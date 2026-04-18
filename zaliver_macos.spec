@@ -1,5 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec: onedir GUI bundle (theme.qss next to ui package)."""
+"""PyInstaller onedir GUI bundle for macOS (theme.qss next to ui package)."""
+
+APP_NAME = "Zaliver"
 
 block_cipher = None
 
@@ -24,14 +26,14 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="zaliver",
+    name=APP_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
     console=False,
     disable_windowed_traceback=False,
-    argv_emulation=False,
+    argv_emulation=True,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
@@ -45,5 +47,12 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="zaliver",
+    name=APP_NAME,
+)
+
+app = BUNDLE(
+    coll,
+    name=f"{APP_NAME}.app",
+    icon=None,
+    bundle_identifier="com.zaliver.desktop",
 )

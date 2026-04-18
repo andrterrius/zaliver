@@ -41,23 +41,9 @@ jobs:
           name: python-dist
           path: dist/
 
-  pyinstaller-onefile:
-    name: PyInstaller onefile (${{ matrix.name }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            name: Windows x64
-            artifact: zaliver-windows-x86_64
-            upload_path: dist/zaliver.exe
-          - os: macos-latest
-            name: macOS ARM64
-            artifact: zaliver-macos-arm64
-            upload_path: dist/zaliver
-
-    runs-on: ${{ matrix.os }}
-
+  pyinstaller-onefile-windows:
+    name: PyInstaller onefile (Windows x64)
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -75,12 +61,40 @@ jobs:
       - name: Smoke import (headless Qt)
         run: python -c "from zaliver.ui.main_window import MainWindow; print('import ok')"
 
-      - name: PyInstaller (onefile)
-        run: python -m PyInstaller --noconfirm zaliver_onefile.spec
+      - name: PyInstaller (onefile, Windows spec)
+        run: python -m PyInstaller --noconfirm zaliver_onefile_windows.spec
 
-      - name: Upload executable
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.upload_path }}
+          name: zaliver-windows-x86_64
+          path: dist/Zaliver.exe
+          if-no-files-found: error
+
+  pyinstaller-onefile-macos:
+    name: PyInstaller onefile (macOS ARM64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install project and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[bundle]"
+
+      - name: Smoke import (headless Qt)
+        run: python -c "from zaliver.ui.main_window import MainWindow; print('import ok')"
+
+      - name: PyInstaller (onefile, macOS spec)
+        run: python -m PyInstaller --noconfirm zaliver_onefile_macos.spec
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zaliver-macos-arm64
+          path: dist/Zaliver.app
           if-no-files-found: error

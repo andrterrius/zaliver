@@ -4,4 +4,10 @@ opencv-python-headless>=4.8.0
 
 [bundle]
 pyinstaller>=6.3.0
-imageio-ffmpeg>=0.5.1
+
+[ffmpeg]
+imageio-ffmpeg>=0.4.9
+
+[nuitka]
+nuitka>=2.3
+ordered-set>=4.0

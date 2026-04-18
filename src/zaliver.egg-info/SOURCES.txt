@@ -11,11 +11,13 @@ src/zaliver/processing/__init__.py
 src/zaliver/processing/batch_paths.py
 src/zaliver/processing/chunking.py
 src/zaliver/processing/color_grade.py
+src/zaliver/processing/ffmpeg_install.py
 src/zaliver/processing/ffmpeg_merge.py
 src/zaliver/processing/pipeline.py
 src/zaliver/processing/shm_buffers.py
 src/zaliver/processing/thread_worker.py
 src/zaliver/processing/worker.py
 src/zaliver/ui/__init__.py
+src/zaliver/ui/ffmpeg_install_worker.py
 src/zaliver/ui/main_window.py
 src/zaliver/ui/widgets.py

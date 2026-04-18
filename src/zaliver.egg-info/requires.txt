@@ -1,0 +1,7 @@
+PyQt6>=6.6.0
+numpy>=1.26.0
+opencv-python-headless>=4.8.0
+
+[bundle]
+pyinstaller>=6.3.0
+imageio-ffmpeg>=0.5.1

@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: zaliver
+Version: 0.1.0
+Summary: Desktop video uniquification with parallel whole-file processing
+Requires-Python: >=3.11
+Requires-Dist: PyQt6>=6.6.0
+Requires-Dist: numpy>=1.26.0
+Requires-Dist: opencv-python-headless>=4.8.0
+Provides-Extra: bundle
+Requires-Dist: pyinstaller>=6.3.0; extra == "bundle"
+Requires-Dist: imageio-ffmpeg>=0.5.1; extra == "bundle"

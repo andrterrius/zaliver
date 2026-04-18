@@ -1,0 +1,2 @@
+[console_scripts]
+zaliver = zaliver.__main__:main

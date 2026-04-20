@@ -82,7 +82,7 @@ jobs:
           cache: pip
           cache-dependency-path: |
             pyproject.toml
-            setup_py2app.py
+            macos_app/setup.py
 
       - name: Install project and py2app
         run: |
@@ -94,10 +94,11 @@ jobs:
         run: python -c "from zaliver.ui.main_window import MainWindow; print('import ok')"
 
       - name: py2app
-        run: python setup_py2app.py py2app
+        working-directory: macos_app
+        run: python setup.py py2app
 
       - uses: actions/upload-artifact@v4
         with:
           name: zaliver-macos-arm64-py2app
-          path: dist/Zaliver.app
+          path: macos_app/dist/Zaliver.app
           if-no-files-found: error

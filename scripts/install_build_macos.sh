@@ -44,6 +44,6 @@ python -m pip install "py2app>=0.28"
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
 python -c "from zaliver.ui.main_window import MainWindow; print('import ok')"
 
-python setup_py2app.py py2app
+( cd "$ROOT_DIR/macos_app" && python setup.py py2app )
 
-echo "Build finished. Output: $ROOT_DIR/dist/Zaliver.app"
+echo "Build finished. Output: $ROOT_DIR/macos_app/dist/Zaliver.app"

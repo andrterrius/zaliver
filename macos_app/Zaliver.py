@@ -1,4 +1,4 @@
-"""macOS py2app entry script — produces dist/Zaliver.app (see setup_py2app.py)."""
+"""macOS py2app entry script — produces dist/Zaliver.app (run from macos_app/)."""
 
 from __future__ import annotations
 

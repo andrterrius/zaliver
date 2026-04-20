@@ -21,4 +21,5 @@ src/zaliver/processing/worker.py
 src/zaliver/ui/__init__.py
 src/zaliver/ui/ffmpeg_install_worker.py
 src/zaliver/ui/main_window.py
+src/zaliver/ui/theme.qss
 src/zaliver/ui/widgets.py

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zaliver"
+version = "0.1.0"
+description = "Desktop video uniquification with parallel whole-file processing"
+requires-python = ">=3.11"
+dependencies = [
+  "PyQt6>=6.6.0",
+  "numpy>=1.26.0",
+  "opencv-python-headless>=4.8.0",
+]
+
+[project.optional-dependencies]
+bundle = ["pyinstaller>=6.3.0"]
+ffmpeg = ["imageio-ffmpeg>=0.4.9"]
+nuitka = ["nuitka>=2.3", "ordered-set>=4.0"]
+
+[project.scripts]
+zaliver = "zaliver.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+zaliver = ["ui/theme.qss"]

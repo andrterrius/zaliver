@@ -6,10 +6,10 @@ Requires-Python: >=3.11
 Requires-Dist: PyQt6>=6.6.0
 Requires-Dist: numpy>=1.26.0
 Requires-Dist: opencv-python-headless>=4.8.0
-Provides-Extra: ffmpeg
-Requires-Dist: imageio-ffmpeg>=0.4.9; extra == "ffmpeg"
 Provides-Extra: bundle
 Requires-Dist: pyinstaller>=6.3.0; extra == "bundle"
+Provides-Extra: ffmpeg
+Requires-Dist: imageio-ffmpeg>=0.4.9; extra == "ffmpeg"
 Provides-Extra: nuitka
 Requires-Dist: nuitka>=2.3; extra == "nuitka"
 Requires-Dist: ordered-set>=4.0; extra == "nuitka"

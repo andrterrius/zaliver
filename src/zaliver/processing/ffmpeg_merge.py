@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 LogFn = Optional[Callable[[str], None]]
 
@@ -206,6 +206,148 @@ def run_ffmpeg(
     if p.returncode != 0:
         err = (p.stderr or p.stdout or "").strip()
         raise RuntimeError(err or f"ffmpeg failed with code {p.returncode}")
+
+
+_cached_encoder_list: Optional[str] = None
+_encoder_runtime_ok: dict[str, bool] = {}
+_encoder_runtime_err: dict[str, str] = {}
+
+
+def ffmpeg_encoder_list_text() -> str:
+    """Return ffmpeg -encoders output (cached)."""
+    global _cached_encoder_list
+    if _cached_encoder_list is not None:
+        return _cached_encoder_list
+    exe = resolve_ffmpeg_executable()
+    if not exe:
+        _cached_encoder_list = ""
+        return _cached_encoder_list
+    try:
+        p = subprocess.run(
+            [exe, "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=12,
+        )
+        _cached_encoder_list = (p.stdout or "") + "\n" + (p.stderr or "")
+    except Exception:
+        _cached_encoder_list = ""
+    return _cached_encoder_list
+
+
+def _probe_encoder_runtime(encoder: str) -> bool:
+    """
+    Some encoders show up in `ffmpeg -encoders` but are not usable at runtime
+    (e.g. NVENC without NVIDIA driver -> cannot load nvcuda.dll).
+    We do a tiny 1-frame encode to null and cache result.
+    """
+    enc = str(encoder).strip()
+    if not enc:
+        return False
+    if enc in _encoder_runtime_ok:
+        return _encoder_runtime_ok[enc]
+    exe = resolve_ffmpeg_executable()
+    if not exe:
+        _encoder_runtime_ok[enc] = False
+        return False
+    # Some encoders are picky about pixel format and/or minimum frame size.
+    # Use a "realistic" small HD-ish frame and a safe hw-friendly pix_fmt.
+    if enc in ("h264_amf", "hevc_amf", "av1_amf"):
+        lavfi = "color=c=black:s=1280x720:r=30"
+        vf = "format=nv12"
+    elif enc in ("h264_qsv", "hevc_qsv", "av1_qsv"):
+        lavfi = "color=c=black:s=1280x720:r=30"
+        vf = "format=nv12"
+    else:
+        lavfi = "color=c=black:s=640x360:r=30"
+        vf = "format=yuv420p"
+    try:
+        # Some HW encoders need a tiny bit more time on first init (driver spin-up).
+        p = subprocess.run(
+            [
+                exe,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                lavfi,
+                "-frames:v",
+                "1",
+                "-vf",
+                vf,
+                "-an",
+                "-c:v",
+                enc,
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+        )
+        ok = p.returncode == 0
+        if not ok:
+            _encoder_runtime_err[enc] = (p.stderr or p.stdout or "").strip()[:800]
+    except Exception as e:
+        ok = False
+        _encoder_runtime_err[enc] = str(e)[:800]
+    _encoder_runtime_ok[enc] = ok
+    return ok
+
+
+def encoder_runtime_error(encoder: str) -> str:
+    """Return cached runtime probe error text (if any)."""
+    return _encoder_runtime_err.get(str(encoder).strip(), "")
+
+
+def pick_best_h264_encoder(*, prefer_gpu: bool = True) -> Tuple[str, List[str]]:
+    """
+    Return (encoder_name, extra_args) preferring GPU encoders if available.
+    If no GPU encoder is found, returns ("libx264", ["-preset","veryfast","-crf","20"]).
+    """
+    txt = ffmpeg_encoder_list_text().lower()
+    # Preference order: NVIDIA -> Intel -> AMD, then CPU.
+    if prefer_gpu and "h264_nvenc" in txt and _probe_encoder_runtime("h264_nvenc"):
+        # "p1..p7" presets exist on modern FFmpeg; "p4" is a good default.
+        return ("h264_nvenc", ["-preset", "p4", "-cq", "23", "-b:v", "0"])
+    if prefer_gpu and "h264_qsv" in txt and _probe_encoder_runtime("h264_qsv"):
+        # QSV: use global_quality when supported; fallback is still OK.
+        return ("h264_qsv", ["-global_quality", "23", "-look_ahead", "1"])
+    if prefer_gpu and "h264_amf" in txt and _probe_encoder_runtime("h264_amf"):
+        # AMF: tune for throughput (speed) by default.
+        # Notes:
+        # - We keep CQP for stable quality without bitrate planning overhead.
+        # - Disable B-frames for lower latency and typically higher speed.
+        # - Raise async_depth to allow deeper internal parallelism.
+        return (
+            "h264_amf",
+            [
+                "-usage",
+                "transcoding",
+                "-quality",
+                "speed",
+                "-rc",
+                "cqp",
+                "-qp_i",
+                "23",
+                "-qp_p",
+                "23",
+                "-qp_b",
+                "23",
+                "-bf",
+                "0",
+                "-async_depth",
+                "32",
+            ],
+        )
+    return ("libx264", ["-preset", "veryfast", "-crf", "20"])
 
 
 def concat_segments(segment_paths: List[str], out_path: str, log: LogFn = None) -> None:

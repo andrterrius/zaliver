@@ -9,6 +9,8 @@ from typing import Any, Dict, Optional, Tuple
 
 import cv2
 import numpy as np
+import subprocess
+import sys
 
 from zaliver.processing.pipeline import (
     UniquifySettings,
@@ -28,6 +30,14 @@ def init_worker(
     global _progress_queue, _cancel_event
     _progress_queue = progress_queue
     _cancel_event = cancel_event
+    # В пуле мы масштабируемся количеством процессов.
+    # Если оставить OpenCV "по умолчанию", каждый процесс может создать много потоков,
+    # что даёт сильную переподписку CPU и в итоге замедляет обработку.
+    try:
+        cv2.setNumThreads(1)
+        cv2.setUseOptimized(True)
+    except Exception:
+        pass
 
 
 def _report(job_id: str, chunk_index: int, done: int, total: int) -> None:
@@ -37,6 +47,69 @@ def _report(job_id: str, chunk_index: int, done: int, total: int) -> None:
 
 def _cancelled() -> bool:
     return _cancel_event is not None and _cancel_event.is_set()
+
+
+def _popen_flags() -> int:
+    if sys.platform == "win32":
+        return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return 0
+
+
+def _ffmpeg_rawvideo_writer(
+    *,
+    out_path: str,
+    width: int,
+    height: int,
+    fps: float,
+    use_gpu: bool,
+) -> subprocess.Popen:
+    # Local import to avoid heavy import at module import time in workers.
+    from zaliver.processing.ffmpeg_merge import resolve_ffmpeg_executable, pick_best_h264_encoder
+
+    exe = resolve_ffmpeg_executable()
+    if not exe:
+        raise RuntimeError("ffmpeg not found")
+
+    enc, enc_args = pick_best_h264_encoder(prefer_gpu=use_gpu)
+
+    # We feed BGR frames from OpenCV as rawvideo bgr24.
+    cmd = [
+        exe,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "bgr24",
+        "-s",
+        f"{width}x{height}",
+        "-r",
+        f"{fps:.6f}",
+        "-i",
+        "-",
+        # Ensure a widely-supported output pixel format for hardware encoders.
+        "-vf",
+        "format=yuv420p",
+        "-an",
+        "-c:v",
+        enc,
+        *enc_args,
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        out_path,
+    ]
+    return subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+        creationflags=_popen_flags(),
+    )
 
 
 def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
@@ -50,6 +123,7 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
     w = int(task["width"])
     h = int(task["height"])
     fps = float(task["fps"])
+    use_gpu = bool(task.get("use_gpu", False))
     # Many MP4 backends require even width/height.
     w_out = max(2, w - (w % 2))
     h_out = max(2, h - (h % 2))
@@ -76,19 +150,34 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
 
     cap = cv2.VideoCapture(path)
     writer: cv2.VideoWriter | None = None
+    ff_proc: subprocess.Popen | None = None
     committed = False
     try:
         if not cap.isOpened():
             return {"ok": False, "chunk_index": chunk_index, "error": "open failed"}
         cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(part_path, fourcc, fps, (w_out, h_out))
-        if not writer.isOpened():
-            return {
-                "ok": False,
-                "chunk_index": chunk_index,
-                "error": f"writer failed ({part_path}, {w_out}x{h_out})",
-            }
+
+        # Prefer ffmpeg output (optionally GPU encoder) when available.
+        try:
+            ff_proc = _ffmpeg_rawvideo_writer(
+                out_path=part_path,
+                width=w_out,
+                height=h_out,
+                fps=fps,
+                use_gpu=use_gpu,
+            )
+            if ff_proc.stdin is None:
+                raise RuntimeError("ffmpeg stdin missing")
+        except Exception:
+            ff_proc = None
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(part_path, fourcc, fps, (w_out, h_out))
+            if not writer.isOpened():
+                return {
+                    "ok": False,
+                    "chunk_index": chunk_index,
+                    "error": f"writer failed ({part_path}, {w_out}x{h_out})",
+                }
 
         for i in range(count):
             if _cancelled():
@@ -109,10 +198,38 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
                 proc = cv2.resize(proc, (w, h), interpolation=cv2.INTER_LINEAR)
             if proc.shape[1] != w_out or proc.shape[0] != h_out:
                 proc = cv2.resize(proc, (w_out, h_out), interpolation=cv2.INTER_LINEAR)
-            writer.write(proc)
+            if ff_proc is not None:
+                try:
+                    ff_proc.stdin.write(proc.tobytes())  # type: ignore[union-attr]
+                except OSError as e:
+                    # ffmpeg may have exited early; surface its stderr for real reason.
+                    try:
+                        ff_proc.stdin.close()  # type: ignore[union-attr]
+                    except Exception:
+                        pass
+                    try:
+                        _, err = ff_proc.communicate(timeout=10)
+                    except Exception:
+                        err = b""
+                    msg = (err or b"").decode("utf-8", errors="replace").strip()
+                    raise RuntimeError(f"{e} (ffmpeg: {msg})".strip())
+            else:
+                writer.write(proc)  # type: ignore[union-attr]
             _report(job_id, chunk_index, i + 1, count)
-        writer.release()
-        writer = None
+        if ff_proc is not None:
+            try:
+                ff_proc.stdin.close()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            out, err = ff_proc.communicate(timeout=600)
+            code = int(ff_proc.returncode or 0)
+            ff_proc = None
+            if code != 0:
+                msg = (err or out or b"").decode("utf-8", errors="replace").strip()
+                raise RuntimeError(msg or f"ffmpeg encode failed ({code})")
+        else:
+            writer.release()  # type: ignore[union-attr]
+            writer = None
         if _cancelled():
             return {"ok": False, "chunk_index": chunk_index, "error": "cancelled"}
         try:
@@ -127,6 +244,11 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
         if writer is not None:
             try:
                 writer.release()
+            except Exception:
+                pass
+        if ff_proc is not None:
+            try:
+                ff_proc.kill()
             except Exception:
                 pass
         cap.release()

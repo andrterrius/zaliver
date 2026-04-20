@@ -19,7 +19,14 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from zaliver.processing.batch_paths import list_video_files
 from zaliver.processing.chunking import VideoInfo, build_n_even_chunks, probe_video
-from zaliver.processing.ffmpeg_merge import check_ffmpeg, concat_segments
+from zaliver.processing.ffmpeg_merge import (
+    check_ffmpeg,
+    concat_segments,
+    encoder_runtime_error,
+    ffmpeg_encoder_list_text,
+    pick_best_h264_encoder,
+)
+from zaliver.processing.gpu_detect import detect_gpus, format_gpu_list
 from zaliver.processing.pipeline import random_uniquify_settings
 from zaliver.processing.worker import init_worker, process_chunk_disk
 
@@ -29,7 +36,9 @@ LogCallback = Callable[[str], None]
 # Один чанк не короче стольки кадров (иначе накладные расходы > выгоды).
 _MIN_FRAMES_PER_CHUNK = 360
 # Не дробить ролик на больше стольки частей (склейка и диск).
-_MAX_CHUNKS_PER_VIDEO = 24
+# При большом числе логических CPU (24/32/64) фиксированного лимита 24
+# недостаточно, чтобы загрузить машину на одном видео.
+_MAX_CHUNKS_PER_VIDEO = 64
 
 
 @dataclass
@@ -86,7 +95,9 @@ def _try_enable_chunk_mode(
     if fc < _MIN_FRAMES_PER_CHUNK * 2:
         return
     n_by_size = max(2, (fc + _MIN_FRAMES_PER_CHUNK - 1) // _MIN_FRAMES_PER_CHUNK)
-    n_target = min(_MAX_CHUNKS_PER_VIDEO, num_workers, n_by_size)
+    # Чанков делаем больше, чем воркеров, чтобы пул не простаивал из‑за
+    # неодинаковой сложности участков (сцены/шум/автоколор и т.п.).
+    n_target = min(_MAX_CHUNKS_PER_VIDEO, max(num_workers * 2, 2), n_by_size)
     specs = build_n_even_chunks(fc, n_target)
     if len(specs) < 2:
         return
@@ -134,6 +145,12 @@ class ProcessingController(QObject):
         self._mp_cancel = None
 
         try:
+            # Informational: list detected adapters (NVIDIA/AMD/Intel) early in the log.
+            try:
+                log(format_gpu_list(detect_gpus()))
+            except Exception:
+                pass
+
             inp_dir = Path(options["input_dir"])
             out_dir = Path(options["output_dir"])
             if not inp_dir.is_dir():
@@ -175,6 +192,7 @@ class ProcessingController(QObject):
 
             total_all = max(1, sum(x[2].frame_count for x in plan))
             num_workers = max(1, int(options.get("num_workers", 1)))
+            use_gpu = bool(options.get("use_gpu", False))
             randomize = bool(options.get("randomize_uniquify", True))
             ui_settings = dict(options.get("settings", {}))
             auto_color = bool(ui_settings.get("auto_color_grade", False))
@@ -263,6 +281,30 @@ class ProcessingController(QObject):
                 return
 
             jobs_by_id: Dict[str, OutputJob] = {j.job_id: j for j in jobs}
+            if check_ffmpeg():
+                try:
+                    enc, _ = pick_best_h264_encoder(prefer_gpu=use_gpu)
+                    if use_gpu and enc != "libx264":
+                        log(f"GPU-энкодер ffmpeg: {enc}")
+                    elif use_gpu and enc == "libx264":
+                        # Explain why we didn't pick a GPU encoder (if ffmpeg reports any).
+                        txt = ffmpeg_encoder_list_text().lower()
+                        hints: List[str] = []
+                        for cand in ("h264_nvenc", "h264_qsv", "h264_amf"):
+                            if cand in txt:
+                                err = encoder_runtime_error(cand)
+                                if err:
+                                    hints.append(f"{cand}: {err}")
+                        if hints:
+                            log(
+                                "GPU включён, но GPU-энкодер не стартует. Будет CPU (libx264/mp4v).\n"
+                                + "\n".join(hints)
+                            )
+                        else:
+                            log("GPU включён, но доступного GPU-энкодера нет. Будет CPU (libx264/mp4v).")
+                except Exception:
+                    if use_gpu:
+                        log("GPU-режим: не удалось определить/проверить энкодер ffmpeg, будет CPU.")
 
             def _cleanup_partial_outputs() -> None:
                 for j in jobs:
@@ -400,6 +442,7 @@ class ProcessingController(QObject):
                             "height": j.info.height,
                             "fps": j.info.fps,
                             "color_grade": j.color_grade_params,
+                            "use_gpu": use_gpu,
                         }
                     else:
                         start, cnt, seg = j.chunks[meta.chunk_idx]
@@ -415,6 +458,7 @@ class ProcessingController(QObject):
                             "height": j.info.height,
                             "fps": j.info.fps,
                             "color_grade": j.color_grade_params,
+                            "use_gpu": use_gpu,
                         }
                     fut = pool.submit(process_chunk_disk, task)
                     futures[fut] = meta

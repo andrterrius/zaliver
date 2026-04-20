@@ -43,7 +43,10 @@ from zaliver.ui.widgets import (
 
 
 def _default_workers() -> int:
-    return max(1, (os.cpu_count() or 2) - 1)
+    # Для одиночного длинного ролика приложение умеет нарезать на части (если есть ffmpeg)
+    # и тем самым эффективно загрузить все CPU. Поэтому по умолчанию используем все
+    # логические ядра, а не (CPU-1).
+    return max(1, os.cpu_count() or 2)
 
 
 def _max_worker_slider() -> int:
@@ -160,13 +163,24 @@ class MainWindow(QWidget):
         ff_row.addWidget(self.btn_install_ffmpeg, 0, Qt.AlignmentFlag.AlignRight)
         pg.addWidget(self._ffmpeg_row, 1, 0, 1, 2)
 
-        pg.addWidget(QLabel("Потоков процессов:"), 2, 0)
+        self.use_gpu = ToggleSwitch("Использовать GPU для кодирования (если доступно)")
+        self.use_gpu.setChecked(True)
+        gpu_hint = QLabel(
+            "Если ffmpeg поддерживает NVENC/QSV/AMF, сегменты будут кодироваться быстрее. "
+            "Эффекты считаются в CPU, ускоряется именно энкод."
+        )
+        gpu_hint.setObjectName("hint")
+        gpu_hint.setWordWrap(True)
+        pg.addWidget(self.use_gpu, 2, 0, 1, 2)
+        pg.addWidget(gpu_hint, 3, 0, 1, 2)
+
+        pg.addWidget(QLabel("Потоков процессов:"), 4, 0)
         thr_row = QHBoxLayout()
         thr_row.addWidget(self.thread_slider, 1)
         thr_row.addWidget(self.thread_label)
         w_thr = QWidget()
         w_thr.setLayout(thr_row)
-        pg.addWidget(w_thr, 2, 1)
+        pg.addWidget(w_thr, 4, 1)
 
         fx = QGroupBox("Уникализация (лёгкие эффекты)")
         fx_layout = QVBoxLayout(fx)
@@ -450,6 +464,7 @@ class MainWindow(QWidget):
             "input_dir": self.input_dir_edit.text().strip(),
             "output_dir": self.output_dir_edit.text().strip(),
             "num_workers": int(self.thread_slider.value()),
+            "use_gpu": bool(self.use_gpu.isChecked()),
             "settings": st.to_dict(),
             "randomize_uniquify": self.random_uniquify.isChecked(),
             "auto_color_sample_frames": int(self.auto_color_frames.value()),

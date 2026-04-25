@@ -16,6 +16,13 @@ LogFn = Optional[Callable[[str], None]]
 _explicit_ffmpeg: Optional[str] = None
 
 
+def _popen_flags() -> int:
+    """Hide console window on Windows for child processes (ffmpeg)."""
+    if sys.platform == "win32":
+        return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return 0
+
+
 def set_ffmpeg_executable(path: Optional[str]) -> None:
     """Force ffmpeg location. Pass None or empty string to use auto-detection only."""
     global _explicit_ffmpeg
@@ -211,6 +218,7 @@ def run_ffmpeg(
         text=True,
         encoding="utf-8",
         errors="replace",
+        creationflags=_popen_flags(),
     )
     if p.returncode != 0:
         err = (p.stderr or p.stdout or "").strip()
@@ -239,6 +247,7 @@ def ffmpeg_encoder_list_text() -> str:
             encoding="utf-8",
             errors="replace",
             timeout=12,
+            creationflags=_popen_flags(),
         )
         _cached_encoder_list = (p.stdout or "") + "\n" + (p.stderr or "")
     except Exception:
@@ -300,6 +309,7 @@ def _probe_encoder_runtime(encoder: str) -> bool:
             encoding="utf-8",
             errors="replace",
             timeout=20,
+            creationflags=_popen_flags(),
         )
         ok = p.returncode == 0
         if not ok:

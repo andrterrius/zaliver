@@ -41,6 +41,14 @@ from zaliver.ui.widgets import (
     ToggleSwitch,
 )
 
+# Qt SpinBox/DoubleSpinBox всегда имеют min/max.
+# Чтобы в UI не было "лимитов", используем максимально широкие диапазоны,
+# но оставляем минимальные логические ограничения там, где отрицательные значения
+# ломают смысл (например, количество копий).
+_INT_MIN = -2_147_483_648
+_INT_MAX = 2_147_483_647
+_BIG_FLOAT = 1.0e12
+
 
 def _default_workers() -> int:
     # Для одиночного длинного ролика приложение умеет нарезать на части (если есть ffmpeg)
@@ -123,7 +131,7 @@ class MainWindow(QWidget):
         io_grid.addWidget(self.output_dir_edit, 2, 1)
         io_grid.addWidget(btn_out, 2, 2)
         self.copies_per_file = QSpinBox()
-        self.copies_per_file.setRange(1, 500)
+        self.copies_per_file.setRange(1, _INT_MAX)
         self.copies_per_file.setValue(1)
         io_grid.addWidget(QLabel("Копий на исходник:"), 3, 0)
         io_grid.addWidget(self.copies_per_file, 3, 1)
@@ -146,6 +154,7 @@ class MainWindow(QWidget):
         pg = QGridLayout(proc)
         self.thread_slider = SmoothSlider(Qt.Orientation.Horizontal)
         self.thread_slider.setMinimum(1)
+        # Единственный лимит в UI: количество потоков (до числа логических CPU).
         self.thread_slider.setMaximum(_max_worker_slider())
         self.thread_slider.setValue(_default_workers())
         self.thread_label = QLabel()
@@ -203,7 +212,7 @@ class MainWindow(QWidget):
         )
         self.auto_color.setChecked(False)
         self.auto_color_strength = QDoubleSpinBox()
-        self.auto_color_strength.setRange(0.25, 1.0)
+        self.auto_color_strength.setRange(-_BIG_FLOAT, _BIG_FLOAT)
         self.auto_color_strength.setSingleStep(0.05)
         self.auto_color_strength.setValue(0.85)
         self.auto_color_strength.setDecimals(2)
@@ -214,7 +223,7 @@ class MainWindow(QWidget):
         auto_grid.addWidget(QLabel("Сила автоколора (1 = полностью):"), 1, 0)
         auto_grid.addWidget(self.auto_color_strength, 1, 1)
         self.auto_color_frames = QSpinBox()
-        self.auto_color_frames.setRange(16, 200)
+        self.auto_color_frames.setRange(1, _INT_MAX)
         self.auto_color_frames.setValue(48)
         auto_grid.addWidget(QLabel("Кадров для анализа колора:"), 2, 0)
         auto_grid.addWidget(self.auto_color_frames, 2, 1)
@@ -232,33 +241,33 @@ class MainWindow(QWidget):
         mg = QGridLayout(manual_inner)
 
         self.brightness = QSpinBox()
-        self.brightness.setRange(-40, 40)
+        self.brightness.setRange(_INT_MIN, _INT_MAX)
         self.brightness.setValue(0)
         self.contrast = QDoubleSpinBox()
-        self.contrast.setRange(0.85, 1.15)
+        self.contrast.setRange(-_BIG_FLOAT, _BIG_FLOAT)
         self.contrast.setSingleStep(0.01)
         self.contrast.setValue(1.0)
         self.contrast.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.saturation = QDoubleSpinBox()
-        self.saturation.setRange(0.9, 1.1)
+        self.saturation.setRange(-_BIG_FLOAT, _BIG_FLOAT)
         self.saturation.setSingleStep(0.01)
         self.saturation.setValue(1.0)
         self.saturation.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.crop_jitter = QSpinBox()
-        self.crop_jitter.setRange(0, 4)
+        self.crop_jitter.setRange(_INT_MIN, _INT_MAX)
         self.crop_jitter.setValue(1)
         self.scale_pct = QDoubleSpinBox()
-        self.scale_pct.setRange(99.5, 100.5)
+        self.scale_pct.setRange(-_BIG_FLOAT, _BIG_FLOAT)
         self.scale_pct.setDecimals(2)
         self.scale_pct.setValue(100.0)
         self.scale_pct.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.noise = QDoubleSpinBox()
-        self.noise.setRange(0.0, 6.0)
+        self.noise.setRange(-_BIG_FLOAT, _BIG_FLOAT)
         self.noise.setSingleStep(0.5)
         self.noise.setValue(1.0)
         self.noise.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.seed = QSpinBox()
-        self.seed.setRange(0, 999_999)
+        self.seed.setRange(_INT_MIN, _INT_MAX)
         self.seed.setValue(42)
 
         self._manual_video_widgets = [
@@ -290,13 +299,13 @@ class MainWindow(QWidget):
         self.audio_speed = ToggleSwitch("Ускорение звука (случайно)")
         self.audio_speed.setChecked(True)
         self.audio_speed_min = QDoubleSpinBox()
-        self.audio_speed_min.setRange(1.0, 1.5)
+        self.audio_speed_min.setRange(-_BIG_FLOAT, _BIG_FLOAT)
         self.audio_speed_min.setSingleStep(0.01)
         self.audio_speed_min.setDecimals(2)
         self.audio_speed_min.setValue(1.0)
         self.audio_speed_min.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.audio_speed_max = QDoubleSpinBox()
-        self.audio_speed_max.setRange(1.0, 1.5)
+        self.audio_speed_max.setRange(-_BIG_FLOAT, _BIG_FLOAT)
         self.audio_speed_max.setSingleStep(0.01)
         self.audio_speed_max.setDecimals(2)
         self.audio_speed_max.setValue(1.1)
@@ -304,7 +313,7 @@ class MainWindow(QWidget):
         self.audio_chorus = ToggleSwitch("Лёгкий хорус (случайно)")
         self.audio_chorus.setChecked(True)
         self.audio_chorus_prob = QDoubleSpinBox()
-        self.audio_chorus_prob.setRange(0.0, 1.0)
+        self.audio_chorus_prob.setRange(-_BIG_FLOAT, _BIG_FLOAT)
         self.audio_chorus_prob.setSingleStep(0.05)
         self.audio_chorus_prob.setDecimals(2)
         self.audio_chorus_prob.setValue(0.45)
@@ -339,7 +348,7 @@ class MainWindow(QWidget):
         mg.addWidget(QLabel("— Аудио (ручные) —"), r, 0, 1, 2)
         r += 1
         self.audio_speed_factor_manual = QDoubleSpinBox()
-        self.audio_speed_factor_manual.setRange(0.5, 2.0)
+        self.audio_speed_factor_manual.setRange(-_BIG_FLOAT, _BIG_FLOAT)
         self.audio_speed_factor_manual.setSingleStep(0.01)
         self.audio_speed_factor_manual.setDecimals(2)
         self.audio_speed_factor_manual.setValue(1.05)
@@ -513,7 +522,7 @@ class MainWindow(QWidget):
 
     def _update_thread_label(self, v: int) -> None:
         mx = _max_worker_slider()
-        self.thread_label.setText(f"{v} / {mx}")
+        self.thread_label.setText(f"{int(v)} / {mx}")
 
     def _load_folder_settings(self) -> None:
         inp = self._settings.value("input_folder", "", type=str) or ""

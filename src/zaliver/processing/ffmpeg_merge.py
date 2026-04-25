@@ -186,6 +186,15 @@ def check_ffmpeg() -> bool:
     return resolve_ffmpeg_executable() is not None
 
 
+def check_ffmpeg_tools() -> bool:
+    """ffmpeg + ffprobe (обработка и метаданные)."""
+    if not check_ffmpeg():
+        return False
+    from zaliver.processing.ffmpeg_probe import resolve_ffprobe_executable
+
+    return resolve_ffprobe_executable() is not None
+
+
 def run_ffmpeg(
     args: List[str],
     log: LogFn = None,
@@ -428,6 +437,7 @@ def mux_video_audio(
     audio_source_path: str,
     out_path: str,
     audio_atempo: Optional[float] = None,
+    audio_chorus: bool = False,
     log: LogFn = None,
 ) -> None:
     out = Path(out_path)
@@ -435,8 +445,21 @@ def mux_video_audio(
     v = Path(video_path).resolve().as_posix()
     a = Path(audio_source_path).resolve().as_posix()
     o = str(out)
-    if audio_atempo is not None and abs(audio_atempo - 1.0) > 1e-3:
-        filt = _atempo_filter_complex(audio_atempo)
+    want_atempo = audio_atempo is not None and abs(float(audio_atempo) - 1.0) > 1e-3
+    want_chorus = bool(audio_chorus)
+    if want_atempo or want_chorus:
+        parts: List[str] = []
+        if want_atempo:
+            parts.append(_atempo_filter_complex(float(audio_atempo)))
+            cur = "[aout]"
+        else:
+            # No tempo change: start from input audio stream.
+            cur = "[1:a]"
+        if want_chorus:
+            # Very subtle chorus to avoid obvious "robotic" artifacts.
+            # chorus=in_gain:out_gain:delays:decays:speeds:depths
+            parts.append(f"{cur}chorus=0.65:0.75:40:0.20:0.25:2[aout]")
+        filt = ";".join(parts)
         run_ffmpeg(
             [
                 "-i",
@@ -495,6 +518,7 @@ def merge_segments_with_source_audio(
     final_output: str,
     work_dir: str,
     audio_atempo: Optional[float] = None,
+    audio_chorus: bool = False,
     log: LogFn = None,
 ) -> None:
     work = Path(work_dir)
@@ -506,5 +530,6 @@ def merge_segments_with_source_audio(
         source_video,
         final_output,
         audio_atempo=audio_atempo,
+        audio_chorus=audio_chorus,
         log=log,
     )

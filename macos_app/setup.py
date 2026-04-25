@@ -20,7 +20,7 @@ OPTIONS = {
         "CFBundleShortVersionString": "0.1.0",
         "NSHighResolutionCapable": True,
     },
-    "packages": ["zaliver", "PyQt6", "numpy", "cv2"],
+    "packages": ["zaliver", "PyQt6", "numpy"],
 }
 
 setup(

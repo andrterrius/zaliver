@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
 
-import cv2
+from zaliver.processing.ffmpeg_probe import probe_video_stream
 
 # Reserved for optical-flow / temporal filters that need boundary context
 OVERLAP_FRAMES_DEFAULT = 0
@@ -29,40 +29,19 @@ class ChunkSpec:
 
 
 def probe_video(path: str) -> VideoInfo:
-    cap = cv2.VideoCapture(path)
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open video: {path}")
-    try:
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = float(cap.get(cv2.CAP_PROP_FPS)) or 30.0
-        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
-        if n <= 0:
-            n = _count_frames(cap)
-        if w <= 0 or h <= 0:
-            raise RuntimeError("Invalid video dimensions")
-        return VideoInfo(
-            path=path,
-            width=w,
-            height=h,
-            fps=fps,
-            frame_count=n,
-            fourcc=fourcc,
-        )
-    finally:
-        cap.release()
-
-
-def _count_frames(cap: cv2.VideoCapture) -> int:
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    n = 0
-    while True:
-        ok, _ = cap.read()
-        if not ok:
-            break
-        n += 1
-    return n
+    w, h, fps, n, fourcc = probe_video_stream(path)
+    if n <= 0:
+        raise RuntimeError(f"Не удалось определить длительность/кадры: {path}")
+    if w <= 0 or h <= 0:
+        raise RuntimeError("Некорректный размер кадра")
+    return VideoInfo(
+        path=path,
+        width=w,
+        height=h,
+        fps=fps,
+        frame_count=n,
+        fourcc=fourcc,
+    )
 
 
 def build_n_even_chunks(total_frames: int, n_chunks: int) -> List[ChunkSpec]:

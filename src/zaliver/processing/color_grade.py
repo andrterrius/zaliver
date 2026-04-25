@@ -1,11 +1,21 @@
-"""Automatic color correction from video sample (gray-world + CLAHE on L)."""
+"""Automatic color correction: sample frames via ffmpeg, estimate BGR gains (gray-world)."""
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+import subprocess
+import sys
+from typing import Any, Dict, Tuple
 
-import cv2
 import numpy as np
+
+from zaliver.processing.ffmpeg_merge import resolve_ffmpeg_executable
+from zaliver.processing.ffmpeg_probe import probe_video_stream
+
+
+def _popen_flags() -> int:
+    if sys.platform == "win32":
+        return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return 0
 
 
 def estimate_grade_params(
@@ -14,93 +24,82 @@ def estimate_grade_params(
     gain_clip: Tuple[float, float] = (0.65, 1.55),
 ) -> Dict[str, Any]:
     """
-    Sample frames evenly across the file and estimate BGR gains (gray-world)
-    plus CLAHE settings. Same params applied to all frames for temporal stability.
+    Sample frames evenly across the file and estimate BGR gains (gray-world).
+    Same params applied to the whole clip in ffmpeg (colorchannelmixer).
     """
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
+    exe = resolve_ffmpeg_executable()
+    if not exe:
         return _neutral_params()
     try:
-        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-        if n <= 0:
-            frames = _read_sequential(cap, min(sample_frames, 200))
-        else:
-            k = min(sample_frames, n)
-            indices = np.linspace(0, n - 1, k, dtype=np.int64)
-            frames = []
-            for idx in indices:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
-                ok, fr = cap.read()
-                if ok and fr is not None:
-                    frames.append(fr)
-        if not frames:
-            return _neutral_params()
-        stack = np.stack([f.astype(np.float32) for f in frames], axis=0)
-        mb = float(stack[:, :, :, 0].mean())
-        mg = float(stack[:, :, :, 1].mean())
-        mr = float(stack[:, :, :, 2].mean())
-        m = (mb + mg + mr) / 3.0
-        eps = 1e-3
-        lo, hi = gain_clip
-        gb = float(np.clip(m / (mb + eps), lo, hi))
-        gg = float(np.clip(m / (mg + eps), lo, hi))
-        gr = float(np.clip(m / (mr + eps), lo, hi))
-        return {
-            "bgr_gains": (gb, gg, gr),
-            "clahe_clip": 2.2,
-            "clahe_tile": 8,
-        }
-    finally:
-        cap.release()
+        _w, _h, _fps, fc, _fourcc = probe_video_stream(video_path)
+    except Exception:
+        return _neutral_params()
+    if fc <= 0:
+        return _neutral_params()
+
+    step = max(1, fc // max(1, int(sample_frames)))
+    sw, sh = 640, 360
+    vf = (
+        f"select=not(mod(n\\,{step})),"
+        f"scale={sw}:{sh}:force_original_aspect_ratio=decrease,"
+        f"pad={sw}:{sh}:(ow-iw)/2:(oh-ih)/2:black,format=bgr24"
+    )
+    k = max(2, min(int(sample_frames), fc))
+    cmd = [
+        exe,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        video_path,
+        "-vf",
+        vf,
+        "-frames:v",
+        str(k),
+        "-pix_fmt",
+        "bgr24",
+        "-f",
+        "rawvideo",
+        "-",
+    ]
+    try:
+        p = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=180,
+            creationflags=_popen_flags(),
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return _neutral_params()
+    if p.returncode != 0 or not p.stdout:
+        return _neutral_params()
+    raw = p.stdout
+    fs = sw * sh * 3
+    if len(raw) < fs * 2:
+        return _neutral_params()
+    nfr = len(raw) // fs
+    if nfr < 2:
+        return _neutral_params()
+    try:
+        buf = np.frombuffer(raw[: nfr * fs], dtype=np.uint8).reshape((nfr, sh, sw, 3))
+    except ValueError:
+        return _neutral_params()
+    stack = buf.astype(np.float32)
+    mb = float(stack[:, :, :, 0].mean())
+    mg = float(stack[:, :, :, 1].mean())
+    mr = float(stack[:, :, :, 2].mean())
+    m = (mb + mg + mr) / 3.0
+    eps = 1e-3
+    lo, hi = gain_clip
+    gb = float(np.clip(m / (mb + eps), lo, hi))
+    gg = float(np.clip(m / (mg + eps), lo, hi))
+    gr = float(np.clip(m / (mr + eps), lo, hi))
+    return {
+        "bgr_gains": (gb, gg, gr),
+        "clahe_clip": 2.2,
+        "clahe_tile": 8,
+    }
 
 
 def _neutral_params() -> Dict[str, Any]:
     return {"bgr_gains": (1.0, 1.0, 1.0), "clahe_clip": 2.2, "clahe_tile": 8}
-
-
-def _read_sequential(cap: cv2.VideoCapture, max_frames: int) -> List[np.ndarray]:
-    out: List[np.ndarray] = []
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    for _ in range(max_frames):
-        ok, fr = cap.read()
-        if not ok:
-            break
-        out.append(fr)
-    return out
-
-
-def apply_auto_color_grade(
-    bgr: np.ndarray,
-    params: Dict[str, Any],
-    strength: float = 1.0,
-) -> np.ndarray:
-    """
-    strength in [0, 1]: blend between input and fully graded result.
-    """
-    strength = float(np.clip(strength, 0.0, 1.0))
-    if strength <= 0:
-        return bgr
-
-    gb, gg, gr = params.get("bgr_gains", (1.0, 1.0, 1.0))
-    clip = float(params.get("clahe_clip", 2.2))
-    tile = int(params.get("clahe_tile", 8))
-    tile = max(2, tile)
-
-    x = bgr.astype(np.float32)
-    gains = np.array([[[gb, gg, gr]]], dtype=np.float32)
-    graded = x * gains
-    graded = np.clip(graded, 0, 255).astype(np.uint8)
-
-    lab = cv2.cvtColor(graded, cv2.COLOR_BGR2LAB)
-    clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(tile, tile))
-    l, a, b = cv2.split(lab)
-    l2 = clahe.apply(l)
-    lab2 = cv2.merge([l2, a, b])
-    graded = cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
-
-    if strength >= 0.999:
-        return graded
-    a_f = bgr.astype(np.float32)
-    g_f = graded.astype(np.float32)
-    out = np.clip(a_f * (1.0 - strength) + g_f * strength, 0, 255).astype(np.uint8)
-    return out

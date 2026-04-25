@@ -1,26 +1,27 @@
-"""Process pool workers: encode video segments (disk or shared-memory input)."""
+"""Process pool workers: ffmpeg-only trim + filters + encode."""
 
 from __future__ import annotations
 
 import multiprocessing
 import os
-from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
-
-import cv2
-import numpy as np
+import re
 import subprocess
 import sys
+import threading
+from pathlib import Path
+from typing import Any, Dict, Optional
 
-from zaliver.processing.pipeline import (
-    UniquifySettings,
-    apply_frame,
-    pick_chunk_crop_offsets,
+from zaliver.processing.ffmpeg_merge import (
+    pick_best_h264_encoder,
+    resolve_ffmpeg_executable,
 )
-from zaliver.processing.shm_buffers import attach_shm_numpy, close_shm
+from zaliver.processing.ffmpeg_vf import build_uniquify_filtergraph
+from zaliver.processing.pipeline import UniquifySettings, pick_chunk_crop_offsets
 
 _progress_queue: Optional[multiprocessing.Queue] = None
 _cancel_event: Optional[multiprocessing.synchronize.Event] = None
+
+_FRAME_RE = re.compile(r"frame=\s*(\d+)")
 
 
 def init_worker(
@@ -30,14 +31,6 @@ def init_worker(
     global _progress_queue, _cancel_event
     _progress_queue = progress_queue
     _cancel_event = cancel_event
-    # В пуле мы масштабируемся количеством процессов.
-    # Если оставить OpenCV "по умолчанию", каждый процесс может создать много потоков,
-    # что даёт сильную переподписку CPU и в итоге замедляет обработку.
-    try:
-        cv2.setNumThreads(1)
-        cv2.setUseOptimized(True)
-    except Exception:
-        pass
 
 
 def _report(job_id: str, chunk_index: int, done: int, total: int) -> None:
@@ -55,65 +48,8 @@ def _popen_flags() -> int:
     return 0
 
 
-def _ffmpeg_rawvideo_writer(
-    *,
-    out_path: str,
-    width: int,
-    height: int,
-    fps: float,
-    use_gpu: bool,
-) -> subprocess.Popen:
-    # Local import to avoid heavy import at module import time in workers.
-    from zaliver.processing.ffmpeg_merge import resolve_ffmpeg_executable, pick_best_h264_encoder
-
-    exe = resolve_ffmpeg_executable()
-    if not exe:
-        raise RuntimeError("ffmpeg not found")
-
-    enc, enc_args = pick_best_h264_encoder(prefer_gpu=use_gpu)
-
-    # We feed BGR frames from OpenCV as rawvideo bgr24.
-    cmd = [
-        exe,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "bgr24",
-        "-s",
-        f"{width}x{height}",
-        "-r",
-        f"{fps:.6f}",
-        "-i",
-        "-",
-        # Ensure a widely-supported output pixel format for hardware encoders.
-        "-vf",
-        "format=yuv420p",
-        "-an",
-        "-c:v",
-        enc,
-        *enc_args,
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        out_path,
-    ]
-    return subprocess.Popen(
-        cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        bufsize=0,
-        creationflags=_popen_flags(),
-    )
-
-
 def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
-    """Read chunk from file, write processed video to task['output_path'] (video only, mp4v)."""
+    """Trim + uniquify filter graph + encode (single ffmpeg child)."""
     path = str(task["video_path"])
     start = int(task["start_frame"])
     count = int(task["frame_count"])
@@ -124,7 +60,6 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
     h = int(task["height"])
     fps = float(task["fps"])
     use_gpu = bool(task.get("use_gpu", False))
-    # Many MP4 backends require even width/height.
     w_out = max(2, w - (w % 2))
     h_out = max(2, h - (h % 2))
 
@@ -138,7 +73,6 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
     except OSError as e:
         return {"ok": False, "chunk_index": chunk_index, "error": f"mkdir: {e}"}
     out_path = str(out_p)
-    # Temp file must end in .mp4 — OpenCV often refuses ".part" / unknown suffix.
     part_p = out_p.with_name(f"{out_p.stem}._zaliver_tmp{out_p.suffix}")
     part_path = str(part_p)
     try:
@@ -146,196 +80,121 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
     except OSError:
         pass
 
+    exe = resolve_ffmpeg_executable()
+    if not exe:
+        return {"ok": False, "chunk_index": chunk_index, "error": "ffmpeg not found"}
+
     crop = pick_chunk_crop_offsets(job_id, chunk_index, settings)
+    graph = build_uniquify_filtergraph(
+        start_frame=start,
+        frame_count=count,
+        settings=settings,
+        crop=crop,
+        color_grade=task.get("color_grade"),
+        w=w,
+        h=h,
+        w_out=w_out,
+        h_out=h_out,
+    )
+    enc, enc_args = pick_best_h264_encoder(prefer_gpu=use_gpu)
 
-    cap = cv2.VideoCapture(path)
-    writer: cv2.VideoWriter | None = None
-    ff_proc: subprocess.Popen | None = None
+    cmd = [
+        exe,
+        "-hide_banner",
+        "-loglevel",
+        "info",
+        "-stats",
+        "-y",
+        "-i",
+        path,
+        "-filter_complex",
+        graph,
+        "-map",
+        "[outv]",
+        "-an",
+        "-r",
+        f"{fps:.6f}",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        "-c:v",
+        enc,
+        *enc_args,
+        part_path,
+    ]
+
     committed = False
-    try:
-        if not cap.isOpened():
-            return {"ok": False, "chunk_index": chunk_index, "error": "open failed"}
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+    proc: Optional[subprocess.Popen] = None
+    done_holder = [0]
 
-        # Prefer ffmpeg output (optionally GPU encoder) when available.
-        try:
-            ff_proc = _ffmpeg_rawvideo_writer(
-                out_path=part_path,
-                width=w_out,
-                height=h_out,
-                fps=fps,
-                use_gpu=use_gpu,
-            )
-            if ff_proc.stdin is None:
-                raise RuntimeError("ffmpeg stdin missing")
-        except Exception:
-            ff_proc = None
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(part_path, fourcc, fps, (w_out, h_out))
-            if not writer.isOpened():
-                return {
-                    "ok": False,
-                    "chunk_index": chunk_index,
-                    "error": f"writer failed ({part_path}, {w_out}x{h_out})",
-                }
-
-        for i in range(count):
+    def _stderr_reader(p: subprocess.Popen) -> None:
+        if p.stderr is None:
+            return
+        for line in iter(p.stderr.readline, ""):
             if _cancelled():
-                return {"ok": False, "chunk_index": chunk_index, "error": "cancelled"}
-            ok, frame = cap.read()
-            if not ok:
                 break
-            global_idx = start + i
-            proc = apply_frame(
-                frame,
-                global_idx,
-                job_id,
-                settings,
-                crop_offsets=crop,
-                color_grade_params=task.get("color_grade"),
-            )
-            if proc.shape[0] != h or proc.shape[1] != w:
-                proc = cv2.resize(proc, (w, h), interpolation=cv2.INTER_LINEAR)
-            if proc.shape[1] != w_out or proc.shape[0] != h_out:
-                proc = cv2.resize(proc, (w_out, h_out), interpolation=cv2.INTER_LINEAR)
-            if ff_proc is not None:
-                try:
-                    ff_proc.stdin.write(proc.tobytes())  # type: ignore[union-attr]
-                except OSError as e:
-                    # ffmpeg may have exited early; surface its stderr for real reason.
-                    try:
-                        ff_proc.stdin.close()  # type: ignore[union-attr]
-                    except Exception:
-                        pass
-                    try:
-                        _, err = ff_proc.communicate(timeout=10)
-                    except Exception:
-                        err = b""
-                    msg = (err or b"").decode("utf-8", errors="replace").strip()
-                    raise RuntimeError(f"{e} (ffmpeg: {msg})".strip())
-            else:
-                writer.write(proc)  # type: ignore[union-attr]
-            _report(job_id, chunk_index, i + 1, count)
-        if ff_proc is not None:
-            try:
-                ff_proc.stdin.close()  # type: ignore[union-attr]
-            except Exception:
-                pass
-            out, err = ff_proc.communicate(timeout=600)
-            code = int(ff_proc.returncode or 0)
-            ff_proc = None
-            if code != 0:
-                msg = (err or out or b"").decode("utf-8", errors="replace").strip()
-                raise RuntimeError(msg or f"ffmpeg encode failed ({code})")
-        else:
-            writer.release()  # type: ignore[union-attr]
-            writer = None
+            if not line:
+                break
+            m = _FRAME_RE.search(line)
+            if not m:
+                continue
+            fr = min(int(m.group(1)), count)
+            if fr > done_holder[0]:
+                done_holder[0] = fr
+                _report(job_id, chunk_index, fr, count)
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_popen_flags(),
+        )
+        t = threading.Thread(target=_stderr_reader, args=(proc,), daemon=True)
+        t.start()
+        code = int(proc.wait(timeout=7200) or 0)
+        try:
+            if proc.stderr is not None:
+                proc.stderr.close()
+        except OSError:
+            pass
+        t.join(timeout=2.0)
         if _cancelled():
             return {"ok": False, "chunk_index": chunk_index, "error": "cancelled"}
+        if code != 0:
+            return {
+                "ok": False,
+                "chunk_index": chunk_index,
+                "error": f"ffmpeg exited with code {code}",
+            }
+        _report(job_id, chunk_index, count, count)
         try:
             os.replace(part_path, out_path)
         except OSError as e:
             return {"ok": False, "chunk_index": chunk_index, "error": f"rename: {e}"}
         committed = True
         return {"ok": True, "chunk_index": chunk_index, "error": None}
+    except subprocess.TimeoutExpired:
+        if proc is not None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        return {"ok": False, "chunk_index": chunk_index, "error": "ffmpeg timeout"}
     except Exception as e:
         return {"ok": False, "chunk_index": chunk_index, "error": str(e)}
     finally:
-        if writer is not None:
+        if proc is not None and proc.poll() is None:
             try:
-                writer.release()
-            except Exception:
+                proc.kill()
+            except OSError:
                 pass
-        if ff_proc is not None:
-            try:
-                ff_proc.kill()
-            except Exception:
-                pass
-        cap.release()
         if not committed:
             try:
                 Path(part_path).unlink(missing_ok=True)
             except OSError:
                 pass
-
-
-def process_chunk_shm(task: Dict[str, Any]) -> Dict[str, Any]:
-    """Process frames already in shared memory; coordinator unlinks after result."""
-    shm_name = task["shm_name"]
-    shape = tuple(task["shape"])
-    dtype = np.dtype(task["dtype"])
-    out_path = task["output_path"]
-    chunk_index = int(task["chunk_index"])
-    job_id = str(task["job_id"])
-    settings = UniquifySettings.from_dict(task["settings"])
-    w = int(task["width"])
-    h = int(task["height"])
-    fps = float(task["fps"])
-    start = int(task["start_frame"])
-
-    crop = pick_chunk_crop_offsets(job_id, chunk_index, settings)
-    shm = None
-    try:
-        shm, buf = attach_shm_numpy(shm_name, shape, dtype)
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
-        if not writer.isOpened():
-            return {"ok": False, "chunk_index": chunk_index, "error": "writer failed"}
-
-        n = shape[0]
-        for i in range(n):
-            if _cancelled():
-                writer.release()
-                return {"ok": False, "chunk_index": chunk_index, "error": "cancelled"}
-            frame = np.ascontiguousarray(buf[i])
-            global_idx = start + i
-            proc = apply_frame(
-                frame,
-                global_idx,
-                job_id,
-                settings,
-                crop_offsets=crop,
-                color_grade_params=task.get("color_grade"),
-            )
-            if proc.shape[0] != h or proc.shape[1] != w:
-                proc = cv2.resize(proc, (w, h), interpolation=cv2.INTER_LINEAR)
-            writer.write(proc)
-            _report(job_id, chunk_index, i + 1, n)
-        writer.release()
-        if _cancelled():
-            return {"ok": False, "chunk_index": chunk_index, "error": "cancelled"}
-        return {"ok": True, "chunk_index": chunk_index, "error": None}
-    except Exception as e:
-        return {"ok": False, "chunk_index": chunk_index, "error": str(e)}
-    finally:
-        close_shm(shm, unlink=False)
-
-
-def decode_chunk_to_shm(
-    video_path: str,
-    start_frame: int,
-    frame_count: int,
-    height: int,
-    width: int,
-) -> Tuple[Any, str, Tuple[int, ...], str]:
-    """Create SHM (F,H,W,3), fill from video; returns (shm, name, shape, dtype str)."""
-    from zaliver.processing.shm_buffers import create_shm_numpy
-
-    shape = (frame_count, height, width, 3)
-    shm, arr = create_shm_numpy(shape, np.uint8)
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        close_shm(shm, unlink=True)
-        raise RuntimeError("Cannot open video for SHM decode")
-    try:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        for i in range(frame_count):
-            ok, frame = cap.read()
-            if not ok:
-                break
-            if frame.shape[0] != height or frame.shape[1] != width:
-                frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
-            arr[i] = frame
-    finally:
-        cap.release()
-    return shm, shm.name, shape, str(np.dtype(np.uint8))

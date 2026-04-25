@@ -21,9 +21,12 @@ from zaliver.processing.batch_paths import list_video_files
 from zaliver.processing.chunking import VideoInfo, build_n_even_chunks, probe_video
 from zaliver.processing.ffmpeg_merge import (
     check_ffmpeg,
+    check_ffmpeg_tools,
     concat_segments,
     encoder_runtime_error,
     ffmpeg_encoder_list_text,
+    mux_video_audio,
+    merge_segments_with_source_audio,
     pick_best_h264_encoder,
 )
 from zaliver.processing.gpu_detect import detect_gpus, format_gpu_list
@@ -95,9 +98,10 @@ def _try_enable_chunk_mode(
     if fc < _MIN_FRAMES_PER_CHUNK * 2:
         return
     n_by_size = max(2, (fc + _MIN_FRAMES_PER_CHUNK - 1) // _MIN_FRAMES_PER_CHUNK)
-    # Чанков делаем больше, чем воркеров, чтобы пул не простаивал из‑за
+    # Чанков делаем заметно больше, чем воркеров, чтобы пул не простаивал из‑за
     # неодинаковой сложности участков (сцены/шум/автоколор и т.п.).
-    n_target = min(_MAX_CHUNKS_PER_VIDEO, max(num_workers * 2, 2), n_by_size)
+    # Для очень длинных роликов это обычно ускоряет обработку на многоядерных CPU.
+    n_target = min(_MAX_CHUNKS_PER_VIDEO, max(num_workers * 3, 2), n_by_size)
     specs = build_n_even_chunks(fc, n_target)
     if len(specs) < 2:
         return
@@ -157,7 +161,21 @@ class ProcessingController(QObject):
                 self.finished.emit(False, "Входная папка не найдена.")
                 return
 
-            videos = list_video_files(inp_dir)
+            raw_selected = options.get("input_files") or []
+            selected: List[Path] = []
+            try:
+                for x in raw_selected:
+                    p = Path(str(x))
+                    if p.is_file():
+                        selected.append(p)
+            except Exception:
+                selected = []
+
+            if selected:
+                # Только выбранные файлы (сохраняем порядок выбора).
+                videos = selected
+            else:
+                videos = list_video_files(inp_dir)
             if not videos:
                 self.finished.emit(
                     False,
@@ -169,6 +187,13 @@ class ProcessingController(QObject):
                 out_dir.mkdir(parents=True, exist_ok=True)
             except OSError as e:
                 self.finished.emit(False, f"Не удалось создать выходную папку: {e}")
+                return
+
+            if not check_ffmpeg_tools():
+                self.finished.emit(
+                    False,
+                    "Нужны ffmpeg и ffprobe в PATH (обработка только через ffmpeg, без OpenCV).",
+                )
                 return
 
             copies_per_file = max(1, int(options.get("copies_per_file", 1)))
@@ -198,6 +223,17 @@ class ProcessingController(QObject):
             auto_color = bool(ui_settings.get("auto_color_grade", False))
             auto_str = float(ui_settings.get("auto_color_strength", 0.85))
             sample = int(options.get("auto_color_sample_frames", 48))
+            audio_speed_enabled = bool(options.get("audio_speed_enabled", True))
+            audio_speed_min = float(options.get("audio_speed_min", 1.0))
+            audio_speed_max = float(options.get("audio_speed_max", 1.1))
+            audio_chorus_enabled = bool(options.get("audio_chorus_enabled", True))
+            audio_chorus_prob = float(options.get("audio_chorus_prob", 0.45))
+
+            if audio_speed_max < audio_speed_min:
+                audio_speed_min, audio_speed_max = audio_speed_max, audio_speed_min
+            audio_speed_min = max(0.5, min(2.0, audio_speed_min))
+            audio_speed_max = max(0.5, min(2.0, audio_speed_max))
+            audio_chorus_prob = max(0.0, min(1.0, audio_chorus_prob))
 
             ctx = multiprocessing.get_context("spawn")
             progress_q: multiprocessing.Queue = ctx.Queue()
@@ -235,6 +271,22 @@ class ProcessingController(QObject):
                         settings = st.to_dict()
                     else:
                         settings = dict(ui_settings)
+
+                    # Apply randomized audio only when we're in randomized mode.
+                    # In manual mode, audio_speed_factor/audio_chorus come from UI settings.
+                    if randomize:
+                        if audio_speed_enabled:
+                            settings["audio_speed_factor"] = float(
+                                random.uniform(audio_speed_min, audio_speed_max)
+                            )
+                        else:
+                            settings["audio_speed_factor"] = 1.0
+                        if audio_chorus_enabled:
+                            settings["audio_chorus"] = bool(
+                                random.random() < audio_chorus_prob
+                            )
+                        else:
+                            settings["audio_chorus"] = False
 
                     color_grade_params = None
                     if settings.get("auto_color_grade"):
@@ -363,12 +415,6 @@ class ProcessingController(QObject):
                 initializer=init_worker,
                 initargs=(progress_q, cancel_ev),
             ) as pool:
-                if not check_ffmpeg():
-                    log(
-                        "ffmpeg не найден: длинные ролики не режутся на части "
-                        "(каждый файл — один процесс). Добавьте ffmpeg в PATH для "
-                        "дополнительного ускорения на одном видео."
-                    )
                 pending_tasks: deque[_PoolTaskMeta] = deque()
                 chunked = [j for j in jobs if j.chunk_mode]
                 max_c = max((len(j.chunks) for j in chunked), default=0)
@@ -430,11 +476,16 @@ class ProcessingController(QObject):
                 def _submit_task(meta: _PoolTaskMeta) -> None:
                     j = jobs_by_id[meta.job_id]
                     if meta.chunk_idx < 0:
+                        # Всегда считаем "видео без аудио" в temp-файл.
+                        # Аудио добавим позже (mux из исходника) в одном потоке координатора.
+                        temp_out = j.outp.with_name(
+                            f"{j.outp.stem}._zaliver_video{j.outp.suffix}"
+                        )
                         task = {
                             "video_path": str(j.p),
                             "start_frame": 0,
                             "frame_count": int(j.info.frame_count),
-                            "output_path": str(j.outp),
+                            "output_path": str(temp_out),
                             "chunk_index": 0,
                             "job_id": j.job_id,
                             "settings": j.settings,
@@ -513,6 +564,41 @@ class ProcessingController(QObject):
                             finish_error("Отменено.", futures)
                             return
                         if meta.chunk_idx < 0:
+                            # После обработки: приклеиваем аудио из исходника (если есть ffmpeg).
+                            # Если аудио нет или ffmpeg не найден, сохранится "только видео".
+                            video_only = j.outp.with_name(
+                                f"{j.outp.stem}._zaliver_video{j.outp.suffix}"
+                            )
+                            if check_ffmpeg() and video_only.is_file():
+                                av_tmp = j.outp.with_name(
+                                    f"{j.outp.stem}._zaliver_av{j.outp.suffix}"
+                                )
+                                try:
+                                    mux_video_audio(
+                                        str(video_only),
+                                        str(j.p),
+                                        str(av_tmp),
+                                        audio_atempo=float(j.settings.get("audio_speed_factor", 1.0)),
+                                        audio_chorus=bool(j.settings.get("audio_chorus", False)),
+                                        log=log,
+                                    )
+                                    try:
+                                        av_tmp.replace(j.outp)
+                                    except OSError:
+                                        # If replace fails, keep whatever exists.
+                                        pass
+                                finally:
+                                    try:
+                                        if video_only.is_file():
+                                            video_only.unlink()
+                                    except OSError:
+                                        pass
+                            else:
+                                try:
+                                    if video_only.is_file():
+                                        video_only.replace(j.outp)
+                                except OSError:
+                                    pass
                             j.finished = True
                             j.done_frames = j.info.frame_count
                             log(f"{j.tag(n_jobs)}: Сохранено: {j.outp.name}")
@@ -521,8 +607,16 @@ class ProcessingController(QObject):
                             if len(j.chunks_finished) >= len(j.chunks):
                                 try:
                                     seg_paths = [str(t[2]) for t in j.chunks]
-                                    concat_segments(
-                                        seg_paths, str(j.outp), log=log
+                                    # Склеиваем видео и добавляем аудио исходника.
+                                    wd = str(j.chunk_work_dir or (out_dir / ".zaliver_chunks" / j.job_id))
+                                    merge_segments_with_source_audio(
+                                        seg_paths,
+                                        str(j.p),
+                                        str(j.outp),
+                                        work_dir=wd,
+                                        audio_atempo=float(j.settings.get("audio_speed_factor", 1.0)),
+                                        audio_chorus=bool(j.settings.get("audio_chorus", False)),
+                                        log=log,
                                     )
                                 except Exception as e:
                                     finish_error(
@@ -554,7 +648,7 @@ class ProcessingController(QObject):
                 f"Сохранено выходных файлов: {n_jobs}\n"
                 f"Исходников: {n_sources}, копий на файл: {copies_per_file}\n"
                 f"Папка: {out_dir}\n"
-                "Формат: MP4 (mp4v), только видео — аудио исходника не переносится."
+                "Формат: MP4 (H.264/AAC, если доступен ffmpeg)."
             )
             self.finished.emit(True, done_msg)
         except Exception as e:

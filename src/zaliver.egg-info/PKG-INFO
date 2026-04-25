@@ -5,7 +5,6 @@ Summary: Desktop video uniquification with parallel whole-file processing
 Requires-Python: >=3.11
 Requires-Dist: PyQt6>=6.6.0
 Requires-Dist: numpy>=1.26.0
-Requires-Dist: opencv-python-headless>=4.8.0
 Provides-Extra: bundle
 Requires-Dist: pyinstaller>=6.3.0; extra == "bundle"
 Provides-Extra: ffmpeg

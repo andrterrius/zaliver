@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import queue
-import random
 import shutil
 import time
 import uuid
@@ -30,11 +29,21 @@ from zaliver.processing.ffmpeg_merge import (
     pick_best_h264_encoder,
 )
 from zaliver.processing.gpu_detect import detect_gpus, format_gpu_list
-from zaliver.processing.pipeline import random_uniquify_settings
+from zaliver.processing.pipeline import RandomUniquifyBounds, random_uniquify_settings
 from zaliver.processing.worker import init_worker, process_chunk_disk
 
 
 LogCallback = Callable[[str], None]
+
+
+def _job_playback_speed(settings: Dict[str, Any]) -> float:
+    """Совместимость: раньше поле называлось audio_speed_factor."""
+    v = settings.get("playback_speed_factor", settings.get("audio_speed_factor", 1.0))
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 1.0
+
 
 # Один чанк не короче стольки кадров (иначе накладные расходы > выгоды).
 _MIN_FRAMES_PER_CHUNK = 360
@@ -56,7 +65,6 @@ class OutputJob:
     info: VideoInfo
     job_id: str
     settings: Dict[str, Any]
-    color_grade_params: Any
     done_frames: int = 0
     finished: bool = False
     chunk_mode: bool = False
@@ -99,7 +107,7 @@ def _try_enable_chunk_mode(
         return
     n_by_size = max(2, (fc + _MIN_FRAMES_PER_CHUNK - 1) // _MIN_FRAMES_PER_CHUNK)
     # Чанков делаем заметно больше, чем воркеров, чтобы пул не простаивал из‑за
-    # неодинаковой сложности участков (сцены/шум/автоколор и т.п.).
+    # неодинаковой сложности участков (сцены/шум и т.п.).
     # Для очень длинных роликов это обычно ускоряет обработку на многоядерных CPU.
     n_target = min(_MAX_CHUNKS_PER_VIDEO, max(num_workers * 3, 2), n_by_size)
     specs = build_n_even_chunks(fc, n_target)
@@ -155,12 +163,7 @@ class ProcessingController(QObject):
             except Exception:
                 pass
 
-            inp_dir = Path(options["input_dir"])
             out_dir = Path(options["output_dir"])
-            if not inp_dir.is_dir():
-                self.finished.emit(False, "Входная папка не найдена.")
-                return
-
             raw_selected = options.get("input_files") or []
             selected: List[Path] = []
             try:
@@ -175,11 +178,19 @@ class ProcessingController(QObject):
                 # Только выбранные файлы (сохраняем порядок выбора).
                 videos = selected
             else:
+                inp_raw = str(options.get("input_dir") or "").strip()
+                inp_dir = Path(inp_raw) if inp_raw else Path()
+                if not inp_dir.is_dir():
+                    self.finished.emit(
+                        False,
+                        "Выберите видеофайлы для обработки (кнопка «Выбрать файлы…»).",
+                    )
+                    return
                 videos = list_video_files(inp_dir)
             if not videos:
                 self.finished.emit(
                     False,
-                    "В папке нет поддерживаемых видео (.mp4, .mkv, .mov, .avi, .webm…).",
+                    "Нет поддерживаемых видео (.mp4, .mkv, .mov, .avi, .webm…).",
                 )
                 return
 
@@ -220,20 +231,10 @@ class ProcessingController(QObject):
             use_gpu = bool(options.get("use_gpu", False))
             randomize = bool(options.get("randomize_uniquify", True))
             ui_settings = dict(options.get("settings", {}))
-            auto_color = bool(ui_settings.get("auto_color_grade", False))
-            auto_str = float(ui_settings.get("auto_color_strength", 0.85))
-            sample = int(options.get("auto_color_sample_frames", 48))
-            audio_speed_enabled = bool(options.get("audio_speed_enabled", True))
-            audio_speed_min = float(options.get("audio_speed_min", 1.0))
-            audio_speed_max = float(options.get("audio_speed_max", 1.1))
+            playback_speed_enabled = bool(
+                options.get("playback_speed_enabled", options.get("audio_speed_enabled", True))
+            )
             audio_chorus_enabled = bool(options.get("audio_chorus_enabled", True))
-            audio_chorus_prob = float(options.get("audio_chorus_prob", 0.45))
-
-            if audio_speed_max < audio_speed_min:
-                audio_speed_min, audio_speed_max = audio_speed_max, audio_speed_min
-            audio_speed_min = max(0.5, min(2.0, audio_speed_min))
-            audio_speed_max = max(0.5, min(2.0, audio_speed_max))
-            audio_chorus_prob = max(0.0, min(1.0, audio_chorus_prob))
 
             ctx = multiprocessing.get_context("spawn")
             progress_q: multiprocessing.Queue = ctx.Queue()
@@ -264,41 +265,18 @@ class ProcessingController(QObject):
                         return
 
                     if randomize:
-                        st = random_uniquify_settings(
-                            auto_color_grade=auto_color,
-                            auto_color_strength=auto_str,
+                        rb = RandomUniquifyBounds.from_options_dict(
+                            options.get("random_bounds") or {}
                         )
+                        st = random_uniquify_settings(rb)
                         settings = st.to_dict()
+                        # Тумблеры отключают соответствующую случайность (значения из границ не используются).
+                        if not playback_speed_enabled:
+                            settings["playback_speed_factor"] = 1.0
+                        if not audio_chorus_enabled:
+                            settings["audio_chorus"] = False
                     else:
                         settings = dict(ui_settings)
-
-                    # Apply randomized audio only when we're in randomized mode.
-                    # In manual mode, audio_speed_factor/audio_chorus come from UI settings.
-                    if randomize:
-                        if audio_speed_enabled:
-                            settings["audio_speed_factor"] = float(
-                                random.uniform(audio_speed_min, audio_speed_max)
-                            )
-                        else:
-                            settings["audio_speed_factor"] = 1.0
-                        if audio_chorus_enabled:
-                            settings["audio_chorus"] = bool(
-                                random.random() < audio_chorus_prob
-                            )
-                        else:
-                            settings["audio_chorus"] = False
-
-                    color_grade_params = None
-                    if settings.get("auto_color_grade"):
-                        from zaliver.processing.color_grade import estimate_grade_params
-
-                        log(
-                            f"{_fmt_job_tag(file_idx, p.name, copy_index)} "
-                            f"Автоколор: {sample} кадров…"
-                        )
-                        color_grade_params = estimate_grade_params(
-                            str(p), sample_frames=sample
-                        )
 
                     job_id = str(uuid.uuid4())
 
@@ -311,7 +289,6 @@ class ProcessingController(QObject):
                         info=info,
                         job_id=job_id,
                         settings=settings,
-                        color_grade_params=color_grade_params,
                     )
                     if randomize:
                         log(
@@ -492,7 +469,6 @@ class ProcessingController(QObject):
                             "width": j.info.width,
                             "height": j.info.height,
                             "fps": j.info.fps,
-                            "color_grade": j.color_grade_params,
                             "use_gpu": use_gpu,
                         }
                     else:
@@ -508,7 +484,6 @@ class ProcessingController(QObject):
                             "width": j.info.width,
                             "height": j.info.height,
                             "fps": j.info.fps,
-                            "color_grade": j.color_grade_params,
                             "use_gpu": use_gpu,
                         }
                     fut = pool.submit(process_chunk_disk, task)
@@ -578,7 +553,7 @@ class ProcessingController(QObject):
                                         str(video_only),
                                         str(j.p),
                                         str(av_tmp),
-                                        audio_atempo=float(j.settings.get("audio_speed_factor", 1.0)),
+                                        playback_speed=_job_playback_speed(j.settings),
                                         audio_chorus=bool(j.settings.get("audio_chorus", False)),
                                         log=log,
                                     )
@@ -614,7 +589,7 @@ class ProcessingController(QObject):
                                         str(j.p),
                                         str(j.outp),
                                         work_dir=wd,
-                                        audio_atempo=float(j.settings.get("audio_speed_factor", 1.0)),
+                                        playback_speed=_job_playback_speed(j.settings),
                                         audio_chorus=bool(j.settings.get("audio_chorus", False)),
                                         log=log,
                                     )

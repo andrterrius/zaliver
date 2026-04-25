@@ -423,11 +423,14 @@ def concat_segments(segment_paths: List[str], out_path: str, log: LogFn = None) 
             pass
 
 
-def _atempo_filter_complex(speed_factor: float) -> str:
-    """speed_factor: 1.0 = unchanged; each atempo must be in [0.5, 2.0]."""
+def _atempo_chain(inp: str, speed_factor: float, out_label: str) -> str:
+    """speed_factor: 1.0 = unchanged; each atempo must be in [0.5, 2.0].
+    `inp` / `out_label` are ffmpeg pad names, e.g. '[1:a]' and '[aout]'."""
     r = float(speed_factor)
+    if r <= 0.0:
+        r = 1.0
     parts: List[str] = []
-    cur = "[1:a]"
+    cur = inp
     n = 0
     while r > 2.0 + 1e-9:
         nxt = f"[at{n}]"
@@ -438,15 +441,21 @@ def _atempo_filter_complex(speed_factor: float) -> str:
         parts.append(f"{cur}atempo=0.5{nxt}")
         cur, r, n = nxt, r / 0.5, n + 1
     r = min(max(r, 0.5), 2.0)
-    parts.append(f"{cur}atempo={r:.6f}[aout]")
+    parts.append(f"{cur}atempo={r:.6f}{out_label}")
     return ";".join(parts)
+
+
+def _chorus_filter(inp: str, out_label: str) -> str:
+    # Very subtle chorus to avoid obvious "robotic" artifacts.
+    # chorus=in_gain:out_gain:delays:decays:speeds:depths
+    return f"{inp}chorus=0.65:0.75:40:0.20:0.25:2{out_label}"
 
 
 def mux_video_audio(
     video_path: str,
     audio_source_path: str,
     out_path: str,
-    audio_atempo: Optional[float] = None,
+    playback_speed: Optional[float] = None,
     audio_chorus: bool = False,
     log: LogFn = None,
 ) -> None:
@@ -455,21 +464,53 @@ def mux_video_audio(
     v = Path(video_path).resolve().as_posix()
     a = Path(audio_source_path).resolve().as_posix()
     o = str(out)
-    want_atempo = audio_atempo is not None and abs(float(audio_atempo) - 1.0) > 1e-3
+    spd = float(playback_speed) if playback_speed is not None else 1.0
+    want_speed = abs(spd - 1.0) > 1e-3
     want_chorus = bool(audio_chorus)
-    if want_atempo or want_chorus:
+    if want_speed or want_chorus:
         parts: List[str] = []
-        if want_atempo:
-            parts.append(_atempo_filter_complex(float(audio_atempo)))
-            cur = "[aout]"
-        else:
-            # No tempo change: start from input audio stream.
-            cur = "[1:a]"
-        if want_chorus:
-            # Very subtle chorus to avoid obvious "robotic" artifacts.
-            # chorus=in_gain:out_gain:delays:decays:speeds:depths
-            parts.append(f"{cur}chorus=0.65:0.75:40:0.20:0.25:2[aout]")
-        filt = ";".join(parts)
+        if want_speed:
+            # Видео: setpts=PTS/s — то же относительное ускорение, что и atempo=s для аудио.
+            parts.append(f"[0:v]setpts=PTS/{spd:.9f}[vout]")
+            if want_chorus:
+                parts.append(_atempo_chain("[1:a]", spd, "[aspd]"))
+                parts.append(_chorus_filter("[aspd]", "[aout]"))
+            else:
+                parts.append(_atempo_chain("[1:a]", spd, "[aout]"))
+            filt = ";".join(parts)
+            run_ffmpeg(
+                [
+                    "-i",
+                    v,
+                    "-i",
+                    a,
+                    "-filter_complex",
+                    filt,
+                    "-map",
+                    "[vout]",
+                    "-map",
+                    "[aout]",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "20",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-movflags",
+                    "+faststart",
+                    "-c:a",
+                    "aac",
+                    "-shortest",
+                    o,
+                ],
+                log=log,
+            )
+            return
+
+        # Только хорус: видео без перекодирования.
+        filt = _chorus_filter("[1:a]", "[aout]")
         run_ffmpeg(
             [
                 "-i",
@@ -527,7 +568,7 @@ def merge_segments_with_source_audio(
     source_video: str,
     final_output: str,
     work_dir: str,
-    audio_atempo: Optional[float] = None,
+    playback_speed: Optional[float] = None,
     audio_chorus: bool = False,
     log: LogFn = None,
 ) -> None:
@@ -539,7 +580,7 @@ def merge_segments_with_source_audio(
         str(concat_out),
         source_video,
         final_output,
-        audio_atempo=audio_atempo,
+        playback_speed=playback_speed,
         audio_chorus=audio_chorus,
         log=log,
     )

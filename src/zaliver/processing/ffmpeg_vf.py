@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 from zaliver.processing.pipeline import UniquifySettings
 
@@ -58,7 +58,6 @@ def build_uniquify_filtergraph(
     frame_count: int,
     settings: UniquifySettings,
     crop: Optional[Tuple[int, int, int, int]],
-    color_grade: Optional[Dict[str, Any]],
     w: int,
     h: int,
     w_out: int,
@@ -83,26 +82,4 @@ def build_uniquify_filtergraph(
     tail.append(f"format=yuv420p,scale={w_out}:{h_out}:flags=bilinear")
     tail_s = ",".join(tail)
 
-    if settings.auto_color_grade and color_grade is not None:
-        gb, gg, gr = color_grade.get("bgr_gains", (1.0, 1.0, 1.0))
-        gb, gg, gr = float(gb), float(gg), float(gr)
-        clip = float(color_grade.get("clahe_clip", 2.2))
-        m = min(1.8, max(0.2, (clip - 1.0) * 0.35))
-        graded = (
-            f"format=rgb24,colorchannelmixer=rr={gr:.6f}:gg={gg:.6f}:bb={gb:.6f},"
-            f"unsharp=5:5:{m:.4f}:3:3:0.0"
-        )
-        st = max(0.0, min(1.0, float(settings.auto_color_strength)))
-        if st >= 0.999:
-            body = f"{graded},{tail_s}"
-        else:
-            body = (
-                f"split[orig][tmp];[tmp]{graded}[grd];"
-                f"[orig][grd]blend=all_mode=normal:"
-                f"all_expr='A*(1-{1.0 - st:.6f})+B*{st:.6f}'[ac0];"
-                f"[ac0]{tail_s}"
-            )
-    else:
-        body = tail_s
-
-    return f"[0:v]{head},{body}[outv]"
+    return f"[0:v]{head},{tail_s}[outv]"

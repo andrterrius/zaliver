@@ -10,7 +10,6 @@ src/zaliver.egg-info/top_level.txt
 src/zaliver/processing/__init__.py
 src/zaliver/processing/batch_paths.py
 src/zaliver/processing/chunking.py
-src/zaliver/processing/color_grade.py
 src/zaliver/processing/ffmpeg_install.py
 src/zaliver/processing/ffmpeg_merge.py
 src/zaliver/processing/ffmpeg_probe.py

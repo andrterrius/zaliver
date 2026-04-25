@@ -90,7 +90,6 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
         frame_count=count,
         settings=settings,
         crop=crop,
-        color_grade=task.get("color_grade"),
         w=w,
         h=h,
         w_out=w_out,

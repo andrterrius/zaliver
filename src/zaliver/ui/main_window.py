@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 )
 
 from zaliver.processing.ffmpeg_merge import check_ffmpeg_tools
-from zaliver.processing.pipeline import UniquifySettings
+from zaliver.processing.pipeline import RandomUniquifyBounds, UniquifySettings
 from zaliver.processing.thread_worker import ProcessingController
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
 from zaliver.ui.widgets import (
@@ -96,20 +96,15 @@ class MainWindow(QWidget):
 
         title = QLabel("Zaliver")
         title.setObjectName("title")
-        sub = QLabel("Папка с видео → папка результатов · случайная уникализация ")
+        sub = QLabel("Выбор видео → папка результатов · случайная уникализация ")
         sub.setObjectName("hint")
         root.addWidget(title)
         root.addWidget(sub)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        io = QGroupBox("Папки")
+        io = QGroupBox("Файлы и папка результата")
         io_grid = QGridLayout(io)
-        self.input_dir_edit = QLineEdit()
-        self.input_dir_edit.setPlaceholderText("Папка с исходными видео…")
-        btn_in = QPushButton("Обзор…")
-        btn_in.setObjectName("secondary")
-        btn_in.clicked.connect(self._browse_input_dir)
         btn_pick_files = QPushButton("Выбрать файлы…")
         btn_pick_files.setObjectName("secondary")
         btn_pick_files.clicked.connect(self._browse_input_files)
@@ -121,34 +116,31 @@ class MainWindow(QWidget):
         btn_out = QPushButton("Обзор…")
         btn_out.setObjectName("secondary")
         btn_out.clicked.connect(self._browse_output_dir)
-        io_grid.addWidget(QLabel("Входная папка:"), 0, 0)
-        io_grid.addWidget(self.input_dir_edit, 0, 1)
-        io_grid.addWidget(btn_in, 0, 2)
-        io_grid.addWidget(btn_pick_files, 1, 2)
-        io_grid.addWidget(QLabel("Выбор файлов:"), 1, 0)
-        io_grid.addWidget(self._input_files_hint, 1, 1)
-        io_grid.addWidget(QLabel("Выходная папка:"), 2, 0)
-        io_grid.addWidget(self.output_dir_edit, 2, 1)
-        io_grid.addWidget(btn_out, 2, 2)
+        io_grid.addWidget(QLabel("Исходные видео:"), 0, 0)
+        io_grid.addWidget(self._input_files_hint, 0, 1)
+        io_grid.addWidget(btn_pick_files, 0, 2)
+        io_grid.addWidget(QLabel("Выходная папка:"), 1, 0)
+        io_grid.addWidget(self.output_dir_edit, 1, 1)
+        io_grid.addWidget(btn_out, 1, 2)
         self.copies_per_file = QSpinBox()
         self.copies_per_file.setRange(1, _INT_MAX)
         self.copies_per_file.setValue(1)
-        io_grid.addWidget(QLabel("Копий на исходник:"), 3, 0)
-        io_grid.addWidget(self.copies_per_file, 3, 1)
+        io_grid.addWidget(QLabel("Копий на исходник:"), 2, 0)
+        io_grid.addWidget(self.copies_per_file, 2, 1)
         copies_hint = QLabel(
             "Каждая копия — отдельный прогон со своими случайными параметрами "
             "(при включённой случайной уникализации). Например: 10 видео × 5 = 50 файлов."
         )
         copies_hint.setObjectName("hint")
         copies_hint.setWordWrap(True)
-        io_grid.addWidget(copies_hint, 4, 0, 1, 3)
+        io_grid.addWidget(copies_hint, 3, 0, 1, 3)
         io_hint = QLabel(
             "Имена: имя_unique.mp4 при одной копии; при нескольких — "
             "имя_unique_001.mp4 …"
         )
         io_hint.setObjectName("hint")
         io_hint.setWordWrap(True)
-        io_grid.addWidget(io_hint, 5, 0, 1, 3)
+        io_grid.addWidget(io_hint, 4, 0, 1, 3)
 
         proc = QGroupBox("Обработка")
         pg = QGridLayout(proc)
@@ -206,35 +198,83 @@ class MainWindow(QWidget):
         fx_layout = QVBoxLayout(fx)
         fx_layout.setSpacing(8)
 
-        auto_grid = QGridLayout()
-        self.auto_color = ToggleSwitch(
-            "Автокоррекция цвета (выборка кадров из ролика, единые параметры)"
-        )
-        self.auto_color.setChecked(False)
-        self.auto_color_strength = QDoubleSpinBox()
-        self.auto_color_strength.setRange(-_BIG_FLOAT, _BIG_FLOAT)
-        self.auto_color_strength.setSingleStep(0.05)
-        self.auto_color_strength.setValue(0.85)
-        self.auto_color_strength.setDecimals(2)
-        self.auto_color_strength.setButtonSymbols(
-            QAbstractSpinBox.ButtonSymbols.NoButtons
-        )
-        auto_grid.addWidget(self.auto_color, 0, 0, 1, 2)
-        auto_grid.addWidget(QLabel("Сила автоколора (1 = полностью):"), 1, 0)
-        auto_grid.addWidget(self.auto_color_strength, 1, 1)
-        self.auto_color_frames = QSpinBox()
-        self.auto_color_frames.setRange(1, _INT_MAX)
-        self.auto_color_frames.setValue(48)
-        auto_grid.addWidget(QLabel("Кадров для анализа колора:"), 2, 0)
-        auto_grid.addWidget(self.auto_color_frames, 2, 1)
-        fx_layout.addLayout(auto_grid)
-
         self.random_uniquify = ToggleSwitch(
             "Случайные параметры для каждого файла (каждый запуск — новый набор)"
         )
         self.random_uniquify.setChecked(True)
         self.random_uniquify.toggled.connect(self._on_random_uniquify_toggled)
         fx_layout.addWidget(self.random_uniquify)
+
+        self._random_bounds_section = CollapsibleSection(
+            "Границы случайной уникализации (от / до)"
+        )
+        bounds_inner = QWidget()
+        rg = QGridLayout(bounds_inner)
+        rg.setHorizontalSpacing(8)
+
+        def _dspin(lo: float, hi: float, step: float, dec: int) -> tuple[QDoubleSpinBox, QDoubleSpinBox]:
+            a, b = QDoubleSpinBox(), QDoubleSpinBox()
+            for w in (a, b):
+                w.setRange(-_BIG_FLOAT, _BIG_FLOAT)
+                w.setSingleStep(step)
+                w.setDecimals(dec)
+                w.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+            a.setValue(lo)
+            b.setValue(hi)
+            return a, b
+
+        def _ispin(lo: int, hi: int) -> tuple[QSpinBox, QSpinBox]:
+            a, b = QSpinBox(), QSpinBox()
+            for w in (a, b):
+                w.setRange(_INT_MIN, _INT_MAX)
+            a.setValue(lo)
+            b.setValue(hi)
+            return a, b
+
+        def _bounds_row(row: int, title: str, w_lo: QWidget, w_hi: QWidget) -> None:
+            rg.addWidget(QLabel(title), row, 0)
+            rg.addWidget(QLabel("от"), row, 1)
+            rg.addWidget(w_lo, row, 2)
+            rg.addWidget(QLabel("до"), row, 3)
+            rg.addWidget(w_hi, row, 4)
+
+        br = 0
+        self.rb_brightness_min, self.rb_brightness_max = _dspin(-22.0, 22.0, 1.0, 1)
+        _bounds_row(br, "Яркость (±)", self.rb_brightness_min, self.rb_brightness_max)
+        br += 1
+        self.rb_contrast_min, self.rb_contrast_max = _dspin(0.88, 1.14, 0.01, 3)
+        _bounds_row(br, "Контраст", self.rb_contrast_min, self.rb_contrast_max)
+        br += 1
+        self.rb_saturation_min, self.rb_saturation_max = _dspin(0.88, 1.12, 0.01, 3)
+        _bounds_row(br, "Насыщенность", self.rb_saturation_min, self.rb_saturation_max)
+        br += 1
+        self.rb_crop_jitter_min, self.rb_crop_jitter_max = _ispin(0, 3)
+        _bounds_row(br, "Кроп-джиттер (px)", self.rb_crop_jitter_min, self.rb_crop_jitter_max)
+        br += 1
+        self.rb_scale_pct_min, self.rb_scale_pct_max = _dspin(95, 100.6, 0.1, 2)
+        _bounds_row(br, "Масштаб %", self.rb_scale_pct_min, self.rb_scale_pct_max)
+        br += 1
+        self.rb_noise_min, self.rb_noise_max = _dspin(0.15, 4.0, 0.05, 2)
+        _bounds_row(br, "Шум σ", self.rb_noise_min, self.rb_noise_max)
+        br += 1
+        self.rb_seed_min, self.rb_seed_max = _ispin(0, 99_999_999)
+        _bounds_row(br, "Seed", self.rb_seed_min, self.rb_seed_max)
+        br += 1
+        self.audio_speed_min, self.audio_speed_max = _dspin(1.0, 1.1, 0.01, 2)
+        _bounds_row(br, "Скорость видео+аудио (x)", self.audio_speed_min, self.audio_speed_max)
+        br += 1
+        self.audio_chorus_prob = QDoubleSpinBox()
+        self.audio_chorus_prob.setRange(-_BIG_FLOAT, _BIG_FLOAT)
+        self.audio_chorus_prob.setSingleStep(0.05)
+        self.audio_chorus_prob.setDecimals(2)
+        self.audio_chorus_prob.setValue(0.45)
+        self.audio_chorus_prob.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        rg.addWidget(QLabel("Вероятность хора (0…1):"), br, 0, 1, 2)
+        rg.addWidget(self.audio_chorus_prob, br, 2, 1, 3)
+        self._random_bounds_section.content_layout().addWidget(bounds_inner)
+        self._random_bounds_section.set_expanded(True)
+        fx_layout.addWidget(self._random_bounds_section)
+        self._random_bounds_panel = bounds_inner
 
         self._manual_section = CollapsibleSection("Ручные параметры и аудио")
         manual_inner = QWidget()
@@ -294,75 +334,43 @@ class MainWindow(QWidget):
             mg.addWidget(w, r, 1)
             r += 1
 
-        mg.addWidget(QLabel("— Аудио (случайно) —"), r, 0, 1, 2)
+        mg.addWidget(QLabel("— Случайные: включение —"), r, 0, 1, 2)
         r += 1
-        self.audio_speed = ToggleSwitch("Ускорение звука (случайно)")
+        self.audio_speed = ToggleSwitch(
+            "Ускорение видео и аудио (случайно, один коэффициент)"
+        )
         self.audio_speed.setChecked(True)
-        self.audio_speed_min = QDoubleSpinBox()
-        self.audio_speed_min.setRange(-_BIG_FLOAT, _BIG_FLOAT)
-        self.audio_speed_min.setSingleStep(0.01)
-        self.audio_speed_min.setDecimals(2)
-        self.audio_speed_min.setValue(1.0)
-        self.audio_speed_min.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.audio_speed_max = QDoubleSpinBox()
-        self.audio_speed_max.setRange(-_BIG_FLOAT, _BIG_FLOAT)
-        self.audio_speed_max.setSingleStep(0.01)
-        self.audio_speed_max.setDecimals(2)
-        self.audio_speed_max.setValue(1.1)
-        self.audio_speed_max.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.audio_chorus = ToggleSwitch("Лёгкий хорус (случайно)")
         self.audio_chorus.setChecked(True)
-        self.audio_chorus_prob = QDoubleSpinBox()
-        self.audio_chorus_prob.setRange(-_BIG_FLOAT, _BIG_FLOAT)
-        self.audio_chorus_prob.setSingleStep(0.05)
-        self.audio_chorus_prob.setDecimals(2)
-        self.audio_chorus_prob.setValue(0.45)
-        self.audio_chorus_prob.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
 
         self._random_audio_widgets = [
             self.audio_speed,
-            self.audio_speed_min,
-            self.audio_speed_max,
             self.audio_chorus,
-            self.audio_chorus_prob,
         ]
 
         mg.addWidget(self.audio_speed, r, 0, 1, 2)
         r += 1
-        mg.addWidget(QLabel("Диапазон скорости (x):"), r, 0)
-        sp_row = QHBoxLayout()
-        sp_row.addWidget(QLabel("от"))
-        sp_row.addWidget(self.audio_speed_min)
-        sp_row.addWidget(QLabel("до"))
-        sp_row.addWidget(self.audio_speed_max)
-        w_sp = QWidget()
-        w_sp.setLayout(sp_row)
-        mg.addWidget(w_sp, r, 1)
-        r += 1
         mg.addWidget(self.audio_chorus, r, 0, 1, 2)
         r += 1
-        mg.addWidget(QLabel("Вероятность хора:"), r, 0)
-        mg.addWidget(self.audio_chorus_prob, r, 1)
-        r += 1
 
-        mg.addWidget(QLabel("— Аудио (ручные) —"), r, 0, 1, 2)
+        mg.addWidget(QLabel("— Скорость и аудио (ручные) —"), r, 0, 1, 2)
         r += 1
-        self.audio_speed_factor_manual = QDoubleSpinBox()
-        self.audio_speed_factor_manual.setRange(-_BIG_FLOAT, _BIG_FLOAT)
-        self.audio_speed_factor_manual.setSingleStep(0.01)
-        self.audio_speed_factor_manual.setDecimals(2)
-        self.audio_speed_factor_manual.setValue(1.05)
-        self.audio_speed_factor_manual.setButtonSymbols(
+        self.playback_speed_manual = QDoubleSpinBox()
+        self.playback_speed_manual.setRange(-_BIG_FLOAT, _BIG_FLOAT)
+        self.playback_speed_manual.setSingleStep(0.01)
+        self.playback_speed_manual.setDecimals(2)
+        self.playback_speed_manual.setValue(1.05)
+        self.playback_speed_manual.setButtonSymbols(
             QAbstractSpinBox.ButtonSymbols.NoButtons
         )
         self.audio_chorus_manual = ToggleSwitch("Хорус (включить)")
         self.audio_chorus_manual.setChecked(False)
         self._manual_audio_widgets = [
-            self.audio_speed_factor_manual,
+            self.playback_speed_manual,
             self.audio_chorus_manual,
         ]
-        mg.addWidget(QLabel("Скорость аудио (x):"), r, 0)
-        mg.addWidget(self.audio_speed_factor_manual, r, 1)
+        mg.addWidget(QLabel("Скорость видео+аудио (x):"), r, 0)
+        mg.addWidget(self.playback_speed_manual, r, 1)
         r += 1
         mg.addWidget(self.audio_chorus_manual, r, 0, 1, 2)
         r += 1
@@ -525,9 +533,7 @@ class MainWindow(QWidget):
         self.thread_label.setText(f"{int(v)} / {mx}")
 
     def _load_folder_settings(self) -> None:
-        inp = self._settings.value("input_folder", "", type=str) or ""
         out = self._settings.value("output_folder", "", type=str) or ""
-        self.input_dir_edit.setText(inp)
         self.output_dir_edit.setText(out)
         try:
             files = self._settings.value("input_files", [], type=list) or []
@@ -537,29 +543,14 @@ class MainWindow(QWidget):
         self._sync_input_files_hint()
 
     def _save_folder_settings(self) -> None:
-        self._settings.setValue("input_folder", self.input_dir_edit.text().strip())
         self._settings.setValue("output_folder", self.output_dir_edit.text().strip())
         self._settings.setValue("input_files", list(self._selected_input_files))
 
-    def _browse_input_dir(self) -> None:
-        start = self.input_dir_edit.text().strip() or str(Path.home())
-        path = QFileDialog.getExistingDirectory(self, "Папка с исходными видео", start)
-        if path:
-            self.input_dir_edit.setText(path)
-            # После выбора папки — даём выбрать конкретные файлы.
-            # Если пользователь отменил выбор, оставляем обработку всех файлов папки.
-            files, _ = QFileDialog.getOpenFileNames(
-                self,
-                "Выберите видеофайлы для обработки (можно несколько)",
-                path,
-                "Видео (*.mp4 *.mkv *.mov *.avi *.webm *.m4v *.ts);;Все файлы (*)",
-            )
-            self._selected_input_files = [f for f in files if str(f).strip()]
-            self._sync_input_files_hint()
-            self._save_folder_settings()
-
     def _browse_input_files(self) -> None:
-        start_dir = self.input_dir_edit.text().strip() or str(Path.home())
+        if self._selected_input_files:
+            start_dir = str(Path(self._selected_input_files[0]).parent)
+        else:
+            start_dir = str(Path.home())
         files, _ = QFileDialog.getOpenFileNames(
             self,
             "Выберите видеофайлы для обработки (можно несколько)",
@@ -576,7 +567,7 @@ class MainWindow(QWidget):
             return
         n = len(self._selected_input_files or [])
         if n <= 0:
-            self._input_files_hint.setText("Все видеофайлы из входной папки")
+            self._input_files_hint.setText("Не выбрано — нажмите «Выбрать файлы…»")
             self._input_files_hint.setToolTip("")
             return
         names = [Path(p).name for p in self._selected_input_files]
@@ -587,7 +578,11 @@ class MainWindow(QWidget):
         self._input_files_hint.setToolTip("\n".join(names))
 
     def _browse_output_dir(self) -> None:
-        start = self.output_dir_edit.text().strip() or self.input_dir_edit.text().strip() or str(Path.home())
+        start = self.output_dir_edit.text().strip()
+        if not start and self._selected_input_files:
+            start = str(Path(self._selected_input_files[0]).parent)
+        if not start:
+            start = str(Path.home())
         path = QFileDialog.getExistingDirectory(self, "Папка для результатов", start)
         if path:
             self.output_dir_edit.setText(path)
@@ -603,6 +598,8 @@ class MainWindow(QWidget):
             w.setEnabled(not random_on)
         for w in getattr(self, "_random_audio_widgets", []):
             w.setEnabled(bool(random_on))
+        if hasattr(self, "_random_bounds_panel"):
+            self._random_bounds_panel.setEnabled(bool(random_on))
         self._manual_section.setEnabled(True)
 
     def _build_options(self) -> dict:
@@ -614,41 +611,61 @@ class MainWindow(QWidget):
             scale_pct=float(self.scale_pct.value()),
             noise_sigma=float(self.noise.value()),
             seed_base=int(self.seed.value()),
-            auto_color_grade=self.auto_color.isChecked(),
-            auto_color_strength=float(self.auto_color_strength.value()),
-            audio_speed_factor=float(self.audio_speed_factor_manual.value()),
+            playback_speed_factor=float(self.playback_speed_manual.value()),
             audio_chorus=bool(self.audio_chorus_manual.isChecked()),
         )
         return {
-            "input_dir": self.input_dir_edit.text().strip(),
+            "input_dir": "",
             "output_dir": self.output_dir_edit.text().strip(),
             "input_files": list(self._selected_input_files),
             "num_workers": int(self.thread_slider.value()),
             "use_gpu": bool(self.use_gpu.isChecked()),
             "settings": st.to_dict(),
             "randomize_uniquify": self.random_uniquify.isChecked(),
-            "auto_color_sample_frames": int(self.auto_color_frames.value()),
             "copies_per_file": int(self.copies_per_file.value()),
-            "audio_speed_enabled": bool(self.audio_speed.isChecked()),
-            "audio_speed_min": float(self.audio_speed_min.value()),
-            "audio_speed_max": float(self.audio_speed_max.value()),
+            "playback_speed_enabled": bool(self.audio_speed.isChecked()),
             "audio_chorus_enabled": bool(self.audio_chorus.isChecked()),
-            "audio_chorus_prob": float(self.audio_chorus_prob.value()),
+            "random_bounds": RandomUniquifyBounds(
+                brightness_min=float(self.rb_brightness_min.value()),
+                brightness_max=float(self.rb_brightness_max.value()),
+                contrast_min=float(self.rb_contrast_min.value()),
+                contrast_max=float(self.rb_contrast_max.value()),
+                saturation_min=float(self.rb_saturation_min.value()),
+                saturation_max=float(self.rb_saturation_max.value()),
+                crop_jitter_min=int(self.rb_crop_jitter_min.value()),
+                crop_jitter_max=int(self.rb_crop_jitter_max.value()),
+                scale_pct_min=float(self.rb_scale_pct_min.value()),
+                scale_pct_max=float(self.rb_scale_pct_max.value()),
+                noise_sigma_min=float(self.rb_noise_min.value()),
+                noise_sigma_max=float(self.rb_noise_max.value()),
+                seed_min=int(self.rb_seed_min.value()),
+                seed_max=int(self.rb_seed_max.value()),
+                playback_speed_min=float(self.audio_speed_min.value()),
+                playback_speed_max=float(self.audio_speed_max.value()),
+                audio_chorus_prob=float(self.audio_chorus_prob.value()),
+            ).to_dict(),
         }
 
     def _start(self) -> None:
         self._save_folder_settings()
         opts = self._build_options()
-        if not opts["input_dir"] or not opts["output_dir"]:
-            QMessageBox.warning(
-                self, "Zaliver", "Укажите входную и выходную папку."
-            )
+        if not opts["output_dir"]:
+            QMessageBox.warning(self, "Zaliver", "Укажите выходную папку.")
             return
-        if Path(opts["input_dir"]).resolve() == Path(opts["output_dir"]).resolve():
+        if not opts.get("input_files"):
             QMessageBox.warning(
                 self,
                 "Zaliver",
-                "Входная и выходная папки не должны совпадать.",
+                "Выберите хотя бы один видеофайл (кнопка «Выбрать файлы…»).",
+            )
+            return
+        out_res = Path(opts["output_dir"]).resolve()
+        parents = {Path(f).resolve().parent for f in opts["input_files"]}
+        if len(parents) == 1 and next(iter(parents)) == out_res:
+            QMessageBox.warning(
+                self,
+                "Zaliver",
+                "Папка результатов совпадает с папкой всех исходных файлов — выберите другую.",
             )
             return
         if self._work_thread and self._work_thread.isRunning():

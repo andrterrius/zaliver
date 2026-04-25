@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -451,6 +452,50 @@ def _chorus_filter(inp: str, out_label: str) -> str:
     return f"{inp}chorus=0.65:0.75:40:0.20:0.25:2{out_label}"
 
 
+def source_file_has_audio(path: str) -> bool:
+    """Есть ли в файле хотя бы один аудиопоток (для filter_complex с [1:a])."""
+    try:
+        from zaliver.processing.ffmpeg_probe import resolve_ffprobe_executable
+    except ImportError:
+        return False
+    probe = resolve_ffprobe_executable()
+    pth = Path(path)
+    if not probe or not pth.is_file():
+        return False
+    cmd = [
+        probe,
+        "-v",
+        "error",
+        "-show_entries",
+        "stream=codec_type",
+        "-select_streams",
+        "a",
+        "-of",
+        "json",
+        str(pth),
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_popen_flags(),
+            timeout=120,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    if proc.returncode != 0:
+        return False
+    try:
+        data = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return False
+    streams = data.get("streams") or []
+    return len(streams) > 0
+
+
 def mux_video_audio(
     video_path: str,
     audio_source_path: str,
@@ -467,7 +512,51 @@ def mux_video_audio(
     spd = float(playback_speed) if playback_speed is not None else 1.0
     want_speed = abs(spd - 1.0) > 1e-3
     want_chorus = bool(audio_chorus)
+    has_audio = source_file_has_audio(a)
+
     if want_speed or want_chorus:
+        if not has_audio:
+            if log:
+                if want_chorus and not want_speed:
+                    log("В исходнике нет аудио — хорус не применяется, копируется только видео.")
+                elif want_chorus and want_speed:
+                    log(
+                        "В исходнике нет аудио — ускоряется только видео, хорус и звук пропущены."
+                    )
+                elif want_speed:
+                    log("В исходнике нет аудио — сохраняется только ускоренное видео (без звука).")
+            if want_speed:
+                filt = f"[0:v]setpts=PTS/{spd:.9f}[vout]"
+                run_ffmpeg(
+                    [
+                        "-i",
+                        v,
+                        "-filter_complex",
+                        filt,
+                        "-map",
+                        "[vout]",
+                        "-an",
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "veryfast",
+                        "-crf",
+                        "20",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-movflags",
+                        "+faststart",
+                        o,
+                    ],
+                    log=log,
+                )
+            else:
+                run_ffmpeg(
+                    ["-i", v, "-c:v", "copy", "-an", o],
+                    log=log,
+                )
+            return
+
         parts: List[str] = []
         if want_speed:
             # Видео: setpts=PTS/s — то же относительное ускорение, что и atempo=s для аудио.

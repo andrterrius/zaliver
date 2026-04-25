@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import queue
+import secrets
 import shutil
 import time
 import uuid
@@ -34,6 +35,11 @@ from zaliver.processing.worker import init_worker, process_chunk_disk
 
 
 LogCallback = Callable[[str], None]
+
+
+def _unique_output_filename(stem: str) -> str:
+    """Случайное имя выходного файла (не счётчик), расширение .mp4."""
+    return f"{stem}_u_{secrets.token_hex(10)}.mp4"
 
 
 def _job_playback_speed(settings: Dict[str, Any]) -> float:
@@ -217,10 +223,7 @@ class ProcessingController(QObject):
                             f"{p.name}: в файле нет кадров (frame_count=0)."
                         )
                     for ci in range(1, copies_per_file + 1):
-                        if copies_per_file == 1:
-                            outp = out_dir / f"{p.stem}_unique.mp4"
-                        else:
-                            outp = out_dir / f"{p.stem}_unique_{ci:03d}.mp4"
+                        outp = out_dir / _unique_output_filename(p.stem)
                         plan.append((p, outp, inf, ci, copies_per_file))
             except Exception as e:
                 self.finished.emit(False, str(e))

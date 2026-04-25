@@ -135,8 +135,7 @@ class MainWindow(QWidget):
         copies_hint.setWordWrap(True)
         io_grid.addWidget(copies_hint, 3, 0, 1, 3)
         io_hint = QLabel(
-            "Имена: имя_unique.mp4 при одной копии; при нескольких — "
-            "имя_unique_001.mp4 …"
+            "Имена: имя_u_<случайные hex>.mp4 — у каждого выхода свой суффикс (не счётчик)."
         )
         io_hint.setObjectName("hint")
         io_hint.setWordWrap(True)
@@ -254,7 +253,7 @@ class MainWindow(QWidget):
         self.rb_scale_pct_min, self.rb_scale_pct_max = _dspin(95, 100.6, 0.1, 2)
         _bounds_row(br, "Масштаб %", self.rb_scale_pct_min, self.rb_scale_pct_max)
         br += 1
-        self.rb_noise_min, self.rb_noise_max = _dspin(0.15, 4.0, 0.05, 2)
+        self.rb_noise_min, self.rb_noise_max = _dspin(0.5, 4.0, 0.05, 2)
         _bounds_row(br, "Шум σ", self.rb_noise_min, self.rb_noise_max)
         br += 1
         self.rb_seed_min, self.rb_seed_max = _ispin(0, 99_999_999)

@@ -149,6 +149,7 @@ class ProcessingController(QObject):
     progress = pyqtSignal(int, int, str)
     finished = pyqtSignal(bool, str)
     log_line = pyqtSignal(str)
+    output_saved = pyqtSignal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -580,6 +581,7 @@ class ProcessingController(QObject):
                             j.finished = True
                             j.done_frames = j.info.frame_count
                             log(f"{j.tag(n_jobs)}: Сохранено: {j.outp.name}")
+                            self.output_saved.emit(str(j.outp))
                         else:
                             j.chunks_finished.add(meta.chunk_idx)
                             if len(j.chunks_finished) >= len(j.chunks):
@@ -618,6 +620,7 @@ class ProcessingController(QObject):
                                     f"{j.tag(n_jobs)}: Сохранено: {j.outp.name} "
                                     f"(склеено из {len(j.chunks)} частей)"
                                 )
+                                self.output_saved.emit(str(j.outp))
                         emit_progress_global()
                     fill_pool()
 

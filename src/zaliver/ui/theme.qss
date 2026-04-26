@@ -166,3 +166,188 @@ QScrollBar::handle:vertical {
 QScrollBar::handle:vertical:hover {
     background: #6366f1;
 }
+
+QListWidget#sideNav {
+    background-color: #1a1d26;
+    border: 1px solid #2d3142;
+    border-radius: 12px;
+    padding: 8px 4px;
+    outline: none;
+}
+
+QListWidget#sideNav::item {
+    padding: 12px 14px;
+    border-radius: 8px;
+    color: #c7c9d9;
+}
+
+QListWidget#sideNav::item:hover {
+    background-color: #252836;
+}
+
+QListWidget#sideNav::item:selected {
+    background-color: #2e3245;
+    border: 1px solid #6366f1;
+    color: #f1f5f9;
+}
+
+QListWidget#readyList {
+    background-color: #0f1118;
+    border: 1px solid #2d3142;
+    border-radius: 12px;
+    padding: 8px;
+}
+
+QListWidget#readyList::item {
+    padding: 8px;
+    border-radius: 10px;
+}
+
+QListWidget#readyList::item:hover {
+    background-color: #1a1d26;
+}
+
+QListWidget#readyList::item:selected {
+    background-color: #252836;
+    border: 1px solid #6366f1;
+}
+
+QLabel#readyRowNumber {
+    font-size: 34px;
+    font-weight: 800;
+    color: #a5b4fc;
+    letter-spacing: -1px;
+    background-color: transparent;
+}
+
+QLabel#readyRowTitle {
+    font-size: 14px;
+    font-weight: 600;
+    color: #f1f5f9;
+}
+
+QLabel#readyRowDate {
+    font-size: 12px;
+    color: #94a3b8;
+}
+
+QLabel#readyThumb {
+    background-color: #0f1118;
+    border: 1px solid #2d3142;
+    border-radius: 10px;
+}
+
+QLabel#readyThumbEmpty {
+    background-color: #1a1d26;
+    border: 1px dashed #3d4258;
+    border-radius: 10px;
+    color: #6b7280;
+    font-size: 11px;
+}
+
+/* Dolphin{anty} profiles list */
+QListWidget#profilesList {
+    background-color: #0f1118;
+    border: 1px solid #2d3142;
+    border-radius: 12px;
+    padding: 8px;
+    outline: none;
+}
+
+QListWidget#profilesList::item {
+    padding: 4px;
+    border-radius: 12px;
+    background: transparent;
+}
+
+QListWidget#profilesList::item:hover {
+    background-color: rgba(99, 102, 241, 0.10);
+}
+
+QListWidget#profilesList::item:selected {
+    background-color: rgba(99, 102, 241, 0.16);
+    border: 1px solid #6366f1;
+}
+
+QWidget#dolphinProfileRowRoot {
+    background: transparent;
+}
+
+QFrame#dolphinProfileAccent {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #6366f1, stop:1 #a855f7);
+    border-top-left-radius: 12px;
+    border-bottom-left-radius: 12px;
+}
+
+QFrame#dolphinProfileCard {
+    background-color: #151826;
+    border: 1px solid #2d3142;
+    border-top-right-radius: 12px;
+    border-bottom-right-radius: 12px;
+}
+
+QLabel#dolphinProfileTitle {
+    font-size: 14px;
+    font-weight: 700;
+    color: #f1f5f9;
+}
+
+QLabel#dolphinProfileSubtitle {
+    font-size: 11px;
+    color: #94a3b8;
+}
+
+QLabel#dolphinProfileId {
+    font-size: 11px;
+    font-weight: 700;
+    color: #c7d2fe;
+    background-color: rgba(99, 102, 241, 0.14);
+    border: 1px solid rgba(129, 140, 248, 0.35);
+    border-radius: 999px;
+    padding: 4px 10px;
+}
+
+QLabel#dolphinProfileStatus {
+    font-size: 11px;
+    font-weight: 700;
+    color: #ede9fe;
+    background-color: rgba(124, 58, 237, 0.18);
+    border: 1px solid rgba(167, 139, 250, 0.35);
+    border-radius: 999px;
+    padding: 4px 10px;
+}
+
+QLabel#dolphinProfileProxy {
+    font-size: 11px;
+    font-weight: 700;
+    color: #c7d2fe;
+    background-color: rgba(99, 102, 241, 0.10);
+    border: 1px solid rgba(129, 140, 248, 0.28);
+    border-radius: 999px;
+    padding: 4px 10px;
+}
+
+QLabel#dolphinProfileProxy[proxyState="ok"] {
+    color: #dcfce7;
+    background-color: rgba(34, 197, 94, 0.14);
+    border: 1px solid rgba(74, 222, 128, 0.35);
+}
+
+QLabel#dolphinProfileProxy[proxyState="bad"] {
+    color: #ffe4e6;
+    background-color: rgba(244, 63, 94, 0.14);
+    border: 1px solid rgba(251, 113, 133, 0.35);
+}
+
+QLabel#dolphinProfileProxy[proxyState="unknown"] {
+    color: #e5e7eb;
+    background-color: rgba(148, 163, 184, 0.12);
+    border: 1px solid rgba(148, 163, 184, 0.28);
+}
+
+QLabel#dolphinProfileProxy[proxyState="none"] {
+    color: #94a3b8;
+    background-color: rgba(148, 163, 184, 0.08);
+    border: 1px dashed rgba(148, 163, 184, 0.28);
+}

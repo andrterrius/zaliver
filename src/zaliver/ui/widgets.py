@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QEasingCurve, QObject, QPropertyAnimation, Qt, pyqtProperty
+from PyQt6.QtCore import (
+    QEasingCurve,
+    QObject,
+    QPropertyAnimation,
+    Qt,
+    pyqtProperty,
+    pyqtSignal,
+)
 from PyQt6.QtGui import QColor, QLinearGradient, QPainter, QPen
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -18,6 +25,8 @@ from PyQt6.QtWidgets import (
 
 class CollapsibleSection(QWidget):
     """Сворачиваемый блок (стрелка + контент)."""
+
+    expansionChanged = pyqtSignal(bool)
 
     def __init__(self, title: str, parent=None) -> None:
         super().__init__(parent)
@@ -49,6 +58,7 @@ class CollapsibleSection(QWidget):
         self._btn.setArrowType(
             Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
         )
+        self.expansionChanged.emit(expanded)
 
     def set_expanded(self, expanded: bool) -> None:
         self._btn.blockSignals(True)

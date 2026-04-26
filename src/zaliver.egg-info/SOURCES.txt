@@ -7,6 +7,12 @@ src/zaliver.egg-info/dependency_links.txt
 src/zaliver.egg-info/entry_points.txt
 src/zaliver.egg-info/requires.txt
 src/zaliver.egg-info/top_level.txt
+src/zaliver/antydetect/__init__.py
+src/zaliver/antydetect/api.py
+src/zaliver/antydetect/dolphin_open.py
+src/zaliver/antydetect/dolphin_test.py
+src/zaliver/db/__init__.py
+src/zaliver/db/video_store.py
 src/zaliver/processing/__init__.py
 src/zaliver/processing/batch_paths.py
 src/zaliver/processing/chunking.py
@@ -20,6 +26,7 @@ src/zaliver/processing/shm_buffers.py
 src/zaliver/processing/thread_worker.py
 src/zaliver/processing/worker.py
 src/zaliver/ui/__init__.py
+src/zaliver/ui/dolphin_profile_row.py
 src/zaliver/ui/ffmpeg_install_worker.py
 src/zaliver/ui/main_window.py
 src/zaliver/ui/theme.qss

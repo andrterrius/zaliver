@@ -306,6 +306,8 @@ class MainWindow(QWidget):
     _after_video_saved = pyqtSignal()
     _profiles_loaded = pyqtSignal(object)
     _profiles_load_failed = pyqtSignal(str)
+    _dolphin_google_ready = pyqtSignal(str)
+    _dolphin_google_failed = pyqtSignal(str, str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -327,6 +329,8 @@ class MainWindow(QWidget):
         self._build_ui()
         self._profiles_loaded.connect(self._on_profiles_loaded)
         self._profiles_load_failed.connect(self._on_profiles_load_failed)
+        self._dolphin_google_ready.connect(self._on_dolphin_google_ready)
+        self._dolphin_google_failed.connect(self._on_dolphin_google_failed)
         self._after_video_saved.connect(self._refresh_ready_list)
         self._apply_theme()
         self.showMaximized()
@@ -732,7 +736,10 @@ class MainWindow(QWidget):
         profiles_hint = QLabel(
             "Подгрузка профилей через глобальный Public API Dolphin{anty} "
             "(нужен JWT токен из личного кабинета; отправляется как Authorization: Bearer …). "
-            "Поле поиска фильтрует уже загруженный список; кнопка «Обновить» (или Enter) — повторный запрос к API."
+            "Поле поиска фильтрует уже загруженный список; кнопка «Обновить» (или Enter) — повторный запрос к API. "
+            "Клик по профилю запускает его через Local API в headless, открывает YouTube Studio "
+            "и загрузку последнего готового видео из каталога (сессия Studio должна быть в профиле). "
+            "Клики не блокируют друг друга (параллельно в фоне)."
         )
         profiles_hint.setObjectName("hint")
         profiles_hint.setWordWrap(True)
@@ -760,6 +767,7 @@ class MainWindow(QWidget):
         )
         self._dolphin_query.textChanged.connect(self._schedule_profiles_filter)
         self._dolphin_query.returnPressed.connect(self._refresh_antydetect_profiles)
+        self._profiles_list.itemClicked.connect(self._on_profiles_list_clicked)
 
         profiles_l.addLayout(profiles_top)
         profiles_l.addWidget(profiles_hint)
@@ -1238,6 +1246,45 @@ class MainWindow(QWidget):
         self._profiles_status.setText(
             "Не удалось загрузить профили. Проверьте JWT токен (Public API: https://dolphin-anty-api.com).\n"
             f"{message}"
+        )
+
+    def _on_profiles_list_clicked(self, item: QListWidgetItem) -> None:
+        pid = (item.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
+        if not pid:
+            self._profiles_status.setText("У профиля нет ID — запуск через Local API невозможен.")
+            return
+        token = (self._dolphin_token.text() or "").strip()
+        if not token:
+            token = (self._settings.value("antydetect/dolphin_token", "", type=str) or "").strip()
+        threading.Thread(
+            target=self._dolphin_google_worker,
+            kwargs={"profile_id": pid, "token": token},
+            daemon=True,
+        ).start()
+
+    def _dolphin_google_worker(self, *, profile_id: str, token: str) -> None:
+        try:
+            from zaliver.antydetect.dolphin_open import open_google_in_profile
+
+            open_google_in_profile(
+                profile_id,
+                local_token=token or None,
+                headless=True,
+            )
+            self._dolphin_google_ready.emit(profile_id)
+        except Exception as e:
+            self._dolphin_google_failed.emit(profile_id, str(e))
+
+    def _on_dolphin_google_ready(self, _profile_id: str) -> None:
+        if self._profiles_raw is not None:
+            self._apply_profiles_filter()
+
+    def _on_dolphin_google_failed(self, profile_id: str, message: str) -> None:
+        if self._profiles_raw is not None:
+            self._apply_profiles_filter()
+        self._profiles_status.setText(
+            f"Профиль {profile_id}: не удалось открыть YouTube Studio / загрузку. "
+            f"Нужны Dolphin, Local API, playwright и сессия Studio в профиле. {message}"
         )
 
     def _browse_input_files(self) -> None:

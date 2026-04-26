@@ -12,3 +12,6 @@ Requires-Dist: imageio-ffmpeg>=0.4.9; extra == "ffmpeg"
 Provides-Extra: nuitka
 Requires-Dist: nuitka>=2.3; extra == "nuitka"
 Requires-Dist: ordered-set>=4.0; extra == "nuitka"
+Provides-Extra: antydetect
+Requires-Dist: requests>=2.32.0; extra == "antydetect"
+Requires-Dist: playwright>=1.45.0; extra == "antydetect"

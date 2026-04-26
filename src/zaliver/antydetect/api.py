@@ -141,8 +141,6 @@ class DolphinAntyPublicAPI:
         if resp.status_code != 200 or "data" not in data:
             raise DolphinAntyError(f"Public list profiles failed: status={resp.status_code}, body={data!r}")
         items = data.get("data")
-        for i in items:
-            print(i)
         if not isinstance(items, list):
             raise DolphinAntyError(f"Unexpected public list payload: {items!r}")
         return [it for it in items if isinstance(it, dict)]

@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QProgressDialog,
     QPushButton,
+    QCheckBox,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
@@ -308,6 +309,7 @@ class MainWindow(QWidget):
     _profiles_load_failed = pyqtSignal(str)
     _dolphin_google_ready = pyqtSignal(str)
     _dolphin_google_failed = pyqtSignal(str, str)
+    _ui_log_line = pyqtSignal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -327,6 +329,7 @@ class MainWindow(QWidget):
         self._profiles_filter_timer.setSingleShot(True)
         self._profiles_filter_timer.timeout.connect(self._apply_profiles_filter)
         self._build_ui()
+        self._ui_log_line.connect(self._append_log)
         self._profiles_loaded.connect(self._on_profiles_loaded)
         self._profiles_load_failed.connect(self._on_profiles_load_failed)
         self._dolphin_google_ready.connect(self._on_dolphin_google_ready)
@@ -735,11 +738,6 @@ class MainWindow(QWidget):
         profiles_title.setObjectName("title")
         profiles_hint = QLabel(
             "Подгрузка профилей через глобальный Public API Dolphin{anty} "
-            "(нужен JWT токен из личного кабинета; отправляется как Authorization: Bearer …). "
-            "Поле поиска фильтрует уже загруженный список; кнопка «Обновить» (или Enter) — повторный запрос к API. "
-            "Клик по профилю запускает его через Local API в headless, открывает YouTube Studio "
-            "и загрузку последнего готового видео из каталога (сессия Studio должна быть в профиле). "
-            "Клики не блокируют друг друга (параллельно в фоне)."
         )
         profiles_hint.setObjectName("hint")
         profiles_hint.setWordWrap(True)
@@ -781,10 +779,7 @@ class MainWindow(QWidget):
         settings_title = QLabel("Настройки")
         settings_title.setObjectName("title")
         settings_hint = QLabel(
-            "Настройки интеграции с антидетект-браузером Dolphin{anty}. "
-            "Токен хранится локально в настройках приложения (QSettings). "
-            "Для загрузки списка профилей используется Public API (Authorization: Bearer …). "
-            "Local API нужен для запуска/остановки профиля и подключения автоматизации (CDP)."
+            "Токен для Dolphon брать тут https://dolphin-anty.net/panel/#/api"
         )
         settings_hint.setObjectName("hint")
         settings_hint.setWordWrap(True)
@@ -802,6 +797,12 @@ class MainWindow(QWidget):
             "Используется для Public API как заголовок Authorization: Bearer <token>."
         )
 
+        self._dolphin_headless = QCheckBox("Headless (без окна браузера)")
+        self._dolphin_headless.setChecked(True)
+        self._dolphin_headless.setToolTip(
+            "Если включено — профиль Dolphin запускается без окна браузера (headless)."
+        )
+
         self._btn_save_antydetect = QPushButton("Сохранить")
         self._btn_save_antydetect.setObjectName("secondary")
         self._btn_save_antydetect.clicked.connect(self._save_antydetect_settings)
@@ -816,14 +817,15 @@ class MainWindow(QWidget):
         gg.addWidget(public_host, 0, 0, 1, 2)
         gg.addWidget(QLabel("JWT:"), 1, 0)
         gg.addWidget(self._dolphin_token, 1, 1)
+        gg.addWidget(self._dolphin_headless, 2, 0, 1, 2)
         btns = QHBoxLayout()
         btns.addWidget(self._btn_test_profiles)
         btns.addStretch()
         btns.addWidget(self._btn_save_antydetect)
         w_btns = QWidget()
         w_btns.setLayout(btns)
-        gg.addWidget(w_btns, 2, 0, 1, 2)
-        gg.addWidget(self._settings_status, 3, 0, 1, 2)
+        gg.addWidget(w_btns, 3, 0, 1, 2)
+        gg.addWidget(self._settings_status, 4, 0, 1, 2)
 
         settings_l.addWidget(settings_title)
         settings_l.addWidget(settings_hint)
@@ -1101,13 +1103,21 @@ class MainWindow(QWidget):
             return
         token = self._settings.value("antydetect/dolphin_token", "", type=str) or ""
         self._dolphin_token.setText((token or "").strip())
+        if hasattr(self, "_dolphin_headless"):
+            headless = self._settings.value(
+                "antydetect/dolphin_headless", True, type=bool
+            )
+            self._dolphin_headless.setChecked(bool(headless))
 
     def _save_antydetect_settings(self) -> None:
         token = (self._dolphin_token.text() or "").strip()
-        # Не затираем сохранённый JWT пустым значением: вкладка «Профили» тоже вызывает сохранение,
-        # и пустое поле токена (до первого открытия «Настройки») иначе стирает корректный токен из QSettings.
         if token:
             self._settings.setValue("antydetect/dolphin_token", token)
+        if hasattr(self, "_dolphin_headless"):
+            self._settings.setValue(
+                "antydetect/dolphin_headless",
+                bool(self._dolphin_headless.isChecked()),
+            )
         try:
             self._settings.sync()
         except Exception:
@@ -1264,12 +1274,22 @@ class MainWindow(QWidget):
 
     def _dolphin_google_worker(self, *, profile_id: str, token: str) -> None:
         try:
-            from zaliver.antydetect.dolphin_open import open_google_in_profile
+            from zaliver.antydetect.dolphin_open import open_google_in_profile, set_log_sink
+
+            set_log_sink(self._ui_log_line.emit)
+
+            headless = True
+            if hasattr(self, "_dolphin_headless"):
+                headless = bool(self._dolphin_headless.isChecked())
+            else:
+                headless = bool(
+                    self._settings.value("antydetect/dolphin_headless", True, type=bool)
+                )
 
             open_google_in_profile(
                 profile_id,
                 local_token=token or None,
-                headless=True,
+                headless=headless,
             )
             self._dolphin_google_ready.emit(profile_id)
         except Exception as e:

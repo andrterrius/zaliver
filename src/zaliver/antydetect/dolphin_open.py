@@ -1,5 +1,3 @@
-"""Запуск профиля Dolphin{anty} через Local API: YouTube Studio и загрузка файла (CDP + Playwright)."""
-
 from __future__ import annotations
 
 import re
@@ -8,14 +6,36 @@ from pathlib import Path
 
 from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI
 
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import sync_playwright
 
 _STUDIO_UI_MS = 120_000
 _POST_UPLOAD_WAIT_S = 60.0
 _STUDIO_WIZARD_NEXT_MAX = 30
 
 
+_LOG_SINK = None
+
+
+def set_log_sink(sink) -> None:
+    """
+    Optional log sink callback.
+    If set, each `_log()` line will be forwarded to `sink(str)`.
+    """
+    global _LOG_SINK
+    _LOG_SINK = sink
+
+
 def _log(message: str) -> None:
-    print(f"[dolphin_open] {message}")
+    line = f"[dolphin_open] {message}"
+    print(line)
+    sink = _LOG_SINK
+    if sink is not None:
+        try:
+            sink(line)
+        except Exception:
+            # Logging must not break automation flow.
+            pass
 
 
 def _resolve_latest_zaliver_video_on_disk(*, db_path: Path | None = None) -> str:
@@ -196,21 +216,6 @@ def open_google_in_profile(
     upload_latest_zaliver_video: bool = True,
     zaliver_db_path: Path | None = None,
 ) -> None:
-    """
-    Стартует профиль Dolphin, CDP + Playwright: открывает YouTube Studio,
-    «Создать» → «Добавить видео», затем при upload_latest_zaliver_video подставляет
-    последнее готовое видео из каталога Zaliver (БД + файл на диске).
-
-    Авторизация Google из Zaliver не выполняется — в профиле браузера должна быть
-    уже сохранённая сессия Studio.
-
-    После передачи файла в Studio выполняется пауза POST_UPLOAD_WAIT_S секунд в том же
-    потоке, где вызвана функция (например фоновый воркер UI); главный поток Qt не блокируется.
-    Затем мастер публикации: «не для детей» → «Далее» до экрана доступа → «Открытый доступ»
-    → «Опубликовать».
-    """
-    from playwright.sync_api import Error as PlaywrightError
-    from playwright.sync_api import sync_playwright
 
     _log(
         f"Старт open_google_in_profile: profile_id={profile_id!r}, headless={headless}, "

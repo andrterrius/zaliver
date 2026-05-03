@@ -117,17 +117,46 @@ class LocalAntidetectHttpAPI:
         )
 
 
+def _local_profile_tag_strings(raw: dict[str, Any]) -> list[str]:
+    """Теги из API (tags) + служебные engine / device_preset, без дубликатов."""
+    tags: list[str] = []
+    seen: set[str] = set()
+
+    def add(s: str) -> None:
+        k = s.lower()
+        if k in seen:
+            return
+        seen.add(k)
+        tags.append(s)
+
+    raw_tags = raw.get("tags")
+    if isinstance(raw_tags, list):
+        for t in raw_tags:
+            if isinstance(t, str) and t.strip():
+                add(t.strip())
+            elif isinstance(t, dict):
+                bit = str(
+                    t.get("name") or t.get("title") or t.get("tag") or t.get("id") or ""
+                ).strip()
+                if bit:
+                    add(bit)
+    eng = raw.get("engine")
+    if isinstance(eng, str) and eng.strip():
+        add(eng.strip())
+    dev = raw.get("device_preset")
+    if isinstance(dev, str) and dev.strip():
+        add(dev.strip())
+    return tags
+
+
 def normalize_local_profile_for_ui(raw: dict[str, Any]) -> dict[str, object]:
     """Поля ProfileOut OpenAPI → общий dict для списка профилей (как у Dolphin)."""
     pid = str(raw.get("profile_id") or "").strip()
     name = str(raw.get("name") or "").strip() or "Без названия"
-    tags: list[str] = []
-    eng = raw.get("engine")
-    if isinstance(eng, str) and eng.strip():
-        tags.append(eng.strip())
-    dev = raw.get("device_preset")
-    if isinstance(dev, str) and dev.strip():
-        tags.append(dev.strip())
+    tags = _local_profile_tag_strings(raw)
+
+    desc_raw = raw.get("description")
+    description = desc_raw.strip() if isinstance(desc_raw, str) else ""
 
     proxy: dict[str, object] | None = None
     server = raw.get("proxy_server")
@@ -158,6 +187,7 @@ def normalize_local_profile_for_ui(raw: dict[str, Any]) -> dict[str, object]:
         "name": name,
         "mainWebsite": "",
         "tags": tags,
+        "description": description,
         "status": st,
         "proxy": proxy,
     }

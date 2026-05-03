@@ -35,10 +35,10 @@ def _profile_status(profile: dict[str, object]) -> str:
     return _as_str(st) or _as_str(profile.get("statusId"))
 
 
-def _profile_tags(profile: dict[str, object]) -> str:
+def _profile_tag_list(profile: dict[str, object], *, limit: int = 24) -> list[str]:
     tags = profile.get("tags")
     if not isinstance(tags, list) or not tags:
-        return ""
+        return []
     out: list[str] = []
     for t in tags:
         if isinstance(t, str) and t.strip():
@@ -47,7 +47,13 @@ def _profile_tags(profile: dict[str, object]) -> str:
             s = _as_str(t.get("name") or t.get("title") or t.get("tag") or t.get("id"))
             if s:
                 out.append(s)
-    return ", ".join(out[:6])
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _profile_description(profile: dict[str, object]) -> str:
+    return _as_str(profile.get("description"))
 
 
 def _profile_main_site(profile: dict[str, object]) -> str:
@@ -123,7 +129,9 @@ class DolphinProfileRow(QWidget):
         pid = _profile_id(profile)
         name = _profile_name(profile)
         status = _profile_status(profile)
-        tags = _profile_tags(profile)
+        tag_strings = _profile_tag_list(profile)
+        tags_tip = ", ".join(tag_strings) if tag_strings else ""
+        description = _profile_description(profile)
         site = _profile_main_site(profile)
         proxy_text, proxy_kind, proxy_extra = _proxy_state(profile)
 
@@ -144,18 +152,77 @@ class DolphinProfileRow(QWidget):
         left = QVBoxLayout()
         left.setSpacing(6)
 
+        filter_widgets: list[QWidget] = []
+
+        tags_per_row = 5
+        title_row = QHBoxLayout()
+        title_row.setSpacing(10)
+
         title = QLabel(name)
         title.setObjectName("dolphinProfileTitle")
         title.setWordWrap(True)
+        title.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        title.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        filter_widgets.append(title)
+        title_row.addWidget(title, 1)
+
+        if tag_strings:
+            tags_col = QWidget()
+            tags_col.setSizePolicy(
+                QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum
+            )
+            tags_v = QVBoxLayout(tags_col)
+            tags_v.setContentsMargins(0, 0, 0, 0)
+            tags_v.setSpacing(4)
+            for i in range(0, len(tag_strings), tags_per_row):
+                chunk = tag_strings[i : i + tags_per_row]
+                row_w = QWidget()
+                row_w.setSizePolicy(
+                    QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum
+                )
+                row_l = QHBoxLayout(row_w)
+                row_l.setContentsMargins(0, 0, 0, 0)
+                row_l.setSpacing(6)
+                row_l.addStretch(1)
+                for text in chunk:
+                    chip = QLabel(text)
+                    chip.setObjectName("dolphinProfileTag")
+                    chip.setSizePolicy(
+                        QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+                    )
+                    row_l.addWidget(chip, 0, Qt.AlignmentFlag.AlignRight)
+                    filter_widgets.append(chip)
+                tags_v.addWidget(row_w)
+                filter_widgets.append(row_w)
+            title_row.addWidget(
+                tags_col, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop
+            )
+            filter_widgets.append(tags_col)
+
+        left.addLayout(title_row)
+
+        if description:
+            desc_lbl = QLabel(description)
+            desc_lbl.setObjectName("dolphinProfileDescription")
+            desc_lbl.setWordWrap(True)
+            desc_lbl.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+            )
+            left.addWidget(desc_lbl)
+            filter_widgets.append(desc_lbl)
 
         subtitle_parts: list[str] = []
         if site:
             subtitle_parts.append(site)
-        if tags:
-            subtitle_parts.append(f"теги: {tags}")
         subtitle = QLabel(" · ".join(subtitle_parts)) if subtitle_parts else QLabel("")
         subtitle.setObjectName("dolphinProfileSubtitle")
         subtitle.setWordWrap(True)
+        if subtitle_parts:
+            filter_widgets.append(subtitle)
 
         meta = QHBoxLayout()
         meta.setSpacing(10)
@@ -175,10 +242,11 @@ class DolphinProfileRow(QWidget):
         meta.addWidget(st_lbl, 0, Qt.AlignmentFlag.AlignLeft)
         meta.addStretch(1)
 
-        left.addWidget(title)
         if subtitle_parts:
             left.addWidget(subtitle)
         left.addLayout(meta)
+
+        filter_widgets.extend((id_lbl, proxy_lbl, st_lbl))
 
         card_l.addLayout(left, 1)
 
@@ -191,16 +259,27 @@ class DolphinProfileRow(QWidget):
         ]
         if site:
             tip_lines.append(f"Сайт: {site}")
-        if tags:
-            tip_lines.append(f"Теги: {tags}")
+        if description:
+            tip_lines.append(f"Описание: {description}")
+        if tags_tip:
+            tip_lines.append(f"Теги: {tags_tip}")
         if status:
             tip_lines.append(f"Статус: {status}")
         if proxy_extra:
             tip_lines.append("Прокси (последняя проверка):")
             tip_lines.append(proxy_extra)
 
-        self.setMinimumHeight(78)
-        for w in (accent, card, title, subtitle, id_lbl, proxy_lbl, st_lbl):
+        self.setToolTip("\n".join(tip_lines))
+
+        min_h = 78
+        if description:
+            min_h += 22
+        if tag_strings:
+            rows = (len(tag_strings) + tags_per_row - 1) // tags_per_row
+            min_h = max(min_h, 52 + rows * 24)
+        self.setMinimumHeight(min_h)
+
+        for w in (accent, card, *filter_widgets):
             w.installEventFilter(self)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]

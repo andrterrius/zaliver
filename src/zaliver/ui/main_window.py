@@ -1254,6 +1254,7 @@ class MainWindow(QWidget):
         add(profile.get("profile_id"))
         add(profile.get("name"))
         add(profile.get("mainWebsite"))
+        add(profile.get("description"))
         add(profile.get("tags"))
         add(profile.get("proxy"))
         add(profile.get("notes"))

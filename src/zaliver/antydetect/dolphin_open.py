@@ -701,3 +701,82 @@ def open_google_in_profile(
         _log("Local API: api.close…")
         api.close()
         _log("Local API: api.close завершён.")
+
+
+def open_google_in_local_antidetect_profile(
+    profile_id: str,
+    *,
+    base_url: str,
+    headless: bool = True,
+    upload_latest_zaliver_video: bool = True,
+    zaliver_db_path: Path | None = None,
+) -> None:
+    """
+    Запуск профиля через локальный HTTP API (см. OpenAPI Antidetect: launch + опрос сессии на cdp_ws_url),
+    затем тот же сценарий Studio, что и для Dolphin.
+    """
+    from zaliver.antydetect.local_antidetect_api import LocalAntidetectError, LocalAntidetectHttpAPI
+
+    _log(
+        f"Старт open_google_in_local_antidetect_profile: profile_id={profile_id!r}, "
+        f"base_url={base_url!r}, headless={headless}, upload_latest_zaliver_video={upload_latest_zaliver_video}."
+    )
+
+    api = LocalAntidetectHttpAPI(base_url)
+    session_id: str | None = None
+    try:
+        _log("Локальный API: POST …/launch…")
+        acc = api.launch_profile(profile_id, headless=headless, expose_cdp=True)
+        sid = acc.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+        session_id = sid.strip()
+        _log(f"Локальный API: сессия {session_id!r}, ожидание cdp_ws_url…")
+        ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+        _log("Локальный API: Playwright connect_over_cdp…")
+
+        with sync_playwright() as p:
+            browser = None
+            last_err: Exception | None = None
+            try:
+                browser = p.chromium.connect_over_cdp(ws_url)
+                last_err = None
+            except PlaywrightError as e:
+                last_err = e
+            if browser is None:
+                raise LocalAntidetectError(f"CDP connect failed: {last_err!r}")
+
+            context = browser.contexts[0] if browser.contexts else browser.new_context()
+            page = context.pages[0] if context.pages else context.new_page()
+            _log(f"Playwright: страниц в контексте: {len(context.pages)}.")
+
+            _studio_click_create_then_add_video(page)
+
+            if upload_latest_zaliver_video:
+                latest_path = _resolve_latest_zaliver_video_on_disk(db_path=zaliver_db_path)
+                _studio_upload_pick_file(page, latest_path)
+                _log(
+                    f"Ожидание до {_POST_UPLOAD_STUDIO_OUTCOME_MAX_S:.0f} с исхода Studio "
+                    f"(опрос ~каждые {_POST_UPLOAD_QUOTA_POLL_S:.0f} с)…"
+                )
+                _studio_wait_after_upload_studio_outcome(page, browser, _POST_UPLOAD_STUDIO_OUTCOME_MAX_S)
+                _studio_publish_flow_after_upload(page)
+                time.sleep(_STUDIO_WIZARD_NEXT_MAX)
+            else:
+                _log("Загрузка файла из каталога Zaliver отключена (upload_latest_zaliver_video=False).")
+
+            _log("Playwright: browser.close…")
+            try:
+                browser.close()
+                _log("Playwright: browser.close выполнен.")
+            except Exception:
+                _log("Playwright: browser.close пропущен (браузер уже закрыт или CDP недоступен).")
+    finally:
+        if session_id:
+            try:
+                _log(f"Локальный API: POST …/sessions/{session_id}/stop…")
+                api.stop_session(session_id)
+            except Exception as e:
+                _log(f"Локальный API: stop_session: {e!r}")
+        api.close()
+        _log("Локальный API: клиент закрыт.")

@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QCheckBox,
+    QComboBox,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
@@ -51,6 +52,10 @@ from PyQt6.QtWidgets import (
 
 from zaliver.db.video_store import VideoStore
 from zaliver.antydetect.api import DolphinAntyError, DolphinAntyPublicAPI
+from zaliver.antydetect.local_antidetect_api import (
+    DEFAULT_LOCAL_API_BASE_URL,
+    LocalAntidetectError,
+)
 from zaliver.processing.ffmpeg_merge import check_ffmpeg_tools
 from zaliver.processing.pipeline import RandomUniquifyBounds, UniquifySettings
 from zaliver.processing.thread_worker import ProcessingController
@@ -61,6 +66,11 @@ from zaliver.ui.widgets import (
     CollapsibleSection,
     SmoothSlider,
     ToggleSwitch,
+)
+
+from zaliver.antydetect.local_antidetect_api import (
+    LocalAntidetectHttpAPI,
+    normalize_local_profile_for_ui,
 )
 
 # Qt SpinBox/DoubleSpinBox всегда имеют min/max.
@@ -325,9 +335,17 @@ class MainWindow(QWidget):
 
         self._settings = QSettings("Zaliver", "Zaliver")
         self._profiles_raw: list[dict[str, object]] | None = None
+        self._profiles_list_render_gen: int = 0
+        self._profiles_click_press_render_gen: int = -1
+        self._profiles_list_populating: bool = False
         self._profiles_filter_timer = QTimer(self)
         self._profiles_filter_timer.setSingleShot(True)
         self._profiles_filter_timer.timeout.connect(self._apply_profiles_filter)
+        self._profiles_rearm_click_timer = QTimer(self)
+        self._profiles_rearm_click_timer.setSingleShot(True)
+        self._profiles_rearm_click_timer.timeout.connect(
+            self._ensure_profiles_list_click_connected
+        )
         self._build_ui()
         self._ui_log_line.connect(self._append_log)
         self._profiles_loaded.connect(self._on_profiles_loaded)
@@ -339,6 +357,7 @@ class MainWindow(QWidget):
         self.showMaximized()
         self._load_folder_settings()
         self._load_antydetect_settings()
+        self._update_profiles_section_header()
         self._sync_ffmpeg_install_row()
 
     def _theme_path(self) -> Path:
@@ -734,21 +753,23 @@ class MainWindow(QWidget):
         profiles_l = QVBoxLayout(profiles)
         profiles_l.setSpacing(10)
         profiles_l.setContentsMargins(12, 12, 12, 12)
-        profiles_title = QLabel("Профили Dolphin Anty")
-        profiles_title.setObjectName("title")
-        profiles_hint = QLabel(
+        self._profiles_title = QLabel("Профили Dolphin Anty")
+        self._profiles_title.setObjectName("title")
+        self._profiles_hint = QLabel(
             "Подгрузка профилей через глобальный Public API Dolphin{anty} "
         )
-        profiles_hint.setObjectName("hint")
-        profiles_hint.setWordWrap(True)
+        self._profiles_hint.setObjectName("hint")
+        self._profiles_hint.setWordWrap(True)
 
         profiles_top = QHBoxLayout()
         self._dolphin_query = QLineEdit()
         self._dolphin_query.setPlaceholderText("Поиск по загруженным профилям…")
         self._btn_profiles_refresh = QPushButton("Обновить")
         self._btn_profiles_refresh.setObjectName("secondary")
+        self._btn_profiles_refresh.setAutoDefault(False)
+        self._btn_profiles_refresh.setDefault(False)
         self._btn_profiles_refresh.clicked.connect(self._refresh_antydetect_profiles)
-        profiles_top.addWidget(profiles_title)
+        profiles_top.addWidget(self._profiles_title)
         profiles_top.addStretch()
         profiles_top.addWidget(self._dolphin_query, 1)
         profiles_top.addWidget(self._btn_profiles_refresh)
@@ -766,9 +787,10 @@ class MainWindow(QWidget):
         self._dolphin_query.textChanged.connect(self._schedule_profiles_filter)
         self._dolphin_query.returnPressed.connect(self._refresh_antydetect_profiles)
         self._profiles_list.itemClicked.connect(self._on_profiles_list_clicked)
+        self._profiles_list.viewport().installEventFilter(self)
 
         profiles_l.addLayout(profiles_top)
-        profiles_l.addWidget(profiles_hint)
+        profiles_l.addWidget(self._profiles_hint)
         profiles_l.addWidget(self._profiles_status)
         profiles_l.addWidget(self._profiles_list, 1)
 
@@ -779,10 +801,22 @@ class MainWindow(QWidget):
         settings_title = QLabel("Настройки")
         settings_title.setObjectName("title")
         settings_hint = QLabel(
-            "Токен для Dolphon брать тут https://dolphin-anty.net/panel/#/api"
+            "Выберите браузер по умолчанию для раздела «Профили». "
+            "Токен Dolphin — https://dolphin-anty.net/panel/#/api"
         )
         settings_hint.setObjectName("hint")
         settings_hint.setWordWrap(True)
+
+        browser_pick = QHBoxLayout()
+        browser_pick.addWidget(QLabel("Браузер по умолчанию:"))
+        self._default_browser_combo = QComboBox()
+        self._default_browser_combo.setObjectName("defaultBrowserCombo")
+        self._default_browser_combo.addItem("Dolphin Anty", "dolphin")
+        self._default_browser_combo.addItem("Свой (локальный API)", "local")
+        self._default_browser_combo.currentIndexChanged.connect(
+            self._on_default_browser_combo_changed
+        )
+        browser_pick.addWidget(self._default_browser_combo, 1)
 
         gb = QGroupBox("Dolphin Anty")
         gg = QGridLayout(gb)
@@ -800,14 +834,27 @@ class MainWindow(QWidget):
         self._dolphin_headless = QCheckBox("Headless (без окна браузера)")
         self._dolphin_headless.setChecked(True)
         self._dolphin_headless.setToolTip(
-            "Если включено — профиль Dolphin запускается без окна браузера (headless)."
+            "Если включено — профиль запускается без окна браузера (headless): "
+            "и Dolphin, и локальный API."
         )
+
+        gb_local = QGroupBox("Свой антидетект (локальный HTTP API)")
+        gl = QGridLayout(gb_local)
+        self._local_api_base_url = QLineEdit()
+        self._local_api_base_url.setPlaceholderText(DEFAULT_LOCAL_API_BASE_URL)
+        self._local_api_base_url.setToolTip(
+            "Корень HTTP-сервиса (без завершающего слэша), как в OpenAPI: /profiles, /health, …"
+        )
+        gl.addWidget(QLabel("Базовый URL:"), 0, 0)
+        gl.addWidget(self._local_api_base_url, 0, 1)
 
         self._btn_save_antydetect = QPushButton("Сохранить")
         self._btn_save_antydetect.setObjectName("secondary")
         self._btn_save_antydetect.clicked.connect(self._save_antydetect_settings)
 
         self._btn_test_profiles = QPushButton("Проверить и загрузить профили")
+        self._btn_test_profiles.setAutoDefault(False)
+        self._btn_test_profiles.setDefault(False)
         self._btn_test_profiles.clicked.connect(self._refresh_antydetect_profiles)
 
         self._settings_status = QLabel("")
@@ -829,7 +876,9 @@ class MainWindow(QWidget):
 
         settings_l.addWidget(settings_title)
         settings_l.addWidget(settings_hint)
+        settings_l.addLayout(browser_pick)
         settings_l.addWidget(gb)
+        settings_l.addWidget(gb_local)
         settings_l.addStretch()
 
         self._stack = QStackedWidget()
@@ -1098,6 +1147,32 @@ class MainWindow(QWidget):
         self._settings.setValue("output_folder", self.output_dir_edit.text().strip())
         self._settings.setValue("input_files", list(self._selected_input_files))
 
+    def _on_default_browser_combo_changed(self, _index: int) -> None:
+        self._update_profiles_section_header()
+
+    def _update_profiles_section_header(self) -> None:
+        if not hasattr(self, "_profiles_title"):
+            return
+        kind = self._default_browser_combo.currentData()
+        if not isinstance(kind, str) or not kind:
+            kind = "dolphin"
+        if kind == "local":
+            self._profiles_title.setText("Профили (локальный антидетект)")
+            self._profiles_hint.setText(
+                "Клик по строке — запуск профиля и сценарий YouTube Studio."
+            )
+            if hasattr(self, "_dolphin_query"):
+                self._dolphin_query.setPlaceholderText(
+                    "Поиск по загруженным профилям (имя, ID, движок)…"
+                )
+        else:
+            self._profiles_title.setText("Профили Dolphin Anty")
+            self._profiles_hint.setText(
+                "Подгрузка профилей через глобальный Public API Dolphin{anty} "
+            )
+            if hasattr(self, "_dolphin_query"):
+                self._dolphin_query.setPlaceholderText("Поиск по загруженным профилям…")
+
     def _load_antydetect_settings(self) -> None:
         if not hasattr(self, "_dolphin_token"):
             return
@@ -1108,6 +1183,23 @@ class MainWindow(QWidget):
                 "antydetect/dolphin_headless", True, type=bool
             )
             self._dolphin_headless.setChecked(bool(headless))
+        if hasattr(self, "_default_browser_combo"):
+            br = (
+                self._settings.value("antydetect/default_browser", "dolphin", type=str)
+                or "dolphin"
+            ).strip()
+            idx = self._default_browser_combo.findData(br)
+            if idx < 0:
+                idx = 0
+            self._default_browser_combo.blockSignals(True)
+            self._default_browser_combo.setCurrentIndex(idx)
+            self._default_browser_combo.blockSignals(False)
+        if hasattr(self, "_local_api_base_url"):
+            if self._settings.contains("antydetect/local_api_base_url"):
+                url = (self._settings.value("antydetect/local_api_base_url", "", type=str) or "").strip()
+            else:
+                url = DEFAULT_LOCAL_API_BASE_URL
+            self._local_api_base_url.setText(url)
 
     def _save_antydetect_settings(self) -> None:
         token = (self._dolphin_token.text() or "").strip()
@@ -1117,6 +1209,15 @@ class MainWindow(QWidget):
             self._settings.setValue(
                 "antydetect/dolphin_headless",
                 bool(self._dolphin_headless.isChecked()),
+            )
+        if hasattr(self, "_default_browser_combo"):
+            k = self._default_browser_combo.currentData()
+            if isinstance(k, str) and k:
+                self._settings.setValue("antydetect/default_browser", k)
+        if hasattr(self, "_local_api_base_url"):
+            self._settings.setValue(
+                "antydetect/local_api_base_url",
+                (self._local_api_base_url.text() or "").strip(),
             )
         try:
             self._settings.sync()
@@ -1150,6 +1251,7 @@ class MainWindow(QWidget):
 
         add(profile.get("id"))
         add(profile.get("browserProfileId"))
+        add(profile.get("profile_id"))
         add(profile.get("name"))
         add(profile.get("mainWebsite"))
         add(profile.get("tags"))
@@ -1168,19 +1270,43 @@ class MainWindow(QWidget):
         return q in MainWindow._profile_search_blob(profile)
 
     def _render_profiles_items(self, profiles: list[dict[str, object]]) -> int:
-        self._profiles_list.clear()
+        self._profiles_list_populating = True
+        try:
+            self._profiles_list.itemClicked.disconnect()
+        except TypeError:
+            pass
+        self._profiles_rearm_click_timer.stop()
+        self._profiles_list.blockSignals(True)
         n = 0
-        for it in profiles:
-            pid = str(it.get("id") or it.get("browserProfileId") or "").strip()
-            item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, it)
-            item.setData(Qt.ItemDataRole.UserRole + 1, pid)
+        try:
+            self._profiles_list.clear()
+            for it in profiles:
+                pid = str(
+                    it.get("id")
+                    or it.get("browserProfileId")
+                    or it.get("profile_id")
+                    or ""
+                ).strip()
+                item = QListWidgetItem()
+                item.setData(Qt.ItemDataRole.UserRole, it)
+                item.setData(Qt.ItemDataRole.UserRole + 1, pid)
 
-            row = DolphinProfileRow(it, self._profiles_list)
-            item.setSizeHint(row.sizeHint())
-            self._profiles_list.addItem(item)
-            self._profiles_list.setItemWidget(item, row)
-            n += 1
+                row = DolphinProfileRow(
+                    it,
+                    self._profiles_list,
+                    on_left_press=self._profiles_note_left_press,
+                )
+                item.setSizeHint(row.sizeHint())
+                self._profiles_list.addItem(item)
+                self._profiles_list.setItemWidget(item, row)
+                n += 1
+        finally:
+            self._profiles_list.blockSignals(False)
+            self._profiles_list_render_gen += 1
+            self._profiles_list_populating = False
+            self._profiles_rearm_click_timer.start(50)
+        if hasattr(self, "_dolphin_query") and (self._dolphin_query.text() or "").strip():
+            self._profiles_filter_timer.start(0)
         return n
 
     def _schedule_profiles_filter(self) -> None:
@@ -1193,6 +1319,8 @@ class MainWindow(QWidget):
     def _apply_profiles_filter(self) -> None:
         if not hasattr(self, "_profiles_list"):
             return
+        if self._profiles_list_populating:
+            return
         raw = self._profiles_raw
         if raw is None:
             return
@@ -1200,6 +1328,7 @@ class MainWindow(QWidget):
         q = (self._dolphin_query.text() if hasattr(self, "_dolphin_query") else "") or ""
         q = q.strip()
         filtered = [p for p in raw if isinstance(p, dict) and self._profile_matches(p, q)]
+
         shown = self._render_profiles_items(filtered)
         total = len(raw)
         if q:
@@ -1217,18 +1346,45 @@ class MainWindow(QWidget):
         if not token:
             token = (self._settings.value("antydetect/dolphin_token", "", type=str) or "").strip()
 
+        kind = self._default_browser_combo.currentData()
+        if not isinstance(kind, str) or not kind.strip():
+            kind = "dolphin"
+        base_url = (self._local_api_base_url.text() or "").strip()
+        if not base_url:
+            base_url = (
+                self._settings.value("antydetect/local_api_base_url", "", type=str) or ""
+            ).strip()
+        if not base_url and kind == "local":
+            base_url = DEFAULT_LOCAL_API_BASE_URL
+
         self._btn_profiles_refresh.setEnabled(False)
         self._profiles_status.setText("Загрузка профилей…")
 
         t = threading.Thread(
             target=self._profiles_worker,
-            kwargs={"token": token},
+            kwargs={"kind": kind, "token": token, "base_url": base_url},
             daemon=True,
         )
         t.start()
 
-    def _profiles_worker(self, *, token: str) -> None:
+    def _profiles_worker(self, *, kind: str, token: str, base_url: str) -> None:
         try:
+            if kind == "local":
+                u = (base_url or "").strip()
+                if not u:
+                    self._profiles_load_failed.emit(
+                        "Укажите базовый URL локального API в настройках (раздел «Свой антидетект») и сохраните."
+                    )
+                    return
+                api = LocalAntidetectHttpAPI(u)
+                try:
+                    raw = api.list_profiles()
+                finally:
+                    api.close()
+                profiles = [normalize_local_profile_for_ui(p) for p in raw]
+                self._profiles_loaded.emit(profiles)
+                return
+
             api = DolphinAntyPublicAPI(token=token)
             try:
                 # Public API: limit max 100 (OpenAPI). Поиск в UI — локально по загруженному списку.
@@ -1237,7 +1393,13 @@ class MainWindow(QWidget):
                 api.close()
             self._profiles_loaded.emit(profiles)
         except DolphinAntyError as e:
-            self._profiles_load_failed.emit(str(e))
+            self._profiles_load_failed.emit(
+                "Проверьте JWT токен (Public API: https://dolphin-anty-api.com).\n" + str(e)
+            )
+        except LocalAntidetectError as e:
+            self._profiles_load_failed.emit(
+                "Проверьте, что локальный сервис запущен и базовый URL верен.\n" + str(e)
+            )
         except Exception as e:
             self._profiles_load_failed.emit(repr(e))
 
@@ -1252,13 +1414,47 @@ class MainWindow(QWidget):
         self._btn_profiles_refresh.setEnabled(True)
         self._profiles_raw = None
         if hasattr(self, "_profiles_list"):
-            self._profiles_list.clear()
-        self._profiles_status.setText(
-            "Не удалось загрузить профили. Проверьте JWT токен (Public API: https://dolphin-anty-api.com).\n"
-            f"{message}"
-        )
+            try:
+                self._profiles_list.itemClicked.disconnect()
+            except TypeError:
+                pass
+            self._profiles_rearm_click_timer.stop()
+            self._profiles_list.blockSignals(True)
+            try:
+                self._profiles_list.clear()
+            finally:
+                self._profiles_list.blockSignals(False)
+            self._profiles_list_render_gen += 1
+            self._profiles_rearm_click_timer.start(50)
+        self._profiles_status.setText(f"Не удалось загрузить список профилей.\n{message}")
+
+    def _ensure_profiles_list_click_connected(self) -> None:
+        if not hasattr(self, "_profiles_list"):
+            return
+        lw = self._profiles_list
+        try:
+            lw.itemClicked.disconnect()
+        except TypeError:
+            pass
+        lw.itemClicked.connect(self._on_profiles_list_clicked)
+
+    def _profiles_note_left_press(self) -> None:
+        self._profiles_click_press_render_gen = self._profiles_list_render_gen
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
+        if hasattr(self, "_profiles_list") and watched is self._profiles_list.viewport():
+            if event.type() == QEvent.Type.MouseButtonPress and isinstance(
+                event, QMouseEvent
+            ):
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._profiles_note_left_press()
+        return super().eventFilter(watched, event)
 
     def _on_profiles_list_clicked(self, item: QListWidgetItem) -> None:
+        if self._profiles_list_populating:
+            return
+        if self._profiles_click_press_render_gen != self._profiles_list_render_gen:
+            return
         pid = (item.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
         if not pid:
             self._profiles_status.setText("У профиля нет ID — запуск через Local API невозможен.")
@@ -1266,15 +1462,38 @@ class MainWindow(QWidget):
         token = (self._dolphin_token.text() or "").strip()
         if not token:
             token = (self._settings.value("antydetect/dolphin_token", "", type=str) or "").strip()
+
+        kind = self._default_browser_combo.currentData()
+        if not isinstance(kind, str) or not kind.strip():
+            kind = "dolphin"
+        base_url = (self._local_api_base_url.text() or "").strip()
+        if not base_url:
+            base_url = (
+                self._settings.value("antydetect/local_api_base_url", "", type=str) or ""
+            ).strip()
+        if not base_url and kind == "local":
+            base_url = DEFAULT_LOCAL_API_BASE_URL
+
         threading.Thread(
             target=self._dolphin_google_worker,
-            kwargs={"profile_id": pid, "token": token},
+            kwargs={
+                "profile_id": pid,
+                "token": token,
+                "kind": kind,
+                "base_url": base_url,
+            },
             daemon=True,
         ).start()
 
-    def _dolphin_google_worker(self, *, profile_id: str, token: str) -> None:
+    def _dolphin_google_worker(
+        self, *, profile_id: str, token: str, kind: str, base_url: str
+    ) -> None:
         try:
-            from zaliver.antydetect.dolphin_open import open_google_in_profile, set_log_sink
+            from zaliver.antydetect.dolphin_open import (
+                open_google_in_local_antidetect_profile,
+                open_google_in_profile,
+                set_log_sink,
+            )
 
             set_log_sink(self._ui_log_line.emit)
 
@@ -1286,11 +1505,23 @@ class MainWindow(QWidget):
                     self._settings.value("antydetect/dolphin_headless", True, type=bool)
                 )
 
-            open_google_in_profile(
-                profile_id,
-                local_token=token or None,
-                headless=headless,
-            )
+            if kind == "local":
+                u = (base_url or "").strip()
+                if not u:
+                    raise LocalAntidetectError(
+                        "Сначала укажите базовый URL локального API в настройках."
+                    )
+                open_google_in_local_antidetect_profile(
+                    profile_id,
+                    base_url=u,
+                    headless=headless,
+                )
+            else:
+                open_google_in_profile(
+                    profile_id,
+                    local_token=token or None,
+                    headless=headless,
+                )
             self._dolphin_google_ready.emit(profile_id)
         except Exception as e:
             self._dolphin_google_failed.emit(profile_id, str(e))
@@ -1302,9 +1533,18 @@ class MainWindow(QWidget):
     def _on_dolphin_google_failed(self, profile_id: str, message: str) -> None:
         if self._profiles_raw is not None:
             self._apply_profiles_filter()
+        kind = self._default_browser_combo.currentData()
+        if kind == "local":
+            hint = (
+                "Нужны запущенный локальный API антидетекта, Playwright и сессия Studio в профиле. "
+            )
+        else:
+            hint = (
+                "Нужны Dolphin, Local API, playwright и сессия Studio в профиле. "
+            )
         self._profiles_status.setText(
             f"Профиль {profile_id}: не удалось открыть YouTube Studio / загрузку. "
-            f"Нужны Dolphin, Local API, playwright и сессия Studio в профиле. {message}"
+            f"{hint}{message}"
         )
 
     def _browse_input_files(self) -> None:

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
+from collections.abc import Callable
+
+from PyQt6.QtCore import QEvent, QObject, Qt
+from PyQt6.QtGui import QMouseEvent
 from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 
@@ -13,7 +16,11 @@ def _as_str(v: object) -> str:
 
 
 def _profile_id(profile: dict[str, object]) -> str:
-    return _as_str(profile.get("id") or profile.get("browserProfileId"))
+    return _as_str(
+        profile.get("id")
+        or profile.get("browserProfileId")
+        or profile.get("profile_id")
+    )
 
 
 def _profile_name(profile: dict[str, object]) -> str:
@@ -88,10 +95,30 @@ def _proxy_state(profile: dict[str, object]) -> tuple[str, str, str]:
 class DolphinProfileRow(QWidget):
     """One profile row for QListWidget (card-like layout)."""
 
-    def __init__(self, profile: dict[str, object], parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        profile: dict[str, object],
+        parent: QWidget | None = None,
+        *,
+        on_left_press: Callable[[], None] | None = None,
+    ) -> None:
         super().__init__(parent)
+        self._on_left_press = on_left_press
+        self.setObjectName("dolphinProfileRowRoot")
+
+        self.setWindowFlag(Qt.WindowType.Window, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, False)
+
+        # Оптимизация отрисовки для QListWidget
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+
         self.setObjectName("dolphinProfileRowRoot")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # Убираем фокус, чтобы не создавать дополнительные окна
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
 
         pid = _profile_id(profile)
         name = _profile_name(profile)
@@ -128,7 +155,6 @@ class DolphinProfileRow(QWidget):
             subtitle_parts.append(f"теги: {tags}")
         subtitle = QLabel(" · ".join(subtitle_parts)) if subtitle_parts else QLabel("")
         subtitle.setObjectName("dolphinProfileSubtitle")
-        subtitle.setVisible(bool(subtitle_parts))
         subtitle.setWordWrap(True)
 
         meta = QHBoxLayout()
@@ -143,7 +169,6 @@ class DolphinProfileRow(QWidget):
 
         st_lbl = QLabel(status if status else "")
         st_lbl.setObjectName("dolphinProfileStatus")
-        st_lbl.setVisible(bool(status))
 
         meta.addWidget(id_lbl, 0, Qt.AlignmentFlag.AlignLeft)
         meta.addWidget(proxy_lbl, 0, Qt.AlignmentFlag.AlignLeft)
@@ -173,6 +198,25 @@ class DolphinProfileRow(QWidget):
         if proxy_extra:
             tip_lines.append("Прокси (последняя проверка):")
             tip_lines.append(proxy_extra)
-        self.setToolTip("\n".join([t for t in tip_lines if t.strip()]))
 
         self.setMinimumHeight(78)
+        for w in (accent, card, title, subtitle, id_lbl, proxy_lbl, st_lbl):
+            w.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
+        if (
+            self._on_left_press is not None
+            and event.type() == QEvent.Type.MouseButtonPress
+            and isinstance(event, QMouseEvent)
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._on_left_press()
+        return super().eventFilter(watched, event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        if (
+            self._on_left_press is not None
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._on_left_press()
+        super().mousePressEvent(event)

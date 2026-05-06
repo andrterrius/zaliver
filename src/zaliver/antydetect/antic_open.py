@@ -30,6 +30,9 @@ def open_google_in_profile(
     headless: bool = True,
     upload_latest_zaliver_video: bool = True,
     zaliver_db_path: Path | None = None,
+    video_path: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
 ) -> None:
     """
     Запуск профиля через Dolphin Local API + Playwright CDP.
@@ -68,6 +71,9 @@ def open_google_in_profile(
                     page=page,
                     browser=browser,
                     zaliver_db_path=zaliver_db_path,
+                    video_path=video_path,
+                    title=title,
+                    description=description,
                 )
             else:
                 # Ничего не делаем — просто открываем Studio, чтобы пользователь мог работать вручную.
@@ -91,6 +97,9 @@ def open_google_in_local_antidetect_profile(
     headless: bool = True,
     upload_latest_zaliver_video: bool = True,
     zaliver_db_path: Path | None = None,
+    video_path: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
 ) -> None:
     """
     Запуск профиля через локальный HTTP API (см. OpenAPI антидетекта: launch + опрос сессии на cdp_ws_url),
@@ -130,6 +139,9 @@ def open_google_in_local_antidetect_profile(
                     page=page,
                     browser=browser,
                     zaliver_db_path=zaliver_db_path,
+                    video_path=video_path,
+                    title=title,
+                    description=description,
                 )
             else:
                 page.goto("https://studio.youtube.com/", wait_until="domcontentloaded")

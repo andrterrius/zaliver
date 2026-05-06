@@ -27,6 +27,8 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
     QDoubleSpinBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -359,6 +361,8 @@ class MainWindow(QWidget):
         self._load_antydetect_settings()
         self._update_profiles_section_header()
         self._sync_ffmpeg_install_row()
+        self._pending_upload: dict[str, str] | None = None
+        self._just_saved_outputs: list[str] = []
 
     def _theme_path(self) -> Path:
         return Path(__file__).with_name("theme.qss")
@@ -1022,6 +1026,9 @@ class MainWindow(QWidget):
             self._ready_list.setItemWidget(it, row_w)
 
     def _on_output_saved(self, path: str) -> None:
+        if isinstance(path, str) and path.strip():
+            self._just_saved_outputs.append(path.strip())
+
         def work() -> None:
             try:
                 self._video_store.upsert_video(path)
@@ -1029,6 +1036,99 @@ class MainWindow(QWidget):
                 self._after_video_saved.emit()
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _prompt_title_desc_and_profile(self) -> dict[str, str] | None:
+        profiles = self._profiles_raw or []
+        if not profiles:
+            QMessageBox.information(
+                self,
+                "Zaliver",
+                "Сначала загрузите список профилей в разделе «Профили» (кнопка «Обновить»).",
+            )
+            return None
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Загрузка в YouTube после уникализации")
+        dlg.setModal(True)
+
+        grid = QGridLayout(dlg)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+
+        title_edit = QLineEdit()
+        title_edit.setPlaceholderText("Название видео (обязательное)…")
+        desc_edit = QPlainTextEdit()
+        desc_edit.setPlaceholderText("Описание (необязательно)…")
+        desc_edit.setMinimumHeight(120)
+
+        combo = QComboBox()
+        combo.setObjectName("uploadProfileCombo")
+
+        ids: list[str] = []
+        selected_pid = ""
+        try:
+            it = self._profiles_list.currentItem() if hasattr(self, "_profiles_list") else None
+            if it is not None:
+                selected_pid = str(it.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
+        except Exception:
+            selected_pid = ""
+
+        default_index = 0
+        for p in profiles:
+            if not isinstance(p, dict):
+                continue
+            pid = str(p.get("id") or p.get("browserProfileId") or p.get("profile_id") or "").strip()
+            if not pid:
+                continue
+            name = str(p.get("name") or "").strip()
+            combo.addItem(f"{name} ({pid})" if name else pid)
+            ids.append(pid)
+            if selected_pid and pid == selected_pid:
+                default_index = max(0, len(ids) - 1)
+
+        if not ids:
+            QMessageBox.warning(
+                self,
+                "Zaliver",
+                "В загруженных профилях не найдено ни одного валидного ID.",
+            )
+            return None
+
+        combo.setCurrentIndex(default_index)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("Старт")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+
+        grid.addWidget(QLabel("Название:"), 0, 0)
+        grid.addWidget(title_edit, 0, 1)
+        grid.addWidget(QLabel("Описание:"), 1, 0, Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(desc_edit, 1, 1)
+        grid.addWidget(QLabel("Профиль:"), 2, 0)
+        grid.addWidget(combo, 2, 1)
+        grid.addWidget(btns, 3, 0, 1, 2)
+
+        title_edit.setFocus()
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        title = (title_edit.text() or "").strip()
+        description = (desc_edit.toPlainText() or "").strip()
+        idx = int(combo.currentIndex())
+        pid = ids[idx] if 0 <= idx < len(ids) else ""
+
+        if not title:
+            QMessageBox.warning(self, "Zaliver", "Название видео обязательно.")
+            return None
+        if not pid:
+            QMessageBox.warning(self, "Zaliver", "Выберите профиль.")
+            return None
+
+        return {"title": title, "description": description, "profile_id": pid}
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
@@ -1487,7 +1587,15 @@ class MainWindow(QWidget):
         ).start()
 
     def _dolphin_google_worker(
-        self, *, profile_id: str, token: str, kind: str, base_url: str
+        self,
+        *,
+        profile_id: str,
+        token: str,
+        kind: str,
+        base_url: str,
+        upload_video_path: str | None = None,
+        upload_title: str | None = None,
+        upload_description: str | None = None,
     ) -> None:
         try:
             from zaliver.antydetect.antic_open import (
@@ -1516,12 +1624,18 @@ class MainWindow(QWidget):
                     profile_id,
                     base_url=u,
                     headless=headless,
+                    video_path=upload_video_path,
+                    title=upload_title,
+                    description=upload_description,
                 )
             else:
                 open_google_in_profile(
                     profile_id,
                     local_token=token or None,
                     headless=headless,
+                    video_path=upload_video_path,
+                    title=upload_title,
+                    description=upload_description,
                 )
             self._dolphin_google_ready.emit(profile_id)
         except Exception as e:
@@ -1650,6 +1764,12 @@ class MainWindow(QWidget):
 
     def _start(self) -> None:
         self._save_folder_settings()
+        pending = self._prompt_title_desc_and_profile()
+        if pending is None:
+            return
+        self._pending_upload = pending
+        self._just_saved_outputs = []
+
         opts = self._build_options()
         if not opts["output_dir"]:
             QMessageBox.warning(self, "Zaliver", "Укажите выходную папку.")
@@ -1711,7 +1831,50 @@ class MainWindow(QWidget):
         self.btn_cancel.setEnabled(False)
         self._append_log("Готово." if ok else f"Ошибка: {msg}")
         if ok:
-            QMessageBox.information(self, "Zaliver", f"Сохранено:\n{msg}")
+            pending = self._pending_upload
+            self._pending_upload = None
+            if pending is not None:
+                video_path = (self._just_saved_outputs[-1] if self._just_saved_outputs else "").strip()
+                if not video_path:
+                    self._append_log(
+                        "Загрузка в YouTube пропущена: не найден путь к сохранённому видео."
+                    )
+                    return
+
+                token = (self._dolphin_token.text() or "").strip()
+                if not token:
+                    token = (
+                        self._settings.value("antydetect/dolphin_token", "", type=str) or ""
+                    ).strip()
+
+                kind = self._default_browser_combo.currentData()
+                if not isinstance(kind, str) or not kind.strip():
+                    kind = "dolphin"
+                base_url = (self._local_api_base_url.text() or "").strip()
+                if not base_url:
+                    base_url = (
+                        self._settings.value(
+                            "antydetect/local_api_base_url", "", type=str
+                        )
+                        or ""
+                    ).strip()
+                if not base_url and kind == "local":
+                    base_url = DEFAULT_LOCAL_API_BASE_URL
+
+                self._append_log("YouTube: запуск профиля и загрузки…")
+                threading.Thread(
+                    target=self._dolphin_google_worker,
+                    kwargs={
+                        "profile_id": pending.get("profile_id", ""),
+                        "token": token,
+                        "kind": kind,
+                        "base_url": base_url,
+                        "upload_video_path": video_path,
+                        "upload_title": pending.get("title", ""),
+                        "upload_description": pending.get("description", ""),
+                    },
+                    daemon=True,
+                ).start()
         elif msg and msg != "Отменено.":
             QMessageBox.critical(self, "Zaliver", msg)
         elif msg == "Отменено.":

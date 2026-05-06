@@ -10,7 +10,7 @@ from playwright.sync_api import Error as PlaywrightError
 
 _STUDIO_UI_MS = 120_000
 # После передачи файла ждём в Studio один из исходов: лимит или завершение проверок (часто >1 мин).
-_POST_UPLOAD_STUDIO_OUTCOME_MAX_S = 1800.0
+_POST_UPLOAD_STUDIO_OUTCOME_MAX_S = 3600.0
 _POST_UPLOAD_QUOTA_POLL_S = 2.0
 _STUDIO_WIZARD_NEXT_MAX = 30
 
@@ -421,6 +421,60 @@ def _studio_upload_pick_file(page, video_path: str) -> None:
     _log(f"Studio: файл передан — {p.name!r}, байт: {sz_log}.")
 
 
+def _studio_set_title_and_description(page, *, title: str | None, description: str | None) -> None:
+    """
+    Заполнение полей «Название» и «Описание» в диалоге загрузки Studio.
+
+    Поля в Studio — contenteditable div#textbox внутри ytcp-social-suggestion-input.
+    Для надёжности используем клик → Ctrl+A → ввод текста.
+    """
+    t = (title or "").strip()
+    d = (description or "").strip()
+    if not t and not d:
+        return
+
+    editor = page.locator("ytcp-video-metadata-editor#details").or_(
+        page.locator("ytcp-video-metadata-editor")
+    )
+    try:
+        editor.first.wait_for(state="visible", timeout=180_000)
+    except Exception:
+        # Studio иногда показывает мастера позже; не делаем это фатальным.
+        _log("Studio: метаданные (details) не видны — пропуск заполнения title/description.")
+        return
+
+    def _fill(contenteditable, text: str) -> None:
+        contenteditable.first.wait_for(state="visible", timeout=60_000)
+        contenteditable.first.click(timeout=30_000)
+        try:
+            page.keyboard.press("Control+A")
+        except Exception:
+            try:
+                page.keyboard.press("Meta+A")
+            except Exception:
+                pass
+        page.keyboard.type(text, delay=0)
+        page.wait_for_timeout(150)
+
+    if t:
+        _log("Studio: заполнение поля «Название»…")
+        title_box = (
+            editor.first.locator("ytcp-video-title #textbox")
+            .or_(editor.first.locator("#title-wrapper #textbox"))
+            .or_(page.locator("ytcp-video-title #textbox"))
+        )
+        _fill(title_box, t)
+
+    if d:
+        _log("Studio: заполнение поля «Описание»…")
+        desc_box = (
+            editor.first.locator("ytcp-video-description #textbox")
+            .or_(editor.first.locator("#description-wrapper #textbox"))
+            .or_(page.locator("ytcp-video-description #textbox"))
+        )
+        _fill(desc_box, d)
+
+
 def _studio_select_not_for_kids(page) -> None:
     """«Нет, это видео не для детей» (VIDEO_MADE_FOR_KIDS_NOT_MFK)."""
     _log("Studio: «Нет, это видео не для детей»…")
@@ -786,13 +840,19 @@ def run_upload_latest_ready_video(
     page,
     browser,
     zaliver_db_path: Path | None,
+    video_path: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
 ) -> None:
     """
     Полный сценарий Studio: Create → Upload → ждать outcome → мастер → Publish.
     """
     _studio_click_create_then_add_video(page)
-    latest_path = resolve_latest_zaliver_video_on_disk(db_path=zaliver_db_path)
-    _studio_upload_pick_file(page, latest_path)
+    chosen = (video_path or "").strip()
+    if not chosen:
+        chosen = resolve_latest_zaliver_video_on_disk(db_path=zaliver_db_path)
+    _studio_upload_pick_file(page, chosen)
+    _studio_set_title_and_description(page, title=title, description=description)
     _log(
         f"Ожидание до {_POST_UPLOAD_STUDIO_OUTCOME_MAX_S:.0f} с исхода Studio "
         f"(опрос ~каждые {_POST_UPLOAD_QUOTA_POLL_S:.0f} с)…"

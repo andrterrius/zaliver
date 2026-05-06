@@ -59,7 +59,7 @@ from zaliver.antydetect.local_antidetect_api import (
 from zaliver.processing.ffmpeg_merge import check_ffmpeg_tools
 from zaliver.processing.pipeline import RandomUniquifyBounds, UniquifySettings
 from zaliver.processing.thread_worker import ProcessingController
-from zaliver.ui.dolphin_profile_row import DolphinProfileRow
+from zaliver.ui.antic_profile_row import AnticProfileRow
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
 from zaliver.ui.widgets import (
     AnimatedProgressBar,
@@ -1292,7 +1292,7 @@ class MainWindow(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, it)
                 item.setData(Qt.ItemDataRole.UserRole + 1, pid)
 
-                row = DolphinProfileRow(
+                row = AnticProfileRow(
                     it,
                     self._profiles_list,
                     on_left_press=self._profiles_note_left_press,
@@ -1490,7 +1490,7 @@ class MainWindow(QWidget):
         self, *, profile_id: str, token: str, kind: str, base_url: str
     ) -> None:
         try:
-            from zaliver.antydetect.dolphin_open import (
+            from zaliver.antydetect.antic_open import (
                 open_google_in_local_antidetect_profile,
                 open_google_in_profile,
                 set_log_sink,

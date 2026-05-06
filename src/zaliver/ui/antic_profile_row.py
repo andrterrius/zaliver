@@ -16,11 +16,7 @@ def _as_str(v: object) -> str:
 
 
 def _profile_id(profile: dict[str, object]) -> str:
-    return _as_str(
-        profile.get("id")
-        or profile.get("browserProfileId")
-        or profile.get("profile_id")
-    )
+    return _as_str(profile.get("id") or profile.get("browserProfileId") or profile.get("profile_id"))
 
 
 def _profile_name(profile: dict[str, object]) -> str:
@@ -98,7 +94,7 @@ def _proxy_state(profile: dict[str, object]) -> tuple[str, str, str]:
     return f"{head} · не проверен", "unknown", ""
 
 
-class DolphinProfileRow(QWidget):
+class AnticProfileRow(QWidget):
     """One profile row for QListWidget (card-like layout)."""
 
     def __init__(
@@ -110,7 +106,7 @@ class DolphinProfileRow(QWidget):
     ) -> None:
         super().__init__(parent)
         self._on_left_press = on_left_press
-        self.setObjectName("dolphinProfileRowRoot")
+        self.setObjectName("anticProfileRowRoot")
 
         self.setWindowFlag(Qt.WindowType.Window, False)
         self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, False)
@@ -119,12 +115,11 @@ class DolphinProfileRow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
 
-        self.setObjectName("dolphinProfileRowRoot")
+        self.setObjectName("anticProfileRowRoot")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         # Убираем фокус, чтобы не создавать дополнительные окна
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-
 
         pid = _profile_id(profile)
         name = _profile_name(profile)
@@ -140,11 +135,11 @@ class DolphinProfileRow(QWidget):
         outer.setSpacing(0)
 
         accent = QFrame()
-        accent.setObjectName("dolphinProfileAccent")
+        accent.setObjectName("anticProfileAccent")
         accent.setFixedWidth(6)
 
         card = QFrame()
-        card.setObjectName("dolphinProfileCard")
+        card.setObjectName("anticProfileCard")
         card_l = QHBoxLayout(card)
         card_l.setContentsMargins(14, 12, 14, 12)
         card_l.setSpacing(14)
@@ -159,22 +154,16 @@ class DolphinProfileRow(QWidget):
         title_row.setSpacing(10)
 
         title = QLabel(name)
-        title.setObjectName("dolphinProfileTitle")
+        title.setObjectName("anticProfileTitle")
         title.setWordWrap(True)
-        title.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
-        )
-        title.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
-        )
+        title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         filter_widgets.append(title)
         title_row.addWidget(title, 1)
 
         if tag_strings:
             tags_col = QWidget()
-            tags_col.setSizePolicy(
-                QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum
-            )
+            tags_col.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
             tags_v = QVBoxLayout(tags_col)
             tags_v.setContentsMargins(0, 0, 0, 0)
             tags_v.setSpacing(4)
@@ -190,7 +179,7 @@ class DolphinProfileRow(QWidget):
                 row_l.addStretch(1)
                 for text in chunk:
                     chip = QLabel(text)
-                    chip.setObjectName("dolphinProfileTag")
+                    chip.setObjectName("anticProfileTag")
                     chip.setSizePolicy(
                         QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
                     )
@@ -207,7 +196,7 @@ class DolphinProfileRow(QWidget):
 
         if description:
             desc_lbl = QLabel(description)
-            desc_lbl.setObjectName("dolphinProfileDescription")
+            desc_lbl.setObjectName("anticProfileDescription")
             desc_lbl.setWordWrap(True)
             desc_lbl.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
@@ -219,7 +208,7 @@ class DolphinProfileRow(QWidget):
         if site:
             subtitle_parts.append(site)
         subtitle = QLabel(" · ".join(subtitle_parts)) if subtitle_parts else QLabel("")
-        subtitle.setObjectName("dolphinProfileSubtitle")
+        subtitle.setObjectName("anticProfileSubtitle")
         subtitle.setWordWrap(True)
         if subtitle_parts:
             filter_widgets.append(subtitle)
@@ -228,14 +217,14 @@ class DolphinProfileRow(QWidget):
         meta.setSpacing(10)
 
         id_lbl = QLabel(f"ID {pid}" if pid else "ID —")
-        id_lbl.setObjectName("dolphinProfileId")
+        id_lbl.setObjectName("anticProfileId")
 
         proxy_lbl = QLabel(proxy_text)
-        proxy_lbl.setObjectName("dolphinProfileProxy")
+        proxy_lbl.setObjectName("anticProfileProxy")
         proxy_lbl.setProperty("proxyState", proxy_kind)
 
         st_lbl = QLabel(status if status else "")
-        st_lbl.setObjectName("dolphinProfileStatus")
+        st_lbl.setObjectName("anticProfileStatus")
 
         meta.addWidget(id_lbl, 0, Qt.AlignmentFlag.AlignLeft)
         meta.addWidget(proxy_lbl, 0, Qt.AlignmentFlag.AlignLeft)
@@ -253,10 +242,7 @@ class DolphinProfileRow(QWidget):
         outer.addWidget(accent)
         outer.addWidget(card, 1)
 
-        tip_lines = [
-            f"Название: {name}",
-            f"ID: {pid}" if pid else "ID: —",
-        ]
+        tip_lines = [f"Название: {name}", f"ID: {pid}" if pid else "ID: —"]
         if site:
             tip_lines.append(f"Сайт: {site}")
         if description:
@@ -299,3 +285,4 @@ class DolphinProfileRow(QWidget):
         ):
             self._on_left_press()
         super().mousePressEvent(event)
+

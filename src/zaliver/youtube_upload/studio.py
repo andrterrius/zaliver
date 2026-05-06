@@ -5,10 +5,8 @@ import re
 import time
 from pathlib import Path
 
-from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI
-
 from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import sync_playwright
+
 
 _STUDIO_UI_MS = 120_000
 # После передачи файла ждём в Studio один из исходов: лимит или завершение проверок (часто >1 мин).
@@ -19,6 +17,10 @@ _STUDIO_WIZARD_NEXT_MAX = 30
 # Playwright при connect_over_cdp шлёт тело файла по CDP и режет ~50 MiB.
 # DOM.setFileInputFiles с путями на хосте браузера обходит это (Chromium читает файл сам).
 _PLAYWRIGHT_REMOTE_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
+
+
+class YoutubeStudioError(RuntimeError):
+    pass
 
 
 _LOG_SINK = None
@@ -34,7 +36,7 @@ def set_log_sink(sink) -> None:
 
 
 def _log(message: str) -> None:
-    line = f"[dolphin_open] {message}"
+    line = f"[youtube_studio] {message}"
     print(line)
     sink = _LOG_SINK
     if sink is not None:
@@ -45,7 +47,7 @@ def _log(message: str) -> None:
             pass
 
 
-def _resolve_latest_zaliver_video_on_disk(*, db_path: Path | None = None) -> str:
+def resolve_latest_zaliver_video_on_disk(*, db_path: Path | None = None) -> str:
     """Путь к последнему по БД видео, для которого файл ещё есть на диске."""
     from zaliver.db.video_store import VideoStore
 
@@ -54,11 +56,14 @@ def _resolve_latest_zaliver_video_on_disk(*, db_path: Path | None = None) -> str
         try:
             p = Path(str(row.path)).expanduser()
             if p.is_file():
-                _log(f"Каталог Zaliver: последний файл на диске id={row.id}, длина пути {len(str(p))} симв.")
+                _log(
+                    f"Каталог Zaliver: последний файл на диске id={row.id}, "
+                    f"длина пути {len(str(p))} симв."
+                )
                 return str(p.resolve())
         except OSError:
             continue
-    raise DolphinAntyError(
+    raise YoutubeStudioError(
         "В каталоге обработанных видео Zaliver нет записи с существующим файлом на диске. "
         "Добавьте результат в «Готовые видео» или проверьте, что файлы не удалены."
     )
@@ -68,7 +73,7 @@ def _studio_click_create_then_add_video(page) -> None:
     """
     studio.youtube.com → кнопка «Создать» (ytcp-button-shape) → меню ytcp-text-menu
     → пункт «Добавить видео» (test-id=upload).
-    Сессия Google должна уже быть в профиле Dolphin (без логина из Zaliver).
+    Сессия Google должна уже быть в профиле антидетекта (без логина из Zaliver).
     """
     _log("Studio: переход на https://studio.youtube.com/ …")
     page.goto("https://studio.youtube.com/", wait_until="domcontentloaded")
@@ -94,7 +99,11 @@ def _studio_click_create_then_add_video(page) -> None:
     upload_item = (
         page.locator('ytcp-text-menu tp-yt-paper-item[test-id="upload"]')
         .or_(page.locator('tp-yt-paper-item[test-id="upload"]'))
-        .or_(menu.first.get_by_role("menuitem", name=re.compile(r"добавить видео|upload\s*video", re.I)))
+        .or_(
+            menu.first.get_by_role(
+                "menuitem", name=re.compile(r"добавить видео|upload\s*video", re.I)
+            )
+        )
     )
     _log("Studio: клик по пункту «Добавить видео»…")
     upload_item.first.wait_for(state="visible", timeout=20_000)
@@ -107,8 +116,6 @@ def _studio_file_input_frame(picker, select_btn, page) -> object:
     """
     Фрейм документа с Filedata (часто iframe). У Studio поле иногда монтируется только после
     клика по «Выбрать файлы»; без клика wait_for(attached) висит до таймаута.
-    Сначала пробуем короткое ожидание, затем DOM-событие click (не тот же путь, что
-    expect_file_chooser + set_files).
     """
     finp = picker.first.locator('input[type="file"][name="Filedata"]')
     _log("Studio: ожидание появления input Filedata в DOM…")
@@ -128,7 +135,7 @@ def _studio_file_input_frame(picker, select_btn, page) -> object:
             finp.wait_for(state="attached", timeout=120_000)
         except PlaywrightError as e3:
             _log(f"Studio: после клика Filedata так и не появился: {e3!r}")
-            raise DolphinAntyError(
+            raise YoutubeStudioError(
                 "Не найдено поле загрузки Filedata в диалоге Studio. "
                 "Проверьте язык/версию интерфейса YouTube или повторите после обновления страницы."
             ) from e3
@@ -136,24 +143,23 @@ def _studio_file_input_frame(picker, select_btn, page) -> object:
         handle = finp.element_handle(timeout=30_000)
     except PlaywrightError as e:
         _log(f"Studio: element_handle для Filedata: {e!r}")
-        raise DolphinAntyError("Не удалось получить элемент Filedata для CDP.") from e
+        raise YoutubeStudioError("Не удалось получить элемент Filedata для CDP.") from e
     frame = handle.owner_frame()
     if frame is None:
-        raise DolphinAntyError("Не удалось определить фрейм для поля загрузки Filedata.")
+        raise YoutubeStudioError("Не удалось определить фрейм для поля загрузки Filedata.")
     return frame
 
 
 def _studio_cdp_chrome_file_path(local_path: str) -> str:
-    """Абсолютный путь в форме, удобной для Chromium на Windows (Dolphin = локальный диск)."""
+    """Абсолютный путь в форме, удобной для Chromium на Windows."""
     p = Path(local_path).expanduser().resolve()
-    s = os.path.normpath(str(p))
-    return s
+    return os.path.normpath(str(p))
 
 
 def _studio_cdp_set_file_input_on_target_once(target, files_path: str) -> bool:
     """
     Одна попытка: CDP-сессия к конкретному Page|Frame и DOM.setFileInputFiles.
-    Любое необработанное исключение (в т.ч. new_cdp_session для части фреймов Dolphin) логируется.
+    Любое необработанное исключение логируется.
     """
     ctx = getattr(target, "context", None) or target.page.context
     session = None
@@ -162,8 +168,6 @@ def _studio_cdp_set_file_input_on_target_once(target, files_path: str) -> bool:
         session = ctx.new_cdp_session(target)
         session.send("DOM.enable", {})
 
-        # Классический CDP-путь без Playwright set_input_files (лимит ~50 MiB при connect_over_cdp):
-        # DOM.getDocument → DOM.querySelector(document) → DOM.setFileInputFiles(пути на диске браузера).
         doc_params: dict = {"depth": -1}
         try:
             snap = session.send("DOM.getDocument", {**doc_params, "pierce": True})
@@ -173,7 +177,9 @@ def _studio_cdp_set_file_input_on_target_once(target, files_path: str) -> bool:
         if root_id > 0:
             for sel in ('input[type="file"][name="Filedata"]', 'input[type="file"]'):
                 try:
-                    qs = session.send("DOM.querySelector", {"nodeId": root_id, "selector": sel})
+                    qs = session.send(
+                        "DOM.querySelector", {"nodeId": root_id, "selector": sel}
+                    )
                 except Exception as qe:
                     _log(f"Studio: CDP DOM.querySelector({sel!r}): {qe!r}")
                     continue
@@ -181,11 +187,18 @@ def _studio_cdp_set_file_input_on_target_once(target, files_path: str) -> bool:
                 if nid <= 0:
                     continue
                 try:
-                    session.send("DOM.setFileInputFiles", {"nodeId": nid, "files": [files_path]})
-                    _log(f"Studio: CDP getDocument+querySelector({sel!r}) → setFileInputFiles ок.")
+                    session.send(
+                        "DOM.setFileInputFiles",
+                        {"nodeId": nid, "files": [files_path]},
+                    )
+                    _log(
+                        f"Studio: CDP getDocument+querySelector({sel!r}) → setFileInputFiles ок."
+                    )
                     return True
                 except Exception as e:
-                    _log(f"Studio: CDP setFileInputFiles после querySelector({sel!r}): {e!r}")
+                    _log(
+                        f"Studio: CDP setFileInputFiles после querySelector({sel!r}): {e!r}"
+                    )
                     continue
 
         session.send("Runtime.enable", {})
@@ -202,7 +215,10 @@ def _studio_cdp_set_file_input_on_target_once(target, files_path: str) -> bool:
 
         params: dict = {"query": 'input[type="file"][name="Filedata"]'}
         try:
-            search = session.send("DOM.performSearch", {**params, "includeUserAgentShadowDOM": True})
+            search = session.send(
+                "DOM.performSearch",
+                {**params, "includeUserAgentShadowDOM": True},
+            )
         except Exception:
             search = session.send("DOM.performSearch", params)
         search_id = search.get("searchId")
@@ -255,7 +271,9 @@ def _studio_cdp_set_file_input_on_target_once(target, files_path: str) -> bool:
             return False
 
         try:
-            session.send("DOM.setFileInputFiles", {"nodeId": node_id, "files": [files_path]})
+            session.send(
+                "DOM.setFileInputFiles", {"nodeId": node_id, "files": [files_path]}
+            )
         except Exception as e:
             _log(f"Studio: CDP DOM.setFileInputFiles отклонён: {e!r}")
             _discard()
@@ -282,7 +300,6 @@ def _studio_cdp_set_file_input_on_target_once(target, files_path: str) -> bool:
 def _studio_set_file_input_via_cdp(page, preferred_frame, resolved_local_path: str) -> bool:
     """
     DOM.setFileInputFiles по локальному пути; перебираем цели CDP (Page и Frame).
-    У Dolphin connect_over_cdp иногда зависает или падает page.frames() — не полагаемся на него слепо.
     """
     _log("Studio: CDP — сбор целей (Page / Frame)…")
     files_path = _studio_cdp_chrome_file_path(resolved_local_path)
@@ -312,7 +329,9 @@ def _studio_set_file_input_via_cdp(page, preferred_frame, resolved_local_path: s
 
     _log(f"Studio: CDP — целей в очереди: {len(order)}")
     for i, tgt in enumerate(order):
-        _log(f"Studio: CDP setFileInputFiles — цель {i + 1}/{len(order)} ({type(tgt).__name__})…")
+        _log(
+            f"Studio: CDP setFileInputFiles — цель {i + 1}/{len(order)} ({type(tgt).__name__})…"
+        )
         if _studio_cdp_set_file_input_on_target_once(tgt, files_path):
             return True
     _log("Studio: CDP setFileInputFiles — все цели исчерпаны, успеха нет.")
@@ -323,19 +342,27 @@ def _studio_upload_pick_file(page, video_path: str) -> None:
     """Диалог ytcp-uploads-file-picker: «Выбрать файлы» + файл (file chooser или input Filedata)."""
     p = Path(video_path).expanduser()
     if not p.is_file():
-        raise DolphinAntyError(f"Видеофайл не найден: {video_path!r}")
+        raise YoutubeStudioError(f"Видеофайл не найден: {video_path!r}")
 
     _log("Studio: ожидание ytcp-uploads-file-picker…")
-    picker = page.locator("ytcp-uploads-file-picker#ytcp-uploads-dialog-file-picker").or_(
-        page.locator("ytcp-uploads-file-picker")
-    )
+    picker = page.locator(
+        "ytcp-uploads-file-picker#ytcp-uploads-dialog-file-picker"
+    ).or_(page.locator("ytcp-uploads-file-picker"))
     picker.first.wait_for(state="visible", timeout=120_000)
 
     select_btn = (
-        picker.first.locator("#select-files-button button[aria-label='Выбрать файлы']")
-        .or_(picker.first.locator("#select-files-button button[aria-label='Select files']"))
+        picker.first.locator(
+            "#select-files-button button[aria-label='Выбрать файлы']"
+        )
+        .or_(
+            picker.first.locator("#select-files-button button[aria-label='Select files']")
+        )
         .or_(picker.first.locator("ytcp-button#select-files-button button"))
-        .or_(picker.first.get_by_role("button", name=re.compile(r"выбрать файлы|select files", re.I)))
+        .or_(
+            picker.first.get_by_role(
+                "button", name=re.compile(r"выбрать файлы|select files", re.I)
+            )
+        )
     )
     resolved = str(p.resolve())
     try:
@@ -355,9 +382,9 @@ def _studio_upload_pick_file(page, video_path: str) -> None:
             fu = "(url недоступен)"
         _log(f"Studio: CDP — фрейм поля Filedata: {fu!r}")
         if not _studio_set_file_input_via_cdp(page, frame, resolved):
-            raise DolphinAntyError(
+            raise YoutubeStudioError(
                 "Не удалось привязать большой файл к полю загрузки Studio через CDP. "
-                "Нужен доступ к тому же диску, что и у Chromium Dolphin (обычно тот же ПК, что и Zaliver)."
+                "Нужен доступ к тому же диску, что и у Chromium (обычно тот же ПК, что и Zaliver)."
             )
     else:
         try:
@@ -366,16 +393,22 @@ def _studio_upload_pick_file(page, video_path: str) -> None:
                 select_btn.first.click(timeout=30_000)
             fc_info.value.set_files(resolved)
         except Exception as e:
-            _log(f"Studio: file chooser не сработал ({e!r}), set_input_files на input[name=Filedata]…")
+            _log(
+                f"Studio: file chooser не сработал ({e!r}), set_input_files на input[name=Filedata]…"
+            )
             try:
-                picker.first.locator('input[type="file"][name="Filedata"]').set_input_files(resolved)
+                picker.first.locator('input[type="file"][name="Filedata"]').set_input_files(
+                    resolved
+                )
             except Exception as e2:
                 err_t = str(e2).lower()
                 if "50" in err_t and "mb" in err_t:
-                    _log("Studio: срабатывает обход лимита ~50 MiB — CDP DOM.setFileInputFiles…")
+                    _log(
+                        "Studio: срабатывает обход лимита ~50 MiB — CDP DOM.setFileInputFiles…"
+                    )
                     frame = _studio_file_input_frame(picker, select_btn, page)
                     if not _studio_set_file_input_via_cdp(page, frame, resolved):
-                        raise DolphinAntyError(
+                        raise YoutubeStudioError(
                             "Видео слишком велико для передачи в браузер через Playwright по CDP; "
                             "обход через DOM.setFileInputFiles не удался."
                         ) from e2
@@ -389,22 +422,30 @@ def _studio_upload_pick_file(page, video_path: str) -> None:
 
 
 def _studio_select_not_for_kids(page) -> None:
-    """Блок ytkc-made-for-kids-select: «Нет, это видео не для детей» (VIDEO_MADE_FOR_KIDS_NOT_MFK)."""
+    """«Нет, это видео не для детей» (VIDEO_MADE_FOR_KIDS_NOT_MFK)."""
     _log("Studio: «Нет, это видео не для детей»…")
     not_kids = (
         page.locator(
             'ytkc-made-for-kids-select tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"]'
         )
-        .or_(page.locator('.made-for-kids-group tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"]'))
+        .or_(
+            page.locator(
+                '.made-for-kids-group tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"]'
+            )
+        )
         .or_(page.locator('tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"]'))
-        .or_(page.get_by_role("radio", name=re.compile(r"не для детей|not.*made for kids", re.I)))
+        .or_(
+            page.get_by_role(
+                "radio", name=re.compile(r"не для детей|not.*made for kids", re.I)
+            )
+        )
     )
     not_kids.first.wait_for(state="visible", timeout=90_000)
     not_kids.first.click(timeout=15_000)
 
 
 def _studio_click_next_until_visibility(page) -> None:
-    """Кнопки «Далее» / Next, пока не появится выбор доступа (#privacy-radios / PUBLIC)."""
+    """«Далее» / Next пока не появится выбор доступа (#privacy-radios / PUBLIC)."""
     _log("Studio: «Далее» до экрана доступа…")
     public_radio = (
         page.locator(
@@ -426,15 +467,13 @@ def _studio_click_next_until_visibility(page) -> None:
         page.wait_for_timeout(400)
 
     if not public_radio.first.is_visible():
-        raise DolphinAntyError(
+        raise YoutubeStudioError(
             "Не появился экран выбора доступа к видео (ytcp-video-visibility-select / PUBLIC)."
         )
 
 
 def _studio_log_video_link_before_public(page) -> None:
-    """
-    На экране доступа: ссылка из ytcp-video-info (блок «Ссылка на видео») — в консоль и в буфер страницы.
-    """
+    """На экране доступа: попытка вытащить ссылку из ytcp-video-info."""
     candidates = (
         page.locator("ytcp-video-info .video-url-fadeable a[href]")
         .or_(page.locator("ytcp-video-info .value a[href]"))
@@ -467,7 +506,7 @@ def _studio_log_video_link_before_public(page) -> None:
 
 
 def _studio_select_public_visibility(page) -> None:
-    """Ссылка на видео в консоль, затем «Открытый доступ» — tp-yt-paper-radio-button[name=PUBLIC]."""
+    """Ссылка на видео в лог, затем «Открытый доступ» (PUBLIC)."""
     _log("Studio: экран доступа — фиксируем ссылку на видео…")
     _studio_log_video_link_before_public(page)
     _log("Studio: «Открытый доступ»…")
@@ -549,7 +588,9 @@ def _studio_is_upload_checks_completed(page) -> bool:
             return True
     except Exception:
         pass
-    label = page.locator("ytcp-uploads-dialog ytcp-video-upload-progress .progress-label")
+    label = page.locator(
+        "ytcp-uploads-dialog ytcp-video-upload-progress .progress-label"
+    )
     try:
         if label.count() == 0:
             return False
@@ -562,7 +603,11 @@ def _studio_is_upload_checks_completed(page) -> bool:
         return False
     if "проверка завершена" in t and "нарушен" in t and "не найден" in t:
         return True
-    if ("check" in t and "complete" in t) and ("no issues" in t or "no violation" in t or "not found" in t):
+    if ("check" in t and "complete" in t) and (
+        "no issues" in t
+        or "no violation" in t
+        or "not found" in t
+    ):
         return True
     if "checks complete" in t:
         return True
@@ -571,8 +616,85 @@ def _studio_is_upload_checks_completed(page) -> bool:
     return False
 
 
+def _studio_try_extract_video_id_from_url(url: str) -> str:
+    """
+    Пытаемся вытащить videoId из URL/текста ссылки:
+    - https://youtu.be/<id>
+    - https://www.youtube.com/watch?v=<id>
+    - /video/<id>/edit (Studio)
+    """
+    u = (url or "").strip()
+    if not u:
+        return ""
+    m = re.search(r"(?:youtu\.be/|[?&]v=)([A-Za-z0-9_-]{6,})", u)
+    if m:
+        return m.group(1)
+    m2 = re.search(r"/video/([A-Za-z0-9_-]{6,})", u)
+    if m2:
+        return m2.group(1)
+    return ""
+
+
+def _studio_try_log_video_id_from_progress_dialog(page) -> None:
+    """
+    В диалоге загрузки иногда уже есть ссылка/ID (ytcp-video-info) до завершения мастера.
+    Ничего не падает — только логирует, если удалось.
+    """
+    candidates = (
+        page.locator("ytcp-uploads-dialog ytcp-video-info a[href]")
+        .or_(page.locator("ytcp-uploads-dialog a[href*='youtu']"))
+        .or_(page.locator("ytcp-uploads-dialog a[href*='/video/']"))
+    )
+    try:
+        if candidates.count() == 0:
+            return
+        if not candidates.first.is_visible(timeout=500):
+            return
+        href = (candidates.first.get_attribute("href") or "").strip()
+        vid = _studio_try_extract_video_id_from_url(href)
+        if vid:
+            _log(f"Studio: videoId (из диалога прогресса): {vid}")
+    except Exception:
+        return
+
+
+def _studio_fatal_error_text(page) -> str:
+    """
+    Фатальные ошибки загрузки/обработки в Studio.
+
+    Условия:
+    - Встречается слово "ошибка"/"error" (любой регистр) в progress label
+    - Или есть видимый контейнер //*[@id="error-message"] (часто в ytcp-uploads-dialog)
+    """
+    # 1) Явное сообщение ошибки (встречалось у тебя как //*[@id="error-message"])
+    err_box = page.locator("ytcp-uploads-dialog #error-message").or_(
+        page.locator("#error-message")
+    )
+    try:
+        if err_box.count() > 0 and err_box.first.is_visible(timeout=300):
+            t = (err_box.first.inner_text(timeout=1_500) or "").strip()
+            return t or "YouTube Studio: error-message"
+    except Exception:
+        pass
+
+    # 2) Текст прогресса
+    label = page.locator(
+        "ytcp-uploads-dialog ytcp-video-upload-progress .progress-label"
+    ).or_(page.locator("ytcp-video-upload-progress .progress-label"))
+    try:
+        if label.count() > 0 and label.first.is_visible(timeout=300):
+            t = (label.first.inner_text(timeout=1_500) or "").strip()
+            tl = t.lower()
+            if "ошибка" in tl or "error" in tl:
+                return t or "YouTube Studio: error in progress label"
+    except Exception:
+        pass
+
+    return ""
+
+
 def _studio_abort_upload_unavailable(page, browser) -> None:
-    """Лог в консоль, закрытие браузера, исключение для UI/потока."""
+    """Лог, закрытие браузера, исключение для UI/потока."""
     extra = _studio_upload_unavailable_extra_text(page)
     _log(
         "Studio: YouTube — «Загрузка недоступна» (лимит загрузок, проверка канала или пауза 24 ч)."
@@ -584,35 +706,67 @@ def _studio_abort_upload_unavailable(page, browser) -> None:
         browser.close()
     except Exception:
         pass
-    raise DolphinAntyError(
+    raise YoutubeStudioError(
         "YouTube Studio: «Загрузка недоступна». "
         "Обычно это дневной лимит видео или нужна проверка канала (в Studio есть «Пройти проверку»). "
         f"Дополнительно: {extra or '—'}"
     )
 
 
+def _studio_abort_fatal_error(page, browser, error_text: str) -> None:
+    _log("Studio: обнаружена ошибка в процессе загрузки/обработки — прерывание.")
+    if error_text:
+        _log(f"Studio: ошибка: {error_text!r}")
+    _log("Playwright: закрытие браузера из-за ошибки в Studio.")
+    try:
+        browser.close()
+    except Exception:
+        pass
+    raise YoutubeStudioError(f"YouTube Studio: ошибка загрузки/обработки: {error_text or '—'}")
+
+
 def _studio_wait_after_upload_studio_outcome(page, browser, max_wait_sec: float) -> None:
     """
     После передачи файла ждём один из исходов Studio:
-    — «Загрузка недоступна» → лог, закрытие браузера, исключение;
-    — успешные проверки (атрибут COMPLETED / подпись «Проверка завершена…») → выход, дальше мастер.
+    — «Загрузка недоступна» → исключение;
+    — успешные проверки → выход, дальше мастер.
     """
     _log(
         "Studio: ожидание результата после загрузки — «Загрузка недоступна» "
         "или «Проверка завершена… нарушений не найдено»…"
     )
     deadline = time.monotonic() + max_wait_sec
+    last_label: str = ""
     while time.monotonic() < deadline:
+        fatal = _studio_fatal_error_text(page)
+        if fatal:
+            _studio_abort_fatal_error(page, browser, fatal)
+
         if _studio_is_upload_unavailable_dialog(page):
             _studio_abort_upload_unavailable(page, browser)
+
+        # Логируем смену стадий снизу (проценты / обработка / etc.)
+        try:
+            label = page.locator(
+                "ytcp-uploads-dialog ytcp-video-upload-progress .progress-label"
+            )
+            if label.count() > 0 and label.first.is_visible(timeout=300):
+                t = (label.first.inner_text(timeout=1_500) or "").strip()
+                if t and t != last_label:
+                    last_label = t
+                    _log(f"Studio: статус: {t}")
+        except Exception:
+            pass
+
         if _studio_is_upload_checks_completed(page):
+            _studio_try_log_video_id_from_progress_dialog(page)
             _log("Studio: проверки видео завершены успешно — переход к шагу «не для детей».")
             return
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         time.sleep(min(_POST_UPLOAD_QUOTA_POLL_S, max(0.3, remaining)))
-    raise DolphinAntyError(
+    raise YoutubeStudioError(
         f"За {max_wait_sec:.0f} с не появился ни блок «Загрузка недоступна», "
         "ни успешное завершение проверок Studio (прогресс / подпись). "
         "Проверьте диалог загрузки вручную."
@@ -627,156 +781,25 @@ def _studio_publish_flow_after_upload(page) -> None:
     _studio_click_publish(page)
 
 
-def open_google_in_profile(
-    profile_id: str,
+def run_upload_latest_ready_video(
     *,
-    local_token: str | None = None,
-    headless: bool = True,
-    upload_latest_zaliver_video: bool = True,
-    zaliver_db_path: Path | None = None,
-) -> None:
-
-    _log(
-        f"Старт open_google_in_profile: profile_id={profile_id!r}, headless={headless}, "
-        f"local_token={'да' if (local_token or '').strip() else 'нет'}, "
-        f"upload_latest_zaliver_video={upload_latest_zaliver_video}."
-    )
-
-    api = DolphinAntyLocalAPI()
-    try:
-        tok = (local_token or "").strip()
-        if tok:
-            _log("Local API: авторизация по токену…")
-            api.login_with_token(tok)
-            _log("Local API: login_with_token завершён.")
-
-        _log(f"Dolphin: запуск профиля (headless={headless})…")
-        conn = api.start_profile(profile_id, headless=headless)
-        _log(f"Dolphin: профиль запущен, CDP port={conn.port}, ws_endpoint={conn.ws_endpoint!r}.")
-
-        with sync_playwright() as p:
-            browser = None
-            last_err: Exception | None = None
-            for endpoint in (conn.ws_url(), conn.http_url()):
-                _log(f"Playwright: подключение CDP к {endpoint!r}…")
-                try:
-                    browser = p.chromium.connect_over_cdp(endpoint)
-                    last_err = None
-                    _log("Playwright: connect_over_cdp успешно.")
-                    break
-                except PlaywrightError as e:
-                    last_err = e
-                    _log(f"Playwright: ошибка подключения к {endpoint!r}: {e!r}")
-
-            if browser is None:
-                _log("Playwright: браузер не подключён ни по одному endpoint.")
-                raise DolphinAntyError(f"CDP connect failed for both endpoints. Last error: {last_err!r}")
-
-            context = browser.contexts[0] if browser.contexts else browser.new_context()
-            page = context.pages[0] if context.pages else context.new_page()
-            _log(f"Playwright: страниц в контексте: {len(context.pages)}.")
-
-            _studio_click_create_then_add_video(page)
-
-            if upload_latest_zaliver_video:
-                latest_path = _resolve_latest_zaliver_video_on_disk(db_path=zaliver_db_path)
-                _studio_upload_pick_file(page, latest_path)
-                _log(
-                    f"Ожидание до {_POST_UPLOAD_STUDIO_OUTCOME_MAX_S:.0f} с исхода Studio "
-                    f"(опрос ~каждые {_POST_UPLOAD_QUOTA_POLL_S:.0f} с)…"
-                )
-                _studio_wait_after_upload_studio_outcome(page, browser, _POST_UPLOAD_STUDIO_OUTCOME_MAX_S)
-                _studio_publish_flow_after_upload(page)
-                time.sleep(_STUDIO_WIZARD_NEXT_MAX)
-            else:
-                _log("Загрузка файла из каталога Zaliver отключена (upload_latest_zaliver_video=False).")
-
-            _log("Playwright: browser.close…")
-            try:
-                browser.close()
-                _log("Playwright: browser.close выполнен.")
-            except Exception:
-                _log("Playwright: browser.close пропущен (браузер уже закрыт или CDP недоступен).")
-    finally:
-        _log("Local API: api.close…")
-        api.close()
-        _log("Local API: api.close завершён.")
-
-
-def open_google_in_local_antidetect_profile(
-    profile_id: str,
-    *,
-    base_url: str,
-    headless: bool = True,
-    upload_latest_zaliver_video: bool = True,
-    zaliver_db_path: Path | None = None,
+    page,
+    browser,
+    zaliver_db_path: Path | None,
 ) -> None:
     """
-    Запуск профиля через локальный HTTP API (см. OpenAPI Antidetect: launch + опрос сессии на cdp_ws_url),
-    затем тот же сценарий Studio, что и для Dolphin.
+    Полный сценарий Studio: Create → Upload → ждать outcome → мастер → Publish.
     """
-    from zaliver.antydetect.local_antidetect_api import LocalAntidetectError, LocalAntidetectHttpAPI
-
+    _studio_click_create_then_add_video(page)
+    latest_path = resolve_latest_zaliver_video_on_disk(db_path=zaliver_db_path)
+    _studio_upload_pick_file(page, latest_path)
     _log(
-        f"Старт open_google_in_local_antidetect_profile: profile_id={profile_id!r}, "
-        f"base_url={base_url!r}, headless={headless}, upload_latest_zaliver_video={upload_latest_zaliver_video}."
+        f"Ожидание до {_POST_UPLOAD_STUDIO_OUTCOME_MAX_S:.0f} с исхода Studio "
+        f"(опрос ~каждые {_POST_UPLOAD_QUOTA_POLL_S:.0f} с)…"
     )
+    _studio_wait_after_upload_studio_outcome(
+        page, browser, _POST_UPLOAD_STUDIO_OUTCOME_MAX_S
+    )
+    _studio_publish_flow_after_upload(page)
+    time.sleep(_STUDIO_WIZARD_NEXT_MAX)
 
-    api = LocalAntidetectHttpAPI(base_url)
-    session_id: str | None = None
-    try:
-        _log("Локальный API: POST …/launch…")
-        acc = api.launch_profile(profile_id, headless=headless, expose_cdp=True)
-        sid = acc.get("session_id")
-        if not isinstance(sid, str) or not sid.strip():
-            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
-        session_id = sid.strip()
-        _log(f"Локальный API: сессия {session_id!r}, ожидание cdp_ws_url…")
-        ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
-        _log("Локальный API: Playwright connect_over_cdp…")
-
-        with sync_playwright() as p:
-            browser = None
-            last_err: Exception | None = None
-            try:
-                browser = p.chromium.connect_over_cdp(ws_url)
-                last_err = None
-            except PlaywrightError as e:
-                last_err = e
-            if browser is None:
-                raise LocalAntidetectError(f"CDP connect failed: {last_err!r}")
-
-            context = browser.contexts[0] if browser.contexts else browser.new_context()
-            page = context.pages[0] if context.pages else context.new_page()
-            _log(f"Playwright: страниц в контексте: {len(context.pages)}.")
-
-            _studio_click_create_then_add_video(page)
-
-            if upload_latest_zaliver_video:
-                latest_path = _resolve_latest_zaliver_video_on_disk(db_path=zaliver_db_path)
-                _studio_upload_pick_file(page, latest_path)
-                _log(
-                    f"Ожидание до {_POST_UPLOAD_STUDIO_OUTCOME_MAX_S:.0f} с исхода Studio "
-                    f"(опрос ~каждые {_POST_UPLOAD_QUOTA_POLL_S:.0f} с)…"
-                )
-                _studio_wait_after_upload_studio_outcome(page, browser, _POST_UPLOAD_STUDIO_OUTCOME_MAX_S)
-                _studio_publish_flow_after_upload(page)
-                time.sleep(_STUDIO_WIZARD_NEXT_MAX)
-            else:
-                _log("Загрузка файла из каталога Zaliver отключена (upload_latest_zaliver_video=False).")
-
-            _log("Playwright: browser.close…")
-            try:
-                browser.close()
-                _log("Playwright: browser.close выполнен.")
-            except Exception:
-                _log("Playwright: browser.close пропущен (браузер уже закрыт или CDP недоступен).")
-    finally:
-        if session_id:
-            try:
-                _log(f"Локальный API: POST …/sessions/{session_id}/stop…")
-                api.stop_session(session_id)
-            except Exception as e:
-                _log(f"Локальный API: stop_session: {e!r}")
-        api.close()
-        _log("Локальный API: клиент закрыт.")

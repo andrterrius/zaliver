@@ -41,7 +41,9 @@ def run_google_search(
                     last_err = e
 
             if browser is None:
-                raise DolphinAntyError(f"CDP connect failed for both endpoints. Last error: {last_err!r}")
+                raise DolphinAntyError(
+                    f"CDP connect failed for both endpoints. Last error: {last_err!r}"
+                )
 
             context = browser.contexts[0] if browser.contexts else browser.new_context()
             page = context.pages[0] if context.pages else context.new_page()
@@ -59,7 +61,7 @@ def run_google_search(
 
         return 0
     except DolphinAntyError as e:
-        sys.stderr.write(f"[dolphin] {e}\n")
+        sys.stderr.write(f"[antydetect] {e}\n")
         return 2
     except PlaywrightError as e:
         sys.stderr.write(f"[playwright] {e}\n")
@@ -70,6 +72,7 @@ def run_google_search(
         except Exception:
             pass
         api.close()
+
 
 def run_public_list_profiles(*, token: str, limit: int, query: str | None) -> int:
     try:
@@ -85,29 +88,42 @@ def run_public_list_profiles(*, token: str, limit: int, query: str | None) -> in
             sys.stdout.write(f"{pid}\t{name}\n")
         return 0
     except DolphinAntyError as e:
-        sys.stderr.write(f"[dolphin] {e}\n")
+        sys.stderr.write(f"[antydetect] {e}\n")
         return 2
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Dolphin{anty} smoke tests (Local API + Playwright; Public API list profiles).")
+    parser = argparse.ArgumentParser(
+        description="Antydetect smoke tests (Local API + Playwright; Public API list profiles)."
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_list = sub.add_parser("list-profiles", help="List browser profiles via Public API (Bearer token).")
+    p_list = sub.add_parser(
+        "list-profiles", help="List browser profiles via Public API (Bearer token)."
+    )
     p_list.add_argument(
         "--token",
         required=True,
         help="Public API JWT (raw JWT, or already prefixed as 'Bearer <jwt>').",
     )
-    p_list.add_argument("--limit", type=int, default=50, help="Profiles per page (API limit param)")
+    p_list.add_argument(
+        "--limit", type=int, default=50, help="Profiles per page (API limit param)"
+    )
     p_list.add_argument("--query", default=None, help="Optional query filter")
 
-    p_google = sub.add_parser("google", help="Start local profile and perform Google search via Playwright CDP.")
-    p_google.add_argument("--profile-id", required=True, help="Dolphin browser profile ID (local)")
+    p_google = sub.add_parser(
+        "google", help="Start local profile and perform Google search via Playwright CDP."
+    )
+    p_google.add_argument("--profile-id", required=True, help="Browser profile ID (local)")
     p_google.add_argument("--query", default="zaliver test", help="Google query to type")
     p_google.add_argument("--token", default=None, help="Local API token (optional)")
     p_google.add_argument("--headless", action="store_true", help="Start profile in headless mode")
-    p_google.add_argument("--keep-open-s", type=float, default=5.0, help="Seconds to keep browser open after search")
+    p_google.add_argument(
+        "--keep-open-s",
+        type=float,
+        default=5.0,
+        help="Seconds to keep browser open after search",
+    )
     args = parser.parse_args(argv)
 
     if args.cmd == "list-profiles":

@@ -1890,7 +1890,7 @@ class MainWindow(QWidget):
                         "kind": kind,
                         "base_url": base_url,
                         "upload_video_path": video_path,
-                        "upload_title": pending.get("title", ""),
+                        "upload_title": pending.get("title", "Название"),
                         "upload_description": pending.get("description", ""),
                     },
                     daemon=True,

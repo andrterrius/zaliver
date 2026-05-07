@@ -116,7 +116,7 @@ def open_google_in_local_antidetect_profile(
         acc = api.launch_profile(profile_id, headless=headless, expose_cdp=True)
         sid = acc.get("session_id")
         if not isinstance(sid, str) or not sid.strip():
-            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+                raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
         session_id = sid.strip()
         ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
 
@@ -152,7 +152,7 @@ def open_google_in_local_antidetect_profile(
             except Exception:
                 pass
     except Exception as e:
-        raise _wrap_exc(e) from e
+        raise LocalAntidetectError(f"Ошибка открытия профиля локального антика: {e}")
     finally:
         if session_id:
             try:

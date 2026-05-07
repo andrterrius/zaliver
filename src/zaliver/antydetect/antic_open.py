@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import sync_playwright
+from patchright.sync_api import sync_playwright
 
 from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI
 from zaliver.youtube_upload.studio import (

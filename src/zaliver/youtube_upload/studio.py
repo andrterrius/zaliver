@@ -485,22 +485,12 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
     def _fill(contenteditable, text: str, *, clear_first: bool = False) -> None:
         contenteditable.first.wait_for(state="visible", timeout=60_000)
         contenteditable.first.click(timeout=30_000)
-        try:
-            page.keyboard.press("Control+A")
-        except Exception:
-            try:
-                page.keyboard.press("Command+A")
-            except Exception:
-                pass
         if clear_first:
             try:
-                page.keyboard.press("Backspace")
+                element.evaluate('(el) => el.innerText = ""')
+                _log("Studio: Отчистил поле")
             except Exception:
-                pass
-            try:
-                page.keyboard.press("Delete")
-            except Exception:
-                pass
+                _log("Studio: Не смог отчистить поле")
             page.wait_for_timeout(80)
         page.keyboard.type(text, delay=0)
         page.wait_for_timeout(150)

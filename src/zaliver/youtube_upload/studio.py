@@ -341,8 +341,23 @@ def _studio_set_file_input_via_cdp(page, preferred_frame, resolved_local_path: s
 def _studio_upload_pick_file(page, video_path: str) -> None:
     """Диалог ytcp-uploads-file-picker: «Выбрать файлы» + файл (file chooser или input Filedata)."""
     p = Path(video_path).expanduser()
-    if not p.is_file():
-        raise YoutubeStudioError(f"Видеофайл не найден: {video_path!r}")
+    # На Windows иногда бывает гонка: файл только что "сохранён",
+    # но ещё недоступен для открытия из другого процесса на мгновение.
+    _log(f"Studio: проверка файла перед загрузкой: raw={video_path!r}, expanded={str(p)!r}")
+    file_wait_deadline = time.monotonic() + 6.0
+    last_stat_err: Exception | None = None
+    while True:
+        try:
+            if p.is_file():
+                break
+        except Exception as e:
+            last_stat_err = e
+        if time.monotonic() >= file_wait_deadline:
+            raise YoutubeStudioError(
+                f"Видеофайл не найден/не доступен: {video_path!r}. "
+                f"expanded={str(p)!r}, last_stat_err={last_stat_err!r}"
+            )
+        time.sleep(0.5)
 
     _log("Studio: ожидание ytcp-uploads-file-picker…")
     picker = page.locator(
@@ -364,11 +379,18 @@ def _studio_upload_pick_file(page, video_path: str) -> None:
             )
         )
     )
-    resolved = str(p.resolve())
+    try:
+        resolved = str(p.resolve())
+    except OSError:
+        resolved = str(p)
     try:
         sz = p.stat().st_size
     except OSError:
         sz = -1
+    _log(
+        "Studio: файл перед выбором: "
+        f"resolved={resolved!r}, exists={p.exists()}, is_file={p.is_file()}, size={sz}"
+    )
 
     if sz >= _PLAYWRIGHT_REMOTE_UPLOAD_LIMIT_BYTES:
         _log(
@@ -387,33 +409,50 @@ def _studio_upload_pick_file(page, video_path: str) -> None:
                 "Нужен доступ к тому же диску, что и у Chromium (обычно тот же ПК, что и Zaliver)."
             )
     else:
-        try:
-            _log("Studio: «Выбрать файлы» + file chooser…")
-            with page.expect_file_chooser(timeout=60_000) as fc_info:
-                select_btn.first.click(timeout=30_000)
-            fc_info.value.set_files(resolved)
-        except Exception as e:
-            _log(
-                f"Studio: file chooser не сработал ({e!r}), set_input_files на input[name=Filedata]…"
-            )
+        last_pick_err: Exception | None = None
+        for attempt in range(1, 4):
             try:
-                picker.first.locator('input[type="file"][name="Filedata"]').set_input_files(
-                    resolved
+                _log(f"Studio: «Выбрать файлы» + file chooser… (попытка {attempt}/3)")
+                with page.expect_file_chooser(timeout=60_000) as fc_info:
+                    select_btn.first.click(timeout=30_000)
+                fc_info.value.set_files(resolved)
+                last_pick_err = None
+                break
+            except Exception as e:
+                last_pick_err = e
+                _log(
+                    "Studio: file chooser не сработал "
+                    f"(attempt={attempt}/3, err={e!r}). "
+                    f"Файл сейчас: exists={p.exists()}, is_file={p.is_file()} — пробуем fallback…"
                 )
-            except Exception as e2:
-                err_t = str(e2).lower()
-                if "50" in err_t and "mb" in err_t:
-                    _log(
-                        "Studio: срабатывает обход лимита ~50 MiB — CDP DOM.setFileInputFiles…"
+                try:
+                    picker.first.locator('input[type="file"][name="Filedata"]').set_input_files(
+                        resolved
                     )
-                    frame = _studio_file_input_frame(picker, select_btn, page)
-                    if not _studio_set_file_input_via_cdp(page, frame, resolved):
+                    last_pick_err = None
+                    break
+                except Exception as e2:
+                    last_pick_err = e2
+                    err_t = str(e2).lower()
+                    if "50" in err_t and "mb" in err_t:
+                        _log(
+                            "Studio: срабатывает обход лимита ~50 MiB — CDP DOM.setFileInputFiles…"
+                        )
+                        frame = _studio_file_input_frame(picker, select_btn, page)
+                        if _studio_set_file_input_via_cdp(page, frame, resolved):
+                            last_pick_err = None
+                            break
                         raise YoutubeStudioError(
                             "Видео слишком велико для передачи в браузер через Playwright по CDP; "
                             "обход через DOM.setFileInputFiles не удался."
                         ) from e2
-                else:
-                    raise e2 from e
+                    _log(
+                        f"Studio: fallback set_input_files не удался: {e2!r}. "
+                        "Ждём 0.5s и повторяем…"
+                    )
+                    time.sleep(0.5)
+        if last_pick_err is not None:
+            raise last_pick_err
     try:
         sz_log = p.stat().st_size
     except OSError:

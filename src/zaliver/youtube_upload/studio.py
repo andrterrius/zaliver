@@ -489,12 +489,10 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
             page.keyboard.press("Control+A")
         except Exception:
             try:
-                page.keyboard.press("Meta+A")
+                page.keyboard.press("Command+A")
             except Exception:
                 pass
         if clear_first:
-            # YouTube Studio иногда не заменяет выделение при type(),
-            # поэтому принудительно удаляем содержимое перед вводом.
             try:
                 page.keyboard.press("Backspace")
             except Exception:

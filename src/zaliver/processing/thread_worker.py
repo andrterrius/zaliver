@@ -582,6 +582,11 @@ class ProcessingController(QObject):
                             j.done_frames = j.info.frame_count
                             log(f"{j.tag(n_jobs)}: Сохранено: {j.outp.name}")
                             self.output_saved.emit(str(j.outp))
+                            log(
+                                f"{j.tag(n_jobs)}: Пауза 3 секунды после сохранения "
+                                f"(файл: {str(j.outp)!r})…"
+                            )
+                            time.sleep(3.0)
                         else:
                             j.chunks_finished.add(meta.chunk_idx)
                             if len(j.chunks_finished) >= len(j.chunks):
@@ -621,6 +626,11 @@ class ProcessingController(QObject):
                                     f"(склеено из {len(j.chunks)} частей)"
                                 )
                                 self.output_saved.emit(str(j.outp))
+                                log(
+                                    f"{j.tag(n_jobs)}: Пауза 3 секунды после сохранения "
+                                    f"(файл: {str(j.outp)!r})…"
+                                )
+                                time.sleep(3.0)
                         emit_progress_global()
                     fill_pool()
 

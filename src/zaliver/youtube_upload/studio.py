@@ -851,6 +851,7 @@ def run_upload_latest_ready_video(
     chosen = (video_path or "").strip()
     if not chosen:
         chosen = resolve_latest_zaliver_video_on_disk(db_path=zaliver_db_path)
+    _log(f"Studio: файл для загрузки: {chosen!r}")
     _studio_upload_pick_file(page, chosen)
     _studio_set_title_and_description(page, title=title, description=description)
     _log(

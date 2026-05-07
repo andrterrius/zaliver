@@ -482,7 +482,7 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
         _log("Studio: метаданные (details) не видны — пропуск заполнения title/description.")
         return
 
-    def _fill(contenteditable, text: str) -> None:
+    def _fill(contenteditable, text: str, *, clear_first: bool = False) -> None:
         contenteditable.first.wait_for(state="visible", timeout=60_000)
         contenteditable.first.click(timeout=30_000)
         try:
@@ -492,6 +492,18 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
                 page.keyboard.press("Meta+A")
             except Exception:
                 pass
+        if clear_first:
+            # YouTube Studio иногда не заменяет выделение при type(),
+            # поэтому принудительно удаляем содержимое перед вводом.
+            try:
+                page.keyboard.press("Backspace")
+            except Exception:
+                pass
+            try:
+                page.keyboard.press("Delete")
+            except Exception:
+                pass
+            page.wait_for_timeout(80)
         page.keyboard.type(text, delay=0)
         page.wait_for_timeout(150)
 
@@ -502,7 +514,7 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
             .or_(editor.first.locator("#title-wrapper #textbox"))
             .or_(page.locator("ytcp-video-title #textbox"))
         )
-        _fill(title_box, t)
+        _fill(title_box, t, clear_first=True)
 
     if d:
         _log("Studio: заполнение поля «Описание»…")
@@ -511,7 +523,7 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
             .or_(editor.first.locator("#description-wrapper #textbox"))
             .or_(page.locator("ytcp-video-description #textbox"))
         )
-        _fill(desc_box, d)
+        _fill(desc_box, d, clear_first=False)
 
 
 def _studio_select_not_for_kids(page) -> None:

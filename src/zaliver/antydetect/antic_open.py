@@ -47,19 +47,32 @@ def open_google_in_profile(
 
     Важно: логин Google должен быть уже в профиле антидетекта.
     """
+    _log(
+        "Dolphin: старт. "
+        f"profile_id={profile_id!r}, headless={headless}, "
+        f"upload_latest_zaliver_video={upload_latest_zaliver_video}, "
+        f"local_token={'<set>' if (local_token or '').strip() else None}"
+    )
     api = DolphinAntyLocalAPI()
     try:
         tok = (local_token or "").strip()
         if tok:
+            _log("Dolphin: login_with_token…")
             api.login_with_token(tok)
 
+        _log("Dolphin: start_profile…")
         conn = api.start_profile(profile_id, headless=headless)
+        _log(
+            "Dolphin: профиль запущен. "
+            f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+        )
 
         with sync_playwright() as p:
             browser = None
             last_err: Exception | None = None
             for endpoint in (conn.ws_url(), conn.http_url()):
                 try:
+                    _log(f"Playwright: connect_over_cdp endpoint={endpoint!r}…")
                     browser = p.chromium.connect_over_cdp(endpoint)
                     last_err = None
                     break
@@ -70,9 +83,17 @@ def open_google_in_profile(
                 raise DolphinAntyError(
                     f"CDP connect failed for both endpoints. Last error: {last_err!r}"
                 )
+            _log(
+                "Playwright: CDP подключение успешно. "
+                f"contexts={len(browser.contexts)}"
+            )
 
             context = browser.contexts[0] if browser.contexts else browser.new_context()
             page = context.pages[0] if context.pages else context.new_page()
+            _log(
+                "Playwright: выбраны объекты. "
+                f"context_pages={len(context.pages)}, page_url={page.url!r}"
+            )
 
             if upload_latest_zaliver_video:
                 run_upload_latest_ready_video(
@@ -93,6 +114,7 @@ def open_google_in_profile(
             except Exception:
                 pass
     except Exception as e:
+        _log(f"Ошибка: {type(e).__name__}: {e!r}")
         raise _wrap_exc(e) from e
     finally:
         api.close()
@@ -113,20 +135,25 @@ def open_google_in_local_antidetect_profile(
     Запуск профиля через локальный HTTP API (см. OpenAPI антидетекта: launch + опрос сессии на cdp_ws_url),
     затем тот же сценарий YouTube Studio.
     """
-    from zaliver.antydetect.local_antidetect_api import (
-        LocalAntidetectError,
-        LocalAntidetectHttpAPI,
+    _log(
+        "Local antidetect: вход в функцию. "
+        f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}, "
+        f"upload_latest_zaliver_video={upload_latest_zaliver_video}"
     )
+    try:
+        from zaliver.antydetect.local_antidetect_api import (
+            LocalAntidetectError,
+            LocalAntidetectHttpAPI,
+        )
+    except Exception as e:
+        _log(f"Local antidetect: import local_antidetect_api failed: {type(e).__name__}: {e!r}")
+        raise
 
     api = LocalAntidetectHttpAPI(base_url)
     session_id: str | None = None
     try:
         started_at = time.perf_counter()
-        _log(
-            "Local antidetect: старт. "
-            f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}, "
-            f"upload_latest_zaliver_video={upload_latest_zaliver_video}"
-        )
+        _log("Local antidetect: клиент создан, запускаем профиль…")
         acc = api.launch_profile(profile_id, headless=headless, expose_cdp=True)
         _log(f"Local antidetect: launch_profile ответ: {acc!r}")
         sid = acc.get("session_id")
@@ -146,6 +173,7 @@ def open_google_in_local_antidetect_profile(
                 last_err = None
             except PlaywrightError as e:
                 last_err = e
+                _log(f"Playwright error: {e!r}…")
             if browser is None:
                 raise LocalAntidetectError(f"CDP connect failed: {last_err!r}")
             _log(

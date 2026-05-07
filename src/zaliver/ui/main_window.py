@@ -1598,6 +1598,14 @@ class MainWindow(QWidget):
         upload_description: str | None = None,
     ) -> None:
         try:
+            # Логи антидетекта могут быть критичны для диагностики.
+            # Пишем первую строку напрямую в UI, ещё до импортов (импорт может упасть).
+            try:
+                self._ui_log_line.emit(
+                    f"[antydetect] worker start: profile_id={profile_id!r}, kind={kind!r}"
+                )
+            except Exception:
+                pass
             from zaliver.antydetect.antic_open import (
                 open_google_in_local_antidetect_profile,
                 open_google_in_profile,
@@ -1605,6 +1613,10 @@ class MainWindow(QWidget):
             )
 
             set_log_sink(self._ui_log_line.emit)
+            try:
+                self._ui_log_line.emit("[antydetect] log sink установлен.")
+            except Exception:
+                pass
 
             headless = True
             if hasattr(self, "_dolphin_headless"):
@@ -1639,6 +1651,14 @@ class MainWindow(QWidget):
                 )
             self._dolphin_google_ready.emit(profile_id)
         except Exception as e:
+            try:
+                import traceback
+
+                self._ui_log_line.emit(
+                    "[antydetect] worker error:\n" + traceback.format_exc()
+                )
+            except Exception:
+                pass
             self._dolphin_google_failed.emit(profile_id, str(e))
 
     def _on_dolphin_google_ready(self, _profile_id: str) -> None:

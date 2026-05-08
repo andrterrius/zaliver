@@ -482,15 +482,33 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
         _log("Studio: метаданные (details) не видны — пропуск заполнения title/description.")
         return
 
+    def _clear_like_user(contenteditable) -> None:
+        """
+        Очистка как просили: читаем содержимое поля на странице, ставим курсор в конец
+        и нажимаем Backspace ровно столько раз, сколько символов в поле.
+        """
+        try:
+            current = contenteditable.first.evaluate(
+                "(el) => (el && (el.innerText ?? el.textContent) ? String(el.innerText ?? el.textContent) : '')"
+            )
+        except Exception:
+            current = ""
+        n = len(current or "")
+        # Фокус уже должен быть в поле.
+        try:
+            page.keyboard.press("End")
+        except Exception:
+            # Иногда End не отрабатывает (layout/OS), тогда дожимаем стрелкой.
+            for _ in range(n + 8):
+                page.keyboard.press("ArrowRight")
+        for _ in range(n):
+            page.keyboard.press("Backspace")
+
     def _fill(contenteditable, text: str, *, clear_first: bool = False) -> None:
         contenteditable.first.wait_for(state="visible", timeout=60_000)
         contenteditable.first.click(timeout=30_000)
         if clear_first:
-            try:
-                element.evaluate('(el) => el.innerText = ""')
-                _log("Studio: Отчистил поле")
-            except Exception:
-                _log("Studio: Не смог отчистить поле")
+            _clear_like_user(contenteditable)
             page.wait_for_timeout(80)
         page.keyboard.type(text, delay=0)
         page.wait_for_timeout(150)
@@ -511,7 +529,7 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
             .or_(editor.first.locator("#description-wrapper #textbox"))
             .or_(page.locator("ytcp-video-description #textbox"))
         )
-        _fill(desc_box, d, clear_first=False)
+        _fill(desc_box, d, clear_first=bool(d))
 
 
 def _studio_select_not_for_kids(page) -> None:

@@ -47,6 +47,66 @@ def _log(message: str) -> None:
             pass
 
 
+def _studio_login_required(page) -> bool:
+    """
+    Иногда вместо Studio открывается окно логина Google/YouTube.
+    В этом случае на профиле нет активной сессии → залив нужно завершать.
+    """
+    try:
+        url = (page.url or "").lower()
+        if "accounts.google.com" in url or "servicelogin" in url:
+            return True
+    except Exception:
+        pass
+    try:
+        # Пример из репорта пользователя:
+        # <h1 id="headingText"><span>Вход</span></h1>
+        # "Для перехода к YouTube войдите в свой аккаунт Google."
+        login_block = page.locator("div.ObDc3.ZYOIke").first
+        if login_block.count() > 0 and login_block.is_visible():
+            return True
+    except Exception:
+        pass
+    try:
+        if page.locator("#headingText", has_text=re.compile(r"вход|sign\s*in", re.I)).first.is_visible():
+            return True
+    except Exception:
+        pass
+    try:
+        if page.get_by_text(
+            re.compile(r"для\s+перехода\s+к\s+youtube\s+войдите", re.I)
+        ).first.is_visible():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _studio_wait_create_or_login(page, create_locator) -> None:
+    """
+    Ждём появления кнопки «Создать», но параллельно проверяем, что нас не выкинуло на логин.
+    """
+    deadline = time.monotonic() + (_STUDIO_UI_MS / 1000.0)
+    while True:
+        if _studio_login_required(page):
+            raise YoutubeStudioError(
+                "YouTube Studio: требуется вход в Google (профиль без активной сессии). "
+                "Останавливаем залив для этого профиля."
+            )
+        try:
+            if create_locator.count() > 0 and create_locator.first.is_visible():
+                return
+        except Exception:
+            # transient detach / navigation; continue polling
+            pass
+
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+
+    raise YoutubeStudioError("YouTube Studio: не дождались кнопки «Создать» (таймаут).")
+
+
 def resolve_latest_zaliver_video_on_disk(*, db_path: Path | None = None) -> str:
     """Путь к последнему по БД видео, для которого файл ещё есть на диске."""
     from zaliver.db.video_store import VideoStore
@@ -85,7 +145,7 @@ def _studio_click_create_then_add_video(page) -> None:
         .or_(page.get_by_role("button", name=re.compile(r"^создать$|^create$", re.I)))
     )
     _log("Studio: ожидание кнопки «Создать»…")
-    create.first.wait_for(state="visible", timeout=_STUDIO_UI_MS)
+    _studio_wait_create_or_login(page, create)
     create.first.scroll_into_view_if_needed(timeout=15_000)
     _log("Studio: клик по «Создать»…")
     create.first.click(timeout=30_000)
@@ -583,8 +643,8 @@ def _studio_click_next_until_visibility(page) -> None:
         )
 
 
-def _studio_log_video_link_before_public(page) -> None:
-    """На экране доступа: попытка вытащить ссылку из ytcp-video-info."""
+def _studio_log_video_link_before_public(page) -> str:
+    """На экране доступа: вытащить ссылку из ytcp-video-info (и залогировать)."""
     candidates = (
         page.locator("ytcp-video-info .video-url-fadeable a[href]")
         .or_(page.locator("ytcp-video-info .value a[href]"))
@@ -600,7 +660,7 @@ def _studio_log_video_link_before_public(page) -> None:
         pass
     if not href:
         _log("Studio: ссылка на видео (ytcp-video-info) не найдена — ставим доступ без URL.")
-        return
+        return ""
     _log(f"Studio: ссылка на видео: {href}")
     try:
         page.evaluate(
@@ -614,12 +674,37 @@ def _studio_log_video_link_before_public(page) -> None:
         )
     except Exception:
         pass
+    return href
 
 
-def _studio_select_public_visibility(page) -> None:
-    """Ссылка на видео в лог, затем «Открытый доступ» (PUBLIC)."""
+def _studio_try_extract_video_url(page) -> str:
+    """
+    Best-effort extraction of the uploaded video's URL from the Studio upload dialog.
+    """
+    candidates = (
+        page.locator("ytcp-video-info .video-url-fadeable a[href]")
+        .or_(page.locator("ytcp-video-info .value a[href]"))
+        .or_(page.locator('ytcp-video-info a[target="_blank"][href*="youtu"]'))
+        .or_(page.locator("ytcp-uploads-dialog ytcp-video-info a[href]"))
+        .or_(page.locator("ytcp-uploads-dialog a[href*='youtu']"))
+    )
+    try:
+        if candidates.count() <= 0:
+            return ""
+        if not candidates.first.is_visible(timeout=1_500):
+            return ""
+        href = (candidates.first.get_attribute("href") or "").strip()
+        if href:
+            return href
+        return (candidates.first.inner_text(timeout=1_500) or "").strip()
+    except Exception:
+        return ""
+
+
+def _studio_select_public_visibility(page) -> str:
+    """Ссылка на видео в лог, затем «Открытый доступ» (PUBLIC). Возвращает href (если нашли)."""
     _log("Studio: экран доступа — фиксируем ссылку на видео…")
-    _studio_log_video_link_before_public(page)
+    href = _studio_log_video_link_before_public(page)
     _log("Studio: «Открытый доступ»…")
     pub = (
         page.locator(
@@ -630,6 +715,7 @@ def _studio_select_public_visibility(page) -> None:
     )
     pub.first.wait_for(state="visible", timeout=30_000)
     pub.first.click(timeout=15_000)
+    return href
 
 
 def _studio_click_publish(page) -> None:
@@ -732,6 +818,7 @@ def _studio_try_extract_video_id_from_url(url: str) -> str:
     Пытаемся вытащить videoId из URL/текста ссылки:
     - https://youtu.be/<id>
     - https://www.youtube.com/watch?v=<id>
+    - https://www.youtube.com/shorts/<id>
     - /video/<id>/edit (Studio)
     """
     u = (url or "").strip()
@@ -740,10 +827,35 @@ def _studio_try_extract_video_id_from_url(url: str) -> str:
     m = re.search(r"(?:youtu\.be/|[?&]v=)([A-Za-z0-9_-]{6,})", u)
     if m:
         return m.group(1)
+    m_sh = re.search(r"/shorts/([A-Za-z0-9_-]{6,})", u)
+    if m_sh:
+        return m_sh.group(1)
     m2 = re.search(r"/video/([A-Za-z0-9_-]{6,})", u)
     if m2:
         return m2.group(1)
     return ""
+
+
+def _studio_is_probably_youtube_video_url(url: str) -> bool:
+    u = (url or "").strip().lower()
+    if not u:
+        return False
+    # Avoid unrelated help/support links.
+    if "support.google.com" in u:
+        return False
+    return (
+        "youtube.com/watch" in u
+        or "youtu.be/" in u
+        or "youtube.com/shorts/" in u
+        or "/video/" in u
+    )
+
+
+def _studio_canonical_watch_url(video_id: str) -> str:
+    vid = (video_id or "").strip()
+    if not vid:
+        return ""
+    return f"https://www.youtube.com/watch?v={vid}"
 
 
 def _studio_try_log_video_id_from_progress_dialog(page) -> None:
@@ -884,12 +996,22 @@ def _studio_wait_after_upload_studio_outcome(page, browser, max_wait_sec: float)
     )
 
 
-def _studio_publish_flow_after_upload(page) -> None:
-    """После паузы: не для детей → Далее… → открытый доступ → Опубликовать."""
+def _studio_publish_flow_after_upload(page) -> str:
+    """После паузы: не для детей → Далее… → открытый доступ → Опубликовать. Возвращает href (если нашли)."""
     _studio_select_not_for_kids(page)
     _studio_click_next_until_visibility(page)
-    _studio_select_public_visibility(page)
+    href = _studio_select_public_visibility(page)
     _studio_click_publish(page)
+    return href
+
+
+class UploadedStudioResult(dict):
+    """
+    Minimal result of a successful Studio publish flow.
+    Keys:
+      - video_id: str
+      - url: str
+    """
 
 
 def run_upload_latest_ready_video(
@@ -904,6 +1026,9 @@ def run_upload_latest_ready_video(
     """
     Полный сценарий Studio: Create → Upload → ждать outcome → мастер → Publish.
     """
+    best_url = ""
+    best_vid = ""
+
     _studio_click_create_then_add_video(page)
     chosen = (video_path or "").strip()
     if not chosen:
@@ -918,6 +1043,57 @@ def run_upload_latest_ready_video(
     _studio_wait_after_upload_studio_outcome(
         page, browser, _POST_UPLOAD_STUDIO_OUTCOME_MAX_S
     )
-    _studio_publish_flow_after_upload(page)
+    # Иногда ссылка/ID доступны уже на этапе прогресса.
+    try:
+        u0 = _studio_try_extract_video_url(page)
+        if u0:
+            best_url = u0
+            v0 = _studio_try_extract_video_id_from_url(u0)
+            if v0:
+                best_vid = v0
+    except Exception:
+        pass
+    href_before_public = _studio_publish_flow_after_upload(page)
+    if href_before_public:
+        best_url = href_before_public
+        try:
+            vpub = _studio_try_extract_video_id_from_url(href_before_public)
+            if vpub:
+                best_vid = vpub
+        except Exception:
+            pass
+    time.sleep(5.0)
+    url = ""
+    vid = ""
+    try:
+        url = _studio_try_extract_video_url(page)
+        # Never overwrite the URL captured from ytcp-video-info with unrelated links.
+        if url and not best_url and _studio_is_probably_youtube_video_url(url):
+            best_url = url
+    except Exception:
+        url = ""
+
+    try:
+        vid = _studio_try_extract_video_id_from_url(best_url or url)
+        if not vid:
+            try:
+                vid = _studio_try_extract_video_id_from_url(str(page.url or ""))
+            except Exception:
+                vid = ""
+        if vid:
+            best_vid = vid
+    except Exception:
+        vid = ""
+
+    # IMPORTANT: итоговая ссылка должна совпадать со ссылкой из ytcp-video-info (если она была).
+    # Канонический watch URL используем только как fallback.
+    if not best_url and best_vid:
+        best_url = _studio_canonical_watch_url(best_vid)
+
+    if best_url:
+        _log(f"Studio: итоговая ссылка: {best_url}")
+    if best_vid:
+        _log(f"Studio: итоговый videoId: {best_vid}")
     time.sleep(_STUDIO_WIZARD_NEXT_MAX)
+    return UploadedStudioResult(video_id=best_vid, url=best_url)
 

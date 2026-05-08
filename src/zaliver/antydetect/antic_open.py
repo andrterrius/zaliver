@@ -41,7 +41,7 @@ def open_google_in_profile(
     video_path: str | None = None,
     title: str | None = None,
     description: str | None = None,
-) -> None:
+) -> dict | None:
     """
     Запуск профиля через Dolphin Local API + Playwright CDP.
 
@@ -96,7 +96,7 @@ def open_google_in_profile(
             )
 
             if upload_latest_zaliver_video:
-                run_upload_latest_ready_video(
+                res = run_upload_latest_ready_video(
                     page=page,
                     browser=browser,
                     zaliver_db_path=zaliver_db_path,
@@ -104,6 +104,7 @@ def open_google_in_profile(
                     title=title,
                     description=description,
                 )
+                return res
             else:
                 # Ничего не делаем — просто открываем Studio, чтобы пользователь мог работать вручную.
                 page.goto("https://studio.youtube.com/", wait_until="domcontentloaded")
@@ -113,6 +114,7 @@ def open_google_in_profile(
                 browser.close()
             except Exception:
                 pass
+        return None
     except Exception as e:
         _log(f"Ошибка: {type(e).__name__}: {e!r}")
         raise _wrap_exc(e) from e
@@ -130,7 +132,7 @@ def open_google_in_local_antidetect_profile(
     video_path: str | None = None,
     title: str | None = None,
     description: str | None = None,
-) -> None:
+) -> dict | None:
     """
     Запуск профиля через локальный HTTP API (см. OpenAPI антидетекта: launch + опрос сессии на cdp_ws_url),
     затем тот же сценарий YouTube Studio.
@@ -195,7 +197,7 @@ def open_google_in_local_antidetect_profile(
                     f"video_path={video_path!r}, title={'<set>' if title else None}, "
                     f"description={'<set>' if description else None}"
                 )
-                run_upload_latest_ready_video(
+                res = run_upload_latest_ready_video(
                     page=page,
                     browser=browser,
                     zaliver_db_path=zaliver_db_path,
@@ -204,6 +206,7 @@ def open_google_in_local_antidetect_profile(
                     description=description,
                 )
                 _log("Studio upload: сценарий завершён.")
+                return res
             else:
                 _log("Studio: upload_latest_zaliver_video=False → просто открываем Studio…")
                 page.goto("https://studio.youtube.com/", wait_until="domcontentloaded")
@@ -216,6 +219,7 @@ def open_google_in_local_antidetect_profile(
                 _log("Playwright: browser закрыт.")
             except Exception:
                 pass
+        return None
     except Exception as e:
         _log(f"Ошибка: {type(e).__name__}: {e!r}")
         raise LocalAntidetectError(f"Ошибка открытия профиля локального антика: {e}")

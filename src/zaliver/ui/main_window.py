@@ -114,6 +114,20 @@ def _uploaded_stats_html(*, views: int | None, likes: int | None, comments: int 
     )
 
 
+def _sum_optional_int(values: list[int | None]) -> int | None:
+    total = 0
+    any_val = False
+    for v in values:
+        if v is None:
+            continue
+        try:
+            total += int(v)
+            any_val = True
+        except Exception:
+            continue
+    return total if any_val else None
+
+
 def _format_stored_datetime(iso_s: str) -> str:
     """Человекочитаемая дата/время из ISO-строки БД (в локальном поясе)."""
     if not (iso_s or "").strip():
@@ -1230,13 +1244,30 @@ class MainWindow(QWidget):
         self._uploaded_list.clear()
         try:
             if only_session_id > 0:
+                sessions = [
+                    s
+                    for s in self._upload_store.list_sessions(limit=400)
+                    if int(s.id) == int(only_session_id)
+                ]
                 m = self._upload_store.list_uploaded_videos_for_sessions([only_session_id])
-                vids_all = m.get(int(only_session_id), []) if isinstance(m, dict) else []
+                vids = m.get(int(only_session_id), []) if isinstance(m, dict) else []
+                started_text = (
+                    _format_stored_datetime(sessions[0].started_at) if sessions else "—"
+                )
+                grouped = [(int(only_session_id), started_text, vids)]
             else:
-                vids_all = self._upload_store.list_uploaded_videos(limit=800)
+                sessions = self._upload_store.list_sessions(limit=400)
+                ids = [int(s.id) for s in sessions]
+                m = self._upload_store.list_uploaded_videos_for_sessions(ids)
+                grouped = []
+                for s in sessions:
+                    started_text = _format_stored_datetime(s.started_at or "")
+                    vids = (m.get(int(s.id)) or []) if isinstance(m, dict) else []
+                    grouped.append((int(s.id), started_text, vids))
         except Exception:
-            vids_all = []
-        if not vids_all:
+            grouped = []
+
+        if not grouped or all(not vids for (_sid, _started, vids) in grouped):
             return
 
         row_h = 54 + 42
@@ -1244,53 +1275,72 @@ class MainWindow(QWidget):
         w_hint = max(520, vw - 8) if vw > 80 else 560
 
         visual_idx = 1
-        for v in vids_all:
-            updated = (
-                _format_stored_datetime(v.stats_updated_at or "")
-                if v.stats_updated_at
-                else "—"
-            )
-            sess = (
-                _format_stored_datetime(v.session_started_at or "")
-                if v.session_started_at
-                else "—"
-            )
-            uploaded_at = _format_stored_datetime(v.uploaded_at or "")
-            extra = f"Сессия: #{v.session_id} ({sess}) · Загружено: {uploaded_at}"
-            tip = (
-                f"{(v.title or '').strip()}\n"
-                f"videoId: {v.video_id}\n"
-                f"url: {v.url}\n"
-                f"session_id: {v.session_id}\n"
-                f"session_started_at: {v.session_started_at or '—'}\n"
-                f"uploaded_at: {v.uploaded_at}\n"
-                f"stats_updated_at: {v.stats_updated_at or '—'}"
-            )
+        for sid, started_text, vids in grouped:
+            if not vids:
+                continue
 
-            it = QListWidgetItem()
-            it.setData(Qt.ItemDataRole.UserRole + 1, str(v.video_id))
-            it.setData(Qt.ItemDataRole.UserRole + 2, str(v.url))
-            it.setToolTip(tip)
-            it.setSizeHint(QSize(w_hint, row_h))
-            self._uploaded_list.addItem(it)
-
-            row_w = _UploadedVideoRow(
-                index=visual_idx,
-                title=v.title,
-                url=v.url,
-                video_id=v.video_id,
-                view_count=v.view_count,
-                like_count=v.like_count,
-                comment_count=v.comment_count,
-                extra_text=extra,
-                updated_text=updated,
-                tooltip=tip,
-                list_widget=self._uploaded_list,
-                parent=self._uploaded_list,
+            total_views = _sum_optional_int([v.view_count for v in vids])
+            total_likes = _sum_optional_int([v.like_count for v in vids])
+            total_comments = _sum_optional_int([v.comment_count for v in vids])
+            summary_html = _uploaded_stats_html(
+                views=total_views, likes=total_likes, comments=total_comments
             )
-            row_w.activated.connect(self._open_uploaded_url)
-            self._uploaded_list.setItemWidget(it, row_w)
-            visual_idx += 1
+            summary_text = f"Сессия №{sid} · {started_text} · Видео: {len(vids)} · {summary_html}"
+
+            it_h = QListWidgetItem()
+            it_h.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            it_h.setSizeHint(QSize(w_hint, 42))
+            self._uploaded_list.addItem(it_h)
+            hdr = _UploadSessionHeaderRow(summary_text, parent=self._uploaded_list)
+            self._uploaded_list.setItemWidget(it_h, hdr)
+
+            for v in vids:
+                updated = (
+                    _format_stored_datetime(v.stats_updated_at or "")
+                    if v.stats_updated_at
+                    else "—"
+                )
+                sess = (
+                    _format_stored_datetime(v.session_started_at or "")
+                    if v.session_started_at
+                    else started_text
+                )
+                uploaded_at = _format_stored_datetime(v.uploaded_at or "")
+                extra = f"Сессия: #{v.session_id} ({sess}) · Загружено: {uploaded_at}"
+                tip = (
+                    f"{(v.title or '').strip()}\n"
+                    f"videoId: {v.video_id}\n"
+                    f"url: {v.url}\n"
+                    f"session_id: {v.session_id}\n"
+                    f"session_started_at: {v.session_started_at or '—'}\n"
+                    f"uploaded_at: {v.uploaded_at}\n"
+                    f"stats_updated_at: {v.stats_updated_at or '—'}"
+                )
+
+                it = QListWidgetItem()
+                it.setData(Qt.ItemDataRole.UserRole + 1, str(v.video_id))
+                it.setData(Qt.ItemDataRole.UserRole + 2, str(v.url))
+                it.setToolTip(tip)
+                it.setSizeHint(QSize(w_hint, row_h))
+                self._uploaded_list.addItem(it)
+
+                row_w = _UploadedVideoRow(
+                    index=visual_idx,
+                    title=v.title,
+                    url=v.url,
+                    video_id=v.video_id,
+                    view_count=v.view_count,
+                    like_count=v.like_count,
+                    comment_count=v.comment_count,
+                    extra_text=extra,
+                    updated_text=updated,
+                    tooltip=tip,
+                    list_widget=self._uploaded_list,
+                    parent=self._uploaded_list,
+                )
+                row_w.activated.connect(self._open_uploaded_url)
+                self._uploaded_list.setItemWidget(it, row_w)
+                visual_idx += 1
 
     def _populate_uploaded_session_filter(self) -> None:
         if not hasattr(self, "_uploaded_session_filter"):

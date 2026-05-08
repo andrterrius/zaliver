@@ -359,6 +359,7 @@ class MainWindow(QWidget):
         self.showMaximized()
         self._load_folder_settings()
         self._load_antydetect_settings()
+        self._load_youtube_settings()
         self._update_profiles_section_header()
         self._sync_ffmpeg_install_row()
         self._pending_upload: dict[str, str] | None = None
@@ -878,11 +879,41 @@ class MainWindow(QWidget):
         gg.addWidget(w_btns, 3, 0, 1, 2)
         gg.addWidget(self._settings_status, 4, 0, 1, 2)
 
+        gb_yt = QGroupBox("YouTube")
+        gy = QGridLayout(gb_yt)
+        self._youtube_api_key = QLineEdit()
+        self._youtube_api_key.setPlaceholderText("YOUTUBE_API_KEY (YouTube Data API v3)…")
+        self._youtube_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._youtube_api_key.setToolTip(
+            "Ключ для YouTube Data API v3. Нужен для стабильного получения просмотров/лайков/комментариев.\n"
+            "Хранится локально в настройках приложения (QSettings)."
+        )
+        self._youtube_show_key = QCheckBox("Показать ключ")
+        self._youtube_show_key.stateChanged.connect(self._on_youtube_show_key_changed)
+        self._btn_save_youtube = QPushButton("Сохранить ключ")
+        self._btn_save_youtube.setObjectName("secondary")
+        self._btn_save_youtube.clicked.connect(self._save_youtube_settings)
+        self._youtube_settings_status = QLabel("")
+        self._youtube_settings_status.setObjectName("hint")
+        self._youtube_settings_status.setWordWrap(True)
+
+        gy.addWidget(QLabel("API key (для статистики):"), 0, 0)
+        gy.addWidget(self._youtube_api_key, 0, 1)
+        gy.addWidget(self._youtube_show_key, 1, 0, 1, 2)
+        yt_btns = QHBoxLayout()
+        yt_btns.addStretch()
+        yt_btns.addWidget(self._btn_save_youtube)
+        w_yt_btns = QWidget()
+        w_yt_btns.setLayout(yt_btns)
+        gy.addWidget(w_yt_btns, 2, 0, 1, 2)
+        gy.addWidget(self._youtube_settings_status, 3, 0, 1, 2)
+
         settings_l.addWidget(settings_title)
         settings_l.addWidget(settings_hint)
         settings_l.addLayout(browser_pick)
         settings_l.addWidget(gb)
         settings_l.addWidget(gb_local)
+        settings_l.addWidget(gb_yt)
         settings_l.addStretch()
 
         self._stack = QStackedWidget()
@@ -1325,6 +1356,49 @@ class MainWindow(QWidget):
             pass
         if hasattr(self, "_settings_status"):
             self._settings_status.setText("Сохранено.")
+
+    def _load_youtube_settings(self) -> None:
+        if not hasattr(self, "_youtube_api_key"):
+            return
+        key = (self._settings.value("youtube/api_key", "", type=str) or "").strip()
+        self._youtube_api_key.setText(key)
+        if key:
+            os.environ["YOUTUBE_API_KEY"] = key
+
+    def _save_youtube_settings(self) -> None:
+        if not hasattr(self, "_youtube_api_key"):
+            return
+        key = (self._youtube_api_key.text() or "").strip()
+        if key:
+            self._settings.setValue("youtube/api_key", key)
+            os.environ["YOUTUBE_API_KEY"] = key
+            try:
+                self._settings.sync()
+            except Exception:
+                pass
+            if hasattr(self, "_youtube_settings_status"):
+                self._youtube_settings_status.setText("Ключ сохранён.")
+            return
+
+        try:
+            self._settings.remove("youtube/api_key")
+        except Exception:
+            self._settings.setValue("youtube/api_key", "")
+        os.environ.pop("YOUTUBE_API_KEY", None)
+        try:
+            self._settings.sync()
+        except Exception:
+            pass
+        if hasattr(self, "_youtube_settings_status"):
+            self._youtube_settings_status.setText("Ключ очищен.")
+
+    def _on_youtube_show_key_changed(self, _state: int) -> None:
+        if not hasattr(self, "_youtube_api_key") or not hasattr(self, "_youtube_show_key"):
+            return
+        show = bool(self._youtube_show_key.isChecked())
+        self._youtube_api_key.setEchoMode(
+            QLineEdit.EchoMode.Normal if show else QLineEdit.EchoMode.Password
+        )
 
     @staticmethod
     def _profile_search_blob(profile: dict[str, object]) -> str:

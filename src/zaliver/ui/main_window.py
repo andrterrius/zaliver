@@ -364,6 +364,8 @@ class MainWindow(QWidget):
         self._sync_ffmpeg_install_row()
         self._pending_upload: dict[str, str] | None = None
         self._just_saved_outputs: list[str] = []
+        # Автозагрузка профилей при запуске (асинхронно).
+        QTimer.singleShot(0, self._refresh_antydetect_profiles)
 
     def _theme_path(self) -> Path:
         return Path(__file__).with_name("theme.qss")
@@ -1071,11 +1073,12 @@ class MainWindow(QWidget):
     def _prompt_title_desc_and_profile(self) -> dict[str, str] | None:
         profiles = self._profiles_raw or []
         if not profiles:
-            QMessageBox.information(
-                self,
-                "Zaliver",
-                "Сначала загрузите список профилей в разделе «Профили» (кнопка «Обновить»).",
-            )
+            # Без pop-up: просто инициируем загрузку и даём подсказку в статусе.
+            try:
+                self._profiles_status.setText("Профили ещё не загружены — запускаю загрузку…")
+            except Exception:
+                pass
+            self._refresh_antydetect_profiles()
             return None
 
         dlg = QDialog(self)

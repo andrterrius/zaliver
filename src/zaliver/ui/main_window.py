@@ -6,6 +6,7 @@ import os
 import sqlite3
 import sys
 import threading
+import time
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -602,6 +603,7 @@ class MainWindow(QWidget):
         self._sync_ffmpeg_install_row()
         self._pending_upload: dict[str, str] | None = None
         self._just_saved_outputs: list[str] = []
+        self._upload_manager = None
         # Автозагрузка профилей при запуске (асинхронно).
         QTimer.singleShot(0, self._refresh_antydetect_profiles)
 
@@ -1582,19 +1584,22 @@ class MainWindow(QWidget):
         desc_edit.setPlaceholderText("Описание (необязательно)…")
         desc_edit.setMinimumHeight(120)
 
-        combo = QComboBox()
-        combo.setObjectName("uploadProfileCombo")
+        # Multiple profiles selection (checkboxes).
+        lw = QListWidget()
+        lw.setObjectName("uploadProfilesList")
+        lw.setSelectionMode(QListWidget.SelectionMode.NoSelection)
 
         ids: list[str] = []
-        selected_pid = ""
+        preselect: set[str] = set()
         try:
             it = self._profiles_list.currentItem() if hasattr(self, "_profiles_list") else None
             if it is not None:
-                selected_pid = str(it.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
+                pid0 = str(it.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
+                if pid0:
+                    preselect.add(pid0)
         except Exception:
-            selected_pid = ""
+            pass
 
-        default_index = 0
         for p in profiles:
             if not isinstance(p, dict):
                 continue
@@ -1602,10 +1607,14 @@ class MainWindow(QWidget):
             if not pid:
                 continue
             name = str(p.get("name") or "").strip()
-            combo.addItem(f"{name} ({pid})" if name else pid)
             ids.append(pid)
-            if selected_pid and pid == selected_pid:
-                default_index = max(0, len(ids) - 1)
+            it = QListWidgetItem(f"{name} ({pid})" if name else pid)
+            it.setData(Qt.ItemDataRole.UserRole + 1, pid)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(
+                Qt.CheckState.Checked if (pid in preselect) else Qt.CheckState.Unchecked
+            )
+            lw.addItem(it)
 
         if not ids:
             QMessageBox.warning(
@@ -1614,8 +1623,6 @@ class MainWindow(QWidget):
                 "В загруженных профилях не найдено ни одного валидного ID.",
             )
             return None
-
-        combo.setCurrentIndex(default_index)
 
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -1629,8 +1636,8 @@ class MainWindow(QWidget):
         grid.addWidget(title_edit, 0, 1)
         grid.addWidget(QLabel("Описание:"), 1, 0, Qt.AlignmentFlag.AlignTop)
         grid.addWidget(desc_edit, 1, 1)
-        grid.addWidget(QLabel("Профиль:"), 2, 0)
-        grid.addWidget(combo, 2, 1)
+        grid.addWidget(QLabel("Профили:"), 2, 0, Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(lw, 2, 1)
         grid.addWidget(btns, 3, 0, 1, 2)
 
         title_edit.setFocus()
@@ -1639,17 +1646,27 @@ class MainWindow(QWidget):
 
         title = (title_edit.text() or "").strip()
         description = (desc_edit.toPlainText() or "").strip()
-        idx = int(combo.currentIndex())
-        pid = ids[idx] if 0 <= idx < len(ids) else ""
+        picked: list[str] = []
+        for i in range(lw.count()):
+            it = lw.item(i)
+            if it is None:
+                continue
+            try:
+                if it.checkState() == Qt.CheckState.Checked:
+                    pid = str(it.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
+                    if pid:
+                        picked.append(pid)
+            except Exception:
+                continue
 
         if not title:
             QMessageBox.warning(self, "Zaliver", "Название видео обязательно.")
             return None
-        if not pid:
-            QMessageBox.warning(self, "Zaliver", "Выберите профиль.")
+        if not picked:
+            QMessageBox.warning(self, "Zaliver", "Выберите хотя бы один профиль.")
             return None
 
-        return {"title": title, "description": description, "profile_id": pid}
+        return {"title": title, "description": description, "profile_ids": ",".join(picked)}
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
@@ -2124,31 +2141,16 @@ class MainWindow(QWidget):
         if not pid:
             self._profiles_status.setText("У профиля нет ID — запуск через Local API невозможен.")
             return
-        token = (self._dolphin_token.text() or "").strip()
-        if not token:
-            token = (self._settings.value("antydetect/dolphin_token", "", type=str) or "").strip()
-
-        kind = self._default_browser_combo.currentData()
-        if not isinstance(kind, str) or not kind.strip():
-            kind = "dolphin"
-        base_url = (self._local_api_base_url.text() or "").strip()
-        if not base_url:
-            base_url = (
-                self._settings.value("antydetect/local_api_base_url", "", type=str) or ""
-            ).strip()
-        if not base_url and kind == "local":
-            base_url = DEFAULT_LOCAL_API_BASE_URL
-
-        threading.Thread(
-            target=self._dolphin_google_worker,
-            kwargs={
-                "profile_id": pid,
-                "token": token,
-                "kind": kind,
-                "base_url": base_url,
-            },
-            daemon=True,
-        ).start()
+        # Одиночный клик по профилю должен только выбирать профиль в списке.
+        # Запуск браузера/загрузка выполняются отдельными действиями (кнопки "Старт", и т.п.).
+        self._selected_profile_id = pid
+        try:
+            label = (item.text() or "").strip()
+        except Exception:
+            label = ""
+        self._profiles_status.setText(
+            f"Выбран профиль: {label}" if label else f"Выбран профиль: {pid}"
+        )
 
     def _dolphin_google_worker(
         self,
@@ -2479,6 +2481,12 @@ class MainWindow(QWidget):
     def _cancel(self) -> None:
         if self._processor is not None:
             self._processor.cancel()
+        try:
+            mgr = getattr(self, "_upload_manager", None)
+            if mgr is not None:
+                mgr.stop()
+        except Exception:
+            pass
 
     def _on_progress(self, cur: int, total: int, msg: str) -> None:
         self.progress.setRange(0, max(1, total))
@@ -2494,8 +2502,12 @@ class MainWindow(QWidget):
             pending = self._pending_upload
             self._pending_upload = None
             if pending is not None:
-                video_path = (self._just_saved_outputs[-1] if self._just_saved_outputs else "").strip()
-                if not video_path:
+                video_paths = [
+                    p.strip()
+                    for p in (self._just_saved_outputs or [])
+                    if isinstance(p, str) and p.strip()
+                ]
+                if not video_paths:
                     self._append_log(
                         "Загрузка в YouTube пропущена: не найден путь к сохранённому видео."
                     )
@@ -2524,20 +2536,124 @@ class MainWindow(QWidget):
                 if not base_url and kind == "local":
                     base_url = DEFAULT_LOCAL_API_BASE_URL
 
-                self._append_log("YouTube: запуск профиля и загрузки…")
-                threading.Thread(
-                    target=self._dolphin_google_worker,
-                    kwargs={
-                        "profile_id": pending.get("profile_id", ""),
-                        "token": token,
-                        "kind": kind,
-                        "base_url": base_url,
-                        "upload_video_path": video_path,
-                        "upload_title": pending.get("title", "Название"),
-                        "upload_description": pending.get("description", ""),
-                    },
-                    daemon=True,
-                ).start()
+                raw_ids = (pending.get("profile_ids", "") or "").strip()
+                profile_ids = [p.strip() for p in raw_ids.split(",") if p.strip()]
+                if not profile_ids:
+                    self._append_log("YouTube: профили не выбраны — заливка пропущена.")
+                    self._upload_session_upload_expected = False
+                    self._upload_session_upload_done = True
+                    self._maybe_finish_upload_session(status="done")
+                    return
+
+                from zaliver.youtube_upload.multi_uploader import MultiProfileUploader, VideoTask
+
+                self._append_log(
+                    f"YouTube: многопоточная заливка стартует. Видео={len(video_paths)}, профили={len(profile_ids)}…"
+                )
+
+                def _upload_one(profile_id: str, task: VideoTask) -> None:
+                    from zaliver.antydetect.antic_open import (
+                        open_google_in_local_antidetect_profile,
+                        open_google_in_profile,
+                        set_log_sink,
+                    )
+
+                    set_log_sink(self._ui_log_line.emit)
+                    headless = True
+                    if hasattr(self, "_dolphin_headless"):
+                        headless = bool(self._dolphin_headless.isChecked())
+                    else:
+                        headless = bool(
+                            self._settings.value(
+                                "antydetect/dolphin_headless", True, type=bool
+                            )
+                        )
+
+                    if kind == "local":
+                        res = open_google_in_local_antidetect_profile(
+                            profile_id,
+                            base_url=(base_url or "").strip(),
+                            headless=headless,
+                            video_path=task.video_path,
+                            title=task.title,
+                            description=task.description,
+                        )
+                    else:
+                        res = open_google_in_profile(
+                            profile_id,
+                            local_token=token or None,
+                            headless=headless,
+                            video_path=task.video_path,
+                            title=task.title,
+                            description=task.description,
+                        )
+
+                    vid = ""
+                    url = ""
+                    if isinstance(res, dict):
+                        vid = str(res.get("video_id") or "").strip()
+                        url = str(res.get("url") or "").strip()
+                    if not vid and url:
+                        try:
+                            from zaliver.youtube_parsing.video_stats import extract_video_id
+
+                            vid = extract_video_id(url)
+                        except Exception:
+                            pass
+                    if not vid:
+                        raise RuntimeError(f"Empty video_id (res={res!r})")
+
+                    sid = int(self._upload_session.id) if self._upload_session is not None else 0
+                    if sid <= 0:
+                        raise RuntimeError("upload_session is not set (sid=0)")
+
+                    self._upload_store.add_uploaded_video(
+                        session_id=sid,
+                        title=task.title or "",
+                        description=task.description or "",
+                        url=url,
+                        video_id=vid,
+                        profile_id=profile_id,
+                    )
+                    try:
+                        self._upload_store.inc_uploaded_ok(session_id=sid, delta=1)
+                    except Exception:
+                        pass
+                    try:
+                        QTimer.singleShot(0, self._refresh_uploaded_list)
+                    except Exception:
+                        pass
+
+                mgr = MultiProfileUploader(
+                    profile_ids=profile_ids,
+                    cooldown_s=3600.0,
+                    max_attempts_per_profile=2,
+                    log_sink=self._ui_log_line.emit,
+                    upload_one=_upload_one,
+                )
+                self._upload_manager = mgr
+                mgr.enqueue_videos(
+                    video_paths=video_paths,
+                    title=pending.get("title", "Название"),
+                    description=pending.get("description", ""),
+                )
+
+                def _run_mgr() -> None:
+                    try:
+                        mgr.start()
+                        while not mgr.is_finished() and not mgr.stop_requested():
+                            time.sleep(0.5)
+                    finally:
+                        self._upload_session_upload_done = True
+                        status = "done"
+                        try:
+                            if mgr.done_failed > 0:
+                                status = "upload_failed"
+                        except Exception:
+                            status = "upload_failed"
+                        self._maybe_finish_upload_session(status=status)
+
+                threading.Thread(target=_run_mgr, daemon=True).start()
                 return
             # Обработка завершена, а загрузка не запрашивалась.
             self._upload_session_upload_expected = False

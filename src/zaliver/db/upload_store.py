@@ -121,6 +121,7 @@ class UploadStore:
                     description TEXT NOT NULL DEFAULT '',
                     url TEXT NOT NULL DEFAULT '',
                     video_id TEXT NOT NULL,
+                    profile_id TEXT NOT NULL DEFAULT '',
                     view_count INTEGER,
                     like_count INTEGER,
                     comment_count INTEGER,
@@ -130,6 +131,14 @@ class UploadStore:
                 );
                 """
             )
+            # Lightweight migration for existing DBs (add profile_id).
+            for stmt in (
+                "ALTER TABLE uploaded_videos ADD COLUMN profile_id TEXT NOT NULL DEFAULT '';",
+            ):
+                try:
+                    con.execute(stmt)
+                except sqlite3.Error:
+                    pass
             con.execute(
                 "CREATE INDEX IF NOT EXISTS idx_uploaded_videos_session ON uploaded_videos(session_id, uploaded_at DESC);"
             )
@@ -208,6 +217,7 @@ class UploadStore:
         description: str,
         url: str,
         video_id: str,
+        profile_id: str = "",
         uploaded_at: str | None = None,
     ) -> int:
         ua = (uploaded_at or _utc_now_iso()).strip() or _utc_now_iso()
@@ -215,15 +225,16 @@ class UploadStore:
             cur = con.execute(
                 """
                 INSERT INTO uploaded_videos(
-                    session_id, uploaded_at, title, description, url, video_id
+                    session_id, uploaded_at, title, description, url, video_id, profile_id
                 )
-                VALUES(?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(video_id) DO UPDATE SET
                     session_id=excluded.session_id,
                     uploaded_at=excluded.uploaded_at,
                     title=excluded.title,
                     description=excluded.description,
-                    url=excluded.url;
+                    url=excluded.url,
+                    profile_id=excluded.profile_id;
                 """,
                 (
                     int(session_id),
@@ -232,6 +243,7 @@ class UploadStore:
                     (description or "").strip(),
                     (url or "").strip(),
                     (video_id or "").strip(),
+                    (profile_id or "").strip(),
                 ),
             )
             return int(cur.lastrowid or 0)

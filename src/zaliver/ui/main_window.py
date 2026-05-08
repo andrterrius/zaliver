@@ -1012,8 +1012,8 @@ class MainWindow(QWidget):
         self._btn_uploaded_refresh = QPushButton("Обновить список")
         self._btn_uploaded_refresh.setObjectName("secondary")
         self._btn_uploaded_refresh.clicked.connect(self._refresh_uploaded_list)
-        self._btn_uploaded_refresh_stats = QPushButton("Обновить статистику (выбранное)")
-        self._btn_uploaded_refresh_stats.clicked.connect(self._refresh_uploaded_stats_selected)
+        self._btn_uploaded_refresh_stats = QPushButton("Обновить статистику")
+        self._btn_uploaded_refresh_stats.clicked.connect(self._refresh_uploaded_stats_visible)
         self._uploaded_session_filter = QComboBox()
         self._uploaded_session_filter.setObjectName("uploadedSessionFilter")
         self._uploaded_session_filter.setToolTip("Фильтр по сессии залива")
@@ -1383,21 +1383,25 @@ class MainWindow(QWidget):
         finally:
             combo.blockSignals(False)
 
-    def _refresh_uploaded_stats_selected(self) -> None:
+    def _refresh_uploaded_stats_visible(self) -> None:
         if not hasattr(self, "_uploaded_list"):
             return
-        items = self._uploaded_list.selectedItems()
-        if not items:
-            QMessageBox.information(self, "Zaliver", "Выберите видео (строку внутри сессии).")
-            return
         vids: list[str] = []
-        for it in items:
+        for i in range(self._uploaded_list.count()):
+            it = self._uploaded_list.item(i)
+            if it is None:
+                continue
             vid = (it.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
             if vid:
                 vids.append(vid)
         vids = sorted(set(vids))
         if not vids:
-            QMessageBox.information(self, "Zaliver", "Выберите именно видео, а не строку-сессию.")
+            QMessageBox.information(
+                self,
+                "Zaliver",
+                "В списке нет видео для обновления статистики. "
+                "Выберите нужную сессию или нажмите «Обновить список».",
+            )
             return
         try:
             from zaliver.youtube_parsing.video_stats import fetch_video_stats_by_id

@@ -91,7 +91,7 @@ class LocalAntidetectHttpAPI:
         *,
         headless: bool = False,
         expose_cdp: bool = True,
-        start_url: str = "https://2ip.ru",
+        start_url: str = "https://studio.youtube.com",
     ) -> dict[str, Any]:
         url = f"{self._base}/profiles/{profile_id}/launch"
         body: dict[str, Any] = {

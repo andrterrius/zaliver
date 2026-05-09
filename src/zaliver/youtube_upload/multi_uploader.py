@@ -3,6 +3,7 @@ from __future__ import annotations
 import signal
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from queue import Empty, Queue
@@ -22,7 +23,12 @@ class VideoTask:
     last_failed_profile: str = ""
 
 
-_MAX_CONCURRENT_UPLOADS = 10
+# Глобальный лимит одновременных upload_one (остальные ждут семафор).
+_MAX_CONCURRENT_UPLOADS = 5
+# Последние N завершённых загрузок — не назначаем им новое видео, пока есть другие свободные очереди.
+_RECENT_COMPLETED_MAX = 5
+# Если «свободны» только недавно отработавшие профили — пауза диспетчера перед повторным назначением.
+_RECENT_BATCH_WAIT_S = 3600.0
 
 
 class MultiProfileUploader:
@@ -32,7 +38,11 @@ class MultiProfileUploader:
     - One profile = one thread.
     - At most `_MAX_CONCURRENT_UPLOADS` profiles run `upload_one` at the same time (RAM);
       others wait on a semaphore until a slot frees.
-    - Round-robin assignment via dispatcher thread.
+    - Round-robin assignment via dispatcher thread; среди профилей с пустой per-profile
+      очередью сначала выбираются те, кто не входит в последние `_RECENT_COMPLETED_MAX`
+      завершённых загрузок (чтобы не гонять одни и те же 5, если другие свободны).
+    - Если подходят только «недавно отработавшие», диспетчер ждёт `_RECENT_BATCH_WAIT_S` (1 ч),
+      затем сбрасывает список недавних и назначает снова (лог [WAIT]).
     - Per-profile cooldown: wait at least `cooldown_s` from *start time* of previous upload
       in this run, and optionally `profile_upload_pause_remaining_s` (e.g. DB «Пауза 1 ч»).
     - Errors re-queue the same video to another profile (never the same one immediately),
@@ -74,6 +84,8 @@ class MultiProfileUploader:
         }
 
         self._last_start_monotonic: dict[str, float] = {pid: 0.0 for pid in self._profiles}
+        self._recent_completed: deque[str] = deque(maxlen=_RECENT_COMPLETED_MAX)
+        self._recent_lock = threading.Lock()
         self._workers: list[threading.Thread] = []
         self._dispatcher: threading.Thread | None = None
 
@@ -185,9 +197,56 @@ class MultiProfileUploader:
         except Exception:
             pass
 
+    def _task_exhausted_on_all_profiles(self, task: VideoTask) -> bool:
+        for pid in self._profiles:
+            if pid == task.last_failed_profile:
+                continue
+            if int(task.attempts_by_profile.get(pid, 0)) >= self._max_attempts:
+                continue
+            return False
+        return True
+
+    def _eligible_profiles_for_dispatch(self, task: VideoTask) -> list[str]:
+        """Профили, которым можно поставить задачу (очередь пуста, лимиты попыток)."""
+        out: list[str] = []
+        for pid in self._profiles:
+            if pid == task.last_failed_profile:
+                continue
+            if int(task.attempts_by_profile.get(pid, 0)) >= self._max_attempts:
+                continue
+            if not self._per_profile_q[pid].empty():
+                continue
+            out.append(pid)
+        return out
+
+    def _pick_round_robin(self, candidates: list[str], start_idx: int) -> str:
+        if not candidates:
+            raise ValueError("candidates must be non-empty")
+        want = set(candidates)
+        n = len(self._profiles)
+        for i in range(n):
+            pid = self._profiles[(start_idx + i) % n]
+            if pid in want:
+                return pid
+        return candidates[0]
+
+    def _wait_recent_batch_cooldown(self) -> None:
+        total = float(_RECENT_BATCH_WAIT_S)
+        self._log(
+            f"[{_ts()}] [upload] [WAIT] reason=recent_parallel_profiles_only "
+            f"sleep_s={total:.0f}"
+        )
+        remaining = total
+        while remaining > 0 and not self._stop.is_set():
+            chunk = min(30.0, remaining)
+            if self._stop.wait(timeout=chunk):
+                break
+            remaining -= chunk
+        with self._recent_lock:
+            self._recent_completed.clear()
+
     def _dispatch_loop(self) -> None:
         idx = 0
-        n = len(self._profiles)
         while not self._stop.is_set():
             try:
                 task = self._global_q.get(timeout=0.25)
@@ -201,37 +260,49 @@ class MultiProfileUploader:
             if self._stop.is_set():
                 return
 
-            # Pick next eligible profile in round-robin.
-            chosen = ""
-            for _ in range(max(1, n)):
-                pid = self._profiles[idx % n]
-                idx += 1
-                if pid == task.last_failed_profile:
-                    continue
-                if int(task.attempts_by_profile.get(pid, 0)) >= self._max_attempts:
-                    continue
-                chosen = pid
-                break
+            while not self._stop.is_set():
+                if self._task_exhausted_on_all_profiles(task):
+                    self._log(
+                        f"[{_ts()}] [upload] [FAILED] video={task.video_path!r} "
+                        f"reason=all_profiles_exhausted attempts={task.attempts_by_profile!r}"
+                    )
+                    with self._done_lock:
+                        self._done_failed += 1
+                    self._global_q.task_done()
+                    break
 
-            if not chosen:
-                # All profiles exhausted for this video.
+                eligible = self._eligible_profiles_for_dispatch(task)
+                if not eligible:
+                    time.sleep(0.05)
+                    continue
+
+                with self._recent_lock:
+                    recent = set(self._recent_completed)
+                preferred = [p for p in eligible if p not in recent]
+                if not preferred:
+                    self._wait_recent_batch_cooldown()
+                    if self._stop.is_set():
+                        try:
+                            self._global_q.put(task)
+                        except Exception:
+                            pass
+                        return
+                    continue
+
+                chosen = self._pick_round_robin(preferred, idx)
+                try:
+                    pos = self._profiles.index(chosen)
+                except ValueError:
+                    pos = 0
+                idx = (pos + 1) % max(1, len(self._profiles))
+
+                self._per_profile_q[chosen].put(task)
                 self._log(
-                    f"[{_ts()}] [upload] [FAILED] video={task.video_path!r} "
-                    f"reason=all_profiles_exhausted attempts={task.attempts_by_profile!r}"
+                    f"[{_ts()}] [upload] [QUEUED] profile={chosen} video={task.video_path!r} "
+                    f"attempts={int(task.attempts_by_profile.get(chosen, 0)) + 1}"
                 )
-                with self._done_lock:
-                    self._done_failed += 1
                 self._global_q.task_done()
-                continue
-
-            # This blocks if the profile already has a queued task, which effectively
-            # means "no free profiles" right now → we wait without blocking UI thread.
-            self._per_profile_q[chosen].put(task)
-            self._log(
-                f"[{_ts()}] [upload] [QUEUED] profile={chosen} video={task.video_path!r} "
-                f"attempts={int(task.attempts_by_profile.get(chosen, 0)) + 1}"
-            )
-            self._global_q.task_done()
+                break
 
     def _worker_loop(self, profile_id: str) -> None:
         q = self._per_profile_q[profile_id]
@@ -315,6 +386,7 @@ class MultiProfileUploader:
                 q.task_done()
                 continue
 
+            upload_ran = False
             try:
                 if self._stop.is_set():
                     try:
@@ -338,6 +410,7 @@ class MultiProfileUploader:
                 except Exception as e:
                     ok = False
                     err_text = str(e) or repr(e)
+                upload_ran = True
 
                 cb_attempt = self._on_profile_attempt
                 if cb_attempt is not None:
@@ -366,6 +439,10 @@ class MultiProfileUploader:
                     self._global_q.put(task)
             finally:
                 self._upload_slots.release()
+
+            if upload_ran:
+                with self._recent_lock:
+                    self._recent_completed.append(profile_id)
 
             q.task_done()
 

@@ -9,7 +9,11 @@ a = Analysis(
     ["src/zaliver/__main__.py"],
     pathex=["src"],
     binaries=[],
-    datas=[("src/zaliver/ui/theme.qss", "zaliver/ui")],
+    datas=[
+        ("src/zaliver/ui/theme.qss", "zaliver/ui"),
+        ("src/zaliver/ui/icons/app.png", "zaliver/ui/icons"),
+        ("src/zaliver/ui/icons/app.svg", "zaliver/ui/icons"),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -41,4 +45,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon="src/zaliver/ui/icons/app.ico",
 )

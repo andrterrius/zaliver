@@ -9,7 +9,11 @@ a = Analysis(
     ["src/zaliver/__main__.py"],
     pathex=["src"],
     binaries=[],
-    datas=[("src/zaliver/ui/theme.qss", "zaliver/ui")],
+    datas=[
+        ("src/zaliver/ui/theme.qss", "zaliver/ui"),
+        ("src/zaliver/ui/icons/app.png", "zaliver/ui/icons"),
+        ("src/zaliver/ui/icons/app.svg", "zaliver/ui/icons"),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

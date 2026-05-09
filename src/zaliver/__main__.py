@@ -33,14 +33,32 @@ def _pause_console() -> None:
         pass
 
 
+def _app_icon_path() -> Path | None:
+    from zaliver.ui import main_window as mw
+
+    base = Path(mw.__file__).resolve().parent / "icons"
+    for name in ("app.png", "app.svg"):
+        p = base / name
+        if p.is_file():
+            return p
+    return None
+
+
 def main() -> None:
+    from PyQt6.QtGui import QIcon
     from PyQt6.QtWidgets import QApplication
 
     from zaliver.ui.main_window import MainWindow
 
     app = QApplication(sys.argv)
     app.setApplicationName("Zaliver")
+    icon_path = _app_icon_path()
+    if icon_path is not None:
+        ico = QIcon(str(icon_path))
+        app.setWindowIcon(ico)
     w = MainWindow()
+    if icon_path is not None:
+        w.setWindowIcon(ico)
     w.show()
     raise SystemExit(app.exec())
 

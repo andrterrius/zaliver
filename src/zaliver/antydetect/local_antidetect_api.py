@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
 import requests
+from urllib.parse import quote
 
 # Значение по умолчанию для поля «Базовый URL» до первого сохранения настроек.
 DEFAULT_LOCAL_API_BASE_URL = "http://127.0.0.1:18765"
@@ -54,6 +56,34 @@ class LocalAntidetectHttpAPI:
         if not isinstance(data, list):
             raise LocalAntidetectError(f"Unexpected list payload: {type(data).__name__}: {data!r}")
         return [x for x in data if isinstance(x, dict)]
+
+    def add_profile_tag(self, profile_id: str, tag: str) -> dict[str, Any]:
+        pid = (profile_id or "").strip()
+        t = (tag or "").strip()
+        if not pid:
+            raise LocalAntidetectError("profile_id пуст.")
+        if not t:
+            raise LocalAntidetectError("tag пуст.")
+        url = f"{self._base}/profiles/{quote(pid)}/tags/{quote(t)}"
+        resp = self._session.post(url, timeout=self._timeout_s)
+        data = _json_body(resp)
+        if resp.status_code != 200 or not isinstance(data, dict):
+            raise LocalAntidetectError(f"Add tag failed: status={resp.status_code}, body={data!r}")
+        return data
+
+    def remove_profile_tag(self, profile_id: str, tag: str) -> dict[str, Any]:
+        pid = (profile_id or "").strip()
+        t = (tag or "").strip()
+        if not pid:
+            raise LocalAntidetectError("profile_id пуст.")
+        if not t:
+            raise LocalAntidetectError("tag пуст.")
+        url = f"{self._base}/profiles/{quote(pid)}/tags/{quote(t)}"
+        resp = self._session.delete(url, timeout=self._timeout_s)
+        data = _json_body(resp)
+        if resp.status_code != 200 or not isinstance(data, dict):
+            raise LocalAntidetectError(f"Remove tag failed: status={resp.status_code}, body={data!r}")
+        return data
 
     def launch_profile(
         self,
@@ -117,17 +147,52 @@ class LocalAntidetectHttpAPI:
         )
 
 
+def _strip_automation_from_tag_label(s: str) -> str:
+    t = (
+        (s or "")
+        .replace("\ufeff", "")
+        .replace("\u200b", "")
+        .replace("\u200c", "")
+        .replace("\u200d", "")
+        .strip()
+    )
+    if not t:
+        return ""
+    t = re.sub(
+        r"[\s·•,;—–\-]+автоматизация(?:[:,\s]+(да|нет))?\s*$",
+        "",
+        t,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    t = re.sub(
+        r"[\s·•,;—–\-]+automation(?:[:,\s]+(yes|no))?\s*$",
+        "",
+        t,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    return t.strip(" ·•,;—–-")
+
+
 def _local_profile_tag_strings(raw: dict[str, Any]) -> list[str]:
     """Теги из API (tags) + служебные engine / device_preset, без дубликатов."""
     tags: list[str] = []
     seen: set[str] = set()
 
     def add(s: str) -> None:
-        k = s.lower()
-        if k in seen:
+        t = _strip_automation_from_tag_label(s)
+        if not t:
             return
-        seen.add(k)
-        tags.append(s)
+        low = t.lower()
+        if low == "автоматизация" or low.startswith("автоматизация"):
+            return
+        if low == "automation" or low.startswith("automation"):
+            return
+        if low in seen:
+            return
+        seen.add(low)
+        tags.append(t)
 
     raw_tags = raw.get("tags")
     if isinstance(raw_tags, list):
@@ -174,12 +239,6 @@ def normalize_local_profile_for_ui(raw: dict[str, Any]) -> dict[str, object]:
                 lc["ip"] = pm.strip()
             proxy["lastCheck"] = lc
 
-    st = ""
-    if raw.get("automation_enabled") is True:
-        st = "Автоматизация: да"
-    elif raw.get("automation_enabled") is False:
-        st = "Автоматизация: нет"
-
     return {
         "id": pid,
         "browserProfileId": pid,
@@ -188,6 +247,6 @@ def normalize_local_profile_for_ui(raw: dict[str, Any]) -> dict[str, object]:
         "mainWebsite": "",
         "tags": tags,
         "description": description,
-        "status": st,
+        "status": "",
         "proxy": proxy,
     }

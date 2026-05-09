@@ -4,7 +4,7 @@ import os
 import sqlite3
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -145,6 +145,28 @@ class UploadStore:
             con.execute(
                 "CREATE INDEX IF NOT EXISTS idx_uploaded_videos_uploaded_at ON uploaded_videos(uploaded_at DESC);"
             )
+
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS upload_profile_state (
+                    profile_id TEXT PRIMARY KEY,
+                    consecutive_upload_errors INTEGER NOT NULL DEFAULT 0,
+                    flagged INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT
+                );
+                """
+            )
+            for stmt in (
+                "ALTER TABLE upload_profile_state ADD COLUMN consecutive_upload_errors INTEGER NOT NULL DEFAULT 0;",
+                "ALTER TABLE upload_profile_state ADD COLUMN flagged INTEGER NOT NULL DEFAULT 0;",
+                "ALTER TABLE upload_profile_state ADD COLUMN last_error TEXT NOT NULL DEFAULT '';",
+                "ALTER TABLE upload_profile_state ADD COLUMN updated_at TEXT;",
+            ):
+                try:
+                    con.execute(stmt)
+                except sqlite3.Error:
+                    pass
 
     def start_session(self, *, planned_videos: int) -> UploadSession:
         started_at = _utc_now_iso()
@@ -380,4 +402,128 @@ class UploadStore:
                 )
             )
         return out
+
+    def reset_profile_upload_errors(self, *, profile_id: str) -> None:
+        pid = (profile_id or "").strip()
+        if not pid:
+            return
+        with self._connect() as con:
+            con.execute(
+                """
+                INSERT INTO upload_profile_state(profile_id, consecutive_upload_errors, flagged, last_error, updated_at)
+                VALUES(?, 0, 0, '', ?)
+                ON CONFLICT(profile_id) DO UPDATE SET
+                    consecutive_upload_errors=0,
+                    flagged=0,
+                    last_error='',
+                    updated_at=excluded.updated_at;
+                """,
+                (pid, _utc_now_iso()),
+            )
+
+    def inc_profile_upload_error(self, *, profile_id: str, error_text: str) -> int:
+        """
+        Increment consecutive upload errors for this profile and return the new value.
+        """
+        pid = (profile_id or "").strip()
+        if not pid:
+            return 0
+        et = (error_text or "").strip()
+        now = _utc_now_iso()
+        with self._connect() as con:
+            con.execute(
+                """
+                INSERT INTO upload_profile_state(profile_id, consecutive_upload_errors, flagged, last_error, updated_at)
+                VALUES(?, 1, 0, ?, ?)
+                ON CONFLICT(profile_id) DO UPDATE SET
+                    consecutive_upload_errors = consecutive_upload_errors + 1,
+                    last_error = excluded.last_error,
+                    updated_at = excluded.updated_at;
+                """,
+                (pid, et, now),
+            )
+            row = con.execute(
+                "SELECT consecutive_upload_errors FROM upload_profile_state WHERE profile_id=?;",
+                (pid,),
+            ).fetchone()
+        try:
+            return int(row["consecutive_upload_errors"]) if row else 0
+        except Exception:
+            return 0
+
+    def last_uploaded_at_by_profiles(self, profile_ids: Iterable[str]) -> dict[str, str]:
+        """
+        For each non-empty profile_id, return the latest uploaded_at (ISO) from uploaded_videos.
+        Profiles with no uploads are omitted from the dict.
+        """
+        ids = sorted({(x or "").strip() for x in profile_ids if (x or "").strip()})
+        if not ids:
+            return {}
+        ph = ",".join("?" for _ in ids)
+        with self._connect() as con:
+            rows = con.execute(
+                f"""
+                SELECT profile_id, MAX(uploaded_at) AS last_at
+                FROM uploaded_videos
+                WHERE profile_id IN ({ph})
+                GROUP BY profile_id;
+                """,
+                tuple(ids),
+            ).fetchall()
+        out: dict[str, str] = {}
+        for r in rows:
+            pid = str(r["profile_id"] or "").strip()
+            la = str(r["last_at"] or "").strip()
+            if pid and la:
+                out[pid] = la
+        return out
+
+    def reset_latest_upload_time_for_profile(self, *, profile_id: str) -> int:
+        """
+        Сдвигает время последнего залива для profile_id на >1 ч назад (по одной последней записи),
+        чтобы в UI пауза 1 ч считалась пройденной. Возвращает число обновлённых строк (0 если записей нет).
+        """
+        pid = (profile_id or "").strip()
+        if not pid:
+            return 0
+        old = (datetime.now(tz=timezone.utc) - timedelta(hours=2)).isoformat()
+        with self._connect() as con:
+            con.execute(
+                """
+                UPDATE uploaded_videos
+                SET uploaded_at = ?
+                WHERE profile_id = ?
+                  AND id = (
+                    SELECT id FROM uploaded_videos
+                    WHERE profile_id = ?
+                    ORDER BY uploaded_at DESC, id DESC
+                    LIMIT 1
+                  );
+                """,
+                (old, pid, pid),
+            )
+            row = con.execute("SELECT changes() AS n;").fetchone()
+            try:
+                return int(row["n"]) if row is not None else 0
+            except (TypeError, ValueError, KeyError):
+                return 0
+
+    def flag_profile_after_upload_errors(self, *, profile_id: str, flagged: bool, error_text: str = "") -> None:
+        pid = (profile_id or "").strip()
+        if not pid:
+            return
+        now = _utc_now_iso()
+        et = (error_text or "").strip()
+        with self._connect() as con:
+            con.execute(
+                """
+                INSERT INTO upload_profile_state(profile_id, consecutive_upload_errors, flagged, last_error, updated_at)
+                VALUES(?, 0, ?, ?, ?)
+                ON CONFLICT(profile_id) DO UPDATE SET
+                    flagged=excluded.flagged,
+                    last_error=CASE WHEN excluded.last_error <> '' THEN excluded.last_error ELSE last_error END,
+                    updated_at=excluded.updated_at;
+                """,
+                (pid, 1 if flagged else 0, et, now),
+            )
 

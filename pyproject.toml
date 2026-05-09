@@ -25,4 +25,4 @@ zaliver = "zaliver.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-zaliver = ["ui/theme.qss"]
+zaliver = ["ui/theme.qss", "ui/icons/*"]

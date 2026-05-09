@@ -65,6 +65,7 @@ from zaliver.processing.pipeline import RandomUniquifyBounds, UniquifySettings
 from zaliver.processing.thread_worker import ProcessingController
 from zaliver.ui.antic_profile_row import AnticProfileRow
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
+from zaliver.ui.uploaded_stats_refresh_worker import UploadedStatsRefreshWorker
 from zaliver.ui.widgets import (
     AnimatedProgressBar,
     CollapsibleSection,
@@ -346,15 +347,32 @@ class _ReadyVideoRow(QWidget):
 
 
 class _UploadSessionHeaderRow(QWidget):
-    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+    """Заголовок блока сессии: клик ставит эту сессию в фильтр «Сессия»."""
+
+    session_clicked = pyqtSignal(int)
+
+    def __init__(
+        self,
+        text: str,
+        session_id: int,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
+        self._session_id = int(session_id)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(10, 10, 10, 8)
         lay.setSpacing(10)
         lbl = QLabel(text)
         lbl.setObjectName("title")
         lbl.setWordWrap(True)
+        lbl.setToolTip("Показать в списке только эту сессию (фильтр сверху)")
         lay.addWidget(lbl, 1)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.session_clicked.emit(self._session_id)
+        super().mousePressEvent(event)
 
 
 class _UploadedVideoRow(QWidget):
@@ -566,6 +584,9 @@ class MainWindow(QWidget):
         self._ff_thread: QThread | None = None
         self._ff_worker: FfmpegInstallWorker | None = None
         self._ffmpeg_progress_dlg: QProgressDialog | None = None
+        self._stats_thread: QThread | None = None
+        self._stats_worker: UploadedStatsRefreshWorker | None = None
+        self._stats_progress_dlg: QProgressDialog | None = None
         self._selected_input_files: list[str] = []
         self._video_store = VideoStore()
         self._upload_store = UploadStore(db_path=self._video_store.db_path)
@@ -577,16 +598,11 @@ class MainWindow(QWidget):
         self._settings = QSettings("Zaliver", "Zaliver")
         self._profiles_raw: list[dict[str, object]] | None = None
         self._profiles_list_render_gen: int = 0
-        self._profiles_click_press_render_gen: int = -1
         self._profiles_list_populating: bool = False
+        self._profiles_drag: dict[str, object] = {"anchor": None, "extending": False}
         self._profiles_filter_timer = QTimer(self)
         self._profiles_filter_timer.setSingleShot(True)
         self._profiles_filter_timer.timeout.connect(self._apply_profiles_filter)
-        self._profiles_rearm_click_timer = QTimer(self)
-        self._profiles_rearm_click_timer.setSingleShot(True)
-        self._profiles_rearm_click_timer.timeout.connect(
-            self._ensure_profiles_list_click_connected
-        )
         self._build_ui()
         self._ui_log_line.connect(self._append_log)
         self._profiles_loaded.connect(self._on_profiles_loaded)
@@ -1072,12 +1088,14 @@ class MainWindow(QWidget):
         self._profiles_list.setObjectName("profilesList")
         self._profiles_list.setSpacing(4)
         self._profiles_list.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection
+            QAbstractItemView.SelectionMode.ExtendedSelection
         )
+        self._profiles_list.setMouseTracking(True)
         self._dolphin_query.textChanged.connect(self._schedule_profiles_filter)
         self._dolphin_query.returnPressed.connect(self._refresh_antydetect_profiles)
-        self._profiles_list.itemClicked.connect(self._on_profiles_list_clicked)
-        self._profiles_list.viewport().installEventFilter(self)
+        self._profiles_list.itemSelectionChanged.connect(
+            self._on_profiles_list_selection_changed
+        )
 
         profiles_l.addLayout(profiles_top)
         profiles_l.addWidget(self._profiles_hint)
@@ -1293,7 +1311,10 @@ class MainWindow(QWidget):
             it_h.setFlags(Qt.ItemFlag.ItemIsEnabled)
             it_h.setSizeHint(QSize(w_hint, 42))
             self._uploaded_list.addItem(it_h)
-            hdr = _UploadSessionHeaderRow(summary_text, parent=self._uploaded_list)
+            hdr = _UploadSessionHeaderRow(
+                summary_text, sid, parent=self._uploaded_list
+            )
+            hdr.session_clicked.connect(self._on_uploaded_session_header_clicked)
             self._uploaded_list.setItemWidget(it_h, hdr)
 
             for v in vids:
@@ -1344,18 +1365,35 @@ class MainWindow(QWidget):
                 self._uploaded_list.setItemWidget(it, row_w)
                 visual_idx += 1
 
-    def _populate_uploaded_session_filter(self) -> None:
+    def _on_uploaded_session_header_clicked(self, session_id: int) -> None:
+        sid = int(session_id)
+        if sid <= 0 or not hasattr(self, "_uploaded_session_filter"):
+            return
+        combo: QComboBox = self._uploaded_session_filter
+        idx = combo.findData(sid)
+        if idx < 0:
+            self._populate_uploaded_session_filter(preferred_session_id=sid)
+            idx = combo.findData(sid)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def _populate_uploaded_session_filter(
+        self, *, preferred_session_id: int | None = None
+    ) -> None:
         if not hasattr(self, "_uploaded_session_filter"):
             return
         combo: QComboBox = self._uploaded_session_filter
-        prev = combo.currentData()
-        try:
-            prev_id = int(prev or 0)
-        except Exception:
-            prev_id = 0
+        if preferred_session_id is not None and int(preferred_session_id) > 0:
+            prev_id = int(preferred_session_id)
+        else:
+            prev = combo.currentData()
+            try:
+                prev_id = int(prev or 0)
+            except Exception:
+                prev_id = 0
 
         try:
-            sessions = self._upload_store.list_sessions(limit=250)
+            sessions = self._upload_store.list_sessions(limit=400)
         except Exception:
             sessions = []
 
@@ -1386,6 +1424,8 @@ class MainWindow(QWidget):
     def _refresh_uploaded_stats_visible(self) -> None:
         if not hasattr(self, "_uploaded_list"):
             return
+        if self._stats_thread is not None and self._stats_thread.isRunning():
+            return
         vids: list[str] = []
         for i in range(self._uploaded_list.count()):
             it = self._uploaded_list.item(i)
@@ -1403,24 +1443,105 @@ class MainWindow(QWidget):
                 "Выберите нужную сессию или нажмите «Обновить список».",
             )
             return
-        try:
-            from zaliver.youtube_parsing.video_stats import fetch_video_stats_by_id
+        key = ""
+        if hasattr(self, "_youtube_api_key"):
+            key = (self._youtube_api_key.text() or "").strip()
 
-            key = ""
-            if hasattr(self, "_youtube_api_key"):
-                key = (self._youtube_api_key.text() or "").strip()
-            for vid in vids:
-                st = fetch_video_stats_by_id(vid, api_key=key or None)
-                self._upload_store.update_video_stats(
-                    video_id=st.video_id,
-                    view_count=st.view_count,
-                    like_count=st.like_count,
-                    comment_count=st.comment_count,
-                )
-        except Exception as e:
-            QMessageBox.warning(self, "Zaliver", f"Не удалось обновить статистику: {e}")
+        dlg = QProgressDialog(self)
+        dlg.setWindowTitle("Обновление статистики")
+        dlg.setLabelText("Подготовка…")
+        n = len(vids)
+        dlg.setRange(0, max(1, n))
+        dlg.setValue(0)
+        dlg.setMinimumDuration(0)
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        try:
+            dlg.setCancelButton(None)
+        except (TypeError, AttributeError):
+            pass
+        self._stats_progress_dlg = dlg
+        dlg.show()
+
+        self._btn_uploaded_refresh_stats.setEnabled(False)
+        self._stats_thread = QThread()
+        self._stats_worker = UploadedStatsRefreshWorker(vids, key)
+        self._stats_worker.moveToThread(self._stats_thread)
+        self._stats_thread.started.connect(self._stats_worker.run)
+        self._stats_worker.progress.connect(self._on_uploaded_stats_progress)
+        self._stats_worker.finished.connect(self._on_uploaded_stats_worker_finished)
+        self._stats_thread.finished.connect(self._on_uploaded_stats_thread_finished)
+        self._stats_thread.start()
+
+    def _on_uploaded_stats_progress(self, step: int, total: int, video_id: str) -> None:
+        dlg = self._stats_progress_dlg
+        if dlg is None:
             return
-        self._refresh_uploaded_list()
+        t = max(1, int(total))
+        s = max(0, min(int(step), t))
+        dlg.setMaximum(t)
+        dlg.setValue(s)
+        vid = (video_id or "").strip()
+        dlg.setLabelText(f"{s} / {t} — {vid}" if vid else f"{s} / {t}")
+
+    def _on_uploaded_stats_worker_finished(self, successes: object, errors: object) -> None:
+        dlg = self._stats_progress_dlg
+        if dlg is not None:
+            mx = dlg.maximum()
+            dlg.setValue(mx)
+            dlg.close()
+        self._stats_progress_dlg = None
+        try:
+            succ = successes if isinstance(successes, list) else []
+            errs = errors if isinstance(errors, list) else []
+            for row in succ:
+                if not isinstance(row, (list, tuple)) or len(row) < 4:
+                    continue
+                vid, vc, lc, cc = row[0], row[1], row[2], row[3]
+                try:
+                    self._upload_store.update_video_stats(
+                        video_id=str(vid),
+                        view_count=int(vc),
+                        like_count=lc if lc is None else int(lc),
+                        comment_count=cc if cc is None else int(cc),
+                    )
+                except Exception:
+                    pass
+            if succ:
+                self._refresh_uploaded_list()
+            if errs and not succ:
+                detail = "\n".join(str(x) for x in errs[:8])
+                if len(errs) > 8:
+                    detail += f"\n… и ещё {len(errs) - 8}"
+                QMessageBox.warning(
+                    self,
+                    "Zaliver",
+                    f"Не удалось обновить статистику:\n{detail}",
+                )
+            elif errs:
+                detail = "\n".join(str(x) for x in errs[:5])
+                if len(errs) > 5:
+                    detail += f"\n… и ещё {len(errs) - 5}"
+                QMessageBox.information(
+                    self,
+                    "Zaliver",
+                    f"Обновлено записей: {len(succ)} из {len(succ) + len(errs)}.\n"
+                    f"Ошибки по части роликов:\n{detail}",
+                )
+        finally:
+            t = self._stats_thread
+            if t is not None:
+                t.quit()
+
+    def _on_uploaded_stats_thread_finished(self) -> None:
+        self._stats_thread = None
+        if self._stats_worker is not None:
+            self._stats_worker.deleteLater()
+            self._stats_worker = None
+        if self._stats_progress_dlg is not None:
+            self._stats_progress_dlg.close()
+            self._stats_progress_dlg = None
+        if hasattr(self, "_btn_uploaded_refresh_stats"):
+            self._btn_uploaded_refresh_stats.setEnabled(True)
 
     def _open_uploaded_url(self, url: str) -> None:
         u = (url or "").strip()
@@ -1577,48 +1698,125 @@ class MainWindow(QWidget):
         dlg = QDialog(self)
         dlg.setWindowTitle("Загрузка в YouTube после уникализации")
         dlg.setModal(True)
+        dlg.setMinimumSize(QSize(980, 780))
+        dlg.resize(1100, 860)
 
         grid = QGridLayout(dlg)
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(10)
 
         title_edit = QLineEdit()
-        title_edit.setPlaceholderText("Название видео (обязательное)…")
+        title_edit.setPlaceholderText("Название видео (обязательное для загрузки в YouTube)…")
         desc_edit = QPlainTextEdit()
         desc_edit.setPlaceholderText("Описание (необязательно)…")
-        desc_edit.setMinimumHeight(120)
+        desc_edit.setMinimumHeight(44)
+        desc_edit.setMaximumHeight(72)
+        desc_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
-        # Multiple profiles selection (checkboxes).
         lw = QListWidget()
         lw.setObjectName("uploadProfilesList")
-        lw.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        lw.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        lw.setSpacing(4)
+        lw.setMinimumHeight(420)
+        lw.setMouseTracking(True)
 
         ids: list[str] = []
-        preselect: set[str] = set()
-        try:
-            it = self._profiles_list.currentItem() if hasattr(self, "_profiles_list") else None
-            if it is not None:
-                pid0 = str(it.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
-                if pid0:
-                    preselect.add(pid0)
-        except Exception:
-            pass
-
+        profile_rows: list[tuple[str, dict[str, object]]] = []
         for p in profiles:
             if not isinstance(p, dict):
                 continue
             pid = str(p.get("id") or p.get("browserProfileId") or p.get("profile_id") or "").strip()
             if not pid:
                 continue
-            name = str(p.get("name") or "").strip()
             ids.append(pid)
-            it = QListWidgetItem(f"{name} ({pid})" if name else pid)
-            it.setData(Qt.ItemDataRole.UserRole + 1, pid)
-            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            it.setCheckState(
-                Qt.CheckState.Checked if (pid in preselect) else Qt.CheckState.Unchecked
+            profile_rows.append((pid, p))
+
+        preselect: set[str] = set()
+        try:
+            if hasattr(self, "_profiles_list"):
+                lw_m = self._profiles_list
+                for sel in lw_m.selectedItems():
+                    pids = str(sel.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
+                    if pids:
+                        preselect.add(pids)
+                if not preselect:
+                    it0 = lw_m.currentItem()
+                    if it0 is not None:
+                        pid0 = str(it0.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
+                        if pid0:
+                            preselect.add(pid0)
+        except Exception:
+            pass
+
+        last_upload_map = self._upload_store.last_uploaded_at_by_profiles(ids)
+        dlg_drag: dict[str, object] = {"anchor": None, "extending": False}
+
+        for pid, p in profile_rows:
+            lw_item = QListWidgetItem()
+            lw_item.setData(Qt.ItemDataRole.UserRole, p)
+            lw_item.setData(Qt.ItemDataRole.UserRole + 1, pid)
+            lw_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+
+            row_w = AnticProfileRow(
+                p,
+                lw,
+                last_uploaded_at=last_upload_map.get(pid),
+                on_left_press=lambda e, li=lw_item: self._profile_list_row_mouse_press(
+                    lw, li, e, dlg_drag
+                ),
+                on_left_drag=lambda e: self._profile_list_row_mouse_drag(lw, e, dlg_drag),
+                on_left_release=lambda e: self._profile_list_row_mouse_release(e, dlg_drag),
+                on_upload_pause_click=lambda pid=pid: self._ask_reset_upload_cooldown_for_profile(
+                    pid, dialog_parent=dlg, dialog_profile_list=lw
+                ),
             )
-            lw.addItem(it)
+            lw.addItem(lw_item)
+            lw.setItemWidget(lw_item, row_w)
+            row_w.updateGeometry()
+            lw_item.setSizeHint(row_w.sizeHint())
+
+        lw.blockSignals(True)
+        first_sel: QListWidgetItem | None = None
+        for i in range(lw.count()):
+            it_sel = lw.item(i)
+            if it_sel is None:
+                continue
+            pids = str(it_sel.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
+            if pids and pids in preselect:
+                it_sel.setSelected(True)
+                if first_sel is None:
+                    first_sel = it_sel
+        if first_sel is not None:
+            lw.setCurrentItem(first_sel)
+        lw.blockSignals(False)
+
+        n_inputs = len(self._selected_input_files or [])
+        try:
+            copies_n = max(1, int(self.copies_per_file.value()))
+        except Exception:
+            copies_n = 1
+        uniquify_planned = n_inputs * copies_n
+
+        dlg_profile_count_lbl = QLabel("")
+        dlg_profile_count_lbl.setObjectName("hint")
+        dlg_profile_count_lbl.setWordWrap(True)
+
+        def _update_dlg_upload_profile_count() -> None:
+            n = len(lw.selectedItems())
+            uniq_line = f"Будет уникализировано видео: {uniquify_planned}"
+            if n <= 0:
+                dlg_profile_count_lbl.setText(
+                    uniq_line
+                    + "\nВыбрано профилей для залива: 0 — без залива в YouTube "
+                    "(только уникализация)."
+                )
+            else:
+                dlg_profile_count_lbl.setText(
+                    uniq_line + f"\nВыбрано профилей для залива: {n}"
+                )
+
+        lw.itemSelectionChanged.connect(_update_dlg_upload_profile_count)
+        _update_dlg_upload_profile_count()
 
         if not ids:
             QMessageBox.warning(
@@ -1638,11 +1836,24 @@ class MainWindow(QWidget):
 
         grid.addWidget(QLabel("Название:"), 0, 0)
         grid.addWidget(title_edit, 0, 1)
-        grid.addWidget(QLabel("Описание:"), 1, 0, Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(
+            QLabel("Описание:"),
+            1,
+            0,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
         grid.addWidget(desc_edit, 1, 1)
+        profiles_col = QWidget()
+        profiles_col_l = QVBoxLayout(profiles_col)
+        profiles_col_l.setContentsMargins(0, 0, 0, 0)
+        profiles_col_l.setSpacing(8)
+        profiles_col_l.addWidget(dlg_profile_count_lbl)
+        profiles_col_l.addWidget(lw, 1)
+
         grid.addWidget(QLabel("Профили:"), 2, 0, Qt.AlignmentFlag.AlignTop)
-        grid.addWidget(lw, 2, 1)
+        grid.addWidget(profiles_col, 2, 1)
         grid.addWidget(btns, 3, 0, 1, 2)
+        grid.setRowStretch(2, 1)
 
         title_edit.setFocus()
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -1656,18 +1867,19 @@ class MainWindow(QWidget):
             if it is None:
                 continue
             try:
-                if it.checkState() == Qt.CheckState.Checked:
+                if it.isSelected():
                     pid = str(it.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
                     if pid:
                         picked.append(pid)
             except Exception:
                 continue
 
-        if not title:
-            QMessageBox.warning(self, "Zaliver", "Название видео обязательно.")
-            return None
+        # Если профили не выбраны, считаем, что пользователь хочет только уникализировать видео,
+        # без загрузки в YouTube. В этом случае title не обязателен.
         if not picked:
-            QMessageBox.warning(self, "Zaliver", "Выберите хотя бы один профиль.")
+            return {"title": title, "description": description, "profile_ids": ""}
+        if not title:
+            QMessageBox.warning(self, "Zaliver", "Название видео обязательно для загрузки в YouTube.")
             return None
 
         return {"title": title, "description": description, "profile_ids": ",".join(picked)}
@@ -1957,15 +2169,21 @@ class MainWindow(QWidget):
 
     def _render_profiles_items(self, profiles: list[dict[str, object]]) -> int:
         self._profiles_list_populating = True
-        try:
-            self._profiles_list.itemClicked.disconnect()
-        except TypeError:
-            pass
-        self._profiles_rearm_click_timer.stop()
         self._profiles_list.blockSignals(True)
         n = 0
         try:
             self._profiles_list.clear()
+            pids: list[str] = []
+            for it in profiles:
+                pid = str(
+                    it.get("id")
+                    or it.get("browserProfileId")
+                    or it.get("profile_id")
+                    or ""
+                ).strip()
+                if pid:
+                    pids.append(pid)
+            last_upload_map = self._upload_store.last_uploaded_at_by_profiles(pids)
             for it in profiles:
                 pid = str(
                     it.get("id")
@@ -1980,17 +2198,23 @@ class MainWindow(QWidget):
                 row = AnticProfileRow(
                     it,
                     self._profiles_list,
-                    on_left_press=self._profiles_note_left_press,
+                    last_uploaded_at=last_upload_map.get(pid) if pid else None,
+                    on_left_press=lambda e, li=item: self._profiles_row_mouse_press(e, li),
+                    on_left_drag=self._profiles_row_mouse_drag,
+                    on_left_release=self._profiles_row_mouse_release,
+                    on_upload_pause_click=(
+                        lambda pid=pid: self._ask_reset_upload_cooldown_for_profile(pid)
+                    ),
                 )
-                item.setSizeHint(row.sizeHint())
                 self._profiles_list.addItem(item)
                 self._profiles_list.setItemWidget(item, row)
+                row.updateGeometry()
+                item.setSizeHint(row.sizeHint())
                 n += 1
         finally:
             self._profiles_list.blockSignals(False)
             self._profiles_list_render_gen += 1
             self._profiles_list_populating = False
-            self._profiles_rearm_click_timer.start(50)
         if hasattr(self, "_dolphin_query") and (self._dolphin_query.text() or "").strip():
             self._profiles_filter_timer.start(0)
         return n
@@ -2100,61 +2324,178 @@ class MainWindow(QWidget):
         self._btn_profiles_refresh.setEnabled(True)
         self._profiles_raw = None
         if hasattr(self, "_profiles_list"):
-            try:
-                self._profiles_list.itemClicked.disconnect()
-            except TypeError:
-                pass
-            self._profiles_rearm_click_timer.stop()
             self._profiles_list.blockSignals(True)
             try:
                 self._profiles_list.clear()
             finally:
                 self._profiles_list.blockSignals(False)
             self._profiles_list_render_gen += 1
-            self._profiles_rearm_click_timer.start(50)
         self._profiles_status.setText(f"Не удалось загрузить список профилей.\n{message}")
 
-    def _ensure_profiles_list_click_connected(self) -> None:
-        if not hasattr(self, "_profiles_list"):
+    def _ask_reset_upload_cooldown_for_profile(
+        self,
+        profile_id: str,
+        *,
+        dialog_parent: QWidget | None = None,
+        dialog_profile_list: QListWidget | None = None,
+    ) -> None:
+        pid = (profile_id or "").strip()
+        if not pid:
             return
-        lw = self._profiles_list
-        try:
-            lw.itemClicked.disconnect()
-        except TypeError:
-            pass
-        lw.itemClicked.connect(self._on_profiles_list_clicked)
+        parent = dialog_parent or self
+        ans = QMessageBox.question(
+            parent,
+            "Пауза 1 ч",
+            "Обновить время паузы с последнего залива? После подтверждения с этим профилем снова можно будет загружать видео.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        n = self._upload_store.reset_latest_upload_time_for_profile(profile_id=pid)
+        if n <= 0:
+            QMessageBox.information(
+                parent,
+                "Zaliver",
+                "Нет сохранённых заливов для этого профиля в базе — обновлять нечего.",
+            )
+            return
+        QMessageBox.information(
+            parent,
+            "Zaliver",
+            "Пауза обновлена: с этого профиля снова можно загружать видео.",
+        )
+        if dialog_profile_list is not None:
+            new_map = self._upload_store.last_uploaded_at_by_profiles([pid])
+            new_iso = new_map.get(pid)
+            lw2 = dialog_profile_list
+            for i in range(lw2.count()):
+                it2 = lw2.item(i)
+                if it2 is None:
+                    continue
+                if str(it2.data(Qt.ItemDataRole.UserRole + 1) or "").strip() != pid:
+                    continue
+                row_w = lw2.itemWidget(it2)
+                if isinstance(row_w, AnticProfileRow):
+                    row_w.set_last_upload_cooldown(new_iso)
+                break
+        elif hasattr(self, "_profiles_list"):
+            self._apply_profiles_filter()
 
-    def _profiles_note_left_press(self) -> None:
-        self._profiles_click_press_render_gen = self._profiles_list_render_gen
+    def _profile_list_row_mouse_press(
+        self,
+        lw: QListWidget,
+        item: QListWidgetItem,
+        event: QMouseEvent,
+        state: dict[str, object],
+    ) -> None:
+        if lw is self._profiles_list and self._profiles_list_populating:
+            return
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        mods = event.modifiers()
+        ctrl = mods & (
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
+        )
+        shift = mods & Qt.KeyboardModifier.ShiftModifier
+        if ctrl:
+            item.setSelected(not item.isSelected())
+            lw.setCurrentItem(item)
+            state["extending"] = False
+            return
+        if shift:
+            anchor = lw.currentItem()
+            if anchor is None:
+                item.setSelected(True)
+                lw.setCurrentItem(item)
+            else:
+                i_a = lw.row(anchor)
+                i_b = lw.row(item)
+                top, bottom = sorted((i_a, i_b))
+                lw.clearSelection()
+                for r in range(top, bottom + 1):
+                    ri = lw.item(r)
+                    if ri is not None:
+                        ri.setSelected(True)
+                lw.setCurrentItem(item)
+            state["extending"] = False
+            return
+        lw.clearSelection()
+        item.setSelected(True)
+        lw.setCurrentItem(item)
+        state["anchor"] = lw.row(item)
+        state["extending"] = True
 
-    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
-        if hasattr(self, "_profiles_list") and watched is self._profiles_list.viewport():
-            if event.type() == QEvent.Type.MouseButtonPress and isinstance(
-                event, QMouseEvent
-            ):
-                if event.button() == Qt.MouseButton.LeftButton:
-                    self._profiles_note_left_press()
-        return super().eventFilter(watched, event)
+    def _profile_list_row_mouse_drag(
+        self, lw: QListWidget, event: QMouseEvent, state: dict[str, object]
+    ) -> None:
+        if lw is self._profiles_list and self._profiles_list_populating:
+            return
+        if not state.get("extending") or state.get("anchor") is None:
+            return
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        gp = event.globalPosition().toPoint()
+        loc = lw.viewport().mapFromGlobal(gp)
+        hit = lw.itemAt(loc)
+        if hit is None:
+            return
+        r1 = lw.row(hit)
+        r0 = int(state["anchor"])
+        top, bottom = sorted((r0, r1))
+        lw.clearSelection()
+        for r in range(top, bottom + 1):
+            ri = lw.item(r)
+            if ri is not None:
+                ri.setSelected(True)
+        lw.setCurrentItem(hit)
 
-    def _on_profiles_list_clicked(self, item: QListWidgetItem) -> None:
+    def _profile_list_row_mouse_release(
+        self, event: QMouseEvent, state: dict[str, object]
+    ) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            state["extending"] = False
+
+    def _profiles_row_mouse_press(self, event: QMouseEvent, item: QListWidgetItem) -> None:
+        self._profile_list_row_mouse_press(
+            self._profiles_list, item, event, self._profiles_drag
+        )
+
+    def _profiles_row_mouse_drag(self, event: QMouseEvent) -> None:
+        self._profile_list_row_mouse_drag(self._profiles_list, event, self._profiles_drag)
+
+    def _profiles_row_mouse_release(self, event: QMouseEvent) -> None:
+        self._profile_list_row_mouse_release(event, self._profiles_drag)
+
+    def _on_profiles_list_selection_changed(self) -> None:
         if self._profiles_list_populating:
             return
-        if self._profiles_click_press_render_gen != self._profiles_list_render_gen:
+        lw = self._profiles_list
+        it = lw.currentItem()
+        if it is None:
+            sel = lw.selectedItems()
+            it = sel[0] if sel else None
+        if it is None:
+            self._profiles_status.setText("Профиль не выбран")
             return
-        pid = (item.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
+        pid = str(it.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
         if not pid:
             self._profiles_status.setText("У профиля нет ID — запуск через Local API невозможен.")
             return
-        # Одиночный клик по профилю должен только выбирать профиль в списке.
-        # Запуск браузера/загрузка выполняются отдельными действиями (кнопки "Старт", и т.п.).
         self._selected_profile_id = pid
-        try:
-            label = (item.text() or "").strip()
-        except Exception:
-            label = ""
-        self._profiles_status.setText(
-            f"Выбран профиль: {label}" if label else f"Выбран профиль: {pid}"
-        )
+        prof = it.data(Qt.ItemDataRole.UserRole)
+        label = ""
+        if isinstance(prof, dict):
+            label = str(prof.get("name") or "").strip()
+        nsel = len(lw.selectedItems())
+        if nsel > 1:
+            self._profiles_status.setText(
+                f"Выбрано профилей: {nsel}. Активный: {label or pid}"
+            )
+        else:
+            self._profiles_status.setText(
+                f"Выбран профиль: {label}" if label else f"Выбран профиль: {pid}"
+            )
 
     def _dolphin_google_worker(
         self,
@@ -2630,10 +2971,20 @@ class MainWindow(QWidget):
 
                 mgr = MultiProfileUploader(
                     profile_ids=profile_ids,
-                    cooldown_s=3600.0,
+                    cooldown_s=10.0,
                     max_attempts_per_profile=2,
                     log_sink=self._ui_log_line.emit,
                     upload_one=_upload_one,
+                    on_profile_attempt=lambda pid, ok, err: (
+                        self._upload_store.reset_profile_upload_errors(profile_id=pid)
+                        if ok
+                        else self._upload_store.inc_profile_upload_error(
+                            profile_id=pid, error_text=err
+                        )
+                    ),
+                    on_profile_consecutive_failures=lambda pid, n, err: self._on_upload_profile_failed_3x(
+                        profile_id=pid, n=n, error_text=err, kind=kind, base_url=base_url
+                    ),
                 )
                 self._upload_manager = mgr
                 mgr.enqueue_videos(
@@ -2690,3 +3041,44 @@ class MainWindow(QWidget):
     def _append_log(self, line: str) -> None:
         self.log.appendPlainText(line)
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
+
+    def _on_upload_profile_failed_3x(
+        self,
+        *,
+        profile_id: str,
+        n: int,
+        error_text: str,
+        kind: str,
+        base_url: str,
+    ) -> None:
+        pid = (profile_id or "").strip()
+        if not pid:
+            return
+        try:
+            self._upload_store.flag_profile_after_upload_errors(
+                profile_id=pid, flagged=True, error_text=error_text
+            )
+        except Exception:
+            pass
+
+        self._ui_log_line.emit(
+            f"[upload] [PROFILE] profile={pid} consecutive_errors={int(n)} → flagged"
+        )
+
+        # Если используем локальный антидетект — помечаем профиль тегом в его «базе» (profiles.json).
+        if (kind or "").strip() == "local":
+            try:
+                from zaliver.antydetect.local_antidetect_api import LocalAntidetectHttpAPI
+
+                api = LocalAntidetectHttpAPI((base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL)
+                try:
+                    api.add_profile_tag(pid, "upload_error_3x")
+                finally:
+                    api.close()
+                self._ui_log_line.emit(
+                    f"[upload] [PROFILE] profile={pid} tag_added=upload_error_3x"
+                )
+            except Exception as e:
+                self._ui_log_line.emit(
+                    f"[upload] [PROFILE] profile={pid} tag_add_failed err={e!r}"
+                )

@@ -403,6 +403,22 @@ class UploadStore:
             )
         return out
 
+    def is_profile_upload_error_flagged(self, *, profile_id: str) -> bool:
+        pid = (profile_id or "").strip()
+        if not pid:
+            return False
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT flagged FROM upload_profile_state WHERE profile_id=?;",
+                (pid,),
+            ).fetchone()
+        if row is None:
+            return False
+        try:
+            return int(row["flagged"]) != 0
+        except (TypeError, ValueError, KeyError):
+            return False
+
     def reset_profile_upload_errors(self, *, profile_id: str) -> None:
         pid = (profile_id or "").strip()
         if not pid:

@@ -1769,6 +1769,7 @@ class MainWindow(QWidget):
                 on_upload_pause_click=lambda pid=pid: self._ask_reset_upload_cooldown_for_profile(
                     pid, dialog_parent=dlg, dialog_profile_list=lw
                 ),
+                select_checkbox_item=lw_item,
             )
             lw.addItem(lw_item)
             lw.setItemWidget(lw_item, row_w)
@@ -1815,7 +1816,21 @@ class MainWindow(QWidget):
                     uniq_line + f"\nВыбрано профилей для залива: {n}"
                 )
 
-        lw.itemSelectionChanged.connect(_update_dlg_upload_profile_count)
+        def _sync_dlg_profile_checkboxes() -> None:
+            for i in range(lw.count()):
+                it_cb = lw.item(i)
+                if it_cb is None:
+                    continue
+                rw_cb = lw.itemWidget(it_cb)
+                if isinstance(rw_cb, AnticProfileRow):
+                    rw_cb.sync_select_checkbox_from_item()
+
+        def _on_dlg_profile_selection_changed() -> None:
+            _sync_dlg_profile_checkboxes()
+            _update_dlg_upload_profile_count()
+
+        lw.itemSelectionChanged.connect(_on_dlg_profile_selection_changed)
+        _sync_dlg_profile_checkboxes()
         _update_dlg_upload_profile_count()
 
         if not ids:
@@ -1830,7 +1845,9 @@ class MainWindow(QWidget):
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         btns.button(QDialogButtonBox.StandardButton.Ok).setText("Старт")
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+        btn_dlg_cancel = btns.button(QDialogButtonBox.StandardButton.Cancel)
+        btn_dlg_cancel.setText("Отмена")
+        btn_dlg_cancel.setObjectName("danger")
         btns.accepted.connect(dlg.accept)
         btns.rejected.connect(dlg.reject)
 
@@ -2969,22 +2986,31 @@ class MainWindow(QWidget):
                     except Exception:
                         pass
 
+                def _on_profile_upload_attempt(pid: str, ok: bool, err: str) -> None:
+                    if ok:
+                        self._upload_store.reset_profile_upload_errors(profile_id=pid)
+                        return
+                    n = self._upload_store.inc_profile_upload_error(
+                        profile_id=pid, error_text=err
+                    )
+                    if n >= 3 and not self._upload_store.is_profile_upload_error_flagged(
+                        profile_id=pid
+                    ):
+                        self._on_upload_profile_failed_3x(
+                            profile_id=pid,
+                            n=n,
+                            error_text=err,
+                            kind=kind,
+                            base_url=base_url,
+                        )
+
                 mgr = MultiProfileUploader(
                     profile_ids=profile_ids,
                     cooldown_s=10.0,
                     max_attempts_per_profile=2,
                     log_sink=self._ui_log_line.emit,
                     upload_one=_upload_one,
-                    on_profile_attempt=lambda pid, ok, err: (
-                        self._upload_store.reset_profile_upload_errors(profile_id=pid)
-                        if ok
-                        else self._upload_store.inc_profile_upload_error(
-                            profile_id=pid, error_text=err
-                        )
-                    ),
-                    on_profile_consecutive_failures=lambda pid, n, err: self._on_upload_profile_failed_3x(
-                        profile_id=pid, n=n, error_text=err, kind=kind, base_url=base_url
-                    ),
+                    on_profile_attempt=_on_profile_upload_attempt,
                 )
                 self._upload_manager = mgr
                 mgr.enqueue_videos(

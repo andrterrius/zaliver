@@ -6,7 +6,16 @@ from datetime import datetime, timedelta, timezone
 
 from PyQt6.QtCore import QEvent, QObject, QSize, Qt
 from PyQt6.QtGui import QCursor, QMouseEvent
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QCheckBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QListWidgetItem,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 
 def _as_str(v: object) -> str:
@@ -225,12 +234,15 @@ class AnticProfileRow(QWidget):
         on_left_drag: Callable[[QMouseEvent], None] | None = None,
         on_left_release: Callable[[QMouseEvent], None] | None = None,
         on_upload_pause_click: Callable[[], None] | None = None,
+        select_checkbox_item: QListWidgetItem | None = None,
     ) -> None:
         super().__init__(parent)
         self._on_left_press = on_left_press
         self._on_left_drag = on_left_drag
         self._on_left_release = on_left_release
         self._upload_pause_cb = on_upload_pause_click
+        self._select_checkbox_item = select_checkbox_item
+        self._select_cb: QCheckBox | None = None
         self._upload_lbl: QLabel | None = None
         self._upload_cooldown_kind: str = ""
         self.setObjectName("anticProfileRowRoot")
@@ -265,6 +277,21 @@ class AnticProfileRow(QWidget):
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
+
+        if select_checkbox_item is not None:
+            cb = QCheckBox(self)
+            cb.setObjectName("anticProfileSelectCheck")
+            cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            cb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            cb.setChecked(select_checkbox_item.isSelected())
+            cb.setToolTip(
+                "Профиль участвует в заливе на YouTube. Несколько: отметьте строки "
+                "или Ctrl/⌘ + клик по карточке."
+            )
+            cb.stateChanged.connect(self._on_select_checkbox_state_changed)
+            self._select_cb = cb
+            outer.addWidget(cb, 0, Qt.AlignmentFlag.AlignVCenter)
+            outer.addSpacing(8)
 
         accent = QFrame()
         accent.setObjectName("anticProfileAccent")
@@ -443,6 +470,25 @@ class AnticProfileRow(QWidget):
             w.installEventFilter(self)
 
         self.updateGeometry()
+
+    def _on_select_checkbox_state_changed(self, _state: int) -> None:
+        it = self._select_checkbox_item
+        if it is None or self._select_cb is None:
+            return
+        it.setSelected(self._select_cb.isChecked())
+        lw = it.listWidget()
+        if lw is not None:
+            lw.setCurrentItem(it)
+
+    def sync_select_checkbox_from_item(self) -> None:
+        """Синхронизирует чекбокс с QListWidgetItem.isSelected() (диалог перед стартом)."""
+        it = self._select_checkbox_item
+        if it is None or self._select_cb is None:
+            return
+        on = it.isSelected()
+        self._select_cb.blockSignals(True)
+        self._select_cb.setChecked(on)
+        self._select_cb.blockSignals(False)
 
     def set_last_upload_cooldown(self, last_uploaded_iso: str | None) -> None:
         """Обновляет подпись «Пауза 1 ч» после смены времени последнего залива в БД."""

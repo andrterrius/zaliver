@@ -43,7 +43,6 @@ class MultiProfileUploader:
         log_sink: Callable[[str], None],
         upload_one: Callable[[str, VideoTask], None],
         on_profile_attempt: Callable[[str, bool, str], None] | None = None,
-        on_profile_consecutive_failures: Callable[[str, int, str], None] | None = None,
     ) -> None:
         self._profiles = [p.strip() for p in (profile_ids or []) if (p or "").strip()]
         self._cooldown_s = float(cooldown_s)
@@ -51,7 +50,6 @@ class MultiProfileUploader:
         self._log = log_sink
         self._upload_one = upload_one
         self._on_profile_attempt = on_profile_attempt
-        self._on_profile_consecutive_failures = on_profile_consecutive_failures
 
         self._stop = threading.Event()
 
@@ -61,7 +59,6 @@ class MultiProfileUploader:
         }
 
         self._last_start_monotonic: dict[str, float] = {pid: 0.0 for pid in self._profiles}
-        self._consecutive_failures: dict[str, int] = {pid: 0 for pid in self._profiles}
         self._workers: list[threading.Thread] = []
         self._dispatcher: threading.Thread | None = None
 
@@ -272,19 +269,9 @@ class MultiProfileUploader:
                 self._log(
                     f"[{_ts()}] [upload] [OK] profile={profile_id} video={task.video_path!r}"
                 )
-                self._consecutive_failures[profile_id] = 0
                 with self._done_lock:
                     self._done_ok += 1
             else:
-                n_fail = int(self._consecutive_failures.get(profile_id, 0)) + 1
-                self._consecutive_failures[profile_id] = n_fail
-                if n_fail >= 3:
-                    cb_fail = self._on_profile_consecutive_failures
-                    if cb_fail is not None:
-                        try:
-                            cb_fail(profile_id, n_fail, err_text)
-                        except Exception:
-                            pass
                 # Record attempt on this profile and requeue to another one.
                 task.attempts_by_profile[profile_id] = int(
                     task.attempts_by_profile.get(profile_id, 0)

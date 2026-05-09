@@ -21,6 +21,25 @@ def _utc_now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
+def _parse_uploaded_at_iso_utc(s: str) -> datetime | None:
+    t = (s or "").strip()
+    if not t:
+        return None
+    if t.endswith("Z"):
+        t = t[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(t)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+# Должно совпадать с подписью «Пауза 1 ч» в UI (`antic_profile_row.format_upload_cooldown_line`).
+_UPLOAD_PAUSE_BETWEEN_UPLOADS = timedelta(hours=1)
+
+
 @dataclass(frozen=True, slots=True)
 class UploadSession:
     id: int
@@ -493,6 +512,28 @@ class UploadStore:
             if pid and la:
                 out[pid] = la
         return out
+
+    def profile_upload_pause_remaining_seconds(self, profile_id: str) -> float:
+        """
+        Секунды до конца паузы после последнего успешного залива с профиля (по БД),
+        по тем же правилам, что «Пауза 1 ч» в списке профилей. 0 — можно заливать.
+        """
+        pid = (profile_id or "").strip()
+        if not pid:
+            return 0.0
+        m = self.last_uploaded_at_by_profiles([pid])
+        iso = (m.get(pid) or "").strip()
+        if not iso:
+            return 0.0
+        dt = _parse_uploaded_at_iso_utc(iso)
+        if dt is None:
+            return 0.0
+        now = datetime.now(tz=timezone.utc)
+        delta = now - dt
+        if delta >= _UPLOAD_PAUSE_BETWEEN_UPLOADS:
+            return 0.0
+        rem = _UPLOAD_PAUSE_BETWEEN_UPLOADS - delta
+        return float(max(0.0, rem.total_seconds()))
 
     def reset_latest_upload_time_for_profile(self, *, profile_id: str) -> int:
         """

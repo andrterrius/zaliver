@@ -55,7 +55,7 @@ from PyQt6.QtWidgets import (
 
 from zaliver.db.video_store import VideoStore
 from zaliver.db.upload_store import UploadStore
-from zaliver.antydetect.api import DolphinAntyError, DolphinAntyPublicAPI
+from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI, DolphinAntyPublicAPI
 from zaliver.antydetect.local_antidetect_api import (
     DEFAULT_LOCAL_API_BASE_URL,
     LocalAntidetectError,
@@ -574,6 +574,7 @@ class MainWindow(QWidget):
     _dolphin_google_ready = pyqtSignal(str)
     _dolphin_google_failed = pyqtSignal(str, str)
     _ui_log_line = pyqtSignal(str)
+    _youtube_upload_phase_finished = pyqtSignal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -620,6 +621,11 @@ class MainWindow(QWidget):
         self._pending_upload: dict[str, str] | None = None
         self._just_saved_outputs: list[str] = []
         self._upload_manager = None
+        self._progress_hold_youtube = False
+        self._upload_cancel_kind = ""
+        self._upload_cancel_dolphin_token = ""
+        self._upload_cancel_profile_ids: list[str] = []
+        self._youtube_upload_phase_finished.connect(self._on_youtube_upload_phase_finished)
         # Автозагрузка профилей при запуске (асинхронно).
         QTimer.singleShot(0, self._refresh_antydetect_profiles)
 
@@ -2801,6 +2807,13 @@ class MainWindow(QWidget):
         if self._work_thread and self._work_thread.isRunning():
             return
 
+        raw_prof = (pending.get("profile_ids") or "").strip()
+        opts["youtube_upload_after_processing"] = bool(raw_prof)
+        self._progress_hold_youtube = bool(raw_prof)
+        self._upload_cancel_profile_ids = []
+        self._upload_cancel_kind = ""
+        self._upload_cancel_dolphin_token = ""
+
         # Upload session starts only on "Start".
         try:
             planned = len(list(opts.get("input_files") or [])) * max(
@@ -2843,12 +2856,101 @@ class MainWindow(QWidget):
     def _cancel(self) -> None:
         if self._processor is not None:
             self._processor.cancel()
+        mgr = getattr(self, "_upload_manager", None)
         try:
-            mgr = getattr(self, "_upload_manager", None)
             if mgr is not None:
+                try:
+                    self._ui_log_line.emit(
+                        "[upload] Отмена: останавливаем очередь заливов "
+                        "(локальный антик: HTTP stop_session для активных сессий; "
+                        "Dolphin: stop_profile по списку профилей)."
+                    )
+                except Exception:
+                    pass
                 mgr.stop()
         except Exception:
             pass
+        kind_u = (getattr(self, "_upload_cancel_kind", "") or "").strip()
+        ids = [p for p in getattr(self, "_upload_cancel_profile_ids", []) if str(p).strip()]
+        if mgr is not None and kind_u == "local":
+            try:
+                from zaliver.antydetect.local_active_sessions import (
+                    stop_all_registered_local_sessions_sync,
+                )
+
+                for line in stop_all_registered_local_sessions_sync():
+                    try:
+                        self._ui_log_line.emit(line)
+                    except Exception:
+                        pass
+            except Exception as e:
+                try:
+                    self._ui_log_line.emit(f"[upload] [STOP] local antidetect batch err={e!r}")
+                except Exception:
+                    pass
+        if kind_u != "local" and ids:
+            threading.Thread(target=self._stop_dolphin_profiles_for_cancel, daemon=True).start()
+
+    def _stop_dolphin_profiles_for_cancel(self) -> None:
+        token = (getattr(self, "_upload_cancel_dolphin_token", "") or "").strip()
+        ids = [p.strip() for p in getattr(self, "_upload_cancel_profile_ids", []) if str(p).strip()]
+        if not ids:
+            return
+        try:
+            api = DolphinAntyLocalAPI()
+            try:
+                if token:
+                    api.login_with_token(token)
+                for pid in ids:
+                    try:
+                        api.stop_profile(pid)
+                    except Exception as e:
+                        try:
+                            self._ui_log_line.emit(
+                                f"[upload] [STOP] Dolphin stop_profile failed profile={pid!r} err={e!r}"
+                            )
+                        except Exception:
+                            pass
+            finally:
+                api.close()
+        except Exception as e:
+            try:
+                self._ui_log_line.emit(f"[upload] [STOP] Dolphin batch stop failed: {e!r}")
+            except Exception:
+                pass
+
+    def _release_youtube_progress_hold_if_any(self) -> None:
+        if not getattr(self, "_progress_hold_youtube", False):
+            return
+        self._progress_hold_youtube = False
+        mx = max(1, int(self.progress.maximum()))
+        self.progress.setRange(0, mx)
+        self.progress.setValueImmediate(mx)
+
+    def _finalize_idle_toolbar(self) -> None:
+        self.btn_start.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
+
+    def _on_youtube_upload_phase_finished(self, status: str) -> None:
+        self._upload_manager = None
+        self._upload_cancel_profile_ids = []
+        self._upload_cancel_kind = ""
+        self._upload_cancel_dolphin_token = ""
+        self._release_youtube_progress_hold_if_any()
+        mx = max(1, int(self.progress.maximum()))
+        self.progress.setRange(0, mx)
+        self.progress.setValueImmediate(mx)
+        self._finalize_idle_toolbar()
+        if status == "cancelled":
+            self.progress_label.setText("Загрузка на YouTube отменена.")
+            self._append_log("YouTube: загрузка отменена пользователем.")
+            QMessageBox.information(self, "Zaliver", "Загрузка на YouTube отменена.")
+        elif status == "upload_failed":
+            self.progress_label.setText("Готово (есть ошибки загрузки на YouTube).")
+            self._append_log("YouTube: очередь завершена, часть загрузок завершилась с ошибками.")
+        else:
+            self.progress_label.setText("Готово")
+            self._append_log("YouTube: очередь загрузок завершена.")
 
     def _on_progress(self, cur: int, total: int, msg: str) -> None:
         self.progress.setRange(0, max(1, total))
@@ -2856,200 +2958,228 @@ class MainWindow(QWidget):
         self.progress_label.setText(msg or f"{cur} / {total} кадров")
 
     def _on_finished(self, ok: bool, msg: str) -> None:
-        self.btn_start.setEnabled(True)
-        self.btn_cancel.setEnabled(False)
-        self._append_log("Готово." if ok else f"Ошибка: {msg}")
         self._upload_session_processing_done = True
-        if ok:
-            pending = self._pending_upload
-            self._pending_upload = None
-            if pending is not None:
-                video_paths = [
-                    p.strip()
-                    for p in (self._just_saved_outputs or [])
-                    if isinstance(p, str) and p.strip()
-                ]
-                if not video_paths:
-                    self._append_log(
-                        "Загрузка в YouTube пропущена: не найден путь к сохранённому видео."
-                    )
-                    self._upload_session_upload_expected = False
-                    self._upload_session_upload_done = True
-                    self._maybe_finish_upload_session(status="done")
-                    return
 
-                token = (self._dolphin_token.text() or "").strip()
-                if not token:
-                    token = (
-                        self._settings.value("antydetect/dolphin_token", "", type=str) or ""
-                    ).strip()
+        if not ok:
+            self._finalize_idle_toolbar()
+            self._release_youtube_progress_hold_if_any()
+            self._append_log(f"Ошибка: {msg}")
+            if msg and msg != "Отменено.":
+                self._upload_session_upload_expected = False
+                self._upload_session_upload_done = True
+                self._maybe_finish_upload_session(status="error")
+                QMessageBox.critical(self, "Zaliver", msg)
+            elif msg == "Отменено.":
+                self._upload_session_upload_expected = False
+                self._upload_session_upload_done = True
+                self._maybe_finish_upload_session(status="cancelled")
+                QMessageBox.information(self, "Zaliver", "Обработка отменена.")
+            return
 
-                kind = self._default_browser_combo.currentData()
-                if not isinstance(kind, str) or not kind.strip():
-                    kind = "dolphin"
-                base_url = (self._local_api_base_url.text() or "").strip()
-                if not base_url:
-                    base_url = (
-                        self._settings.value(
-                            "antydetect/local_api_base_url", "", type=str
-                        )
-                        or ""
-                    ).strip()
-                if not base_url and kind == "local":
-                    base_url = DEFAULT_LOCAL_API_BASE_URL
-
-                raw_ids = (pending.get("profile_ids", "") or "").strip()
-                profile_ids = [p.strip() for p in raw_ids.split(",") if p.strip()]
-                if not profile_ids:
-                    self._append_log("YouTube: профили не выбраны — заливка пропущена.")
-                    self._upload_session_upload_expected = False
-                    self._upload_session_upload_done = True
-                    self._maybe_finish_upload_session(status="done")
-                    return
-
-                from zaliver.youtube_upload.multi_uploader import MultiProfileUploader, VideoTask
-
+        self._append_log("Уникализация завершена.")
+        pending = self._pending_upload
+        self._pending_upload = None
+        if pending is not None:
+            video_paths = [
+                p.strip()
+                for p in (self._just_saved_outputs or [])
+                if isinstance(p, str) and p.strip()
+            ]
+            if not video_paths:
                 self._append_log(
-                    f"YouTube: многопоточная заливка стартует. Видео={len(video_paths)}, профили={len(profile_ids)}…"
+                    "Загрузка в YouTube пропущена: не найден путь к сохранённому видео."
+                )
+                self._upload_session_upload_expected = False
+                self._upload_session_upload_done = True
+                self._maybe_finish_upload_session(status="done")
+                self._release_youtube_progress_hold_if_any()
+                self._finalize_idle_toolbar()
+                return
+
+            token = (self._dolphin_token.text() or "").strip()
+            if not token:
+                token = (
+                    self._settings.value("antydetect/dolphin_token", "", type=str) or ""
+                ).strip()
+
+            kind = self._default_browser_combo.currentData()
+            if not isinstance(kind, str) or not kind.strip():
+                kind = "dolphin"
+            base_url = (self._local_api_base_url.text() or "").strip()
+            if not base_url:
+                base_url = (
+                    self._settings.value(
+                        "antydetect/local_api_base_url", "", type=str
+                    )
+                    or ""
+                ).strip()
+            if not base_url and kind == "local":
+                base_url = DEFAULT_LOCAL_API_BASE_URL
+
+            raw_ids = (pending.get("profile_ids", "") or "").strip()
+            profile_ids = [p.strip() for p in raw_ids.split(",") if p.strip()]
+            if not profile_ids:
+                self._append_log("YouTube: профили не выбраны — заливка пропущена.")
+                self._upload_session_upload_expected = False
+                self._upload_session_upload_done = True
+                self._maybe_finish_upload_session(status="done")
+                self._release_youtube_progress_hold_if_any()
+                self._finalize_idle_toolbar()
+                return
+
+            from zaliver.youtube_upload.multi_uploader import MultiProfileUploader, VideoTask
+
+            self._append_log(
+                f"YouTube: многопоточная заливка стартует. Видео={len(video_paths)}, профили={len(profile_ids)}…"
+            )
+            self.btn_cancel.setEnabled(True)
+            self.btn_start.setEnabled(False)
+            self._upload_cancel_kind = (kind or "").strip()
+            self._upload_cancel_dolphin_token = token
+            self._upload_cancel_profile_ids = list(profile_ids)
+
+            def _upload_one(profile_id: str, task: VideoTask) -> None:
+                from zaliver.antydetect.antic_open import (
+                    open_google_in_local_antidetect_profile,
+                    open_google_in_profile,
+                    set_log_sink,
                 )
 
-                def _upload_one(profile_id: str, task: VideoTask) -> None:
-                    from zaliver.antydetect.antic_open import (
-                        open_google_in_local_antidetect_profile,
-                        open_google_in_profile,
-                        set_log_sink,
+                set_log_sink(self._ui_log_line.emit)
+                headless = True
+                if hasattr(self, "_dolphin_headless"):
+                    headless = bool(self._dolphin_headless.isChecked())
+                else:
+                    headless = bool(
+                        self._settings.value(
+                            "antydetect/dolphin_headless", True, type=bool
+                        )
                     )
 
-                    set_log_sink(self._ui_log_line.emit)
-                    headless = True
-                    if hasattr(self, "_dolphin_headless"):
-                        headless = bool(self._dolphin_headless.isChecked())
-                    else:
-                        headless = bool(
-                            self._settings.value(
-                                "antydetect/dolphin_headless", True, type=bool
-                            )
-                        )
-
-                    if kind == "local":
-                        res = open_google_in_local_antidetect_profile(
-                            profile_id,
-                            base_url=(base_url or "").strip(),
-                            headless=headless,
-                            video_path=task.video_path,
-                            title=task.title,
-                            description=task.description,
-                        )
-                    else:
-                        res = open_google_in_profile(
-                            profile_id,
-                            local_token=token or None,
-                            headless=headless,
-                            video_path=task.video_path,
-                            title=task.title,
-                            description=task.description,
-                        )
-
-                    vid = ""
-                    url = ""
-                    if isinstance(res, dict):
-                        vid = str(res.get("video_id") or "").strip()
-                        url = str(res.get("url") or "").strip()
-                    if not vid and url:
-                        try:
-                            from zaliver.youtube_parsing.video_stats import extract_video_id
-
-                            vid = extract_video_id(url)
-                        except Exception:
-                            pass
-                    if not vid:
-                        raise RuntimeError(f"Empty video_id (res={res!r})")
-
-                    sid = int(self._upload_session.id) if self._upload_session is not None else 0
-                    if sid <= 0:
-                        raise RuntimeError("upload_session is not set (sid=0)")
-
-                    self._upload_store.add_uploaded_video(
-                        session_id=sid,
-                        title=task.title or "",
-                        description=task.description or "",
-                        url=url,
-                        video_id=vid,
-                        profile_id=profile_id,
+                if kind == "local":
+                    res = open_google_in_local_antidetect_profile(
+                        profile_id,
+                        base_url=(base_url or "").strip(),
+                        headless=headless,
+                        video_path=task.video_path,
+                        title=task.title,
+                        description=task.description,
                     )
+                else:
+                    res = open_google_in_profile(
+                        profile_id,
+                        local_token=token or None,
+                        headless=headless,
+                        video_path=task.video_path,
+                        title=task.title,
+                        description=task.description,
+                    )
+
+                vid = ""
+                url = ""
+                if isinstance(res, dict):
+                    vid = str(res.get("video_id") or "").strip()
+                    url = str(res.get("url") or "").strip()
+                if not vid and url:
                     try:
-                        self._upload_store.inc_uploaded_ok(session_id=sid, delta=1)
+                        from zaliver.youtube_parsing.video_stats import extract_video_id
+
+                        vid = extract_video_id(url)
                     except Exception:
                         pass
-                    try:
-                        QTimer.singleShot(0, self._refresh_uploaded_list)
-                    except Exception:
-                        pass
+                if not vid:
+                    raise RuntimeError(f"Empty video_id (res={res!r})")
 
-                def _on_profile_upload_attempt(pid: str, ok: bool, err: str) -> None:
-                    if ok:
-                        self._upload_store.reset_profile_upload_errors(profile_id=pid)
-                        return
-                    n = self._upload_store.inc_profile_upload_error(
-                        profile_id=pid, error_text=err
+                sid = int(self._upload_session.id) if self._upload_session is not None else 0
+                if sid <= 0:
+                    raise RuntimeError("upload_session is not set (sid=0)")
+
+                self._upload_store.add_uploaded_video(
+                    session_id=sid,
+                    title=task.title or "",
+                    description=task.description or "",
+                    url=url,
+                    video_id=vid,
+                    profile_id=profile_id,
+                )
+                try:
+                    self._upload_store.inc_uploaded_ok(session_id=sid, delta=1)
+                except Exception:
+                    pass
+                try:
+                    QTimer.singleShot(0, self._refresh_uploaded_list)
+                except Exception:
+                    pass
+
+            def _on_profile_upload_attempt(pid: str, ok: bool, err: str) -> None:
+                if ok:
+                    self._upload_store.reset_profile_upload_errors(profile_id=pid)
+                    return
+                n = self._upload_store.inc_profile_upload_error(
+                    profile_id=pid, error_text=err
+                )
+                if n >= 3 and not self._upload_store.is_profile_upload_error_flagged(
+                    profile_id=pid
+                ):
+                    self._on_upload_profile_failed_3x(
+                        profile_id=pid,
+                        n=n,
+                        error_text=err,
+                        kind=kind,
+                        base_url=base_url,
                     )
-                    if n >= 3 and not self._upload_store.is_profile_upload_error_flagged(
-                        profile_id=pid
-                    ):
-                        self._on_upload_profile_failed_3x(
-                            profile_id=pid,
-                            n=n,
-                            error_text=err,
-                            kind=kind,
-                            base_url=base_url,
-                        )
 
-                mgr = MultiProfileUploader(
-                    profile_ids=profile_ids,
-                    cooldown_s=10.0,
-                    max_attempts_per_profile=2,
-                    log_sink=self._ui_log_line.emit,
-                    upload_one=_upload_one,
-                    on_profile_attempt=_on_profile_upload_attempt,
-                )
-                self._upload_manager = mgr
-                mgr.enqueue_videos(
-                    video_paths=video_paths,
-                    title=pending.get("title", "Название"),
-                    description=pending.get("description", ""),
-                )
+            mgr = MultiProfileUploader(
+                profile_ids=profile_ids,
+                cooldown_s=10.0,
+                max_attempts_per_profile=2,
+                profile_upload_pause_remaining_s=self._upload_store.profile_upload_pause_remaining_seconds,
+                log_sink=self._ui_log_line.emit,
+                upload_one=_upload_one,
+                on_profile_attempt=_on_profile_upload_attempt,
+            )
+            self._upload_manager = mgr
+            mgr.enqueue_videos(
+                video_paths=video_paths,
+                title=pending.get("title", "Название"),
+                description=pending.get("description", ""),
+            )
 
-                def _run_mgr() -> None:
+            def _run_mgr() -> None:
+                try:
+                    mgr.start()
+                    while not mgr.is_finished() and not mgr.stop_requested():
+                        time.sleep(0.5)
+                finally:
+                    self._upload_session_upload_done = True
+                    stopped = False
                     try:
-                        mgr.start()
-                        while not mgr.is_finished() and not mgr.stop_requested():
-                            time.sleep(0.5)
-                    finally:
-                        self._upload_session_upload_done = True
-                        status = "done"
+                        stopped = bool(mgr.stop_requested())
+                    except Exception:
+                        stopped = False
+                    status = "done"
+                    if stopped:
+                        status = "cancelled"
+                    else:
                         try:
                             if mgr.done_failed > 0:
                                 status = "upload_failed"
                         except Exception:
                             status = "upload_failed"
-                        self._maybe_finish_upload_session(status=status)
+                    self._maybe_finish_upload_session(status=status)
+                    try:
+                        self._youtube_upload_phase_finished.emit(status)
+                    except Exception:
+                        pass
 
-                threading.Thread(target=_run_mgr, daemon=True).start()
-                return
-            # Обработка завершена, а загрузка не запрашивалась.
-            self._upload_session_upload_expected = False
-            self._upload_session_upload_done = True
-            self._maybe_finish_upload_session(status="done")
-        elif msg and msg != "Отменено.":
-            self._upload_session_upload_expected = False
-            self._upload_session_upload_done = True
-            self._maybe_finish_upload_session(status="error")
-            QMessageBox.critical(self, "Zaliver", msg)
-        elif msg == "Отменено.":
-            self._upload_session_upload_expected = False
-            self._upload_session_upload_done = True
-            self._maybe_finish_upload_session(status="cancelled")
-            QMessageBox.information(self, "Zaliver", "Обработка отменена.")
+            threading.Thread(target=_run_mgr, daemon=True).start()
+            return
+
+        self._upload_session_upload_expected = False
+        self._upload_session_upload_done = True
+        self._maybe_finish_upload_session(status="done")
+        self._release_youtube_progress_hold_if_any()
+        self._finalize_idle_toolbar()
 
     def _maybe_finish_upload_session(self, *, status: str) -> None:
         s = self._upload_session

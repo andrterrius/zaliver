@@ -634,7 +634,13 @@ class ProcessingController(QObject):
                         emit_progress_global()
                     fill_pool()
 
-            self.progress.emit(total_all, total_all, "Готово")
+            if bool(options.get("youtube_upload_after_processing")) and total_all > 0:
+                cur99 = (total_all * 99) // 100
+                if cur99 >= total_all:
+                    cur99 = max(0, total_all - 1)
+                self.progress.emit(cur99, total_all, "YouTube: загрузка, прогресс 99%…")
+            else:
+                self.progress.emit(total_all, total_all, "Готово")
             done_msg = (
                 f"Сохранено выходных файлов: {n_jobs}\n"
                 f"Исходников: {n_sources}, копий на файл: {copies_per_file}\n"

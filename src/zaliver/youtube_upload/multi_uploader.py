@@ -22,16 +22,24 @@ class VideoTask:
     last_failed_profile: str = ""
 
 
+_MAX_CONCURRENT_UPLOADS = 10
+
+
 class MultiProfileUploader:
     """
     Queue-based multi-threaded uploader.
 
     - One profile = one thread.
+    - At most `_MAX_CONCURRENT_UPLOADS` profiles run `upload_one` at the same time (RAM);
+      others wait on a semaphore until a slot frees.
     - Round-robin assignment via dispatcher thread.
-    - Per-profile cooldown: wait at least `cooldown_s` from *start time* of previous upload.
+    - Per-profile cooldown: wait at least `cooldown_s` from *start time* of previous upload
+      in this run, and optionally `profile_upload_pause_remaining_s` (e.g. DB «Пауза 1 ч»).
     - Errors re-queue the same video to another profile (never the same one immediately),
       max `max_attempts_per_profile` attempts per video per profile.
     - stop() requests graceful shutdown; workers finish current upload and exit.
+    - Waiting for a concurrency slot uses short acquire timeouts so stop() is honored
+      (plain Semaphore.acquire() would ignore threading.Event).
     """
 
     def __init__(
@@ -40,6 +48,8 @@ class MultiProfileUploader:
         profile_ids: list[str],
         cooldown_s: float = 3600.0,
         max_attempts_per_profile: int = 2,
+        max_concurrent_uploads: int = _MAX_CONCURRENT_UPLOADS,
+        profile_upload_pause_remaining_s: Callable[[str], float] | None = None,
         log_sink: Callable[[str], None],
         upload_one: Callable[[str, VideoTask], None],
         on_profile_attempt: Callable[[str, bool, str], None] | None = None,
@@ -47,9 +57,14 @@ class MultiProfileUploader:
         self._profiles = [p.strip() for p in (profile_ids or []) if (p or "").strip()]
         self._cooldown_s = float(cooldown_s)
         self._max_attempts = int(max(1, max_attempts_per_profile))
+        n_prof = max(1, len(self._profiles))
+        cap = max(1, min(int(max_concurrent_uploads), _MAX_CONCURRENT_UPLOADS, n_prof))
+        self._max_parallel = cap
+        self._upload_slots = threading.Semaphore(cap)
         self._log = log_sink
         self._upload_one = upload_one
         self._on_profile_attempt = on_profile_attempt
+        self._profile_upload_pause_remaining_s = profile_upload_pause_remaining_s
 
         self._stop = threading.Event()
 
@@ -65,6 +80,7 @@ class MultiProfileUploader:
         self._total = 0
         self._done_ok = 0
         self._done_failed = 0
+        self._abandoned = 0
         self._done_lock = threading.Lock()
 
         self._orig_sigint = None
@@ -121,7 +137,10 @@ class MultiProfileUploader:
             self._workers.append(t)
             t.start()
 
-        self._log(f"[{_ts()}] [upload] started: profiles={len(self._profiles)}, total={self._total}")
+        self._log(
+            f"[{_ts()}] [upload] started: profiles={len(self._profiles)}, "
+            f"max_parallel={self._max_parallel}, total={self._total}"
+        )
 
     def stop(self) -> None:
         self._stop.set()
@@ -225,63 +244,128 @@ class MultiProfileUploader:
                 continue
 
             if self._stop.is_set():
+                try:
+                    self._global_q.put(task)
+                except Exception:
+                    pass
+                q.task_done()
                 return
 
-            # Cooldown based on start time of previous upload for this profile.
-            last_start = float(self._last_start_monotonic.get(profile_id, 0.0))
-            now = time.monotonic()
-            elapsed = now - last_start if last_start > 0 else self._cooldown_s
-            remaining = max(0.0, self._cooldown_s - elapsed)
-            if remaining > 0:
-                self._log(
-                    f"[{_ts()}] [upload] [WAIT] profile={profile_id} "
-                    f"sleep_s={remaining:.1f} video={task.video_path!r}"
-                )
-                # Wait with stop awareness.
-                self._stop.wait(timeout=remaining)
+            # Cooldown: min interval between starts in this run + optional wall-clock pause (DB).
+            pause_fn = self._profile_upload_pause_remaining_s
+            while True:
                 if self._stop.is_set():
+                    try:
+                        self._global_q.put(task)
+                    except Exception:
+                        pass
+                    q.task_done()
                     return
 
-            # Mark start time immediately (requirement: track *start*).
-            self._last_start_monotonic[profile_id] = time.monotonic()
+                last_start = float(self._last_start_monotonic.get(profile_id, 0.0))
+                now_m = time.monotonic()
+                elapsed = now_m - last_start if last_start > 0 else self._cooldown_s
+                rem_internal = max(0.0, self._cooldown_s - elapsed)
+                db_rem = 0.0
+                if pause_fn is not None:
+                    try:
+                        db_rem = max(0.0, float(pause_fn(profile_id)))
+                    except Exception:
+                        db_rem = 0.0
+                remaining = max(rem_internal, db_rem)
+                if remaining <= 0:
+                    break
 
-            self._log(
-                f"[{_ts()}] [upload] [START] profile={profile_id} video={task.video_path!r}"
-            )
-            ok = False
-            err_text = ""
-            try:
-                self._upload_one(profile_id, task)
-                ok = True
-            except Exception as e:
-                ok = False
-                err_text = str(e) or repr(e)
-
-            cb_attempt = self._on_profile_attempt
-            if cb_attempt is not None:
-                try:
-                    cb_attempt(profile_id, ok, err_text)
-                except Exception:
-                    # Callback errors must not break upload flow.
-                    pass
-
-            if ok:
+                parts: list[str] = []
+                if rem_internal > 0:
+                    parts.append(f"между_стартами≈{rem_internal:.0f}с")
+                if db_rem > 0:
+                    parts.append(f"пауза_1ч≈{db_rem:.0f}с")
+                hint = "+".join(parts) if parts else "cooldown"
                 self._log(
-                    f"[{_ts()}] [upload] [OK] profile={profile_id} video={task.video_path!r}"
+                    f"[{_ts()}] [upload] [WAIT] profile={profile_id} "
+                    f"sleep_s={remaining:.1f} ({hint}) video={task.video_path!r}"
+                )
+                chunk = min(remaining, 30.0)
+                self._stop.wait(timeout=chunk)
+                if self._stop.is_set():
+                    try:
+                        self._global_q.put(task)
+                    except Exception:
+                        pass
+                    q.task_done()
+                    return
+
+            # Semaphore.acquire() без таймаута не прерывается при stop() — поток «висит» и не
+            # отпускает очередь; отмена с главного окна не доводит сессию до конца.
+            got_slot = False
+            while True:
+                if self._stop.is_set():
+                    break
+                if self._upload_slots.acquire(timeout=0.35):
+                    got_slot = True
+                    break
+            if not got_slot:
+                self._log(
+                    f"[{_ts()}] [upload] [ABANDON] profile={profile_id} "
+                    f"reason=stop_waiting_slot video={task.video_path!r}"
                 )
                 with self._done_lock:
-                    self._done_ok += 1
-            else:
-                # Record attempt on this profile and requeue to another one.
-                task.attempts_by_profile[profile_id] = int(
-                    task.attempts_by_profile.get(profile_id, 0)
-                ) + 1
-                task.last_failed_profile = profile_id
+                    self._abandoned += 1
+                q.task_done()
+                continue
+
+            try:
+                if self._stop.is_set():
+                    try:
+                        self._global_q.put(task)
+                    except Exception:
+                        pass
+                    q.task_done()
+                    continue
+
+                # Mark start time immediately (requirement: track *start*).
+                self._last_start_monotonic[profile_id] = time.monotonic()
+
                 self._log(
-                    f"[{_ts()}] [upload] [ERROR] profile={profile_id} video={task.video_path!r} "
-                    f"attempt={task.attempts_by_profile[profile_id]}/{self._max_attempts} err={err_text!r}"
+                    f"[{_ts()}] [upload] [START] profile={profile_id} video={task.video_path!r}"
                 )
-                self._global_q.put(task)
+                ok = False
+                err_text = ""
+                try:
+                    self._upload_one(profile_id, task)
+                    ok = True
+                except Exception as e:
+                    ok = False
+                    err_text = str(e) or repr(e)
+
+                cb_attempt = self._on_profile_attempt
+                if cb_attempt is not None:
+                    try:
+                        cb_attempt(profile_id, ok, err_text)
+                    except Exception:
+                        # Callback errors must not break upload flow.
+                        pass
+
+                if ok:
+                    self._log(
+                        f"[{_ts()}] [upload] [OK] profile={profile_id} video={task.video_path!r}"
+                    )
+                    with self._done_lock:
+                        self._done_ok += 1
+                else:
+                    # Record attempt on this profile and requeue to another one.
+                    task.attempts_by_profile[profile_id] = int(
+                        task.attempts_by_profile.get(profile_id, 0)
+                    ) + 1
+                    task.last_failed_profile = profile_id
+                    self._log(
+                        f"[{_ts()}] [upload] [ERROR] profile={profile_id} video={task.video_path!r} "
+                        f"attempt={task.attempts_by_profile[profile_id]}/{self._max_attempts} err={err_text!r}"
+                    )
+                    self._global_q.put(task)
+            finally:
+                self._upload_slots.release()
 
             q.task_done()
 
@@ -289,7 +373,10 @@ class MultiProfileUploader:
         # We consider "all done" when we have accounted for every initial task as OK/FAILED
         # and all queues are drained. This avoids busy loops when there is no work.
         with self._done_lock:
-            finished = (self._done_ok + self._done_failed) >= self._total and self._total > 0
+            finished = (
+                (self._done_ok + self._done_failed + self._abandoned) >= self._total
+                and self._total > 0
+            )
         if not finished:
             return False
         if not self._global_q.empty():

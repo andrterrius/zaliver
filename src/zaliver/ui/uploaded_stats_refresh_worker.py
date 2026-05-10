@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import requests
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from zaliver.youtube_parsing.video_stats import (
     YoutubeDataApiError,
-    fetch_video_stats_by_id,
+    YOUTUBE_DATA_API_VIDEOS_LIST_MAX_IDS,
+    fetch_video_stats_batch,
 )
 
 
@@ -34,14 +36,30 @@ class UploadedStatsRefreshWorker(QObject):
             self.finished.emit(successes, failures)
             return
         self.progress.emit(0, total, ids[0])
-        for i, v in enumerate(ids, start=1):
+        http = requests.Session()
+        done = 0
+        step = YOUTUBE_DATA_API_VIDEOS_LIST_MAX_IDS
+        for batch_start in range(0, total, step):
+            chunk = ids[batch_start : batch_start + step]
+            last_in_chunk = chunk[-1]
             try:
-                st = fetch_video_stats_by_id(v, api_key=key)
-                successes.append(
-                    (st.video_id, int(st.view_count), st.like_count, st.comment_count)
+                batch_ok, batch_fail = fetch_video_stats_batch(
+                    chunk, api_key=key, session=http
                 )
             except Exception as e:
                 is_data_api = isinstance(e, YoutubeDataApiError)
-                failures.append((v, str(e), is_data_api))
-            self.progress.emit(i, total, v)
+                for v in chunk:
+                    failures.append((v, str(e), is_data_api))
+                done += len(chunk)
+                self.progress.emit(done, total, last_in_chunk)
+                continue
+            for st in batch_ok:
+                successes.append(
+                    (st.video_id, int(st.view_count), st.like_count, st.comment_count)
+                )
+            for vid_f, msg_f in batch_fail:
+                is_data_api = "Invalid video id" not in msg_f
+                failures.append((vid_f, msg_f, is_data_api))
+            done += len(chunk)
+            self.progress.emit(done, total, last_in_chunk)
         self.finished.emit(successes, failures)

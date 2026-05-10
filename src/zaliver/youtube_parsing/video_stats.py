@@ -19,6 +19,9 @@ class YoutubeVideoStats:
 
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,}$")
 
+# YouTube Data API v3: `videos.list` accepts at most 50 comma-separated ids.
+YOUTUBE_DATA_API_VIDEOS_LIST_MAX_IDS = 50
+
 
 def extract_video_id(url_or_id: str) -> str:
     """
@@ -63,6 +66,90 @@ class YoutubeNoKeyParseError(RuntimeError):
     pass
 
 
+def _statistics_scalar_to_int(v: Any) -> int | None:
+    if v is None:
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str) and v.isdigit():
+        return int(v)
+    try:
+        return int(v)
+    except Exception:
+        return None
+
+
+def _item_to_youtube_video_stats(item: dict[str, Any]) -> YoutubeVideoStats | None:
+    vid = str(item.get("id") or "").strip()
+    if not _VIDEO_ID_RE.fullmatch(vid):
+        return None
+    stats = item.get("statistics") or {}
+    if not isinstance(stats, dict):
+        return None
+    view_count = _statistics_scalar_to_int(stats.get("viewCount"))
+    if view_count is None:
+        return None
+    return YoutubeVideoStats(
+        video_id=vid,
+        view_count=view_count,
+        like_count=_statistics_scalar_to_int(stats.get("likeCount")),
+        comment_count=_statistics_scalar_to_int(stats.get("commentCount")),
+    )
+
+
+def _fetch_statistics_map_for_ids(
+    video_ids: list[str],
+    *,
+    api_key: str | None = None,
+    timeout_s: float = 15.0,
+    session: requests.Session | None = None,
+) -> dict[str, YoutubeVideoStats]:
+    """
+    One `videos.list` request. `video_ids` must be non-empty, each id valid regex,
+    length at most YOUTUBE_DATA_API_VIDEOS_LIST_MAX_IDS after deduplication.
+    """
+    if not video_ids:
+        return {}
+    unique = list(dict.fromkeys(video_ids))
+    if len(unique) > YOUTUBE_DATA_API_VIDEOS_LIST_MAX_IDS:
+        raise YoutubeDataApiError(
+            f"Too many video ids in one request: {len(unique)} "
+            f"(max {YOUTUBE_DATA_API_VIDEOS_LIST_MAX_IDS})"
+        )
+
+    key = (api_key or os.getenv("YOUTUBE_API_KEY") or "").strip()
+    if not key:
+        raise YoutubeDataApiError(
+            "Missing API key. Set env var YOUTUBE_API_KEY or pass api_key=..."
+        )
+
+    ids_csv = ",".join(unique)
+    http = session or requests.Session()
+    try:
+        r = http.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={"part": "statistics", "id": ids_csv, "key": key},
+            timeout=timeout_s,
+        )
+    except Exception as e:
+        raise YoutubeDataApiError(f"Request failed: {e!r}") from e
+
+    if r.status_code != 200:
+        body = (r.text or "").strip()
+        raise YoutubeDataApiError(f"HTTP {r.status_code}: {body[:500]}")
+
+    data: dict[str, Any] = r.json() or {}
+    items = data.get("items") or []
+    out: dict[str, YoutubeVideoStats] = {}
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        st = _item_to_youtube_video_stats(raw)
+        if st is not None:
+            out[st.video_id] = st
+    return out
+
+
 def fetch_video_stats_by_id(
     video_id: str,
     *,
@@ -78,57 +165,74 @@ def fetch_video_stats_by_id(
     if not _VIDEO_ID_RE.fullmatch(vid):
         raise YoutubeDataApiError(f"Invalid video id: {video_id!r}")
 
-    key = (api_key or os.getenv("YOUTUBE_API_KEY")).strip()
-    if not key:
-        raise YoutubeDataApiError(
-            "Missing API key. Set env var YOUTUBE_API_KEY or pass api_key=..."
-        )
-
-    http = session or requests.Session()
-    try:
-        r = http.get(
-            "https://www.googleapis.com/youtube/v3/videos",
-            params={"part": "statistics", "id": vid, "key": key},
-            timeout=timeout_s,
-        )
-    except Exception as e:
-        raise YoutubeDataApiError(f"Request failed: {e!r}") from e
-
-    if r.status_code != 200:
-        body = (r.text or "").strip()
-        raise YoutubeDataApiError(f"HTTP {r.status_code}: {body[:500]}")
-
-    data: dict[str, Any] = r.json() or {}
-    items = data.get("items") or []
-    if not items:
+    m = _fetch_statistics_map_for_ids(
+        [vid], api_key=api_key, timeout_s=timeout_s, session=session
+    )
+    if vid not in m:
         raise YoutubeDataApiError(
             f"No items returned for video id {vid!r} (is it public / exists?)"
         )
+    return m[vid]
 
-    stats = (items[0] or {}).get("statistics") or {}
 
-    def _to_int(v: Any) -> int | None:
-        if v is None:
-            return None
-        if isinstance(v, int):
-            return v
-        if isinstance(v, str) and v.isdigit():
-            return int(v)
-        try:
-            return int(v)
-        except Exception:
-            return None
+def fetch_video_stats_batch(
+    video_ids: list[str],
+    *,
+    api_key: str | None = None,
+    timeout_s: float = 15.0,
+    session: requests.Session | None = None,
+) -> tuple[list[YoutubeVideoStats], list[tuple[str, str]]]:
+    """
+    One Data API request for up to 50 ids (comma-separated `id` parameter).
 
-    view_count = _to_int(stats.get("viewCount"))
-    if view_count is None:
-        raise YoutubeDataApiError(f"Missing/invalid viewCount in response: {stats!r}")
+    Returns (successes in the same order as input, failures as (id, message)).
+    Invalid ids do not trigger HTTP. Ids omitted from a successful response are
+    reported as failures (private / deleted / not found).
+    """
+    successes: list[YoutubeVideoStats] = []
+    failures: list[tuple[str, str]] = []
+    if len(video_ids) > YOUTUBE_DATA_API_VIDEOS_LIST_MAX_IDS:
+        raise YoutubeDataApiError(
+            f"Batch size {len(video_ids)} exceeds max "
+            f"{YOUTUBE_DATA_API_VIDEOS_LIST_MAX_IDS}"
+        )
 
-    return YoutubeVideoStats(
-        video_id=vid,
-        view_count=view_count,
-        like_count=_to_int(stats.get("likeCount")),
-        comment_count=_to_int(stats.get("commentCount")),
-    )
+    ordered: list[str] = []
+    for raw in video_ids:
+        v = (raw or "").strip()
+        if v:
+            ordered.append(v)
+
+    if not ordered:
+        return successes, failures
+
+    valid_for_http: list[str] = []
+    for v in ordered:
+        if _VIDEO_ID_RE.fullmatch(v):
+            valid_for_http.append(v)
+
+    stats_by_id: dict[str, YoutubeVideoStats] = {}
+    if valid_for_http:
+        stats_by_id = _fetch_statistics_map_for_ids(
+            valid_for_http, api_key=api_key, timeout_s=timeout_s, session=session
+        )
+
+    for v in ordered:
+        if not _VIDEO_ID_RE.fullmatch(v):
+            failures.append((v, f"Invalid video id: {v!r}"))
+            continue
+        st = stats_by_id.get(v)
+        if st is not None:
+            successes.append(st)
+        else:
+            failures.append(
+                (
+                    v,
+                    "No statistics returned (video may be private, deleted, or not found).",
+                )
+            )
+
+    return successes, failures
 
 
 _DEFAULT_HEADERS = {

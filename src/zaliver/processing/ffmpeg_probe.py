@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from zaliver.processing.ffmpeg_merge import resolve_ffmpeg_executable
 
@@ -132,3 +132,100 @@ def probe_video_stream(path: str) -> tuple[int, int, float, int, int]:
         fps = 30.0
     fc = _frame_count_from_probe(st, fmt, fps)
     return w, h, fps, fc, 0
+
+
+def _probe_positive_int(val: Any) -> Optional[int]:
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s or s in ("N/A", "0"):
+        return None
+    try:
+        n = int(s)
+        return n if n > 0 else None
+    except ValueError:
+        return None
+
+
+def ffprobe_streams_and_format(path: str) -> Dict[str, Any]:
+    """All streams (codec, bitrate) + format size/duration/bit_rate for bitrate heuristics."""
+    probe = resolve_ffprobe_executable()
+    if not probe:
+        raise RuntimeError("ffprobe не найден (нужен рядом с ffmpeg или в PATH)")
+    cmd = [
+        probe,
+        "-v",
+        "error",
+        "-show_entries",
+        "stream=codec_type,bit_rate",
+        "-show_entries",
+        "format=duration,size,bit_rate",
+        "-of",
+        "json",
+        path,
+    ]
+    p = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=_popen_flags(),
+        timeout=120,
+    )
+    if p.returncode != 0:
+        err = (p.stderr or p.stdout or "").strip()
+        raise RuntimeError(err or f"ffprobe failed ({p.returncode})")
+    return json.loads(p.stdout or "{}")
+
+
+def estimate_target_video_bps(path: str) -> Optional[int]:
+    """
+    Оценка битрейта основного видеопотока (бит/с) по метаданным контейнера,
+    чтобы перекодирование давало размер файла близкий к исходнику.
+    """
+    try:
+        data = ffprobe_streams_and_format(path)
+    except (RuntimeError, json.JSONDecodeError, OSError):
+        return None
+    streams: List[Dict[str, Any]] = list(data.get("streams") or [])
+    fmt = data.get("format") or {}
+
+    video_br: Optional[int] = None
+    n_audio = 0
+    audio_sum = 0
+    for st in streams:
+        ct = str(st.get("codec_type") or "").lower()
+        br = _probe_positive_int(st.get("bit_rate"))
+        if ct == "video" and video_br is None:
+            video_br = br
+        elif ct == "audio":
+            n_audio += 1
+            if br is not None:
+                audio_sum += br
+
+    if video_br is not None:
+        return video_br
+
+    fmt_br = _probe_positive_int(fmt.get("bit_rate"))
+    if fmt_br is not None:
+        guess = fmt_br - audio_sum
+        if n_audio > 0 and audio_sum == 0:
+            guess -= 128_000 * n_audio
+        if guess > 200_000:
+            return guess
+
+    size_b = _probe_positive_int(fmt.get("size"))
+    dur_s = fmt.get("duration")
+    try:
+        dur = float(dur_s) if dur_s is not None and str(dur_s) not in ("N/A", "") else 0.0
+    except ValueError:
+        dur = 0.0
+    if size_b is None or dur <= 0.05:
+        return None
+    total_bps = int((size_b * 8) / dur)
+    overhead = audio_sum if audio_sum > 0 else (128_000 * n_audio if n_audio else 0)
+    guess2 = total_bps - overhead - 64_000
+    if guess2 > 200_000:
+        return guess2
+    return None

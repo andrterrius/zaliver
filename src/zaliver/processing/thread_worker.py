@@ -19,10 +19,10 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from zaliver.processing.batch_paths import list_video_files
 from zaliver.processing.chunking import VideoInfo, build_n_even_chunks, probe_video
+from zaliver.processing.ffmpeg_probe import estimate_target_video_bps
 from zaliver.processing.ffmpeg_merge import (
     check_ffmpeg,
     check_ffmpeg_tools,
-    concat_segments,
     encoder_runtime_error,
     ffmpeg_encoder_list_text,
     mux_video_audio,
@@ -71,6 +71,7 @@ class OutputJob:
     info: VideoInfo
     job_id: str
     settings: Dict[str, Any]
+    target_video_bps: Optional[int] = None
     done_frames: int = 0
     finished: bool = False
     chunk_mode: bool = False
@@ -215,7 +216,7 @@ class ProcessingController(QObject):
                 return
 
             copies_per_file = max(1, int(options.get("copies_per_file", 1)))
-            plan: List[Tuple[Path, Path, VideoInfo, int, int]] = []
+            plan: List[Tuple[Path, Path, VideoInfo, int, int, Optional[int]]] = []
             try:
                 for p in videos:
                     inf = probe_video(str(p))
@@ -223,9 +224,10 @@ class ProcessingController(QObject):
                         raise RuntimeError(
                             f"{p.name}: в файле нет кадров (frame_count=0)."
                         )
+                    tvb = estimate_target_video_bps(str(p))
                     for ci in range(1, copies_per_file + 1):
                         outp = out_dir / _unique_output_filename(p.stem)
-                        plan.append((p, outp, inf, ci, copies_per_file))
+                        plan.append((p, outp, inf, ci, copies_per_file, tvb))
             except Exception as e:
                 self.finished.emit(False, str(e))
                 return
@@ -262,7 +264,7 @@ class ProcessingController(QObject):
             jobs: List[OutputJob] = []
             file_idx = 0
             try:
-                for p, outp, info, copy_index, _ in plan:
+                for p, outp, info, copy_index, _, tvb in plan:
                     file_idx += 1
                     if cancelled():
                         self.finished.emit(False, "Отменено.")
@@ -293,6 +295,7 @@ class ProcessingController(QObject):
                         info=info,
                         job_id=job_id,
                         settings=settings,
+                        target_video_bps=tvb,
                     )
                     if randomize:
                         log(
@@ -301,6 +304,11 @@ class ProcessingController(QObject):
                             f"контр.{settings['contrast']:.3f}, "
                             f"насыщ.{settings['saturation_scale']:.3f}, "
                             f"шум σ={settings['noise_sigma']:.2f}"
+                        )
+                    if tvb is not None:
+                        log(
+                            f"{job.tag(n_jobs)}: размер ≈ как у исходника — "
+                            f"видео ~{tvb / 1_000_000:.2f} Мбит/с (оценка ffprobe)."
                         )
                     _try_enable_chunk_mode(job, num_workers, out_dir, log, n_jobs)
                     if not job.chunk_mode:
@@ -474,6 +482,7 @@ class ProcessingController(QObject):
                             "height": j.info.height,
                             "fps": j.info.fps,
                             "use_gpu": use_gpu,
+                            "target_video_bps": j.target_video_bps,
                         }
                     else:
                         start, cnt, seg = j.chunks[meta.chunk_idx]
@@ -489,6 +498,7 @@ class ProcessingController(QObject):
                             "height": j.info.height,
                             "fps": j.info.fps,
                             "use_gpu": use_gpu,
+                            "target_video_bps": j.target_video_bps,
                         }
                     fut = pool.submit(process_chunk_disk, task)
                     futures[fut] = meta
@@ -560,6 +570,7 @@ class ProcessingController(QObject):
                                         playback_speed=_job_playback_speed(j.settings),
                                         audio_chorus=bool(j.settings.get("audio_chorus", False)),
                                         log=log,
+                                        target_video_bps=j.target_video_bps,
                                     )
                                     try:
                                         av_tmp.replace(j.outp)
@@ -602,6 +613,7 @@ class ProcessingController(QObject):
                                         playback_speed=_job_playback_speed(j.settings),
                                         audio_chorus=bool(j.settings.get("audio_chorus", False)),
                                         log=log,
+                                        target_video_bps=j.target_video_bps,
                                     )
                                 except Exception as e:
                                     finish_error(

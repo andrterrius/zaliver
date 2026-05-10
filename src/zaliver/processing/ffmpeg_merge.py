@@ -327,50 +327,122 @@ def encoder_runtime_error(encoder: str) -> str:
     return _encoder_runtime_err.get(str(encoder).strip(), "")
 
 
-def pick_best_h264_encoder(*, prefer_gpu: bool = True) -> Tuple[str, List[str]]:
+_MIN_TARGET_VIDEO_BPS = 300_000
+_MAX_TARGET_VIDEO_BPS = 150_000_000
+
+
+def clamp_target_video_bps(bps: int) -> int:
+    return max(_MIN_TARGET_VIDEO_BPS, min(int(bps), _MAX_TARGET_VIDEO_BPS))
+
+
+def libx264_encode_args_for_target(target_video_bps: Optional[int]) -> List[str]:
+    """CRF по умолчанию или VBV по целевому битрейту (подгонка размера к исходнику)."""
+    if target_video_bps is None or target_video_bps <= 0:
+        return ["-preset", "veryfast", "-crf", "20"]
+    b = clamp_target_video_bps(target_video_bps)
+    maxr = max(b + 1, int(b * 1.35))
+    buf = max(b * 2, int(b * 2))
+    return ["-preset", "veryfast", "-b:v", str(b), "-maxrate", str(maxr), "-bufsize", str(buf)]
+
+
+def _h264_nvenc_args(target_video_bps: Optional[int]) -> List[str]:
+    if target_video_bps is None or target_video_bps <= 0:
+        return ["-preset", "p4", "-cq", "23", "-b:v", "0"]
+    b = clamp_target_video_bps(target_video_bps)
+    return [
+        "-preset",
+        "p4",
+        "-tune",
+        "hq",
+        "-b:v",
+        str(b),
+        "-maxrate",
+        str(max(b + 1, int(b * 1.45))),
+        "-bufsize",
+        str(max(b * 2, int(b * 2))),
+    ]
+
+
+def _h264_qsv_args(target_video_bps: Optional[int]) -> List[str]:
+    if target_video_bps is None or target_video_bps <= 0:
+        return ["-global_quality", "23", "-look_ahead", "1"]
+    b = clamp_target_video_bps(target_video_bps)
+    maxr = max(b + 1, int(b * 1.45))
+    buf = max(b * 2, int(b * 2))
+    return [
+        "-look_ahead",
+        "1",
+        "-b:v",
+        str(b),
+        "-maxrate",
+        str(maxr),
+        "-bufsize",
+        str(buf),
+    ]
+
+
+def _h264_amf_args(target_video_bps: Optional[int]) -> List[str]:
+    if target_video_bps is None or target_video_bps <= 0:
+        return [
+            "-usage",
+            "transcoding",
+            "-quality",
+            "speed",
+            "-rc",
+            "cqp",
+            "-qp_i",
+            "23",
+            "-qp_p",
+            "23",
+            "-qp_b",
+            "23",
+            "-bf",
+            "0",
+            "-async_depth",
+            "32",
+        ]
+    b = clamp_target_video_bps(target_video_bps)
+    maxr = max(b + 1, int(b * 1.5))
+    return [
+        "-usage",
+        "transcoding",
+        "-quality",
+        "balanced",
+        "-rc",
+        "vbr_peak",
+        "-b:v",
+        str(b),
+        "-maxrate",
+        str(maxr),
+        "-async_depth",
+        "32",
+    ]
+
+
+def pick_best_h264_encoder(
+    *, prefer_gpu: bool = True, target_video_bps: Optional[int] = None
+) -> Tuple[str, List[str]]:
     """
     Return (encoder_name, extra_args) preferring GPU encoders if available.
-    If no GPU encoder is found, returns ("libx264", ["-preset","veryfast","-crf","20"]).
+    If target_video_bps is set, args target that video bitrate (VBR) to approximate source file size.
+    Otherwise NVENC/QSV/AMF use quality (CQ) presets and libx264 uses CRF 20.
     """
     txt = ffmpeg_encoder_list_text().lower()
-    # Preference order: NVIDIA -> Intel -> AMD, then CPU.
     if prefer_gpu and "h264_nvenc" in txt and _probe_encoder_runtime("h264_nvenc"):
-        # "p1..p7" presets exist on modern FFmpeg; "p4" is a good default.
-        return ("h264_nvenc", ["-preset", "p4", "-cq", "23", "-b:v", "0"])
+        return ("h264_nvenc", _h264_nvenc_args(target_video_bps))
     if prefer_gpu and "h264_qsv" in txt and _probe_encoder_runtime("h264_qsv"):
-        # QSV: use global_quality when supported; fallback is still OK.
-        return ("h264_qsv", ["-global_quality", "23", "-look_ahead", "1"])
+        return ("h264_qsv", _h264_qsv_args(target_video_bps))
     if prefer_gpu and "h264_amf" in txt and _probe_encoder_runtime("h264_amf"):
-        # AMF: tune for throughput (speed) by default.
-        # Notes:
-        # - We keep CQP for stable quality without bitrate planning overhead.
-        # - Disable B-frames for lower latency and typically higher speed.
-        # - Raise async_depth to allow deeper internal parallelism.
-        return (
-            "h264_amf",
-            [
-                "-usage",
-                "transcoding",
-                "-quality",
-                "speed",
-                "-rc",
-                "cqp",
-                "-qp_i",
-                "23",
-                "-qp_p",
-                "23",
-                "-qp_b",
-                "23",
-                "-bf",
-                "0",
-                "-async_depth",
-                "32",
-            ],
-        )
-    return ("libx264", ["-preset", "veryfast", "-crf", "20"])
+        return ("h264_amf", _h264_amf_args(target_video_bps))
+    return ("libx264", libx264_encode_args_for_target(target_video_bps))
 
 
-def concat_segments(segment_paths: List[str], out_path: str, log: LogFn = None) -> None:
+def concat_segments(
+    segment_paths: List[str],
+    out_path: str,
+    log: LogFn = None,
+    target_video_bps: Optional[int] = None,
+) -> None:
     if not segment_paths:
         raise ValueError("No segments to concat")
     out = Path(out_path)
@@ -398,6 +470,7 @@ def concat_segments(segment_paths: List[str], out_path: str, log: LogFn = None) 
             log=log,
         )
     except RuntimeError:
+        vargs = libx264_encode_args_for_target(target_video_bps)
         run_ffmpeg(
             [
                 "-f",
@@ -408,10 +481,7 @@ def concat_segments(segment_paths: List[str], out_path: str, log: LogFn = None) 
                 list_path,
                 "-c:v",
                 "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "20",
+                *vargs,
                 "-an",
                 str(out),
             ],
@@ -503,6 +573,7 @@ def mux_video_audio(
     playback_speed: Optional[float] = None,
     audio_chorus: bool = False,
     log: LogFn = None,
+    target_video_bps: Optional[int] = None,
 ) -> None:
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -527,6 +598,7 @@ def mux_video_audio(
                     log("В исходнике нет аудио — сохраняется только ускоренное видео (без звука).")
             if want_speed:
                 filt = f"[0:v]setpts=PTS/{spd:.9f}[vout]"
+                vargs = libx264_encode_args_for_target(target_video_bps)
                 run_ffmpeg(
                     [
                         "-i",
@@ -538,10 +610,7 @@ def mux_video_audio(
                         "-an",
                         "-c:v",
                         "libx264",
-                        "-preset",
-                        "veryfast",
-                        "-crf",
-                        "20",
+                        *vargs,
                         "-pix_fmt",
                         "yuv420p",
                         "-movflags",
@@ -567,6 +636,7 @@ def mux_video_audio(
             else:
                 parts.append(_atempo_chain("[1:a]", spd, "[aout]"))
             filt = ";".join(parts)
+            vargs = libx264_encode_args_for_target(target_video_bps)
             run_ffmpeg(
                 [
                     "-i",
@@ -581,10 +651,7 @@ def mux_video_audio(
                     "[aout]",
                     "-c:v",
                     "libx264",
-                    "-preset",
-                    "veryfast",
-                    "-crf",
-                    "20",
+                    *vargs,
                     "-pix_fmt",
                     "yuv420p",
                     "-movflags",
@@ -660,11 +727,14 @@ def merge_segments_with_source_audio(
     playback_speed: Optional[float] = None,
     audio_chorus: bool = False,
     log: LogFn = None,
+    target_video_bps: Optional[int] = None,
 ) -> None:
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
     concat_out = work / "concat_video.mp4"
-    concat_segments(segment_paths, str(concat_out), log=log)
+    concat_segments(
+        segment_paths, str(concat_out), log=log, target_video_bps=target_video_bps
+    )
     mux_video_audio(
         str(concat_out),
         source_video,
@@ -672,4 +742,5 @@ def merge_segments_with_source_audio(
         playback_speed=playback_speed,
         audio_chorus=audio_chorus,
         log=log,
+        target_video_bps=target_video_bps,
     )

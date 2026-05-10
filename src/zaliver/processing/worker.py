@@ -95,7 +95,20 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
         w_out=w_out,
         h_out=h_out,
     )
-    enc, enc_args = pick_best_h264_encoder(prefer_gpu=use_gpu)
+    tb = task.get("target_video_bps")
+    tb_i: Optional[int]
+    if tb is None:
+        tb_i = None
+    else:
+        try:
+            tb_i = int(tb)
+        except (TypeError, ValueError):
+            tb_i = None
+    if tb_i is not None and tb_i <= 0:
+        tb_i = None
+    enc, enc_args = pick_best_h264_encoder(
+        prefer_gpu=use_gpu, target_video_bps=tb_i
+    )
 
     cmd = [
         exe,

@@ -61,10 +61,13 @@ class UploadedVideo:
     description: str
     url: str
     video_id: str
+    profile_id: str
     view_count: int | None
     like_count: int | None
     comment_count: int | None
     stats_updated_at: str | None
+    stats_unavailable: bool
+    stats_unavailable_data_api: bool
 
 
 class UploadStore:
@@ -153,6 +156,8 @@ class UploadStore:
             # Lightweight migration for existing DBs (add profile_id).
             for stmt in (
                 "ALTER TABLE uploaded_videos ADD COLUMN profile_id TEXT NOT NULL DEFAULT '';",
+                "ALTER TABLE uploaded_videos ADD COLUMN stats_unavailable INTEGER NOT NULL DEFAULT 0;",
+                "ALTER TABLE uploaded_videos ADD COLUMN stats_unavailable_data_api INTEGER NOT NULL DEFAULT 0;",
             ):
                 try:
                     con.execute(stmt)
@@ -303,7 +308,8 @@ class UploadStore:
             con.execute(
                 """
                 UPDATE uploaded_videos
-                SET view_count=?, like_count=?, comment_count=?, stats_updated_at=?
+                SET view_count=?, like_count=?, comment_count=?, stats_updated_at=?,
+                    stats_unavailable=0, stats_unavailable_data_api=0
                 WHERE video_id=?;
                 """,
                 (
@@ -313,6 +319,31 @@ class UploadStore:
                     ts,
                     (video_id or "").strip(),
                 ),
+            )
+
+    def mark_video_stats_unavailable(
+        self,
+        *,
+        video_id: str,
+        stats_updated_at: str | None = None,
+        youtube_data_api_error: bool = False,
+    ) -> None:
+        """После неудачного запроса статистики: сброс счётчиков и флаг недоступности."""
+        ts = (stats_updated_at or _utc_now_iso()).strip() or _utc_now_iso()
+        vid = (video_id or "").strip()
+        if not vid:
+            return
+        api_flag = 1 if youtube_data_api_error else 0
+        with self._connect() as con:
+            con.execute(
+                """
+                UPDATE uploaded_videos
+                SET view_count=NULL, like_count=NULL, comment_count=NULL,
+                    stats_updated_at=?, stats_unavailable=1,
+                    stats_unavailable_data_api=?
+                WHERE video_id=?;
+                """,
+                (ts, api_flag, vid),
             )
 
     def list_sessions(self, limit: int = 200) -> list[UploadSession]:
@@ -355,7 +386,10 @@ class UploadStore:
                 SELECT
                     v.id, v.session_id, s.started_at AS session_started_at,
                     v.uploaded_at, v.title, v.description, v.url, v.video_id,
-                    view_count, like_count, comment_count, stats_updated_at
+                    COALESCE(v.profile_id, '') AS profile_id,
+                    v.view_count, v.like_count, v.comment_count, v.stats_updated_at,
+                    COALESCE(v.stats_unavailable, 0) AS stats_unavailable,
+                    COALESCE(v.stats_unavailable_data_api, 0) AS stats_unavailable_data_api
                 FROM uploaded_videos v
                 LEFT JOIN upload_sessions s ON s.id = v.session_id
                 WHERE v.session_id IN ({ph})
@@ -376,10 +410,15 @@ class UploadStore:
                 description=str(r["description"] or ""),
                 url=str(r["url"] or ""),
                 video_id=str(r["video_id"] or ""),
+                profile_id=str(r["profile_id"] or ""),
                 view_count=int(r["view_count"]) if r["view_count"] is not None else None,
                 like_count=int(r["like_count"]) if r["like_count"] is not None else None,
                 comment_count=int(r["comment_count"]) if r["comment_count"] is not None else None,
                 stats_updated_at=str(r["stats_updated_at"]) if r["stats_updated_at"] else None,
+                stats_unavailable=bool(int(r["stats_unavailable"] or 0)),
+                stats_unavailable_data_api=bool(
+                    int(r["stats_unavailable_data_api"] or 0)
+                ),
             )
             out.setdefault(v.session_id, []).append(v)
         return out
@@ -392,7 +431,10 @@ class UploadStore:
                 SELECT
                     v.id, v.session_id, s.started_at AS session_started_at,
                     v.uploaded_at, v.title, v.description, v.url, v.video_id,
-                    v.view_count, v.like_count, v.comment_count, v.stats_updated_at
+                    COALESCE(v.profile_id, '') AS profile_id,
+                    v.view_count, v.like_count, v.comment_count, v.stats_updated_at,
+                    COALESCE(v.stats_unavailable, 0) AS stats_unavailable,
+                    COALESCE(v.stats_unavailable_data_api, 0) AS stats_unavailable_data_api
                 FROM uploaded_videos v
                 LEFT JOIN upload_sessions s ON s.id = v.session_id
                 ORDER BY v.uploaded_at DESC, v.id DESC
@@ -414,10 +456,15 @@ class UploadStore:
                     description=str(r["description"] or ""),
                     url=str(r["url"] or ""),
                     video_id=str(r["video_id"] or ""),
+                    profile_id=str(r["profile_id"] or ""),
                     view_count=int(r["view_count"]) if r["view_count"] is not None else None,
                     like_count=int(r["like_count"]) if r["like_count"] is not None else None,
                     comment_count=int(r["comment_count"]) if r["comment_count"] is not None else None,
                     stats_updated_at=str(r["stats_updated_at"]) if r["stats_updated_at"] else None,
+                    stats_unavailable=bool(int(r["stats_unavailable"] or 0)),
+                    stats_unavailable_data_api=bool(
+                        int(r["stats_unavailable_data_api"] or 0)
+                    ),
                 )
             )
         return out

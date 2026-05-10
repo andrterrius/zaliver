@@ -457,3 +457,261 @@ QLabel#anticProfileProxy[proxyState="none"] {
     background-color: rgba(148, 163, 184, 0.08);
     border: 1px dashed rgba(148, 163, 184, 0.28);
 }
+
+/* Залитые видео — фирменный фиолетово-белый стиль (как в остальном UI) */
+QFrame#uploadedSidePanel {
+    background-color: #151826;
+    border: 1px solid rgba(129, 140, 248, 0.35);
+    border-radius: 12px;
+}
+
+QLabel#uploadedSideTitle {
+    font-size: 18px;
+    font-weight: 800;
+    color: #f8fafc;
+    letter-spacing: 0.3px;
+}
+
+QFrame#uploadedStatTile {
+    background-color: #0f1118;
+    border: 1px solid rgba(99, 102, 241, 0.28);
+    border-radius: 10px;
+}
+
+QLabel#uploadedStatTileTitle {
+    font-size: 10px;
+    font-weight: 700;
+    color: #a5b4fc;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+
+QLabel#uploadedStatTileValue {
+    font-size: 20px;
+    font-weight: 800;
+    color: #ffffff;
+}
+
+QLabel#uploadedMetricName {
+    font-size: 12px;
+    font-weight: 700;
+    color: #e4e6ef;
+}
+
+QLabel#uploadedMetricYellow {
+    font-size: 13px;
+    font-weight: 800;
+    color: #fde68a;
+}
+
+QLabel#uploadedMetricGreen {
+    font-size: 13px;
+    font-weight: 800;
+    color: #ddd6fe;
+}
+
+QLabel#uploadedMetricRed {
+    font-size: 13px;
+    font-weight: 800;
+    color: #f9a8d4;
+}
+
+QLabel#uploadedSideAvg {
+    font-size: 12px;
+    font-weight: 700;
+    color: #c7d2fe;
+    padding-top: 6px;
+}
+
+QPushButton#uploadedCheckBtn {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #6366f1, stop:1 #7c3aed);
+    color: #f8fafc;
+    border: none;
+    border-radius: 10px;
+    padding: 10px 18px;
+    font-weight: 800;
+    min-width: 120px;
+}
+
+QPushButton#uploadedCheckBtn:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #818cf8, stop:1 #8b5cf6);
+    color: #ffffff;
+}
+
+QPushButton#uploadedCheckBtn:pressed {
+    background: #4f46e5;
+    color: #f8fafc;
+}
+
+QPushButton#uploadedCheckBtn:disabled {
+    background: #252836;
+    color: #64748b;
+    border: 1px solid #3d4258;
+}
+
+QLabel#uploadedSectionHint {
+    font-size: 13px;
+    font-weight: 600;
+    color: #e2e8f0;
+    letter-spacing: 0.15px;
+    line-height: 1.45;
+    padding: 2px 0 4px 0;
+}
+
+QLabel#uploadedSortCaption {
+    font-size: 13px;
+    font-weight: 800;
+    color: #f1f5f9;
+}
+
+QPushButton#uploadedSortActive {
+    background-color: rgba(99, 102, 241, 0.22);
+    color: #e0e7ff;
+    border: 1px solid rgba(129, 140, 248, 0.55);
+    border-radius: 8px;
+    padding: 6px 14px;
+    font-weight: 800;
+}
+
+QPushButton#uploadedSortActive:hover {
+    background-color: rgba(99, 102, 241, 0.32);
+    border-color: #a5b4fc;
+}
+
+QPushButton#uploadedSortInactive {
+    background-color: #252836;
+    color: #94a3b8;
+    border: 1px solid #3d4258;
+    border-radius: 8px;
+    padding: 6px 14px;
+    font-weight: 700;
+}
+
+QPushButton#uploadedSortInactive:hover {
+    border-color: #6366f1;
+    color: #e4e6ef;
+}
+
+QListWidget#uploadedList {
+    background-color: #0f1118;
+    border: 1px solid rgba(99, 102, 241, 0.22);
+    border-radius: 12px;
+    padding: 6px;
+}
+
+QListWidget#uploadedList::item {
+    padding: 4px;
+    border-radius: 10px;
+    min-height: 20px;
+}
+
+QListWidget#uploadedList::item:hover {
+    background-color: rgba(99, 102, 241, 0.08);
+}
+
+QListWidget#uploadedList::item:selected {
+    background-color: rgba(99, 102, 241, 0.16);
+    border: 1px solid #6366f1;
+}
+
+QLabel#uploadedRowTitle {
+    font-size: 15px;
+    font-weight: 800;
+    color: #f8fafc;
+    letter-spacing: 0.2px;
+}
+
+QLabel#uploadedRowId {
+    font-size: 12px;
+    font-weight: 800;
+    font-family: "Segoe UI", "SF Mono", "Consolas", monospace;
+    color: #c7d2fe;
+    letter-spacing: 0.35px;
+}
+
+QLabel#uploadedRowProfile {
+    font-size: 12px;
+    font-weight: 700;
+    color: #e9d5ff;
+    letter-spacing: 0.12px;
+}
+
+QLabel#uploadedRowMetrics {
+    font-size: 13px;
+    font-weight: 800;
+}
+
+QLabel#uploadedRowAgo {
+    font-size: 12px;
+    font-weight: 800;
+    color: #e0e7ff;
+}
+
+QLabel#uploadedThumb {
+    background-color: #0a0c12;
+    border: 1px solid rgba(99, 102, 241, 0.25);
+    border-radius: 10px;
+    color: #a5b4fc;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+QLabel#uploadedThumbEmpty {
+    background-color: #1a1d26;
+    border: 1px dashed rgba(129, 140, 248, 0.4);
+    border-radius: 10px;
+    color: #94a3b8;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+QPushButton#uploadedOpenBtn {
+    background-color: rgba(99, 102, 241, 0.2);
+    color: #e0e7ff;
+    border: 1px solid rgba(129, 140, 248, 0.55);
+    border-radius: 8px;
+    font-size: 16px;
+    font-weight: 800;
+    padding: 0;
+}
+
+QPushButton#uploadedOpenBtn:hover {
+    background-color: rgba(99, 102, 241, 0.35);
+    color: #ffffff;
+    border-color: #a5b4fc;
+}
+
+QPushButton#uploadedOpenBtn:disabled {
+    background-color: #252836;
+    color: #64748b;
+    border: 1px solid #3d4258;
+}
+
+QComboBox#uploadedSessionFilter {
+    background-color: #0f1118;
+    border: 1px solid #3d4258;
+    border-radius: 10px;
+    padding: 8px 12px;
+    min-height: 22px;
+    font-weight: 700;
+    color: #f1f5f9;
+}
+
+QComboBox#uploadedSessionFilter:hover {
+    border-color: #818cf8;
+}
+
+QComboBox#uploadedSessionFilter::drop-down {
+    border: none;
+    width: 28px;
+}
+
+QComboBox#uploadedSessionFilter QAbstractItemView {
+    background-color: #151826;
+    border: 1px solid #2d3142;
+    selection-background-color: rgba(99, 102, 241, 0.35);
+    selection-color: #f8fafc;
+    font-weight: 600;
+}

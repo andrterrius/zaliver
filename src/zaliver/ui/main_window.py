@@ -7,7 +7,8 @@ import sqlite3
 import sys
 import threading
 import time
-from datetime import datetime
+import urllib.request
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
@@ -15,9 +16,11 @@ from PyQt6.QtCore import (
     QEvent,
     QObject,
     QPointF,
+    QRunnable,
     QSettings,
     QSize,
     QThread,
+    QThreadPool,
     QTimer,
     Qt,
     QUrl,
@@ -31,6 +34,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -54,7 +58,7 @@ from PyQt6.QtWidgets import (
 )
 
 from zaliver.db.video_store import VideoStore
-from zaliver.db.upload_store import UploadStore
+from zaliver.db.upload_store import UploadedVideo, UploadStore
 from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI, DolphinAntyPublicAPI
 from zaliver.antydetect.local_antidetect_api import (
     DEFAULT_LOCAL_API_BASE_URL,
@@ -63,7 +67,12 @@ from zaliver.antydetect.local_antidetect_api import (
 from zaliver.processing.ffmpeg_merge import check_ffmpeg_tools
 from zaliver.processing.pipeline import RandomUniquifyBounds, UniquifySettings
 from zaliver.processing.thread_worker import ProcessingController
-from zaliver.ui.antic_profile_row import AnticProfileRow
+from zaliver.youtube_parsing.thumb_cache import (
+    read_youtube_thumb_cache,
+    write_youtube_thumb_cache,
+    youtube_mq_thumbnail_url,
+)
+from zaliver.ui.antic_profile_row import AnticProfileRow, _profile_id, _profile_name
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
 from zaliver.ui.uploaded_stats_refresh_worker import UploadedStatsRefreshWorker
 from zaliver.ui.widgets import (
@@ -88,6 +97,76 @@ _BIG_FLOAT = 1.0e12
 
 _READY_THUMB_W = 176
 _READY_THUMB_H = 99
+
+_UPLOADED_THUMB_W = 72
+_UPLOADED_THUMB_H = 128
+
+
+def _format_upload_combo_datetime(iso_s: str) -> str:
+    """Дата/время для выпадающего списка сессий: ``YYYY-MM-DD HH:MM:SS`` (локально)."""
+    if not (iso_s or "").strip():
+        return "—"
+    s = iso_s.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return s.replace("T", " ")[:19]
+    if dt.tzinfo is not None:
+        dt = dt.astimezone()
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _parse_iso_to_local(iso_s: str) -> datetime | None:
+    s = (iso_s or "").strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone()
+
+
+def _format_time_since_uploaded(iso_s: str) -> str:
+    dt = _parse_iso_to_local(iso_s)
+    if dt is None:
+        return "—"
+    now = datetime.now(dt.tzinfo)
+    sec = int((now - dt).total_seconds())
+    if sec < 0:
+        return "0 м"
+    if sec < 60:
+        return f"{max(1, sec)} м"
+    if sec < 3600:
+        return f"{sec // 60} м"
+    if sec < 86400:
+        return f"{sec // 3600} ч"
+    if sec < 86400 * 14:
+        return f"{sec // 86400} д"
+    if sec < 86400 * 60:
+        return f"{sec // (86400 * 7)} нед"
+    mo = sec // (86400 * 30)
+    return f"{max(1, mo)} мес"
+
+
+def _video_might_be_18_plus(title: str, description: str) -> bool:
+    blob = f"{title}\n{description}".lower()
+    needles = (
+        "18+",
+        "18 +",
+        "age-restricted",
+        "age restricted",
+        "not for kids",
+        "для взрослых",
+        "несовершеннолетн",
+    )
+    return any(x in blob for x in needles)
 
 
 def _format_int_compact(v: int | None) -> str:
@@ -128,6 +207,27 @@ def _sum_optional_int(values: list[int | None]) -> int | None:
         except Exception:
             continue
     return total if any_val else None
+
+
+def _uploaded_stats_error_video_id(line: object) -> str | None:
+    """Формат ошибок воркера: ``'{video_id}: {exc}'`` — достаём id для пометки в БД."""
+    s = str(line or "").strip()
+    if not s or ":" not in s:
+        return None
+    vid = s.split(":", 1)[0].strip()
+    return vid or None
+
+
+def _uploaded_row_profile_caption(
+    *, profile_id: str, profiles: list[dict[str, object]] | None
+) -> str:
+    pid = (profile_id or "").strip()
+    if not pid:
+        return "Профиль при заливе не сохранён"
+    for p in profiles or []:
+        if _profile_id(p) == pid:
+            return f"С профиля «{_profile_name(p)}»"
+    return f"С профиля (ID {pid})"
 
 
 def _format_stored_datetime(iso_s: str) -> str:
@@ -346,39 +446,45 @@ class _ReadyVideoRow(QWidget):
         self._body_mouse_release(event, on_thumb=on_thumb)
 
 
-class _UploadSessionHeaderRow(QWidget):
-    """Заголовок блока сессии: клик ставит эту сессию в фильтр «Сессия»."""
+class _UploadedThumbSignals(QObject):
+    loaded = pyqtSignal(str, object, int)
 
-    session_clicked = pyqtSignal(int)
 
-    def __init__(
-        self,
-        text: str,
-        session_id: int,
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self._session_id = int(session_id)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(10, 10, 10, 8)
-        lay.setSpacing(10)
-        lbl = QLabel(text)
-        lbl.setObjectName("title")
-        lbl.setWordWrap(True)
-        lbl.setToolTip("Показать в списке только эту сессию (фильтр сверху)")
-        lay.addWidget(lbl, 1)
+class _FetchUploadedThumbRunnable(QRunnable):
+    def __init__(self, video_id: str, generation: int, sigs: _UploadedThumbSignals) -> None:
+        super().__init__()
+        self._video_id = (video_id or "").strip()
+        self._generation = int(generation)
+        self._sigs = sigs
 
-    def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.session_clicked.emit(self._session_id)
-        super().mousePressEvent(event)
+    def run(self) -> None:
+        vid = self._video_id
+        if not vid:
+            self._sigs.loaded.emit("", b"", self._generation)
+            return
+        cached = read_youtube_thumb_cache(vid)
+        if cached:
+            self._sigs.loaded.emit(vid, cached, self._generation)
+            return
+        data = b""
+        try:
+            req = urllib.request.Request(
+                youtube_mq_thumbnail_url(vid),
+                headers={"User-Agent": "Zaliver/1.0 (uploaded list thumbnail)"},
+            )
+            with urllib.request.urlopen(req, timeout=14) as resp:
+                data = resp.read()
+        except Exception:
+            data = b""
+        if data:
+            write_youtube_thumb_cache(vid, data)
+        self._sigs.loaded.emit(vid, data, self._generation)
 
 
 class _UploadedVideoRow(QWidget):
     """
-    Строка залитого видео: открыть — клик по кнопке «Открыть».
-    Ctrl/Shift работают как в списке «Готовые видео».
+    Строка залитого видео: превью с YouTube, метрики справа, открыть ролик — кнопка «↗».
+    Ctrl/Shift — как в списке «Готовые видео».
     """
 
     activated = pyqtSignal(str)
@@ -386,15 +492,16 @@ class _UploadedVideoRow(QWidget):
     def __init__(
         self,
         *,
-        index: int,
         title: str,
         url: str,
         video_id: str,
+        uploaded_at_iso: str,
         view_count: int | None,
         like_count: int | None,
         comment_count: int | None,
-        extra_text: str,
-        updated_text: str,
+        stats_unavailable: bool = False,
+        stats_unavailable_data_api: bool = False,
+        profile_caption: str,
         tooltip: str,
         list_widget: QListWidget,
         parent: QWidget | None = None,
@@ -407,59 +514,93 @@ class _UploadedVideoRow(QWidget):
         self.setToolTip(tooltip)
 
         row = QHBoxLayout(self)
-        row.setSpacing(14)
-        row.setContentsMargins(6, 6, 10, 6)
+        row.setSpacing(12)
+        row.setContentsMargins(8, 8, 10, 8)
 
-        num = QLabel(str(index))
-        num.setObjectName("readyRowNumber")
-        num.setAlignment(
-            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
-        )
-        num.setFixedWidth(68)
-        num.setMinimumHeight(54)
+        self._thumb = QLabel()
+        self._thumb.setFixedSize(_UPLOADED_THUMB_W, _UPLOADED_THUMB_H)
+        self._thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._thumb.setObjectName("uploadedThumb")
+        self._thumb.setText("…")
+        self._thumb.setScaledContents(False)
 
         text_col = QVBoxLayout()
         text_col.setSpacing(4)
         ttl = (title or "").strip() or "(без названия)"
         title_lbl = QLabel(ttl)
-        title_lbl.setObjectName("readyRowTitle")
+        title_lbl.setObjectName("uploadedRowTitle")
         title_lbl.setWordWrap(True)
 
-        stats_lbl = QLabel(_uploaded_stats_html(views=view_count, likes=like_count, comments=comment_count))
-        stats_lbl.setObjectName("readyRowDate")
-        stats_lbl.setTextFormat(Qt.TextFormat.RichText)
-        stats_lbl.setWordWrap(False)
+        vid_s = (video_id or "").strip()
+        id_lbl = QLabel(vid_s or "—")
+        id_lbl.setObjectName("uploadedRowId")
 
-        meta_parts: list[str] = []
-        if (video_id or "").strip():
-            meta_parts.append(f"ID: {video_id.strip()}")
-        if (url or "").strip():
-            meta_parts.append(url.strip())
-        if (extra_text or "").strip():
-            meta_parts.append(extra_text.strip())
-        if (updated_text or "").strip():
-            meta_parts.append(f"Обновлено: {updated_text.strip()}")
-        meta_lbl = QLabel(" · ".join(meta_parts) if meta_parts else "—")
-        meta_lbl.setObjectName("readyRowDate")
-        meta_lbl.setWordWrap(True)
+        prof_lbl = QLabel((profile_caption or "").strip() or "—")
+        prof_lbl.setObjectName("uploadedRowProfile")
+        prof_lbl.setWordWrap(True)
 
         text_col.addWidget(title_lbl)
-        text_col.addWidget(stats_lbl)
-        text_col.addWidget(meta_lbl)
+        text_col.addWidget(id_lbl)
+        text_col.addWidget(prof_lbl)
         text_col.addStretch()
 
-        row.addWidget(num)
-        row.addLayout(text_col, 1)
+        stats_wrap = QVBoxLayout()
+        stats_wrap.setSpacing(6)
+        stats_wrap.addStretch()
+        stats_row = QHBoxLayout()
+        stats_row.setSpacing(10)
 
-        self._btn_open = QPushButton("Открыть")
-        self._btn_open.setObjectName("secondary")
+        if stats_unavailable and stats_unavailable_data_api:
+            stats_html = (
+                "<span style='color:#94a3b8;font-weight:700;'>API</span> "
+                "<span style='color:#f0abfc;font-weight:700;'>нет данных</span>"
+            )
+        elif stats_unavailable:
+            stats_html = (
+                "<span style='color:#f0abfc;font-weight:700;'>недоступно</span>"
+            )
+        else:
+            v = _format_int_compact(view_count)
+            l = _format_int_compact(like_count)
+            c = _format_int_compact(comment_count)
+            stats_html = (
+                "<span style='white-space:nowrap;'>"
+                f"<span style='color:#c7d2fe;font-weight:800;'>👁&nbsp;{v}</span>&nbsp;&nbsp;"
+                f"<span style='color:#e9d5ff;font-weight:800;'>♥&nbsp;{l}</span>&nbsp;&nbsp;"
+                f"<span style='color:#a8b0d4;font-weight:700;'>💬&nbsp;{c}</span>"
+                "</span>"
+            )
+        metrics = QLabel(stats_html)
+        metrics.setObjectName("uploadedRowMetrics")
+        metrics.setTextFormat(Qt.TextFormat.RichText)
+        metrics.setWordWrap(False)
+
+        ago = QLabel(_format_time_since_uploaded(uploaded_at_iso))
+        ago.setObjectName("uploadedRowAgo")
+
+        self._btn_open = QPushButton("↗")
+        self._btn_open.setObjectName("uploadedOpenBtn")
+        self._btn_open.setFixedSize(34, 30)
         self._btn_open.setCursor(Qt.CursorShape.ArrowCursor)
+        self._btn_open.setToolTip("Открыть на YouTube")
         self._btn_open.setEnabled(bool(self._url))
         self._btn_open.clicked.connect(lambda: self.activated.emit(self._url))
-        row.addWidget(self._btn_open, 0, Qt.AlignmentFlag.AlignTop)
 
-        for w in (num, title_lbl, stats_lbl, meta_lbl):
+        stats_row.addStretch()
+        stats_row.addWidget(metrics, 0, Qt.AlignmentFlag.AlignVCenter)
+        stats_row.addWidget(ago, 0, Qt.AlignmentFlag.AlignVCenter)
+        stats_row.addWidget(self._btn_open, 0, Qt.AlignmentFlag.AlignVCenter)
+        stats_wrap.addLayout(stats_row)
+
+        row.addWidget(self._thumb)
+        row.addLayout(text_col, 1)
+        row.addLayout(stats_wrap, 0)
+
+        for w in (self._thumb, title_lbl, id_lbl, prof_lbl, metrics, ago):
             w.installEventFilter(self)
+
+    def thumb_label(self) -> QLabel:
+        return self._thumb
 
     def _own_item(self) -> QListWidgetItem | None:
         lw = self._list
@@ -1020,46 +1161,152 @@ class MainWindow(QWidget):
 
         uploaded = QWidget()
         uploaded_l = QVBoxLayout(uploaded)
-        uploaded_l.setSpacing(10)
+        uploaded_l.setSpacing(8)
         uploaded_l.setContentsMargins(12, 12, 12, 12)
-        uploaded_title = QLabel("Залитые видео")
-        uploaded_title.setObjectName("title")
-        uploaded_hint = QLabel(
-            "История успешно загруженных видео на YouTube. "
-            "Статистика обновляется по кнопке через YouTube Data API."
-        )
-        uploaded_hint.setObjectName("hint")
-        uploaded_hint.setWordWrap(True)
+
+        self._uploaded_thumb_gen = 0
+        self._uploaded_thumb_labels: dict[str, QLabel] = {}
+        self._uploaded_thumb_signals = _UploadedThumbSignals(self)
+        self._uploaded_thumb_signals.loaded.connect(self._on_uploaded_thumb_loaded)
+        self._uploaded_thumb_pool = QThreadPool(self)
+        self._uploaded_thumb_pool.setMaxThreadCount(5)
+
         uploaded_top = QHBoxLayout()
-        self._btn_uploaded_refresh = QPushButton("Обновить список")
-        self._btn_uploaded_refresh.setObjectName("secondary")
-        self._btn_uploaded_refresh.clicked.connect(self._refresh_uploaded_list)
-        self._btn_uploaded_refresh_stats = QPushButton("Обновить статистику")
-        self._btn_uploaded_refresh_stats.clicked.connect(self._refresh_uploaded_stats_visible)
         self._uploaded_session_filter = QComboBox()
         self._uploaded_session_filter.setObjectName("uploadedSessionFilter")
-        self._uploaded_session_filter.setToolTip("Фильтр по сессии залива")
+        self._uploaded_session_filter.setMinimumWidth(320)
+        self._uploaded_session_filter.setToolTip(
+            "Сессия залива. В скобках: успешно залито / всего уникализировано по данным сессии."
+        )
         self._uploaded_session_filter.currentIndexChanged.connect(
             lambda _i: self._refresh_uploaded_list()
         )
-        uploaded_top.addWidget(uploaded_title)
-        uploaded_top.addStretch()
-        uploaded_top.addWidget(QLabel("Сессия:"))
-        uploaded_top.addWidget(self._uploaded_session_filter)
-        uploaded_top.addWidget(self._btn_uploaded_refresh_stats)
+        self._btn_uploaded_refresh = QPushButton("Список")
+        self._btn_uploaded_refresh.setObjectName("secondary")
+        self._btn_uploaded_refresh.setToolTip("Перечитать залитые видео из локальной базы")
+        self._btn_uploaded_refresh.clicked.connect(self._refresh_uploaded_list)
+        self._btn_uploaded_check = QPushButton("▶  Прочекать")
+        self._btn_uploaded_check.setObjectName("uploadedCheckBtn")
+        self._btn_uploaded_check.setToolTip(
+            "Запросить просмотры, лайки и комментарии через YouTube Data API (для роликов в текущем списке)"
+        )
+        self._btn_uploaded_check.clicked.connect(self._refresh_uploaded_stats_visible)
+        uploaded_top.addWidget(self._uploaded_session_filter, 1)
         uploaded_top.addWidget(self._btn_uploaded_refresh)
+        uploaded_top.addWidget(self._btn_uploaded_check)
         uploaded_l.addLayout(uploaded_top)
+
+        uploaded_hint = QLabel(
+            "История успешных заливов на YouTube"
+        )
+        uploaded_hint.setObjectName("uploadedSectionHint")
+        uploaded_hint.setWordWrap(True)
         uploaded_l.addWidget(uploaded_hint)
 
+        self._uploaded_sort_mode: str = "views"
+        body = QHBoxLayout()
+        body.setSpacing(12)
+
+        side = QFrame()
+        side.setObjectName("uploadedSidePanel")
+        side.setFixedWidth(278)
+        side_l = QVBoxLayout(side)
+        side_l.setSpacing(10)
+        side_l.setContentsMargins(12, 12, 12, 12)
+
+        itogo = QLabel("Итого")
+        itogo.setObjectName("uploadedSideTitle")
+        side_l.addWidget(itogo)
+
+        def _stat_tile(title: str) -> tuple[QFrame, QLabel]:
+            fr = QFrame()
+            fr.setObjectName("uploadedStatTile")
+            vl = QVBoxLayout(fr)
+            vl.setContentsMargins(10, 8, 10, 8)
+            vl.setSpacing(2)
+            t = QLabel(title)
+            t.setObjectName("uploadedStatTileTitle")
+            val = QLabel("0")
+            val.setObjectName("uploadedStatTileValue")
+            vl.addWidget(t)
+            vl.addWidget(val)
+            return fr, val
+
+        gstat = QGridLayout()
+        gstat.setSpacing(8)
+        t_v, self._uploaded_side_val_videos = _stat_tile("Видео")
+        t_views, self._uploaded_side_val_views = _stat_tile("Просмотры")
+        t_likes, self._uploaded_side_val_likes = _stat_tile("Лайки")
+        t_com, self._uploaded_side_val_comments = _stat_tile("Комментарии")
+        gstat.addWidget(t_v, 0, 0)
+        gstat.addWidget(t_views, 0, 1)
+        gstat.addWidget(t_likes, 1, 0)
+        gstat.addWidget(t_com, 1, 1)
+        side_l.addLayout(gstat)
+
+        def _metric_row(label_text: str, value_obj_name: str) -> QLabel:
+            row_w = QWidget()
+            hl = QHBoxLayout(row_w)
+            hl.setContentsMargins(0, 2, 0, 2)
+            hl.setSpacing(8)
+            nm = QLabel(label_text)
+            nm.setObjectName("uploadedMetricName")
+            hl.addWidget(nm, 1)
+            v = QLabel("0")
+            v.setObjectName(value_obj_name)
+            hl.addWidget(v, 0, Qt.AlignmentFlag.AlignRight)
+            side_l.addWidget(row_w)
+            return v
+
+        self._uploaded_side_val_zero = _metric_row("С 0 просмотров", "uploadedMetricYellow")
+        self._uploaded_side_val_300 = _metric_row("300+ просмотров", "uploadedMetricGreen")
+        self._uploaded_side_val_18 = _metric_row("С меткой 18+", "uploadedMetricRed")
+        self._uploaded_side_val_ban = _metric_row("Забанено / недоступно", "uploadedMetricRed")
+
+        self._uploaded_side_avg = QLabel("Среднее: —")
+        self._uploaded_side_avg.setObjectName("uploadedSideAvg")
+        self._uploaded_side_avg.setWordWrap(True)
+        side_l.addWidget(self._uploaded_side_avg)
+
+        side_l.addStretch()
+
+        right = QWidget()
+        right_l = QVBoxLayout(right)
+        right_l.setSpacing(8)
+        right_l.setContentsMargins(0, 0, 0, 0)
+        sort_row = QHBoxLayout()
+        sort_row.setSpacing(8)
+        sort_cap = QLabel("Сортировка:")
+        sort_cap.setObjectName("uploadedSortCaption")
+        sort_row.addWidget(sort_cap)
+        self._btn_uploaded_sort_views = QPushButton("▼  Просмотры")
+        self._btn_uploaded_sort_views.setObjectName("uploadedSortActive")
+        self._btn_uploaded_sort_views.clicked.connect(
+            partial(self._set_uploaded_sort_mode, "views")
+        )
+        self._btn_uploaded_sort_likes = QPushButton("♥  Лайки")
+        self._btn_uploaded_sort_likes.setObjectName("uploadedSortInactive")
+        self._btn_uploaded_sort_likes.clicked.connect(
+            partial(self._set_uploaded_sort_mode, "likes")
+        )
+        sort_row.addWidget(self._btn_uploaded_sort_views)
+        sort_row.addWidget(self._btn_uploaded_sort_likes)
+        sort_row.addStretch()
+        right_l.addLayout(sort_row)
+
         self._uploaded_list = QListWidget()
-        self._uploaded_list.setObjectName("readyList")
-        self._uploaded_list.setSpacing(6)
+        self._uploaded_list.setObjectName("uploadedList")
+        self._uploaded_list.setSpacing(4)
         self._uploaded_list.setAlternatingRowColors(False)
         self._uploaded_list.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
         self._uploaded_list.setUniformItemSizes(True)
-        uploaded_l.addWidget(self._uploaded_list, 1)
+        right_l.addWidget(self._uploaded_list, 1)
+
+        body.addWidget(side, 0)
+        body.addWidget(right, 1)
+        uploaded_l.addLayout(body, 1)
 
         profiles = QWidget()
         profiles_l = QVBoxLayout(profiles)
@@ -1254,6 +1501,143 @@ class MainWindow(QWidget):
         if row == 3:
             self._refresh_antydetect_profiles()
 
+    def _sorted_uploaded_videos(
+        self, videos: list[UploadedVideo], mode: str
+    ) -> list[UploadedVideo]:
+        m = (mode or "views").strip().lower()
+        if m == "likes":
+
+            def key_l(v: UploadedVideo) -> tuple:
+                if v.stats_unavailable or v.like_count is None:
+                    return (1, 0, v.uploaded_at or "", v.id)
+                return (0, -int(v.like_count), v.uploaded_at or "", v.id)
+
+            return sorted(videos, key=key_l)
+
+        def key_v(v: UploadedVideo) -> tuple:
+            if v.stats_unavailable or v.view_count is None:
+                return (1, 0, v.uploaded_at or "", v.id)
+            return (0, -int(v.view_count), v.uploaded_at or "", v.id)
+
+        return sorted(videos, key=key_v)
+
+    def _set_uploaded_sort_mode(self, mode: str) -> None:
+        m = (mode or "views").strip().lower()
+        if m not in ("views", "likes"):
+            return
+        if getattr(self, "_uploaded_sort_mode", "views") == m:
+            return
+        self._uploaded_sort_mode = m
+        self._sync_uploaded_sort_buttons()
+        self._refresh_uploaded_list()
+
+    def _sync_uploaded_sort_buttons(self) -> None:
+        if not hasattr(self, "_btn_uploaded_sort_views"):
+            return
+        v_first = self._uploaded_sort_mode == "views"
+        self._btn_uploaded_sort_views.setObjectName(
+            "uploadedSortActive" if v_first else "uploadedSortInactive"
+        )
+        self._btn_uploaded_sort_likes.setObjectName(
+            "uploadedSortInactive" if v_first else "uploadedSortActive"
+        )
+        for b in (self._btn_uploaded_sort_views, self._btn_uploaded_sort_likes):
+            st = b.style()
+            if st is not None:
+                st.unpolish(b)
+                st.polish(b)
+
+    def _update_uploaded_side_panel(self, videos: list[UploadedVideo]) -> None:
+        if not hasattr(self, "_uploaded_side_val_videos"):
+            return
+        n = len(videos)
+        self._uploaded_side_val_videos.setText(str(n))
+        counted = [v for v in videos if not v.stats_unavailable]
+        total_views = _sum_optional_int([v.view_count for v in counted])
+        total_likes = _sum_optional_int([v.like_count for v in counted])
+        total_comments = _sum_optional_int([v.comment_count for v in counted])
+        self._uploaded_side_val_views.setText(_format_int_compact(total_views))
+        self._uploaded_side_val_likes.setText(_format_int_compact(total_likes))
+        self._uploaded_side_val_comments.setText(_format_int_compact(total_comments))
+
+        n_zero = sum(
+            1
+            for v in counted
+            if v.view_count is not None and int(v.view_count) == 0
+        )
+        n_300 = sum(
+            1
+            for v in counted
+            if v.view_count is not None and int(v.view_count) >= 300
+        )
+        n_18 = sum(1 for v in videos if _video_might_be_18_plus(v.title, v.description))
+        n_ban = sum(1 for v in videos if v.stats_unavailable)
+        self._uploaded_side_val_zero.setText(str(n_zero))
+        self._uploaded_side_val_300.setText(str(n_300))
+        self._uploaded_side_val_18.setText(str(n_18))
+        self._uploaded_side_val_ban.setText(str(n_ban))
+
+        vc = [int(v.view_count) for v in counted if v.view_count is not None]
+        lc = [int(v.like_count) for v in counted if v.like_count is not None]
+        cc = [int(v.comment_count) for v in counted if v.comment_count is not None]
+        parts: list[str] = []
+        if vc:
+            parts.append(f"{_format_int_compact(round(sum(vc) / len(vc)))} 👁")
+        if lc:
+            parts.append(f"{_format_int_compact(round(sum(lc) / len(lc)))} ♥")
+        if cc:
+            parts.append(f"{_format_int_compact(round(sum(cc) / len(cc)))} 💬")
+        self._uploaded_side_avg.setText(
+            "Среднее: " + "   ".join(parts) if parts else "Среднее: —"
+        )
+
+    def _schedule_uploaded_thumb(self, video_id: str, label: QLabel) -> None:
+        vid = (video_id or "").strip()
+        if not vid:
+            return
+        self._uploaded_thumb_labels[vid] = label
+        self._uploaded_thumb_pool.start(
+            _FetchUploadedThumbRunnable(
+                vid, self._uploaded_thumb_gen, self._uploaded_thumb_signals
+            )
+        )
+
+    def _on_uploaded_thumb_loaded(self, video_id: str, data: object, generation: int) -> None:
+        if int(generation) != int(self._uploaded_thumb_gen):
+            return
+        vid = (video_id or "").strip()
+        if not vid:
+            return
+        lbl = self._uploaded_thumb_labels.get(vid)
+        if lbl is None:
+            return
+        blob = data if isinstance(data, (bytes, bytearray)) else b""
+        if blob:
+            pm = QPixmap()
+            if pm.loadFromData(bytes(blob)):
+                scaled = pm.scaled(
+                    _UPLOADED_THUMB_W,
+                    _UPLOADED_THUMB_H,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                lbl.setPixmap(scaled)
+                lbl.setObjectName("uploadedThumb")
+                lbl.setText("")
+                st = lbl.style()
+                if st is not None:
+                    st.unpolish(lbl)
+                    st.polish(lbl)
+                return
+        lbl.clear()
+        lbl.setPixmap(QPixmap())
+        lbl.setText("—")
+        lbl.setObjectName("uploadedThumbEmpty")
+        st = lbl.style()
+        if st is not None:
+            st.unpolish(lbl)
+            st.polish(lbl)
+
     def _refresh_uploaded_list(self) -> None:
         if not hasattr(self, "_uploaded_list"):
             return
@@ -1267,121 +1651,117 @@ class MainWindow(QWidget):
         except Exception:
             only_session_id = 0
 
+        self._uploaded_thumb_gen += 1
+        self._uploaded_thumb_labels.clear()
         self._uploaded_list.clear()
+
         try:
-            if only_session_id > 0:
-                sessions = [
-                    s
-                    for s in self._upload_store.list_sessions(limit=400)
-                    if int(s.id) == int(only_session_id)
-                ]
-                m = self._upload_store.list_uploaded_videos_for_sessions([only_session_id])
-                vids = m.get(int(only_session_id), []) if isinstance(m, dict) else []
-                started_text = (
-                    _format_stored_datetime(sessions[0].started_at) if sessions else "—"
-                )
-                grouped = [(int(only_session_id), started_text, vids)]
-            else:
-                sessions = self._upload_store.list_sessions(limit=400)
-                ids = [int(s.id) for s in sessions]
-                m = self._upload_store.list_uploaded_videos_for_sessions(ids)
-                grouped = []
-                for s in sessions:
-                    started_text = _format_stored_datetime(s.started_at or "")
-                    vids = (m.get(int(s.id)) or []) if isinstance(m, dict) else []
-                    grouped.append((int(s.id), started_text, vids))
+            sessions = self._upload_store.list_sessions(limit=400)
         except Exception:
-            grouped = []
+            sessions = []
 
-        if not grouped or all(not vids for (_sid, _started, vids) in grouped):
-            return
+        ids = [int(s.id) for s in sessions]
+        m: dict[int, list[UploadedVideo]] = {}
+        try:
+            if ids:
+                raw = self._upload_store.list_uploaded_videos_for_sessions(ids)
+                m = raw if isinstance(raw, dict) else {}
+        except Exception:
+            m = {}
 
-        row_h = 54 + 42
+        flat: list[UploadedVideo] = []
+        if only_session_id > 0:
+            flat = list(m.get(int(only_session_id), []) or [])
+        else:
+            for s in sessions:
+                flat.extend(m.get(int(s.id), []) or [])
+            flat.sort(key=lambda v: (v.uploaded_at or "", v.id), reverse=True)
+
+        mode = getattr(self, "_uploaded_sort_mode", "views")
+        flat = self._sorted_uploaded_videos(flat, mode)
+        self._update_uploaded_side_panel(flat)
+
         vw = self._uploaded_list.viewport().width()
         w_hint = max(520, vw - 8) if vw > 80 else 560
+        row_h = _UPLOADED_THUMB_H + 44
 
-        visual_idx = 1
-        for sid, started_text, vids in grouped:
-            if not vids:
-                continue
-
-            total_views = _sum_optional_int([v.view_count for v in vids])
-            total_likes = _sum_optional_int([v.like_count for v in vids])
-            total_comments = _sum_optional_int([v.comment_count for v in vids])
-            summary_html = _uploaded_stats_html(
-                views=total_views, likes=total_likes, comments=total_comments
-            )
-            summary_text = f"Сессия №{sid} · {started_text} · Видео: {len(vids)} · {summary_html}"
-
-            it_h = QListWidgetItem()
-            it_h.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            it_h.setSizeHint(QSize(w_hint, 42))
-            self._uploaded_list.addItem(it_h)
-            hdr = _UploadSessionHeaderRow(
-                summary_text, sid, parent=self._uploaded_list
-            )
-            hdr.session_clicked.connect(self._on_uploaded_session_header_clicked)
-            self._uploaded_list.setItemWidget(it_h, hdr)
-
-            for v in vids:
-                updated = (
-                    _format_stored_datetime(v.stats_updated_at or "")
-                    if v.stats_updated_at
-                    else "—"
-                )
-                sess = (
-                    _format_stored_datetime(v.session_started_at or "")
-                    if v.session_started_at
-                    else started_text
-                )
-                uploaded_at = _format_stored_datetime(v.uploaded_at or "")
-                extra = f"Сессия: #{v.session_id} ({sess}) · Загружено: {uploaded_at}"
-                tip = (
-                    f"{(v.title or '').strip()}\n"
-                    f"videoId: {v.video_id}\n"
-                    f"url: {v.url}\n"
-                    f"session_id: {v.session_id}\n"
-                    f"session_started_at: {v.session_started_at or '—'}\n"
-                    f"uploaded_at: {v.uploaded_at}\n"
-                    f"stats_updated_at: {v.stats_updated_at or '—'}"
-                )
-
-                it = QListWidgetItem()
-                it.setData(Qt.ItemDataRole.UserRole + 1, str(v.video_id))
-                it.setData(Qt.ItemDataRole.UserRole + 2, str(v.url))
-                it.setToolTip(tip)
-                it.setSizeHint(QSize(w_hint, row_h))
-                self._uploaded_list.addItem(it)
-
-                row_w = _UploadedVideoRow(
-                    index=visual_idx,
-                    title=v.title,
-                    url=v.url,
-                    video_id=v.video_id,
-                    view_count=v.view_count,
-                    like_count=v.like_count,
-                    comment_count=v.comment_count,
-                    extra_text=extra,
-                    updated_text=updated,
-                    tooltip=tip,
-                    list_widget=self._uploaded_list,
-                    parent=self._uploaded_list,
-                )
-                row_w.activated.connect(self._open_uploaded_url)
-                self._uploaded_list.setItemWidget(it, row_w)
-                visual_idx += 1
-
-    def _on_uploaded_session_header_clicked(self, session_id: int) -> None:
-        sid = int(session_id)
-        if sid <= 0 or not hasattr(self, "_uploaded_session_filter"):
+        if not flat:
+            it = QListWidgetItem()
+            it.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            it.setSizeHint(QSize(w_hint, 80))
+            self._uploaded_list.addItem(it)
+            empty = QLabel("Нет залитых видео для этого фильтра.")
+            empty.setObjectName("hint")
+            empty.setWordWrap(True)
+            self._uploaded_list.setItemWidget(it, empty)
             return
-        combo: QComboBox = self._uploaded_session_filter
-        idx = combo.findData(sid)
-        if idx < 0:
-            self._populate_uploaded_session_filter(preferred_session_id=sid)
-            idx = combo.findData(sid)
-        if idx >= 0:
-            combo.setCurrentIndex(idx)
+
+        for v in flat:
+            updated = (
+                _format_stored_datetime(v.stats_updated_at or "")
+                if v.stats_updated_at
+                else "—"
+            )
+            sess = (
+                _format_stored_datetime(v.session_started_at or "")
+                if v.session_started_at
+                else "—"
+            )
+            uploaded_at = _format_stored_datetime(v.uploaded_at or "")
+            tip_lines = [
+                (v.title or "").strip(),
+                f"videoId: {v.video_id}",
+                f"profile_id: {v.profile_id or '—'}",
+                f"url: {v.url}",
+                f"session_id: {v.session_id}",
+                f"session_started_at: {v.session_started_at or '—'}",
+                f"uploaded_at: {v.uploaded_at}",
+                f"stats_updated_at: {v.stats_updated_at or '—'}",
+                f"Обновлено (чит.): {updated}",
+                f"Сессия: #{v.session_id} ({sess})",
+                f"Загружено (чит.): {uploaded_at}",
+            ]
+            if v.stats_unavailable:
+                if v.stats_unavailable_data_api:
+                    tip_lines.append(
+                        "Статистика: YoutubeDataApiError — ответ YouTube Data API "
+                        "без данных по этому videoId."
+                    )
+                else:
+                    tip_lines.append(
+                        "Статистика: не удалось получить (блокировка, приват или удалено)."
+                    )
+            tip = "\n".join(tip_lines)
+
+            it = QListWidgetItem()
+            it.setData(Qt.ItemDataRole.UserRole + 1, str(v.video_id))
+            it.setData(Qt.ItemDataRole.UserRole + 2, str(v.url))
+            it.setToolTip(tip)
+            it.setSizeHint(QSize(w_hint, row_h))
+            self._uploaded_list.addItem(it)
+
+            prof_cap = _uploaded_row_profile_caption(
+                profile_id=v.profile_id,
+                profiles=self._profiles_raw,
+            )
+            row_w = _UploadedVideoRow(
+                title=v.title,
+                url=v.url,
+                video_id=v.video_id,
+                uploaded_at_iso=v.uploaded_at or "",
+                view_count=v.view_count,
+                like_count=v.like_count,
+                comment_count=v.comment_count,
+                stats_unavailable=v.stats_unavailable,
+                stats_unavailable_data_api=v.stats_unavailable_data_api,
+                profile_caption=prof_cap,
+                tooltip=tip,
+                list_widget=self._uploaded_list,
+                parent=self._uploaded_list,
+            )
+            row_w.activated.connect(self._open_uploaded_url)
+            self._uploaded_list.setItemWidget(it, row_w)
+            self._schedule_uploaded_thumb((v.video_id or "").strip(), row_w.thumb_label())
 
     def _populate_uploaded_session_filter(
         self, *, preferred_session_id: int | None = None
@@ -1406,16 +1786,13 @@ class MainWindow(QWidget):
         combo.blockSignals(True)
         try:
             combo.clear()
-            combo.addItem("Все", 0)
+            combo.addItem("Все сессии", 0)
             for s in sessions:
-                started = _format_stored_datetime(s.started_at or "")
-                # Пример: "№12 · 08.05.2026  15:40 · ok 3/5 · done"
-                extra = f"ok {int(getattr(s, 'uploaded_ok', 0) or 0)}/{int(getattr(s, 'planned_videos', 0) or 0)}"
-                st = (getattr(s, "status", "") or "").strip()
-                label = f"№{s.id} · {started} · {extra}" + (f" · {st}" if st else "")
-                combo.addItem(label, int(s.id))
+                up = int(s.uploaded_ok or 0)
+                proc = int(s.processed_videos or 0)
+                dt = _format_upload_combo_datetime(s.started_at or "")
+                combo.addItem(f"{dt} ({up}/{proc})", int(s.id))
 
-            # Restore selection if possible.
             if prev_id > 0:
                 idx = combo.findData(prev_id)
                 if idx >= 0:
@@ -1446,7 +1823,7 @@ class MainWindow(QWidget):
                 self,
                 "Zaliver",
                 "В списке нет видео для обновления статистики. "
-                "Выберите нужную сессию или нажмите «Обновить список».",
+                "Выберите сессию с роликами или нажмите «Список».",
             )
             return
         key = ""
@@ -1468,7 +1845,7 @@ class MainWindow(QWidget):
         self._stats_progress_dlg = dlg
         dlg.show()
 
-        self._btn_uploaded_refresh_stats.setEnabled(False)
+        self._btn_uploaded_check.setEnabled(False)
         self._stats_thread = QThread()
         self._stats_worker = UploadedStatsRefreshWorker(vids, key)
         self._stats_worker.moveToThread(self._stats_thread)
@@ -1498,7 +1875,34 @@ class MainWindow(QWidget):
         self._stats_progress_dlg = None
         try:
             succ = successes if isinstance(successes, list) else []
-            errs = errors if isinstance(errors, list) else []
+            failures_raw = errors if isinstance(errors, list) else []
+            err_lines: list[str] = []
+            for item in failures_raw:
+                if isinstance(item, (list, tuple)) and len(item) >= 3:
+                    vid_e, msg_e, is_api = item[0], item[1], bool(item[2])
+                    err_lines.append(f"{vid_e}: {msg_e}")
+                    ve = str(vid_e or "").strip()
+                    if ve:
+                        try:
+                            self._upload_store.mark_video_stats_unavailable(
+                                video_id=ve,
+                                youtube_data_api_error=is_api,
+                            )
+                        except Exception:
+                            pass
+                else:
+                    line = str(item)
+                    err_lines.append(line)
+                    ev = _uploaded_stats_error_video_id(line)
+                    if ev:
+                        is_api = "YoutubeDataApiError" in line
+                        try:
+                            self._upload_store.mark_video_stats_unavailable(
+                                video_id=ev,
+                                youtube_data_api_error=is_api,
+                            )
+                        except Exception:
+                            pass
             for row in succ:
                 if not isinstance(row, (list, tuple)) or len(row) < 4:
                     continue
@@ -1512,25 +1916,25 @@ class MainWindow(QWidget):
                     )
                 except Exception:
                     pass
-            if succ:
+            if succ or err_lines:
                 self._refresh_uploaded_list()
-            if errs and not succ:
-                detail = "\n".join(str(x) for x in errs[:8])
-                if len(errs) > 8:
-                    detail += f"\n… и ещё {len(errs) - 8}"
+            if err_lines and not succ:
+                detail = "\n".join(str(x) for x in err_lines[:8])
+                if len(err_lines) > 8:
+                    detail += f"\n… и ещё {len(err_lines) - 8}"
                 QMessageBox.warning(
                     self,
                     "Zaliver",
                     f"Не удалось обновить статистику:\n{detail}",
                 )
-            elif errs:
-                detail = "\n".join(str(x) for x in errs[:5])
-                if len(errs) > 5:
-                    detail += f"\n… и ещё {len(errs) - 5}"
+            elif err_lines:
+                detail = "\n".join(str(x) for x in err_lines[:5])
+                if len(err_lines) > 5:
+                    detail += f"\n… и ещё {len(err_lines) - 5}"
                 QMessageBox.information(
                     self,
                     "Zaliver",
-                    f"Обновлено записей: {len(succ)} из {len(succ) + len(errs)}.\n"
+                    f"Обновлено записей: {len(succ)} из {len(succ) + len(err_lines)}.\n"
                     f"Ошибки по части роликов:\n{detail}",
                 )
         finally:
@@ -1546,8 +1950,8 @@ class MainWindow(QWidget):
         if self._stats_progress_dlg is not None:
             self._stats_progress_dlg.close()
             self._stats_progress_dlg = None
-        if hasattr(self, "_btn_uploaded_refresh_stats"):
-            self._btn_uploaded_refresh_stats.setEnabled(True)
+        if hasattr(self, "_btn_uploaded_check"):
+            self._btn_uploaded_check.setEnabled(True)
 
     def _open_uploaded_url(self, url: str) -> None:
         u = (url or "").strip()

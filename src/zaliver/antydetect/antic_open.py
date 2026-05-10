@@ -107,7 +107,11 @@ def open_google_in_profile(
                 return res
             else:
                 # Ничего не делаем — просто открываем Studio, чтобы пользователь мог работать вручную.
-                page.goto("https://studio.youtube.com/", wait_until="domcontentloaded")
+                page.goto(
+                    "https://studio.youtube.com/",
+                    wait_until="domcontentloaded",
+                    timeout=120_000,
+                )
                 time.sleep(1)
 
             try:
@@ -217,7 +221,11 @@ def open_google_in_local_antidetect_profile(
                     return res
                 else:
                     _log("Studio: upload_latest_zaliver_video=False → просто открываем Studio…")
-                    page.goto("https://studio.youtube.com/", wait_until="domcontentloaded")
+                    page.goto(
+                        "https://studio.youtube.com/",
+                        wait_until="domcontentloaded",
+                        timeout=120_000,
+                    )
                     time.sleep(1)
                     _log(f"Studio: открыт URL: {page.url!r}")
 

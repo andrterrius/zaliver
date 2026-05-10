@@ -136,7 +136,11 @@ def _studio_click_create_then_add_video(page) -> None:
     Сессия Google должна уже быть в профиле антидетекта (без логина из Zaliver).
     """
     _log("Studio: переход на https://studio.youtube.com/ …")
-    page.goto("https://studio.youtube.com/", wait_until="domcontentloaded")
+    page.goto(
+        "https://studio.youtube.com/",
+        wait_until="domcontentloaded",
+        timeout=120_000,
+    )
     _log(f"Studio: после загрузки URL: {page.url!r}")
 
     create = (

@@ -74,6 +74,7 @@ from zaliver.youtube_parsing.thumb_cache import (
 )
 from zaliver.ui.antic_profile_row import AnticProfileRow, _profile_id, _profile_name
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
+from zaliver.stats_server_client import notify_uploaded_video
 from zaliver.ui.uploaded_stats_refresh_worker import UploadedStatsRefreshWorker
 from zaliver.ui.widgets import (
     AnimatedProgressBar,
@@ -1368,6 +1369,24 @@ class MainWindow(QWidget):
         settings_hint.setObjectName("hint")
         settings_hint.setWordWrap(True)
 
+        self._gb_stats_username = QGroupBox("Имя пользователя")
+        gsu = QVBoxLayout(self._gb_stats_username)
+        self._stats_server_username = QLineEdit()
+        self._btn_save_stats_username = QPushButton("Сохранить")
+        self._btn_save_stats_username.setObjectName("secondary")
+        self._btn_save_stats_username.setAutoDefault(False)
+        self._btn_save_stats_username.setDefault(False)
+        self._btn_save_stats_username.clicked.connect(
+            self._save_stats_server_username_settings
+        )
+        gsu_btns = QHBoxLayout()
+        gsu_btns.addStretch()
+        gsu_btns.addWidget(self._btn_save_stats_username)
+        w_gsu_btns = QWidget()
+        w_gsu_btns.setLayout(gsu_btns)
+        gsu.addWidget(self._stats_server_username)
+        gsu.addWidget(w_gsu_btns)
+
         browser_pick = QHBoxLayout()
         browser_pick.addWidget(QLabel("Браузер по умолчанию:"))
         self._default_browser_combo = QComboBox()
@@ -1379,8 +1398,15 @@ class MainWindow(QWidget):
         )
         browser_pick.addWidget(self._default_browser_combo, 1)
 
-        gb = QGroupBox("Dolphin Anty")
-        gg = QGridLayout(gb)
+        self._dolphin_headless = QCheckBox("Headless (без окна браузера)")
+        self._dolphin_headless.setChecked(True)
+        self._dolphin_headless.setToolTip(
+            "Если включено — профиль запускается без окна браузера (headless): "
+            "и Dolphin, и локальный API."
+        )
+
+        self._gb_antydetect_dolphin = QGroupBox("Dolphin Anty")
+        gg = QGridLayout(self._gb_antydetect_dolphin)
         public_host = QLabel("Public API: https://dolphin-anty-api.com")
         public_host.setObjectName("hint")
         public_host.setWordWrap(True)
@@ -1392,15 +1418,8 @@ class MainWindow(QWidget):
             "Используется для Public API как заголовок Authorization: Bearer <token>."
         )
 
-        self._dolphin_headless = QCheckBox("Headless (без окна браузера)")
-        self._dolphin_headless.setChecked(True)
-        self._dolphin_headless.setToolTip(
-            "Если включено — профиль запускается без окна браузера (headless): "
-            "и Dolphin, и локальный API."
-        )
-
-        gb_local = QGroupBox("Свой антидетект (локальный HTTP API)")
-        gl = QGridLayout(gb_local)
+        self._gb_antydetect_local = QGroupBox("Свой антидетект (локальный HTTP API)")
+        gl = QGridLayout(self._gb_antydetect_local)
         self._local_api_base_url = QLineEdit()
         self._local_api_base_url.setPlaceholderText(DEFAULT_LOCAL_API_BASE_URL)
         self._local_api_base_url.setToolTip(
@@ -1413,11 +1432,6 @@ class MainWindow(QWidget):
         self._btn_save_antydetect.setObjectName("secondary")
         self._btn_save_antydetect.clicked.connect(self._save_antydetect_settings)
 
-        self._btn_test_profiles = QPushButton("Проверить и загрузить профили")
-        self._btn_test_profiles.setAutoDefault(False)
-        self._btn_test_profiles.setDefault(False)
-        self._btn_test_profiles.clicked.connect(self._refresh_antydetect_profiles)
-
         self._settings_status = QLabel("")
         self._settings_status.setObjectName("hint")
         self._settings_status.setWordWrap(True)
@@ -1425,15 +1439,13 @@ class MainWindow(QWidget):
         gg.addWidget(public_host, 0, 0, 1, 2)
         gg.addWidget(QLabel("JWT:"), 1, 0)
         gg.addWidget(self._dolphin_token, 1, 1)
-        gg.addWidget(self._dolphin_headless, 2, 0, 1, 2)
         btns = QHBoxLayout()
-        btns.addWidget(self._btn_test_profiles)
         btns.addStretch()
         btns.addWidget(self._btn_save_antydetect)
         w_btns = QWidget()
         w_btns.setLayout(btns)
-        gg.addWidget(w_btns, 3, 0, 1, 2)
-        gg.addWidget(self._settings_status, 4, 0, 1, 2)
+        gg.addWidget(w_btns, 2, 0, 1, 2)
+        gg.addWidget(self._settings_status, 3, 0, 1, 2)
 
         gb_yt = QGroupBox("YouTube")
         gy = QGridLayout(gb_yt)
@@ -1466,11 +1478,14 @@ class MainWindow(QWidget):
 
         settings_l.addWidget(settings_title)
         settings_l.addWidget(settings_hint)
+        settings_l.addWidget(self._gb_stats_username)
         settings_l.addLayout(browser_pick)
-        settings_l.addWidget(gb)
-        settings_l.addWidget(gb_local)
+        settings_l.addWidget(self._dolphin_headless)
+        settings_l.addWidget(self._gb_antydetect_dolphin)
+        settings_l.addWidget(self._gb_antydetect_local)
         settings_l.addWidget(gb_yt)
         settings_l.addStretch()
+        self._sync_antydetect_settings_groups_visibility()
 
         self._stack = QStackedWidget()
         self._stack.addWidget(home)
@@ -2430,6 +2445,19 @@ class MainWindow(QWidget):
 
     def _on_default_browser_combo_changed(self, _index: int) -> None:
         self._update_profiles_section_header()
+        self._sync_antydetect_settings_groups_visibility()
+
+    def _sync_antydetect_settings_groups_visibility(self) -> None:
+        if not hasattr(self, "_gb_antydetect_dolphin") or not hasattr(
+            self, "_default_browser_combo"
+        ):
+            return
+        kind = self._default_browser_combo.currentData()
+        if not isinstance(kind, str) or not kind:
+            kind = "dolphin"
+        show_dolphin = kind == "dolphin"
+        self._gb_antydetect_dolphin.setVisible(show_dolphin)
+        self._gb_antydetect_local.setVisible(not show_dolphin)
 
     def _update_profiles_section_header(self) -> None:
         if not hasattr(self, "_profiles_title"):
@@ -2481,6 +2509,7 @@ class MainWindow(QWidget):
             else:
                 url = DEFAULT_LOCAL_API_BASE_URL
             self._local_api_base_url.setText(url)
+        self._sync_antydetect_settings_groups_visibility()
 
     def _save_antydetect_settings(self) -> None:
         token = (self._dolphin_token.text() or "").strip()
@@ -2514,6 +2543,75 @@ class MainWindow(QWidget):
         self._youtube_api_key.setText(key)
         if key:
             os.environ["YOUTUBE_API_KEY"] = key
+        if hasattr(self, "_stats_server_username"):
+            gu = (
+                self._settings.value("stats_server/username", "", type=str) or ""
+            ).strip()
+            self._stats_server_username.setText(gu)
+
+    def _stats_server_username_stripped(self) -> str:
+        if not hasattr(self, "_stats_server_username"):
+            return ""
+        return (self._stats_server_username.text() or "").strip()
+
+    def _persist_stats_server_username_to_settings(self, username: str) -> None:
+        gu = (username or "").strip()
+        if gu:
+            self._settings.setValue("stats_server/username", gu)
+        else:
+            try:
+                self._settings.remove("stats_server/username")
+            except Exception:
+                self._settings.setValue("stats_server/username", "")
+        try:
+            self._settings.sync()
+        except Exception:
+            pass
+        if hasattr(self, "_stats_server_username"):
+            self._stats_server_username.setText(gu)
+
+    def _save_stats_server_username_settings(self) -> None:
+        self._persist_stats_server_username_to_settings(
+            self._stats_server_username_stripped()
+        )
+
+    def _prompt_stats_server_username_if_empty(self) -> bool:
+        if self._stats_server_username_stripped():
+            return True
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Имя пользователя")
+        dlg.setModal(True)
+        v = QVBoxLayout(dlg)
+        edit = QLineEdit()
+        edit.setText(
+            (self._settings.value("stats_server/username", "", type=str) or "").strip()
+        )
+        v.addWidget(edit)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.setObjectName("danger")
+        btn_next = QPushButton("Далее")
+        btn_next.setDefault(True)
+        btn_next.setAutoDefault(True)
+
+        def on_next() -> None:
+            t = (edit.text() or "").strip()
+            if not t:
+                return
+            self._persist_stats_server_username_to_settings(t)
+            dlg.accept()
+
+        btn_next.clicked.connect(on_next)
+        btn_cancel.clicked.connect(dlg.reject)
+        edit.returnPressed.connect(on_next)
+        row.addWidget(btn_cancel)
+        row.addWidget(btn_next)
+        v.addLayout(row)
+
+        edit.setFocus()
+        return dlg.exec() == QDialog.DialogCode.Accepted
 
     def _save_youtube_settings(self) -> None:
         if not hasattr(self, "_youtube_api_key"):
@@ -2527,7 +2625,9 @@ class MainWindow(QWidget):
             except Exception:
                 pass
             if hasattr(self, "_youtube_settings_status"):
-                self._youtube_settings_status.setText("Ключ сохранён.")
+                self._youtube_settings_status.setText(
+                    "Ключ YouTube Data API сохранён."
+                )
             return
 
         try:
@@ -2540,7 +2640,7 @@ class MainWindow(QWidget):
         except Exception:
             pass
         if hasattr(self, "_youtube_settings_status"):
-            self._youtube_settings_status.setText("Ключ очищен.")
+            self._youtube_settings_status.setText("Ключ API очищен.")
 
     def _on_youtube_show_key_changed(self, _state: int) -> None:
         if not hasattr(self, "_youtube_api_key") or not hasattr(self, "_youtube_show_key"):
@@ -3182,6 +3282,8 @@ class MainWindow(QWidget):
 
     def _start(self) -> None:
         self._save_folder_settings()
+        if not self._prompt_stats_server_username_if_empty():
+            return
         pending = self._prompt_title_desc_and_profile()
         if pending is None:
             return
@@ -3508,6 +3610,15 @@ class MainWindow(QWidget):
                 )
                 try:
                     self._upload_store.inc_uploaded_ok(session_id=sid, delta=1)
+                except Exception:
+                    pass
+                try:
+                    guser = (
+                        self._settings.value("stats_server/username", "", type=str)
+                        or ""
+                    ).strip()
+                    if guser:
+                        notify_uploaded_video(video_id=vid, username=guser)
                 except Exception:
                     pass
                 try:

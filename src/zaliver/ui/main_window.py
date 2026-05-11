@@ -3110,6 +3110,7 @@ class MainWindow(QWidget):
                         description=upload_description or "",
                         url=url,
                         video_id=vid,
+                        profile_id=profile_id,
                     )
                     try:
                         self._upload_store.inc_uploaded_ok(
@@ -3618,7 +3619,11 @@ class MainWindow(QWidget):
                         or ""
                     ).strip()
                     if guser:
-                        notify_uploaded_video(video_id=vid, username=guser)
+                        notify_uploaded_video(
+                            video_id=vid,
+                            username=guser,
+                            profile_id=profile_id,
+                        )
                 except Exception:
                     pass
                 try:

@@ -1098,6 +1098,5 @@ def run_upload_latest_ready_video(
         _log(f"Studio: итоговая ссылка: {best_url}")
     if best_vid:
         _log(f"Studio: итоговый videoId: {best_vid}")
-    time.sleep(_STUDIO_WIZARD_NEXT_MAX)
     return UploadedStudioResult(video_id=best_vid, url=best_url)
 

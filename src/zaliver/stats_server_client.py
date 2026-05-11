@@ -16,10 +16,15 @@ _LOG = logging.getLogger(__name__)
 
 
 def notify_uploaded_video(
-    *, video_id: str, username: str, timeout_s: float = 25.0
+    *,
+    video_id: str,
+    username: str,
+    profile_id: str = "",
+    timeout_s: float = 25.0,
 ) -> bool:
     """
-    POST JSON ``{ "username", "video_id" }`` на stats_server.
+    POST JSON ``{ "username", "video_id", "profile_id" }`` на stats_server.
+    ``profile_id`` — id профиля антидетект-браузера или пустая строка.
     Не бросает исключения наружу (ошибки только в лог).
     """
     vid = (video_id or "").strip()
@@ -28,7 +33,11 @@ def notify_uploaded_video(
         return False
     url = STATS_SERVER_BASE_URL.rstrip("/") + STATS_SERVER_UPLOADED_VIDEO_PATH
     try:
-        payload: dict[str, Any] = {"username": user, "video_id": vid}
+        payload: dict[str, Any] = {
+            "username": user,
+            "video_id": vid,
+            "profile_id": (profile_id or "").strip(),
+        }
         resp = requests.post(url, json=payload, timeout=timeout_s)
         code = int(resp.status_code)
         ok = 200 <= code < 300

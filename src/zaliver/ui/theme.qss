@@ -221,6 +221,32 @@ QListWidget#readyList::item:selected {
     border: 1px solid #6366f1;
 }
 
+/* Фоновые треки (главная) — как списки профилей / готовых */
+QListWidget#musicTracksList {
+    background-color: #0f1118;
+    border: 1px solid #2d3142;
+    border-radius: 12px;
+    padding: 8px;
+    outline: none;
+}
+
+QListWidget#musicTracksList::item {
+    padding: 8px 10px;
+    border-radius: 8px;
+    min-height: 18px;
+    color: #e4e6ef;
+}
+
+QListWidget#musicTracksList::item:hover {
+    background-color: rgba(99, 102, 241, 0.10);
+}
+
+QListWidget#musicTracksList::item:selected {
+    background-color: rgba(99, 102, 241, 0.16);
+    border: 1px solid #6366f1;
+    color: #f1f5f9;
+}
+
 QLabel#readyRowNumber {
     font-size: 34px;
     font-weight: 800;

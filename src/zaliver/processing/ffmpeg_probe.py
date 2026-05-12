@@ -229,3 +229,35 @@ def estimate_target_video_bps(path: str) -> Optional[int]:
     if guess2 > 200_000:
         return guess2
     return None
+
+
+def probe_media_duration_seconds(path: str) -> Optional[float]:
+    """
+    Длительность файла в секундах (format.duration или сумма по потокам).
+    Нужна для случайного отрезка фоновой музыки.
+    """
+    try:
+        data = ffprobe_streams_and_format(path)
+    except (RuntimeError, json.JSONDecodeError, OSError):
+        return None
+    fmt = data.get("format") or {}
+    raw = fmt.get("duration")
+    try:
+        d = float(raw) if raw is not None and str(raw) not in ("N/A", "") else 0.0
+    except ValueError:
+        d = 0.0
+    if d > 0.05:
+        return d
+    streams: List[Dict[str, Any]] = list(data.get("streams") or [])
+    best = 0.0
+    for st in streams:
+        if str(st.get("codec_type") or "").lower() != "audio":
+            continue
+        sd = st.get("duration")
+        try:
+            x = float(sd) if sd is not None and str(sd) not in ("N/A", "") else 0.0
+        except ValueError:
+            x = 0.0
+        if x > best:
+            best = x
+    return best if best > 0.05 else None

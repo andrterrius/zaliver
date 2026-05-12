@@ -731,6 +731,7 @@ class MainWindow(QWidget):
         self._stats_worker: UploadedStatsRefreshWorker | None = None
         self._stats_progress_dlg: QProgressDialog | None = None
         self._selected_input_files: list[str] = []
+        self._background_music_files: list[str] = []
         self._video_store = VideoStore()
         self._upload_store = UploadStore(db_path=self._video_store.db_path)
         self._upload_session = None
@@ -857,6 +858,80 @@ class MainWindow(QWidget):
         io_hint.setWordWrap(True)
         io_grid.addWidget(io_hint, 4, 0, 1, 3)
 
+        bg_tracks = QGroupBox("Фоновые треки")
+        bg_tracks_l = QVBoxLayout(bg_tracks)
+        bg_tracks_l.setSpacing(8)
+        self.background_music = ToggleSwitch(
+            "Случайный трек и отрезок для каждого выхода (по списку ниже)"
+        )
+        self.background_music.setChecked(False)
+        bg_tracks_l.addWidget(self.background_music)
+        music_btns = QHBoxLayout()
+        self.btn_add_music = QPushButton("Добавить треки…")
+        self.btn_add_music.setObjectName("secondary")
+        self.btn_add_music.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_add_music.clicked.connect(self._browse_background_music)
+        self.btn_remove_music = QPushButton("Удалить выбранные")
+        self.btn_remove_music.setObjectName("secondary")
+        self.btn_remove_music.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_remove_music.clicked.connect(self._remove_selected_music)
+        music_btns.addWidget(self.btn_add_music)
+        music_btns.addWidget(self.btn_remove_music)
+        music_btns.addStretch()
+        mw_music = QWidget()
+        mw_music.setLayout(music_btns)
+        bg_tracks_l.addWidget(mw_music)
+        self._music_list = QListWidget()
+        self._music_list.setObjectName("musicTracksList")
+        self._music_list.setSpacing(4)
+        self._music_list.setMouseTracking(True)
+        self._music_list.setMaximumHeight(100)
+        self._music_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self._music_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._music_list.setFrameShape(QFrame.Shape.NoFrame)
+        bg_tracks_l.addWidget(self._music_list)
+        self._music_hint = QLabel()
+        self._music_hint.setObjectName("hint")
+        self._music_hint.setWordWrap(True)
+        bg_tracks_l.addWidget(self._music_hint)
+        self.background_music_mix = ToggleSwitch(
+            "Смешивать с аудио исходника (иначе — полная замена дорожки)"
+        )
+        self.background_music_mix.setChecked(False)
+        self.background_music_mix.toggled.connect(self._update_music_mix_controls)
+        self.background_music_mix.toggled.connect(self._save_folder_settings)
+        bg_tracks_l.addWidget(self.background_music_mix)
+        self.background_music_volume = SmoothSlider(Qt.Orientation.Horizontal)
+        self.background_music_volume.setMinimum(0)
+        self.background_music_volume.setMaximum(100)
+        self.background_music_volume.setValue(35)
+        self.background_music_volume.setSingleStep(1)
+        self.background_music_volume.setPageStep(5)
+        self.background_music_volume.setToolTip(
+            "Громкость слоя музыки при смешивании (0…100 %). Звук видео не ослабляется."
+        )
+        self.background_music_volume_label = QLabel("35 %")
+        self.background_music_volume_label.setObjectName("hint")
+        self.background_music_volume.valueChanged.connect(self._on_music_volume_slider_changed)
+        vol_row = QHBoxLayout()
+        vol_row.setContentsMargins(0, 0, 0, 0)
+        vol_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        vol_lbl = QLabel("Громкость музыки:")
+        vol_row.addWidget(vol_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        vol_row.addWidget(self.background_music_volume, 1, Qt.AlignmentFlag.AlignVCenter)
+        vol_row.addWidget(self.background_music_volume_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        vw_vol = QWidget()
+        vw_vol.setLayout(vol_row)
+        bg_tracks_l.addWidget(vw_vol)
+        self.background_music.toggled.connect(self._update_music_mix_controls)
+        self.background_music.toggled.connect(self._save_folder_settings)
+        self._update_music_mix_controls()
+        self._sync_music_list_widget()
+
         proc = QGroupBox("Обработка")
         pg = QGridLayout(proc)
         self.thread_slider = SmoothSlider(Qt.Orientation.Horizontal)
@@ -901,13 +976,15 @@ class MainWindow(QWidget):
         pg.addWidget(self.use_gpu, 2, 0, 1, 2)
         pg.addWidget(gpu_hint, 3, 0, 1, 2)
 
-        pg.addWidget(QLabel("Потоков процессов:"), 4, 0)
+        pg.addWidget(QLabel("Потоков процессов:"), 4, 0, Qt.AlignmentFlag.AlignVCenter)
         thr_row = QHBoxLayout()
-        thr_row.addWidget(self.thread_slider, 1)
-        thr_row.addWidget(self.thread_label)
+        thr_row.setSpacing(8)
+        thr_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        thr_row.addWidget(self.thread_slider, 1, Qt.AlignmentFlag.AlignVCenter)
+        thr_row.addWidget(self.thread_label, 0, Qt.AlignmentFlag.AlignVCenter)
         w_thr = QWidget()
         w_thr.setLayout(thr_row)
-        pg.addWidget(w_thr, 4, 1)
+        pg.addWidget(w_thr, 4, 1, Qt.AlignmentFlag.AlignVCenter)
 
         fx = QGroupBox("Уникализация (лёгкие эффекты)")
         fx_layout = QVBoxLayout(fx)
@@ -1103,6 +1180,7 @@ class MainWindow(QWidget):
         inner_left = QWidget()
         inner_left_l = QVBoxLayout(inner_left)
         inner_left_l.addWidget(io)
+        inner_left_l.addWidget(bg_tracks)
         inner_left_l.addWidget(proc)
         inner_left_l.addWidget(fx)
         inner_left_l.addStretch()
@@ -2112,13 +2190,17 @@ class MainWindow(QWidget):
     def _prompt_title_desc_and_profile(self) -> dict[str, str] | None:
         profiles = self._profiles_raw or []
         if not profiles:
-            # Без pop-up: просто инициируем загрузку и даём подсказку в статусе.
+            # Профили ещё не подтянулись — не блокируем уникализацию (раньше return None
+            # давал «Старт» без реакции, если пользователь не на вкладке с профилями).
             try:
-                self._profiles_status.setText("Профили ещё не загружены — запускаю загрузку…")
+                self._profiles_status.setText(
+                    "Профили ещё не загружены — запускаю загрузку… "
+                    "Уникализация без залива в YouTube (профили не выбраны)."
+                )
             except Exception:
                 pass
             self._refresh_antydetect_profiles()
-            return None
+            return {"title": "", "description": "", "profile_ids": ""}
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Загрузка в YouTube после уникализации")
@@ -2438,10 +2520,65 @@ class MainWindow(QWidget):
             files = []
         self._selected_input_files = [str(x) for x in files if str(x).strip()]
         self._sync_input_files_hint()
+        try:
+            mf = self._settings.value("background_music_files", [], type=list) or []
+        except Exception:
+            mf = []
+        raw_music = [str(x) for x in mf if str(x).strip()]
+        pruned: list[str] = []
+        for p in raw_music:
+            try:
+                pp = Path(p)
+                if pp.is_file():
+                    pruned.append(str(pp.resolve()))
+            except OSError:
+                continue
+        self._background_music_files = pruned
+        if len(pruned) != len(raw_music):
+            self._settings.setValue("background_music_files", list(pruned))
+            try:
+                self._settings.sync()
+            except Exception:
+                pass
+        if hasattr(self, "background_music"):
+            self.background_music.setChecked(
+                bool(self._settings.value("background_music_enabled", False, type=bool))
+            )
+        if hasattr(self, "background_music_mix"):
+            self.background_music_mix.setChecked(
+                bool(self._settings.value("background_music_mix_with_source", False, type=bool))
+            )
+        if hasattr(self, "background_music_volume"):
+            try:
+                vv = int(self._settings.value("background_music_volume_pct", 35, type=int))
+            except Exception:
+                vv = 35
+            vv = max(0, min(100, vv))
+            self.background_music_volume.blockSignals(True)
+            self.background_music_volume.setValue(vv)
+            self.background_music_volume.blockSignals(False)
+            if hasattr(self, "background_music_volume_label"):
+                self.background_music_volume_label.setText(f"{vv} %")
+        self._sync_music_list_widget()
+        self._update_music_mix_controls()
 
     def _save_folder_settings(self) -> None:
         self._settings.setValue("output_folder", self.output_dir_edit.text().strip())
         self._settings.setValue("input_files", list(self._selected_input_files))
+        self._settings.setValue("background_music_files", list(self._background_music_files))
+        if hasattr(self, "background_music"):
+            self._settings.setValue(
+                "background_music_enabled", bool(self.background_music.isChecked())
+            )
+        if hasattr(self, "background_music_mix"):
+            self._settings.setValue(
+                "background_music_mix_with_source",
+                bool(self.background_music_mix.isChecked()),
+            )
+        if hasattr(self, "background_music_volume"):
+            self._settings.setValue(
+                "background_music_volume_pct", int(self.background_music_volume.value())
+            )
 
     def _on_default_browser_combo_changed(self, _index: int) -> None:
         self._update_profiles_section_header()
@@ -3223,6 +3360,102 @@ class MainWindow(QWidget):
             self.output_dir_edit.setText(path)
             self._save_folder_settings()
 
+    def _sync_music_hint(self) -> None:
+        if not hasattr(self, "_music_hint"):
+            return
+        n = len(self._background_music_files)
+        if n <= 0:
+            self._music_hint.setText(
+                "Пул треков пуст. Добавьте несколько файлов — для каждого выходного видео "
+                "будет выбран случайный трек и случайное место на шкале времени (длина = длина ролика)."
+            )
+        else:
+            self._music_hint.setText(
+                f"В пуле треков: {n}. Для каждого выходного MP4 — случайный файл и отрезок под длительность ролика. "
+                "Включите «Смешивать с аудио исходника», чтобы музыка шла поверх звука видео (ползунок громкости)."
+            )
+
+    def _on_music_volume_slider_changed(self, value: int) -> None:
+        if hasattr(self, "background_music_volume_label"):
+            self.background_music_volume_label.setText(f"{int(value)} %")
+        self._save_folder_settings()
+
+    def _update_music_mix_controls(self, _checked: bool = False) -> None:
+        if not hasattr(self, "background_music_mix"):
+            return
+        music_on = bool(self.background_music.isChecked())
+        self.background_music_mix.setEnabled(music_on)
+        mix_on = music_on and self.background_music_mix.isChecked()
+        self.background_music_volume.setEnabled(mix_on)
+        if hasattr(self, "background_music_volume_label"):
+            self.background_music_volume_label.setEnabled(mix_on)
+
+    def _sync_music_list_widget(self) -> None:
+        if not hasattr(self, "_music_list"):
+            return
+        self._music_list.clear()
+        for p in self._background_music_files:
+            it = QListWidgetItem(Path(p).name)
+            it.setToolTip(p)
+            it.setData(Qt.ItemDataRole.UserRole, p)
+            self._music_list.addItem(it)
+        self._sync_music_hint()
+
+    def _browse_background_music(self) -> None:
+        start = str(Path.home())
+        if self._background_music_files:
+            start = str(Path(self._background_music_files[0]).parent)
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Аудио для фона (можно несколько)",
+            start,
+            "Аудио (*.mp3 *.wav *.m4a *.aac *.flac *.ogg *.opus);;Все файлы (*)",
+        )
+        if not files:
+            return
+        seen = {str(Path(x).resolve()) for x in self._background_music_files}
+        for f in files:
+            p = str(Path(f).resolve())
+            if p not in seen:
+                seen.add(p)
+                self._background_music_files.append(p)
+        self._sync_music_list_widget()
+        self._save_folder_settings()
+
+    def _normalize_music_path_key(self, p: str) -> str:
+        """Ключ для сравнения путей (Windows: регистр и слэши)."""
+        try:
+            return os.path.normcase(str(Path(p).resolve()))
+        except OSError:
+            return os.path.normcase(os.path.normpath(str(p)))
+
+    def _remove_selected_music(self) -> None:
+        if not hasattr(self, "_music_list"):
+            return
+        items = list(self._music_list.selectedItems())
+        # Клик по кнопке иногда снимает выделение до слота — остаётся текущая строка.
+        if not items:
+            cur = self._music_list.currentItem()
+            if cur is not None:
+                items = [cur]
+        if not items:
+            return
+        drop_keys: set[str] = set()
+        for it in items:
+            raw = it.data(Qt.ItemDataRole.UserRole)
+            if raw is None:
+                continue
+            drop_keys.add(self._normalize_music_path_key(str(raw)))
+        if not drop_keys:
+            return
+        self._background_music_files = [
+            p
+            for p in self._background_music_files
+            if self._normalize_music_path_key(p) not in drop_keys
+        ]
+        self._sync_music_list_widget()
+        self._save_folder_settings()
+
     def _on_random_uniquify_toggled(self, random_on: bool) -> None:
         # Keep section visible, but toggle relevant controls.
         if hasattr(self, "_manual_panel"):
@@ -3260,6 +3493,12 @@ class MainWindow(QWidget):
             "copies_per_file": int(self.copies_per_file.value()),
             "playback_speed_enabled": bool(self.audio_speed.isChecked()),
             "audio_chorus_enabled": bool(self.audio_chorus.isChecked()),
+            "background_music_enabled": bool(self.background_music.isChecked()),
+            "background_music_mix_with_source": bool(self.background_music_mix.isChecked()),
+            "background_music_volume_pct": int(self.background_music_volume.value()),
+            "background_music_files": [
+                p for p in self._background_music_files if Path(p).is_file()
+            ],
             "random_bounds": RandomUniquifyBounds(
                 brightness_min=float(self.rb_brightness_min.value()),
                 brightness_max=float(self.rb_brightness_max.value()),
@@ -3302,6 +3541,15 @@ class MainWindow(QWidget):
                 "Выберите хотя бы один видеофайл (кнопка «Выбрать файлы…»).",
             )
             return
+        if bool(opts.get("background_music_enabled")):
+            if not (opts.get("background_music_files") or []):
+                QMessageBox.warning(
+                    self,
+                    "Zaliver",
+                    "Включена фоновая музыка, но список треков пуст или файлы недоступны.\n"
+                    "Добавьте аудиофайлы или выключите опцию.",
+                )
+                return
         out_res = Path(opts["output_dir"]).resolve()
         parents = {Path(f).resolve().parent for f in opts["input_files"]}
         if len(parents) == 1 and next(iter(parents)) == out_res:

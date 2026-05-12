@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import queue
+import random
 import secrets
 import shutil
 import time
@@ -25,8 +26,9 @@ from zaliver.processing.ffmpeg_merge import (
     check_ffmpeg_tools,
     encoder_runtime_error,
     ffmpeg_encoder_list_text,
-    mux_video_audio,
     merge_segments_with_source_audio,
+    mux_video_audio,
+    mux_video_background_music,
     pick_best_h264_encoder,
 )
 from zaliver.processing.gpu_detect import detect_gpus, format_gpu_list
@@ -72,6 +74,9 @@ class OutputJob:
     job_id: str
     settings: Dict[str, Any]
     target_video_bps: Optional[int] = None
+    background_music_path: Optional[str] = None
+    background_music_mix: bool = False
+    background_music_volume_pct: float = 35.0
     done_frames: int = 0
     finished: bool = False
     chunk_mode: bool = False
@@ -241,6 +246,23 @@ class ProcessingController(QObject):
                 options.get("playback_speed_enabled", options.get("audio_speed_enabled", True))
             )
             audio_chorus_enabled = bool(options.get("audio_chorus_enabled", True))
+            bg_music_enabled = bool(options.get("background_music_enabled", False))
+            raw_music = options.get("background_music_files") or []
+            music_pool: List[str] = []
+            try:
+                for x in raw_music:
+                    p = Path(str(x))
+                    if p.is_file():
+                        music_pool.append(str(p.resolve()))
+            except Exception:
+                music_pool = []
+
+            bg_mix_opt = bool(options.get("background_music_mix_with_source", False))
+            try:
+                bg_vol_opt = float(options.get("background_music_volume_pct", 35.0))
+            except (TypeError, ValueError):
+                bg_vol_opt = 35.0
+            bg_vol_opt = max(0.0, min(100.0, bg_vol_opt))
 
             ctx = multiprocessing.get_context("spawn")
             progress_q: multiprocessing.Queue = ctx.Queue()
@@ -286,6 +308,11 @@ class ProcessingController(QObject):
 
                     job_id = str(uuid.uuid4())
 
+                    bg_track: Optional[str] = None
+                    if bg_music_enabled and music_pool:
+                        bg_track = random.choice(music_pool)
+                    bg_mix = bool(bg_track) and bg_mix_opt
+
                     job = OutputJob(
                         file_idx=file_idx,
                         copy_index=copy_index,
@@ -296,6 +323,9 @@ class ProcessingController(QObject):
                         job_id=job_id,
                         settings=settings,
                         target_video_bps=tvb,
+                        background_music_path=bg_track,
+                        background_music_mix=bg_mix,
+                        background_music_volume_pct=bg_vol_opt,
                     )
                     if randomize:
                         log(
@@ -309,6 +339,21 @@ class ProcessingController(QObject):
                         log(
                             f"{job.tag(n_jobs)}: размер ≈ как у исходника — "
                             f"видео ~{tvb / 1_000_000:.2f} Мбит/с (оценка ffprobe)."
+                        )
+                    if bg_track:
+                        mix_note = (
+                            ", наложение на звук видео"
+                            if bg_mix
+                            else ", замена звука"
+                        )
+                        log(
+                            f"{job.tag(n_jobs)}: фоновая музыка — {Path(bg_track).name}{mix_note} "
+                            f"(из пула {len(music_pool)} треков; случайный отрезок по длительности ролика)"
+                            + (
+                                f", громкость музыки {bg_vol_opt:.0f}%"
+                                if bg_mix
+                                else ""
+                            )
                         )
                     _try_enable_chunk_mode(job, num_workers, out_dir, log, n_jobs)
                     if not job.chunk_mode:
@@ -563,15 +608,37 @@ class ProcessingController(QObject):
                                     f"{j.outp.stem}._zaliver_av{j.outp.suffix}"
                                 )
                                 try:
-                                    mux_video_audio(
-                                        str(video_only),
-                                        str(j.p),
-                                        str(av_tmp),
-                                        playback_speed=_job_playback_speed(j.settings),
-                                        audio_chorus=bool(j.settings.get("audio_chorus", False)),
-                                        log=log,
-                                        target_video_bps=j.target_video_bps,
-                                    )
+                                    if j.background_music_path:
+                                        mux_video_background_music(
+                                            str(video_only),
+                                            str(j.background_music_path),
+                                            str(av_tmp),
+                                            frame_count=int(j.info.frame_count),
+                                            fps=float(j.info.fps),
+                                            playback_speed=_job_playback_speed(j.settings),
+                                            log=log,
+                                            target_video_bps=j.target_video_bps,
+                                            mix_with_source=bool(j.background_music_mix),
+                                            source_video_path=str(j.p),
+                                            audio_chorus=bool(
+                                                j.settings.get("audio_chorus", False)
+                                            ),
+                                            music_volume_pct=float(
+                                                j.background_music_volume_pct
+                                            ),
+                                        )
+                                    else:
+                                        mux_video_audio(
+                                            str(video_only),
+                                            str(j.p),
+                                            str(av_tmp),
+                                            playback_speed=_job_playback_speed(j.settings),
+                                            audio_chorus=bool(
+                                                j.settings.get("audio_chorus", False)
+                                            ),
+                                            log=log,
+                                            target_video_bps=j.target_video_bps,
+                                        )
                                     try:
                                         av_tmp.replace(j.outp)
                                     except OSError:
@@ -614,6 +681,15 @@ class ProcessingController(QObject):
                                         audio_chorus=bool(j.settings.get("audio_chorus", False)),
                                         log=log,
                                         target_video_bps=j.target_video_bps,
+                                        background_music_path=j.background_music_path,
+                                        music_video_meta=(
+                                            int(j.info.frame_count),
+                                            float(j.info.fps),
+                                        ),
+                                        background_music_mix=bool(j.background_music_mix),
+                                        background_music_volume_pct=float(
+                                            j.background_music_volume_pct
+                                        ),
                                     )
                                 except Exception as e:
                                     finish_error(

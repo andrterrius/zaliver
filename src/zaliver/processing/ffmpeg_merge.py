@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -728,6 +729,10 @@ def merge_segments_with_source_audio(
     audio_chorus: bool = False,
     log: LogFn = None,
     target_video_bps: Optional[int] = None,
+    background_music_path: Optional[str] = None,
+    music_video_meta: Optional[Tuple[int, float]] = None,
+    background_music_mix: bool = False,
+    background_music_volume_pct: float = 35.0,
 ) -> None:
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
@@ -735,12 +740,325 @@ def merge_segments_with_source_audio(
     concat_segments(
         segment_paths, str(concat_out), log=log, target_video_bps=target_video_bps
     )
-    mux_video_audio(
-        str(concat_out),
-        source_video,
-        final_output,
-        playback_speed=playback_speed,
-        audio_chorus=audio_chorus,
+    if background_music_path and str(background_music_path).strip():
+        fc, fpsi = music_video_meta or (0, 30.0)
+        mux_video_background_music(
+            str(concat_out),
+            str(background_music_path).strip(),
+            final_output,
+            frame_count=max(1, int(fc)),
+            fps=float(fpsi) if float(fpsi) > 1e-6 else 30.0,
+            playback_speed=playback_speed,
+            log=log,
+            target_video_bps=target_video_bps,
+            mix_with_source=bool(background_music_mix),
+            source_video_path=str(source_video),
+            audio_chorus=bool(audio_chorus),
+            music_volume_pct=float(background_music_volume_pct),
+        )
+    else:
+        mux_video_audio(
+            str(concat_out),
+            source_video,
+            final_output,
+            playback_speed=playback_speed,
+            audio_chorus=audio_chorus,
+            log=log,
+            target_video_bps=target_video_bps,
+        )
+
+
+def _output_duration_after_speed(
+    *, frame_count: int, fps: float, playback_speed: float
+) -> float:
+    if fps <= 1e-6:
+        fps = 30.0
+    spd = float(playback_speed)
+    if spd <= 1e-9:
+        spd = 1.0
+    return (float(frame_count) / fps) / spd
+
+
+def _random_music_trim_start_sec(
+    music_duration_sec: Optional[float], needed_sec: float
+) -> float:
+    """Случайная фаза на шкале времени (сек); при зацикленном входе задаёт «случайный отрезок»."""
+    need = max(0.05, float(needed_sec))
+    if music_duration_sec is None or music_duration_sec <= 0.05:
+        return random.uniform(0.0, max(need, 600.0))
+    d = float(music_duration_sec)
+    # Равномерно по кругу длины d (зацикленный поток).
+    return random.uniform(0.0, d)
+
+
+def _music_volume_linear_from_pct(pct: float) -> float:
+    """0…100 % → множитель для фильтра volume (0 = без музыки)."""
+    try:
+        p = float(pct)
+    except (TypeError, ValueError):
+        p = 35.0
+    return max(0.0, min(100.0, p)) / 100.0
+
+
+def _mux_bgm_replace_only(
+    video_path: str,
+    music_path: str,
+    out_path: str,
+    *,
+    trim_start: float,
+    dur_needed: float,
+    want_speed: bool,
+    spd: float,
+    log: LogFn,
+    target_video_bps: Optional[int],
+) -> None:
+    """Видео + только музыка (как раньше)."""
+    v = Path(video_path).resolve().as_posix()
+    m = Path(music_path).resolve().as_posix()
+    o = str(out_path)
+    a_filt = (
+        f"[1:a]atrim=start={trim_start:.6f}:duration={dur_needed:.6f},"
+        f"asetpts=PTS-STARTPTS[aout]"
+    )
+    vargs = libx264_encode_args_for_target(target_video_bps)
+    if want_speed:
+        filt = f"[0:v]setpts=PTS/{spd:.9f}[vout];{a_filt}"
+        run_ffmpeg(
+            [
+                "-i",
+                v,
+                "-stream_loop",
+                "-1",
+                "-i",
+                m,
+                "-filter_complex",
+                filt,
+                "-map",
+                "[vout]",
+                "-map",
+                "[aout]",
+                "-c:v",
+                "libx264",
+                *vargs,
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                "-c:a",
+                "aac",
+                "-shortest",
+                o,
+            ],
+            log=log,
+        )
+    else:
+        run_ffmpeg(
+            [
+                "-i",
+                v,
+                "-stream_loop",
+                "-1",
+                "-i",
+                m,
+                "-filter_complex",
+                a_filt,
+                "-map",
+                "0:v:0",
+                "-map",
+                "[aout]",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-shortest",
+                o,
+            ],
+            log=log,
+        )
+
+
+def mux_video_background_music(
+    video_path: str,
+    music_path: str,
+    out_path: str,
+    *,
+    frame_count: int,
+    fps: float,
+    playback_speed: Optional[float] = None,
+    log: LogFn = None,
+    target_video_bps: Optional[int] = None,
+    mix_with_source: bool = False,
+    source_video_path: Optional[str] = None,
+    audio_chorus: bool = False,
+    music_volume_pct: float = 35.0,
+) -> None:
+    """
+    Видео без звука + фоновая музыка (случайный отрезок снаружи).
+    При mix_with_source и наличии аудио в source — amix: исходник (скорость/хорус как mux_video_audio)
+    + музыка с громкостью music_volume_pct (0…100 % от полной амплитуды слоя).
+    """
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    v = Path(video_path).resolve().as_posix()
+    m = Path(music_path).resolve().as_posix()
+    o = str(out)
+    spd = float(playback_speed) if playback_speed is not None else 1.0
+    want_speed = abs(spd - 1.0) > 1e-3
+    want_chorus = bool(audio_chorus)
+    dur_needed = _output_duration_after_speed(
+        frame_count=int(frame_count),
+        fps=float(fps),
+        playback_speed=spd,
+    )
+    dur_needed = max(0.05, dur_needed)
+
+    music_dur: Optional[float] = None
+    try:
+        from zaliver.processing.ffmpeg_probe import probe_media_duration_seconds
+
+        music_dur = probe_media_duration_seconds(m)
+    except Exception:
+        music_dur = None
+    if not source_file_has_audio(m):
+        raise RuntimeError("В выбранном музыкальном файле нет аудиопотока")
+
+    trim_start = _random_music_trim_start_sec(music_dur, dur_needed)
+    vol_lin = _music_volume_linear_from_pct(music_volume_pct)
+
+    src_p = (source_video_path or "").strip()
+    use_mix = (
+        bool(mix_with_source)
+        and bool(src_p)
+        and source_file_has_audio(str(Path(src_p).resolve()))
+    )
+    if log:
+        md = f"{music_dur:.2f}s" if music_dur is not None else "?"
+        mode = "наложение на звук видео" if use_mix else "замена звука"
+        log(
+            f"Фоновая музыка ({mode}): {Path(m).name}, фаза ~{trim_start:.2f}s, "
+            f"длина {dur_needed:.2f}s (трек {md})"
+            + (f", громкость музыки {vol_lin * 100:.0f}%" if use_mix else "")
+        )
+
+    if not use_mix:
+        _mux_bgm_replace_only(
+            video_path,
+            music_path,
+            out_path,
+            trim_start=trim_start,
+            dur_needed=dur_needed,
+            want_speed=want_speed,
+            spd=spd,
+            log=log,
+            target_video_bps=target_video_bps,
+        )
+        return
+
+    sx = Path(src_p).resolve().as_posix()
+    music_f = (
+        f"[2:a]atrim=start={trim_start:.6f}:duration={dur_needed:.6f},"
+        f"asetpts=PTS-STARTPTS,volume={vol_lin:.6f}[a_mus]"
+    )
+    amix_f = (
+        "[a_src][a_mus]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
+    )
+
+    if want_speed:
+        vargs = libx264_encode_args_for_target(target_video_bps)
+        parts: List[str] = [f"[0:v]setpts=PTS/{spd:.9f}[vout]"]
+        if want_chorus:
+            parts.append(_atempo_chain("[1:a]", spd, "[aspd]"))
+            parts.append(_chorus_filter("[aspd]", "[a_src]"))
+        else:
+            parts.append(_atempo_chain("[1:a]", spd, "[a_src]"))
+        parts.append(music_f)
+        parts.append(amix_f)
+        filt = ";".join(parts)
+        run_ffmpeg(
+            [
+                "-i",
+                v,
+                "-i",
+                sx,
+                "-stream_loop",
+                "-1",
+                "-i",
+                m,
+                "-filter_complex",
+                filt,
+                "-map",
+                "[vout]",
+                "-map",
+                "[aout]",
+                "-c:v",
+                "libx264",
+                *vargs,
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                "-c:a",
+                "aac",
+                "-shortest",
+                o,
+            ],
+            log=log,
+        )
+        return
+
+    if want_chorus:
+        filt = ";".join([_chorus_filter("[1:a]", "[a_src]"), music_f, amix_f])
+        run_ffmpeg(
+            [
+                "-i",
+                v,
+                "-i",
+                sx,
+                "-stream_loop",
+                "-1",
+                "-i",
+                m,
+                "-filter_complex",
+                filt,
+                "-map",
+                "0:v:0",
+                "-map",
+                "[aout]",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-shortest",
+                o,
+            ],
+            log=log,
+        )
+        return
+
+    # Только наложение музыки, видео без перекодирования, исходник без фильтров по скорости/хорусу.
+    filt = ";".join([music_f, "[1:a][a_mus]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"])
+    run_ffmpeg(
+        [
+            "-i",
+            v,
+            "-i",
+            sx,
+            "-stream_loop",
+            "-1",
+            "-i",
+            m,
+            "-filter_complex",
+            filt,
+            "-map",
+            "0:v:0",
+            "-map",
+            "[aout]",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-shortest",
+            o,
+        ],
         log=log,
-        target_video_bps=target_video_bps,
     )

@@ -14,6 +14,7 @@ from PyQt6.QtGui import QColor, QLinearGradient, QPainter, QPen
 from PyQt6.QtWidgets import (
     QCheckBox,
     QProgressBar,
+    QSizePolicy,
     QSlider,
     QStyle,
     QStyleOptionSlider,
@@ -75,7 +76,10 @@ class SmoothSlider(QSlider):
 
     def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None) -> None:
         super().__init__(orientation, parent)
-        self.setFixedHeight(28)
+        # Высота с запасом под ручку; вертикаль центрируется в paintEvent и в layout (AlignVCenter).
+        self.setMinimumHeight(34)
+        self.setMaximumHeight(40)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._accent = QColor("#6366f1")
 
     def set_accent(self, hex_color: str) -> None:
@@ -101,20 +105,27 @@ class SmoothSlider(QSlider):
             self,
         )
 
+        cr = self.contentsRect()
+        cy = cr.center().y()
+
         margin = 4
-        gy = groove.center().y()
+        x0 = max(cr.left() + margin, groove.left() + margin)
+        x1 = min(cr.right() - margin, groove.right() - margin)
+        if x1 <= x0 + 4:
+            x0, x1 = cr.left() + margin * 2, cr.right() - margin * 2
+
         track_h = 6
         rx = 3
-        x0 = groove.left() + margin
-        x1 = groove.right() - margin
-        y0 = gy - track_h // 2
+        y0 = cy - track_h // 2
 
         bg = QColor("#1e2230")
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(bg)
         painter.drawRoundedRect(x0, y0, x1 - x0, track_h, rx, rx)
 
-        span = handle.center().x() - x0
+        hx = handle.center().x()
+        hx = max(x0 + 2, min(x1 - 2, hx))
+        span = hx - x0
         if span > 2:
             g = QLinearGradient(float(x0), 0, float(x0 + span), 0)
             g.setColorAt(0, self._accent)
@@ -122,8 +133,8 @@ class SmoothSlider(QSlider):
             painter.setBrush(g)
             painter.drawRoundedRect(x0, y0, span, track_h, rx, rx)
 
-        hx, hy = handle.center().x(), handle.center().y()
         r = 9
+        hy = cy
         painter.setBrush(QColor("#f8fafc"))
         painter.setPen(QPen(QColor("#c7d2fe"), 1))
         painter.drawEllipse(hx - r, hy - r, 2 * r, 2 * r)

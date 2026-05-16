@@ -27,7 +27,7 @@ class UploadedStatsRefreshWorker(QObject):
         self._api_key = (api_key or "").strip()
 
     def run(self) -> None:
-        successes: list[tuple[str, int, int | None, int | None]] = []
+        successes: list[tuple[str, int, int | None, int | None, bool]] = []
         failures: list[tuple[str, str, bool]] = []
         key = self._api_key or None
         ids = [(vid or "").strip() for vid in self._video_ids if (vid or "").strip()]
@@ -55,7 +55,13 @@ class UploadedStatsRefreshWorker(QObject):
                 continue
             for st in batch_ok:
                 successes.append(
-                    (st.video_id, int(st.view_count), st.like_count, st.comment_count)
+                    (
+                        st.video_id,
+                        int(st.view_count),
+                        st.like_count,
+                        st.comment_count,
+                        bool(st.age_restricted),
+                    )
                 )
             for vid_f, msg_f in batch_fail:
                 is_data_api = "Invalid video id" not in msg_f

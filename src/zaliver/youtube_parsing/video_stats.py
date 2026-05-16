@@ -15,6 +15,7 @@ class YoutubeVideoStats:
     view_count: int
     like_count: int | None
     comment_count: int | None
+    age_restricted: bool = False
 
 
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,}$")
@@ -79,6 +80,17 @@ def _statistics_scalar_to_int(v: Any) -> int | None:
         return None
 
 
+def _item_youtube_age_restricted(item: dict[str, Any]) -> bool:
+    """``contentDetails.contentRating.ytRating == ytAgeRestricted`` → 18+ на YouTube."""
+    cd = item.get("contentDetails") or {}
+    if not isinstance(cd, dict):
+        return False
+    cr = cd.get("contentRating") or {}
+    if not isinstance(cr, dict):
+        return False
+    return str(cr.get("ytRating") or "").strip() == "ytAgeRestricted"
+
+
 def _item_to_youtube_video_stats(item: dict[str, Any]) -> YoutubeVideoStats | None:
     vid = str(item.get("id") or "").strip()
     if not _VIDEO_ID_RE.fullmatch(vid):
@@ -94,6 +106,7 @@ def _item_to_youtube_video_stats(item: dict[str, Any]) -> YoutubeVideoStats | No
         view_count=view_count,
         like_count=_statistics_scalar_to_int(stats.get("likeCount")),
         comment_count=_statistics_scalar_to_int(stats.get("commentCount")),
+        age_restricted=_item_youtube_age_restricted(item),
     )
 
 
@@ -128,7 +141,7 @@ def _fetch_statistics_map_for_ids(
     try:
         r = http.get(
             "https://www.googleapis.com/youtube/v3/videos",
-            params={"part": "statistics", "id": ids_csv, "key": key},
+            params={"part": "statistics,contentDetails", "id": ids_csv, "key": key},
             timeout=timeout_s,
         )
     except Exception as e:
@@ -233,6 +246,74 @@ def fetch_video_stats_batch(
             )
 
     return successes, failures
+
+
+# `videos.list`: части, доступные по API key (без OAuth).
+YOUTUBE_VIDEOS_LIST_DEFAULT_PARTS = (
+    "snippet,statistics,contentDetails,status,topicDetails"
+)
+
+
+def _redact_youtube_api_key_in_url(url: str) -> str:
+    """Маскирует query-параметр ``key`` в URL ответа requests (для безопасного показа в UI)."""
+    u = url or ""
+    return re.sub(r"([?&]key=)[^&]*", r"\1***", u, count=1, flags=re.IGNORECASE)
+
+
+def _format_http_body_pretty(raw: str) -> str:
+    t = (raw or "").strip()
+    if not t:
+        return "— (пустое тело ответа)"
+    try:
+        obj = json.loads(raw)
+        return json.dumps(obj, indent=2, ensure_ascii=False)
+    except Exception:
+        return raw or ""
+
+
+def fetch_youtube_videos_list_full_text(
+    url_or_id: str,
+    *,
+    api_key: str | None = None,
+    parts: str = YOUTUBE_VIDEOS_LIST_DEFAULT_PARTS,
+    timeout_s: float = 25.0,
+    session: requests.Session | None = None,
+) -> str:
+    """
+    Один запрос ``GET https://www.googleapis.com/youtube/v3/videos`` по ссылке или id.
+
+    Возвращает многострочный текст: статус HTTP, URL без ключа и тело ответа
+    (JSON с отступами, если сервер вернул JSON). Исключения не пробрасывает.
+    """
+    s = (url_or_id or "").strip()
+    if not s:
+        return "Введите ссылку на YouTube или идентификатор видео."
+    vid = extract_video_id(s)
+    if not vid:
+        return f"Не удалось извлечь video id из ввода: {s!r}"
+
+    key = (api_key or os.getenv("YOUTUBE_API_KEY") or "").strip()
+    if not key:
+        return (
+            "Не задан ключ YouTube Data API v3.\n"
+            "Укажите его на вкладке «Настройки» или в переменной окружения YOUTUBE_API_KEY."
+        )
+
+    http = session or requests.Session()
+    params = {"part": parts, "id": vid, "key": key}
+    try:
+        r = http.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params=params,
+            timeout=timeout_s,
+        )
+    except Exception as e:
+        return f"Ошибка сети при запросе к YouTube Data API: {e!r}"
+
+    safe_url = _redact_youtube_api_key_in_url(getattr(r, "url", "") or "")
+    status = int(getattr(r, "status_code", 0) or 0)
+    body = _format_http_body_pretty(r.text or "")
+    return f"HTTP {status}\nGET {safe_url}\n\n{body}"
 
 
 _DEFAULT_HEADERS = {
@@ -439,5 +520,6 @@ def fetch_video_stats_no_key(
         view_count=view_count,
         like_count=like_count,
         comment_count=comment_count,
+        age_restricted=False,
     )
 

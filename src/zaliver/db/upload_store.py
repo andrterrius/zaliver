@@ -68,6 +68,7 @@ class UploadedVideo:
     stats_updated_at: str | None
     stats_unavailable: bool
     stats_unavailable_data_api: bool
+    age_restricted: bool | None
 
 
 class UploadStore:
@@ -158,6 +159,7 @@ class UploadStore:
                 "ALTER TABLE uploaded_videos ADD COLUMN profile_id TEXT NOT NULL DEFAULT '';",
                 "ALTER TABLE uploaded_videos ADD COLUMN stats_unavailable INTEGER NOT NULL DEFAULT 0;",
                 "ALTER TABLE uploaded_videos ADD COLUMN stats_unavailable_data_api INTEGER NOT NULL DEFAULT 0;",
+                "ALTER TABLE uploaded_videos ADD COLUMN age_restricted INTEGER;",
             ):
                 try:
                     con.execute(stmt)
@@ -294,6 +296,22 @@ class UploadStore:
             )
             return int(cur.lastrowid or 0)
 
+    def delete_uploaded_videos_by_ids(self, database_row_ids: Iterable[int]) -> int:
+        """
+        Удаляет строки из ``uploaded_videos`` по первичному ключу ``id``.
+        Возвращает число удалённых строк (по данным SQLite).
+        """
+        ids = sorted({int(x) for x in database_row_ids if int(x) > 0})
+        if not ids:
+            return 0
+        ph = ",".join("?" for _ in ids)
+        with self._connect() as con:
+            cur = con.execute(
+                f"DELETE FROM uploaded_videos WHERE id IN ({ph});",
+                tuple(ids),
+            )
+            return int(cur.rowcount or 0)
+
     def update_video_stats(
         self,
         *,
@@ -301,15 +319,17 @@ class UploadStore:
         view_count: int,
         like_count: int | None,
         comment_count: int | None,
+        age_restricted: bool = False,
         stats_updated_at: str | None = None,
     ) -> None:
         ts = (stats_updated_at or _utc_now_iso()).strip() or _utc_now_iso()
+        ar = 1 if age_restricted else 0
         with self._connect() as con:
             con.execute(
                 """
                 UPDATE uploaded_videos
                 SET view_count=?, like_count=?, comment_count=?, stats_updated_at=?,
-                    stats_unavailable=0, stats_unavailable_data_api=0
+                    stats_unavailable=0, stats_unavailable_data_api=0, age_restricted=?
                 WHERE video_id=?;
                 """,
                 (
@@ -317,6 +337,7 @@ class UploadStore:
                     int(like_count) if like_count is not None else None,
                     int(comment_count) if comment_count is not None else None,
                     ts,
+                    ar,
                     (video_id or "").strip(),
                 ),
             )
@@ -340,7 +361,7 @@ class UploadStore:
                 UPDATE uploaded_videos
                 SET view_count=NULL, like_count=NULL, comment_count=NULL,
                     stats_updated_at=?, stats_unavailable=1,
-                    stats_unavailable_data_api=?
+                    stats_unavailable_data_api=?, age_restricted=NULL
                 WHERE video_id=?;
                 """,
                 (ts, api_flag, vid),
@@ -389,7 +410,8 @@ class UploadStore:
                     COALESCE(v.profile_id, '') AS profile_id,
                     v.view_count, v.like_count, v.comment_count, v.stats_updated_at,
                     COALESCE(v.stats_unavailable, 0) AS stats_unavailable,
-                    COALESCE(v.stats_unavailable_data_api, 0) AS stats_unavailable_data_api
+                    COALESCE(v.stats_unavailable_data_api, 0) AS stats_unavailable_data_api,
+                    v.age_restricted AS age_restricted
                 FROM uploaded_videos v
                 LEFT JOIN upload_sessions s ON s.id = v.session_id
                 WHERE v.session_id IN ({ph})
@@ -419,6 +441,11 @@ class UploadStore:
                 stats_unavailable_data_api=bool(
                     int(r["stats_unavailable_data_api"] or 0)
                 ),
+                age_restricted=(
+                    None
+                    if r["age_restricted"] is None
+                    else bool(int(r["age_restricted"]))
+                ),
             )
             out.setdefault(v.session_id, []).append(v)
         return out
@@ -434,7 +461,8 @@ class UploadStore:
                     COALESCE(v.profile_id, '') AS profile_id,
                     v.view_count, v.like_count, v.comment_count, v.stats_updated_at,
                     COALESCE(v.stats_unavailable, 0) AS stats_unavailable,
-                    COALESCE(v.stats_unavailable_data_api, 0) AS stats_unavailable_data_api
+                    COALESCE(v.stats_unavailable_data_api, 0) AS stats_unavailable_data_api,
+                    v.age_restricted AS age_restricted
                 FROM uploaded_videos v
                 LEFT JOIN upload_sessions s ON s.id = v.session_id
                 ORDER BY v.uploaded_at DESC, v.id DESC
@@ -464,6 +492,11 @@ class UploadStore:
                     stats_unavailable=bool(int(r["stats_unavailable"] or 0)),
                     stats_unavailable_data_api=bool(
                         int(r["stats_unavailable_data_api"] or 0)
+                    ),
+                    age_restricted=(
+                        None
+                        if r["age_restricted"] is None
+                        else bool(int(r["age_restricted"]))
                     ),
                 )
             )

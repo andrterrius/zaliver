@@ -477,8 +477,8 @@ def _studio_upload_pick_file(page, video_path: str) -> None:
         for attempt in range(1, 4):
             try:
                 _log(f"Studio: «Выбрать файлы» + file chooser… (попытка {attempt}/3)")
-                with page.expect_file_chooser(timeout=60_000) as fc_info:
-                    select_btn.first.click(timeout=30_000)
+                with page.expect_file_chooser(timeout=600_000) as fc_info:
+                    select_btn.first.click(timeout=600_000)
                 fc_info.value.set_files(resolved)
                 last_pick_err = None
                 break

@@ -76,6 +76,7 @@ from zaliver.ui.antic_profile_row import AnticProfileRow, _profile_id, _profile_
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
 from zaliver.stats_server_client import notify_uploaded_video
 from zaliver.ui.uploaded_stats_refresh_worker import UploadedStatsRefreshWorker
+from zaliver.ui.youtube_video_api_inspect_worker import YoutubeVideoApiInspectWorker
 from zaliver.ui.widgets import (
     AnimatedProgressBar,
     CollapsibleSection,
@@ -168,6 +169,13 @@ def _video_might_be_18_plus(title: str, description: str) -> bool:
         "несовершеннолетн",
     )
     return any(x in blob for x in needles)
+
+
+def _uploaded_counts_as_18_plus_side(v: UploadedVideo) -> bool:
+    """Боковая статистика «С меткой 18+»: эвристика по описанию или флаг Data API после «Прочекать»."""
+    if v.age_restricted is True:
+        return True
+    return _video_might_be_18_plus(v.title, v.description)
 
 
 def _format_int_compact(v: int | None) -> str:
@@ -502,6 +510,7 @@ class _UploadedVideoRow(QWidget):
         comment_count: int | None,
         stats_unavailable: bool = False,
         stats_unavailable_data_api: bool = False,
+        age_restricted: bool | None = None,
         profile_caption: str,
         tooltip: str,
         list_widget: QListWidget,
@@ -571,6 +580,11 @@ class _UploadedVideoRow(QWidget):
                 f"<span style='color:#a8b0d4;font-weight:700;'>💬&nbsp;{c}</span>"
                 "</span>"
             )
+            if age_restricted is True:
+                stats_html += (
+                    "&nbsp;&nbsp;<span style='color:#fb923c;font-weight:800;'>18+</span>"
+                    "<span style='color:#94a3b8;font-weight:600;font-size:11px;'>&nbsp;YT</span>"
+                )
         metrics = QLabel(stats_html)
         metrics.setObjectName("uploadedRowMetrics")
         metrics.setTextFormat(Qt.TextFormat.RichText)
@@ -730,6 +744,8 @@ class MainWindow(QWidget):
         self._stats_thread: QThread | None = None
         self._stats_worker: UploadedStatsRefreshWorker | None = None
         self._stats_progress_dlg: QProgressDialog | None = None
+        self._ready_inspect_thread: QThread | None = None
+        self._ready_inspect_worker: YoutubeVideoApiInspectWorker | None = None
         self._selected_input_files: list[str] = []
         self._background_music_files: list[str] = []
         self._video_store = VideoStore()
@@ -1228,6 +1244,39 @@ class MainWindow(QWidget):
         ready_top.addWidget(btn_refresh_ready)
         ready_l.addLayout(ready_top)
         ready_l.addWidget(ready_hint)
+        ready_api_hint = QLabel(
+            "Ссылка на YouTube — полный ответ Data API v3 (videos.list, несколько part). "
+            "Ключ API задаётся на вкладке «Настройки»."
+        )
+        ready_api_hint.setObjectName("hint")
+        ready_api_hint.setWordWrap(True)
+        ready_l.addWidget(ready_api_hint)
+        ready_api_row = QHBoxLayout()
+        ready_api_row.setSpacing(10)
+        self._ready_youtube_url = QLineEdit()
+        self._ready_youtube_url.setPlaceholderText(
+            "https://www.youtube.com/watch?v=… или youtu.be/…"
+        )
+        try:
+            self._ready_youtube_url.setClearButtonEnabled(True)
+        except (TypeError, AttributeError):
+            pass
+        self._btn_ready_youtube_api = QPushButton("Ответ API")
+        self._btn_ready_youtube_api.setObjectName("secondary")
+        self._btn_ready_youtube_api.setToolTip(
+            "Один запрос videos.list; в поле ниже — тело ответа сервера (JSON с отступами)."
+        )
+        self._btn_ready_youtube_api.clicked.connect(self._on_ready_youtube_api_clicked)
+        ready_api_row.addWidget(self._ready_youtube_url, 1)
+        ready_api_row.addWidget(self._btn_ready_youtube_api, 0)
+        ready_l.addLayout(ready_api_row)
+        self._ready_api_response = QPlainTextEdit()
+        self._ready_api_response.setObjectName("readyApiResponse")
+        self._ready_api_response.setReadOnly(True)
+        self._ready_api_response.setPlaceholderText("Здесь появится полный ответ API…")
+        self._ready_api_response.setMinimumHeight(168)
+        self._ready_api_response.setMaximumHeight(300)
+        ready_l.addWidget(self._ready_api_response)
         self._ready_list = QListWidget()
         self._ready_list.setObjectName("readyList")
         self._ready_list.setSpacing(6)
@@ -1341,6 +1390,32 @@ class MainWindow(QWidget):
         self._uploaded_side_val_300 = _metric_row("300+ просмотров", "uploadedMetricGreen")
         self._uploaded_side_val_18 = _metric_row("С меткой 18+", "uploadedMetricRed")
         self._uploaded_side_val_ban = _metric_row("Забанено / недоступно", "uploadedMetricRed")
+
+        del_btns_wrap = QWidget()
+        del_btns_l = QVBoxLayout(del_btns_wrap)
+        del_btns_l.setSpacing(6)
+        del_btns_l.setContentsMargins(0, 6, 0, 0)
+        self._btn_uploaded_delete_unavailable = QPushButton(
+            "Удалить из базы: недоступные"
+        )
+        self._btn_uploaded_delete_unavailable.setObjectName("secondary")
+        self._btn_uploaded_delete_unavailable.setToolTip(
+            "Удалить записи с пометкой «недоступно» только среди роликов в текущем списке "
+            "(выбранная сессия или все сессии). Запись в YouTube не трогается."
+        )
+        self._btn_uploaded_delete_unavailable.clicked.connect(
+            self._on_uploaded_delete_unavailable_clicked
+        )
+        self._btn_uploaded_delete_18 = QPushButton("Удалить из базы: 18+")
+        self._btn_uploaded_delete_18.setObjectName("secondary")
+        self._btn_uploaded_delete_18.setToolTip(
+            "Удалить записи, которые считаются 18+ (как в счётчике «С меткой 18+»), "
+            "только в текущем списке. Запись в YouTube не трогается."
+        )
+        self._btn_uploaded_delete_18.clicked.connect(self._on_uploaded_delete_18_clicked)
+        del_btns_l.addWidget(self._btn_uploaded_delete_unavailable)
+        del_btns_l.addWidget(self._btn_uploaded_delete_18)
+        side_l.addWidget(del_btns_wrap)
 
         self._uploaded_side_avg = QLabel("Среднее: —")
         self._uploaded_side_avg.setObjectName("uploadedSideAvg")
@@ -1614,6 +1689,123 @@ class MainWindow(QWidget):
 
         return sorted(videos, key=key_v)
 
+    def _uploaded_session_filter_scope_label(self) -> str:
+        if not hasattr(self, "_uploaded_session_filter"):
+            return "все сессии"
+        try:
+            sid = int(self._uploaded_session_filter.currentData() or 0)
+        except Exception:
+            sid = 0
+        if sid > 0:
+            return f"только сессия №{sid}"
+        return "все сессии"
+
+    def _uploaded_videos_for_current_filter_sorted(self) -> list[UploadedVideo]:
+        """Тот же набор роликов, что строится для списка залитых (фильтр сессии + сортировка)."""
+        only_session_id = 0
+        try:
+            if hasattr(self, "_uploaded_session_filter"):
+                only_session_id = int(self._uploaded_session_filter.currentData() or 0)
+        except Exception:
+            only_session_id = 0
+        try:
+            sessions = self._upload_store.list_sessions(limit=400)
+        except Exception:
+            sessions = []
+        ids = [int(s.id) for s in sessions]
+        m: dict[int, list[UploadedVideo]] = {}
+        try:
+            if ids:
+                raw = self._upload_store.list_uploaded_videos_for_sessions(ids)
+                m = raw if isinstance(raw, dict) else {}
+        except Exception:
+            m = {}
+        flat: list[UploadedVideo] = []
+        if only_session_id > 0:
+            flat = list(m.get(int(only_session_id), []) or [])
+        else:
+            for s in sessions:
+                flat.extend(m.get(int(s.id), []) or [])
+            flat.sort(key=lambda v: (v.uploaded_at or "", v.id), reverse=True)
+        mode = getattr(self, "_uploaded_sort_mode", "views")
+        return self._sorted_uploaded_videos(flat, mode)
+
+    def _on_uploaded_delete_unavailable_clicked(self) -> None:
+        flat = self._uploaded_videos_for_current_filter_sorted()
+        targets = [v for v in flat if v.stats_unavailable]
+        if not targets:
+            QMessageBox.information(
+                self,
+                "Zaliver",
+                "В текущем списке нет записей с недоступной статистикой.",
+            )
+            return
+        scope = self._uploaded_session_filter_scope_label()
+        n = len(targets)
+        ans = QMessageBox.question(
+            self,
+            "Zaliver",
+            f"Удалить из локальной базы {n} залитых видео "
+            f"с недоступной статистикой?\n\n"
+            f"Область: {scope}.\n"
+            "Ролики на YouTube не удаляются — только строки в этой программе.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            deleted = self._upload_store.delete_uploaded_videos_by_ids(
+                v.id for v in targets
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Zaliver", f"Не удалось удалить из базы:\n{e!r}")
+            return
+        QMessageBox.information(
+            self,
+            "Zaliver",
+            f"Удалено записей: {deleted}.",
+        )
+        self._refresh_uploaded_list()
+
+    def _on_uploaded_delete_18_clicked(self) -> None:
+        flat = self._uploaded_videos_for_current_filter_sorted()
+        targets = [v for v in flat if _uploaded_counts_as_18_plus_side(v)]
+        if not targets:
+            QMessageBox.information(
+                self,
+                "Zaliver",
+                "В текущем списке нет записей, попадающих под «18+».",
+            )
+            return
+        scope = self._uploaded_session_filter_scope_label()
+        n = len(targets)
+        ans = QMessageBox.question(
+            self,
+            "Zaliver",
+            f"Удалить из локальной базы {n} залитых видео "
+            f"с меткой 18+ (текст и/или возрастное ограничение по API)?\n\n"
+            f"Область: {scope}.\n"
+            "Ролики на YouTube не удаляются, а только строки в этой программе.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            deleted = self._upload_store.delete_uploaded_videos_by_ids(
+                v.id for v in targets
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Zaliver", f"Не удалось удалить из базы:\n{e!r}")
+            return
+        QMessageBox.information(
+            self,
+            "Zaliver",
+            f"Удалено записей: {deleted}.",
+        )
+        self._refresh_uploaded_list()
+
     def _set_uploaded_sort_mode(self, mode: str) -> None:
         m = (mode or "views").strip().lower()
         if m not in ("views", "likes"):
@@ -1663,7 +1855,7 @@ class MainWindow(QWidget):
             for v in counted
             if v.view_count is not None and int(v.view_count) >= 300
         )
-        n_18 = sum(1 for v in videos if _video_might_be_18_plus(v.title, v.description))
+        n_18 = sum(1 for v in videos if _uploaded_counts_as_18_plus_side(v))
         n_ban = sum(1 for v in videos if v.stats_unavailable)
         self._uploaded_side_val_zero.setText(str(n_zero))
         self._uploaded_side_val_300.setText(str(n_300))
@@ -1824,6 +2016,11 @@ class MainWindow(QWidget):
                     tip_lines.append(
                         "Статистика: не удалось получить (блокировка, приват или удалено)."
                     )
+            elif v.age_restricted is True:
+                tip_lines.append(
+                    "Возрастное ограничение YouTube (Data API): 18+ "
+                    "(contentDetails.contentRating.ytRating = ytAgeRestricted)."
+                )
             tip = "\n".join(tip_lines)
 
             it = QListWidgetItem()
@@ -1847,6 +2044,7 @@ class MainWindow(QWidget):
                 comment_count=v.comment_count,
                 stats_unavailable=v.stats_unavailable,
                 stats_unavailable_data_api=v.stats_unavailable_data_api,
+                age_restricted=v.age_restricted,
                 profile_caption=prof_cap,
                 tooltip=tip,
                 list_widget=self._uploaded_list,
@@ -2000,12 +2198,14 @@ class MainWindow(QWidget):
                 if not isinstance(row, (list, tuple)) or len(row) < 4:
                     continue
                 vid, vc, lc, cc = row[0], row[1], row[2], row[3]
+                ar = bool(row[4]) if len(row) >= 5 else False
                 try:
                     self._upload_store.update_video_stats(
                         video_id=str(vid),
                         view_count=int(vc),
                         like_count=lc if lc is None else int(lc),
                         comment_count=cc if cc is None else int(cc),
+                        age_restricted=ar,
                     )
                 except Exception:
                     pass
@@ -2045,6 +2245,47 @@ class MainWindow(QWidget):
             self._stats_progress_dlg = None
         if hasattr(self, "_btn_uploaded_check"):
             self._btn_uploaded_check.setEnabled(True)
+
+    def _on_ready_youtube_api_clicked(self) -> None:
+        if self._ready_inspect_thread is not None and self._ready_inspect_thread.isRunning():
+            return
+        if not hasattr(self, "_ready_youtube_url"):
+            return
+        url = (self._ready_youtube_url.text() or "").strip()
+        if not url:
+            QMessageBox.information(
+                self,
+                "Zaliver",
+                "Вставьте ссылку на видео YouTube или его идентификатор.",
+            )
+            return
+        key = ""
+        if hasattr(self, "_youtube_api_key"):
+            key = (self._youtube_api_key.text() or "").strip()
+        self._btn_ready_youtube_api.setEnabled(False)
+        self._ready_api_response.setPlainText("Запрос…")
+        self._ready_inspect_thread = QThread()
+        self._ready_inspect_worker = YoutubeVideoApiInspectWorker(url, key)
+        self._ready_inspect_worker.moveToThread(self._ready_inspect_thread)
+        self._ready_inspect_thread.started.connect(self._ready_inspect_worker.run)
+        self._ready_inspect_worker.finished.connect(self._on_ready_inspect_worker_finished)
+        self._ready_inspect_thread.finished.connect(self._on_ready_inspect_thread_finished)
+        self._ready_inspect_thread.start()
+
+    def _on_ready_inspect_worker_finished(self, text: str) -> None:
+        if hasattr(self, "_ready_api_response"):
+            self._ready_api_response.setPlainText(text or "")
+        t = self._ready_inspect_thread
+        if t is not None:
+            t.quit()
+
+    def _on_ready_inspect_thread_finished(self) -> None:
+        self._ready_inspect_thread = None
+        if self._ready_inspect_worker is not None:
+            self._ready_inspect_worker.deleteLater()
+            self._ready_inspect_worker = None
+        if hasattr(self, "_btn_ready_youtube_api"):
+            self._btn_ready_youtube_api.setEnabled(True)
 
     def _open_uploaded_url(self, url: str) -> None:
         u = (url or "").strip()

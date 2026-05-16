@@ -76,7 +76,6 @@ from zaliver.ui.antic_profile_row import AnticProfileRow, _profile_id, _profile_
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
 from zaliver.stats_server_client import notify_uploaded_video
 from zaliver.ui.uploaded_stats_refresh_worker import UploadedStatsRefreshWorker
-from zaliver.ui.youtube_video_api_inspect_worker import YoutubeVideoApiInspectWorker
 from zaliver.ui.widgets import (
     AnimatedProgressBar,
     CollapsibleSection,
@@ -744,8 +743,6 @@ class MainWindow(QWidget):
         self._stats_thread: QThread | None = None
         self._stats_worker: UploadedStatsRefreshWorker | None = None
         self._stats_progress_dlg: QProgressDialog | None = None
-        self._ready_inspect_thread: QThread | None = None
-        self._ready_inspect_worker: YoutubeVideoApiInspectWorker | None = None
         self._selected_input_files: list[str] = []
         self._background_music_files: list[str] = []
         self._video_store = VideoStore()
@@ -1244,39 +1241,6 @@ class MainWindow(QWidget):
         ready_top.addWidget(btn_refresh_ready)
         ready_l.addLayout(ready_top)
         ready_l.addWidget(ready_hint)
-        ready_api_hint = QLabel(
-            "Ссылка на YouTube — полный ответ Data API v3 (videos.list, несколько part). "
-            "Ключ API задаётся на вкладке «Настройки»."
-        )
-        ready_api_hint.setObjectName("hint")
-        ready_api_hint.setWordWrap(True)
-        ready_l.addWidget(ready_api_hint)
-        ready_api_row = QHBoxLayout()
-        ready_api_row.setSpacing(10)
-        self._ready_youtube_url = QLineEdit()
-        self._ready_youtube_url.setPlaceholderText(
-            "https://www.youtube.com/watch?v=… или youtu.be/…"
-        )
-        try:
-            self._ready_youtube_url.setClearButtonEnabled(True)
-        except (TypeError, AttributeError):
-            pass
-        self._btn_ready_youtube_api = QPushButton("Ответ API")
-        self._btn_ready_youtube_api.setObjectName("secondary")
-        self._btn_ready_youtube_api.setToolTip(
-            "Один запрос videos.list; в поле ниже — тело ответа сервера (JSON с отступами)."
-        )
-        self._btn_ready_youtube_api.clicked.connect(self._on_ready_youtube_api_clicked)
-        ready_api_row.addWidget(self._ready_youtube_url, 1)
-        ready_api_row.addWidget(self._btn_ready_youtube_api, 0)
-        ready_l.addLayout(ready_api_row)
-        self._ready_api_response = QPlainTextEdit()
-        self._ready_api_response.setObjectName("readyApiResponse")
-        self._ready_api_response.setReadOnly(True)
-        self._ready_api_response.setPlaceholderText("Здесь появится полный ответ API…")
-        self._ready_api_response.setMinimumHeight(168)
-        self._ready_api_response.setMaximumHeight(300)
-        ready_l.addWidget(self._ready_api_response)
         self._ready_list = QListWidget()
         self._ready_list.setObjectName("readyList")
         self._ready_list.setSpacing(6)
@@ -2245,47 +2209,6 @@ class MainWindow(QWidget):
             self._stats_progress_dlg = None
         if hasattr(self, "_btn_uploaded_check"):
             self._btn_uploaded_check.setEnabled(True)
-
-    def _on_ready_youtube_api_clicked(self) -> None:
-        if self._ready_inspect_thread is not None and self._ready_inspect_thread.isRunning():
-            return
-        if not hasattr(self, "_ready_youtube_url"):
-            return
-        url = (self._ready_youtube_url.text() or "").strip()
-        if not url:
-            QMessageBox.information(
-                self,
-                "Zaliver",
-                "Вставьте ссылку на видео YouTube или его идентификатор.",
-            )
-            return
-        key = ""
-        if hasattr(self, "_youtube_api_key"):
-            key = (self._youtube_api_key.text() or "").strip()
-        self._btn_ready_youtube_api.setEnabled(False)
-        self._ready_api_response.setPlainText("Запрос…")
-        self._ready_inspect_thread = QThread()
-        self._ready_inspect_worker = YoutubeVideoApiInspectWorker(url, key)
-        self._ready_inspect_worker.moveToThread(self._ready_inspect_thread)
-        self._ready_inspect_thread.started.connect(self._ready_inspect_worker.run)
-        self._ready_inspect_worker.finished.connect(self._on_ready_inspect_worker_finished)
-        self._ready_inspect_thread.finished.connect(self._on_ready_inspect_thread_finished)
-        self._ready_inspect_thread.start()
-
-    def _on_ready_inspect_worker_finished(self, text: str) -> None:
-        if hasattr(self, "_ready_api_response"):
-            self._ready_api_response.setPlainText(text or "")
-        t = self._ready_inspect_thread
-        if t is not None:
-            t.quit()
-
-    def _on_ready_inspect_thread_finished(self) -> None:
-        self._ready_inspect_thread = None
-        if self._ready_inspect_worker is not None:
-            self._ready_inspect_worker.deleteLater()
-            self._ready_inspect_worker = None
-        if hasattr(self, "_btn_ready_youtube_api"):
-            self._btn_ready_youtube_api.setEnabled(True)
 
     def _open_uploaded_url(self, url: str) -> None:
         u = (url or "").strip()

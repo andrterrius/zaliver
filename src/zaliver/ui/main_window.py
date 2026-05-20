@@ -730,6 +730,8 @@ class MainWindow(QWidget):
     _dolphin_google_failed = pyqtSignal(str, str)
     _ui_log_line = pyqtSignal(str)
     _youtube_upload_phase_finished = pyqtSignal(str)
+    _studio_availability_progress = pyqtSignal(int, int, str)
+    _studio_availability_finished = pyqtSignal(int, int)
 
     def __init__(self) -> None:
         super().__init__()
@@ -781,7 +783,10 @@ class MainWindow(QWidget):
         self._upload_cancel_kind = ""
         self._upload_cancel_dolphin_token = ""
         self._upload_cancel_profile_ids: list[str] = []
+        self._profiles_availability_running = False
         self._youtube_upload_phase_finished.connect(self._on_youtube_upload_phase_finished)
+        self._studio_availability_progress.connect(self._on_studio_availability_progress)
+        self._studio_availability_finished.connect(self._on_studio_availability_finished)
         # Автозагрузка профилей при запуске (асинхронно).
         QTimer.singleShot(0, self._refresh_antydetect_profiles)
 
@@ -1446,9 +1451,21 @@ class MainWindow(QWidget):
         self._btn_profiles_refresh.setAutoDefault(False)
         self._btn_profiles_refresh.setDefault(False)
         self._btn_profiles_refresh.clicked.connect(self._refresh_antydetect_profiles)
+        self._btn_profiles_check_availability = QPushButton("Проверить доступность YouTube")
+        self._btn_profiles_check_availability.setObjectName("secondary")
+        self._btn_profiles_check_availability.setAutoDefault(False)
+        self._btn_profiles_check_availability.setDefault(False)
+        self._btn_profiles_check_availability.setToolTip(
+            "Последовательно открывает каждый профиль, заходит в YouTube Studio "
+            "и проверяет, что доступно окно загрузки видео (без реальной загрузки)."
+        )
+        self._btn_profiles_check_availability.clicked.connect(
+            self._start_profiles_availability_check
+        )
         profiles_top.addWidget(self._profiles_title)
         profiles_top.addStretch()
         profiles_top.addWidget(self._dolphin_query, 1)
+        profiles_top.addWidget(self._btn_profiles_check_availability)
         profiles_top.addWidget(self._btn_profiles_refresh)
 
         self._profiles_status = QLabel("")
@@ -3096,6 +3113,8 @@ class MainWindow(QWidget):
             base_url = DEFAULT_LOCAL_API_BASE_URL
 
         self._btn_profiles_refresh.setEnabled(False)
+        if hasattr(self, "_btn_profiles_check_availability"):
+            self._btn_profiles_check_availability.setEnabled(False)
         self._profiles_status.setText("Загрузка профилей…")
 
         t = threading.Thread(
@@ -3143,13 +3162,210 @@ class MainWindow(QWidget):
 
     def _on_profiles_loaded(self, profiles_obj: object) -> None:
         self._btn_profiles_refresh.setEnabled(True)
+        if hasattr(self, "_btn_profiles_check_availability"):
+            self._btn_profiles_check_availability.setEnabled(
+                not self._profiles_availability_running
+            )
         profiles = profiles_obj if isinstance(profiles_obj, list) else []
         cleaned: list[dict[str, object]] = [p for p in profiles if isinstance(p, dict)]
         self._profiles_raw = cleaned
         self._apply_profiles_filter()
 
+    def _collect_profile_ids_for_availability_check(self) -> list[str]:
+        raw = self._profiles_raw
+        if not raw:
+            return []
+        q = (self._dolphin_query.text() if hasattr(self, "_dolphin_query") else "") or ""
+        q = q.strip()
+        profiles = [
+            p for p in raw if isinstance(p, dict) and self._profile_matches(p, q)
+        ]
+        ids: list[str] = []
+        seen: set[str] = set()
+        for p in profiles:
+            pid = _profile_id(p)
+            if pid and pid not in seen:
+                seen.add(pid)
+                ids.append(pid)
+        return ids
+
+    def _start_profiles_availability_check(self) -> None:
+        if self._profiles_availability_running:
+            QMessageBox.information(
+                self,
+                "Проверка доступности",
+                "Проверка уже выполняется. Дождитесь завершения.",
+            )
+            return
+        if self._profiles_raw is None:
+            QMessageBox.warning(
+                self,
+                "Проверка доступности",
+                "Сначала загрузите список профилей (кнопка «Обновить»).",
+            )
+            return
+        profile_ids = self._collect_profile_ids_for_availability_check()
+        if not profile_ids:
+            QMessageBox.warning(
+                self,
+                "Проверка доступности",
+                "Нет профилей для проверки (список пуст или фильтр ничего не нашёл).",
+            )
+            return
+
+        token = (self._dolphin_token.text() or "").strip()
+        if not token:
+            token = (
+                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
+            ).strip()
+        kind = self._default_browser_combo.currentData()
+        if not isinstance(kind, str) or not kind.strip():
+            kind = "dolphin"
+        base_url = (self._local_api_base_url.text() or "").strip()
+        if not base_url:
+            base_url = (
+                self._settings.value("antydetect/local_api_base_url", "", type=str) or ""
+            ).strip()
+        if not base_url and kind == "local":
+            base_url = DEFAULT_LOCAL_API_BASE_URL
+
+        self._profiles_availability_running = True
+        self._btn_profiles_check_availability.setEnabled(False)
+        self._btn_profiles_refresh.setEnabled(False)
+        self._profiles_status.setText(
+            f"Проверка доступности Studio: 0 / {len(profile_ids)}…"
+        )
+        self._append_log(
+            f"[availability] Старт последовательной проверки {len(profile_ids)} профилей…"
+        )
+
+        threading.Thread(
+            target=self._profiles_availability_worker,
+            kwargs={
+                "profile_ids": profile_ids,
+                "kind": kind,
+                "token": token,
+                "base_url": base_url,
+            },
+            daemon=True,
+        ).start()
+
+    def _profiles_availability_worker(
+        self,
+        *,
+        profile_ids: list[str],
+        kind: str,
+        token: str,
+        base_url: str,
+    ) -> None:
+        from zaliver.antydetect.antic_open import (
+            check_studio_availability_in_local_antidetect_profile,
+            check_studio_availability_in_profile,
+            set_log_sink,
+        )
+        from zaliver.youtube_upload.studio import STUDIO_AVAILABILITY_ERROR_TAG
+
+        set_log_sink(self._ui_log_line.emit)
+        ok_n = 0
+        fail_n = 0
+        total = len(profile_ids)
+        kind_s = (kind or "").strip()
+
+        for i, pid in enumerate(profile_ids, start=1):
+            self._studio_availability_progress.emit(i, total, pid)
+            try:
+                headless = True
+                if hasattr(self, "_dolphin_headless"):
+                    headless = bool(self._dolphin_headless.isChecked())
+                else:
+                    headless = bool(
+                        self._settings.value("antydetect/dolphin_headless", True, type=bool)
+                    )
+                if kind_s == "local":
+                    u = (base_url or "").strip()
+                    if not u:
+                        raise LocalAntidetectError(
+                            "Укажите базовый URL локального API в настройках."
+                        )
+                    check_studio_availability_in_local_antidetect_profile(
+                        pid, base_url=u, headless=headless
+                    )
+                else:
+                    check_studio_availability_in_profile(
+                        pid, local_token=token or None, headless=headless
+                    )
+                ok_n += 1
+                self._ui_log_line.emit(
+                    f"[availability] OK profile={pid} ({i}/{total})"
+                )
+            except Exception as e:
+                fail_n += 1
+                err = str(e).strip() or repr(e)
+                self._ui_log_line.emit(
+                    f"[availability] ОШИБКА profile={pid} ({i}/{total}): {err}"
+                )
+                if kind_s == "local":
+                    try:
+                        api = LocalAntidetectHttpAPI(
+                            (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
+                        )
+                        try:
+                            api.add_profile_tag(pid, STUDIO_AVAILABILITY_ERROR_TAG)
+                            self._ui_log_line.emit(
+                                f"[availability] profile={pid} tag_added="
+                                f"{STUDIO_AVAILABILITY_ERROR_TAG!r}"
+                            )
+                        finally:
+                            api.close()
+                    except Exception as te:
+                        self._ui_log_line.emit(
+                            f"[availability] profile={pid} tag_add_failed err={te!r}"
+                        )
+                else:
+                    self._ui_log_line.emit(
+                        f"[availability] profile={pid}: тег "
+                        f"{STUDIO_AVAILABILITY_ERROR_TAG!r} доступен только "
+                        "для локального антидетекта."
+                    )
+
+        self._studio_availability_finished.emit(ok_n, fail_n)
+
+    def _on_studio_availability_progress(self, current: int, total: int, profile_id: str) -> None:
+        pid = (profile_id or "").strip()
+        self._profiles_status.setText(
+            f"Проверка доступности Studio: {current} / {total}"
+            + (f" — профиль {pid}" if pid else "…")
+        )
+
+    def _on_studio_availability_finished(self, ok_n: int, fail_n: int) -> None:
+        self._profiles_availability_running = False
+        if hasattr(self, "_btn_profiles_check_availability"):
+            self._btn_profiles_check_availability.setEnabled(True)
+        if hasattr(self, "_btn_profiles_refresh"):
+            self._btn_profiles_refresh.setEnabled(True)
+        total = int(ok_n) + int(fail_n)
+        self._profiles_status.setText(
+            f"Проверка доступности завершена: успешно {ok_n}, с ошибкой {fail_n} "
+            f"(всего {total})."
+        )
+        self._append_log(
+            f"[availability] Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}."
+        )
+        kind = self._default_browser_combo.currentData()
+        if (kind or "").strip() == "local" and int(fail_n) > 0:
+            self._refresh_antydetect_profiles()
+        QMessageBox.information(
+            self,
+            "Проверка доступности",
+            f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
+        )
+
     def _on_profiles_load_failed(self, message: str) -> None:
         self._btn_profiles_refresh.setEnabled(True)
+        if hasattr(self, "_btn_profiles_check_availability"):
+            self._btn_profiles_check_availability.setEnabled(
+                not self._profiles_availability_running
+            )
         self._profiles_raw = None
         if hasattr(self, "_profiles_list"):
             self._profiles_list.blockSignals(True)

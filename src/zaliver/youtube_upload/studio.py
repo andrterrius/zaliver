@@ -23,6 +23,10 @@ class YoutubeStudioError(RuntimeError):
     pass
 
 
+# Тег профиля локального антидетекта при неуспешной проверке доступности Studio.
+STUDIO_AVAILABILITY_ERROR_TAG = "ОШИБКА ПРОВЕРКИ ДОСТУПНОСТИ"
+
+
 _LOG_SINK = None
 
 
@@ -174,6 +178,51 @@ def _studio_click_create_then_add_video(page) -> None:
     upload_item.first.click(timeout=30_000)
     page.wait_for_timeout(500)
     _log(f"Studio: после «Добавить видео» URL: {page.url!r}")
+
+
+def _studio_upload_file_picker_locator(page):
+    return page.locator(
+        "ytcp-uploads-file-picker#ytcp-uploads-dialog-file-picker"
+    ).or_(page.locator("ytcp-uploads-file-picker"))
+
+
+def verify_studio_upload_dialog_available(page) -> None:
+    """
+    Проверка доступности YouTube Studio до окна загрузки (без выбора файла).
+    Успех — видим ytcp-uploads-file-picker («Выбрать файлы»).
+    """
+    _studio_click_create_then_add_video(page)
+    picker = _studio_upload_file_picker_locator(page)
+    _log("Studio: ожидание окна загрузки видео (ytcp-uploads-file-picker)…")
+    picker.first.wait_for(state="visible", timeout=120_000)
+    _log("Studio: окно загрузки видео доступно — проверка успешна.")
+
+
+def _studio_dismiss_upload_dialog(page) -> None:
+    """Закрыть диалог загрузки, если он открыт (перед остановкой профиля)."""
+    try:
+        cancel = (
+            page.locator("ytcp-uploads-dialog #cancel-button button")
+            .or_(page.locator("ytcp-uploads-dialog ytcp-button#cancel-button button"))
+            .or_(
+                page.get_by_role(
+                    "button", name=re.compile(r"отмена|cancel|закрыть|close", re.I)
+                )
+            )
+        )
+        if cancel.count() > 0 and cancel.first.is_visible():
+            cancel.first.click(timeout=10_000)
+            page.wait_for_timeout(400)
+            _log("Studio: диалог загрузки закрыт (кнопка отмены).")
+            return
+    except Exception as e:
+        _log(f"Studio: не удалось закрыть диалог кнопкой отмены: {e!r}")
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+        _log("Studio: отправлен Escape для закрытия диалога.")
+    except Exception:
+        pass
 
 
 def _studio_file_input_frame(picker, select_btn, page) -> object:
@@ -424,9 +473,7 @@ def _studio_upload_pick_file(page, video_path: str) -> None:
         time.sleep(0.5)
 
     _log("Studio: ожидание ytcp-uploads-file-picker…")
-    picker = page.locator(
-        "ytcp-uploads-file-picker#ytcp-uploads-dialog-file-picker"
-    ).or_(page.locator("ytcp-uploads-file-picker"))
+    picker = _studio_upload_file_picker_locator(page)
     picker.first.wait_for(state="visible", timeout=120_000)
 
     select_btn = (

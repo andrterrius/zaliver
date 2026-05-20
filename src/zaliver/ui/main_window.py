@@ -784,6 +784,7 @@ class MainWindow(QWidget):
         self._upload_cancel_dolphin_token = ""
         self._upload_cancel_profile_ids: list[str] = []
         self._profiles_availability_running = False
+        self._last_availability_failed_ids: list[str] = []
         self._youtube_upload_phase_finished.connect(self._on_youtube_upload_phase_finished)
         self._studio_availability_progress.connect(self._on_studio_availability_progress)
         self._studio_availability_finished.connect(self._on_studio_availability_finished)
@@ -1456,8 +1457,8 @@ class MainWindow(QWidget):
         self._btn_profiles_check_availability.setAutoDefault(False)
         self._btn_profiles_check_availability.setDefault(False)
         self._btn_profiles_check_availability.setToolTip(
-            "Последовательно открывает каждый профиль, заходит в YouTube Studio "
-            "и проверяет, что доступно окно загрузки видео (без реальной загрузки)."
+            "Открывает профили в headless, до 5 одновременно (как при заливке), "
+            "проверяет доступность окна загрузки в YouTube Studio без выбора файла."
         )
         self._btn_profiles_check_availability.clicked.connect(
             self._start_profiles_availability_check
@@ -3236,7 +3237,8 @@ class MainWindow(QWidget):
             f"Проверка доступности Studio: 0 / {len(profile_ids)}…"
         )
         self._append_log(
-            f"[availability] Старт последовательной проверки {len(profile_ids)} профилей…"
+            f"[availability] Старт проверки {len(profile_ids)} профилей "
+            f"(headless, до 5 параллельно)…"
         )
 
         threading.Thread(
@@ -3263,71 +3265,67 @@ class MainWindow(QWidget):
             check_studio_availability_in_profile,
             set_log_sink,
         )
+        from zaliver.youtube_upload.multi_availability_checker import (
+            MultiProfileAvailabilityChecker,
+        )
         from zaliver.youtube_upload.studio import STUDIO_AVAILABILITY_ERROR_TAG
 
         set_log_sink(self._ui_log_line.emit)
-        ok_n = 0
-        fail_n = 0
-        total = len(profile_ids)
         kind_s = (kind or "").strip()
+        base_u = (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
 
-        for i, pid in enumerate(profile_ids, start=1):
-            self._studio_availability_progress.emit(i, total, pid)
-            try:
-                headless = True
-                if hasattr(self, "_dolphin_headless"):
-                    headless = bool(self._dolphin_headless.isChecked())
-                else:
-                    headless = bool(
-                        self._settings.value("antydetect/dolphin_headless", True, type=bool)
+        def _check_one(pid: str) -> None:
+            if kind_s == "local":
+                u = (base_url or "").strip()
+                if not u:
+                    raise LocalAntidetectError(
+                        "Укажите базовый URL локального API в настройках."
                     )
-                if kind_s == "local":
-                    u = (base_url or "").strip()
-                    if not u:
-                        raise LocalAntidetectError(
-                            "Укажите базовый URL локального API в настройках."
-                        )
-                    check_studio_availability_in_local_antidetect_profile(
-                        pid, base_url=u, headless=headless
-                    )
-                else:
-                    check_studio_availability_in_profile(
-                        pid, local_token=token or None, headless=headless
-                    )
-                ok_n += 1
-                self._ui_log_line.emit(
-                    f"[availability] OK profile={pid} ({i}/{total})"
+                check_studio_availability_in_local_antidetect_profile(
+                    pid, base_url=u, headless=True
                 )
-            except Exception as e:
-                fail_n += 1
-                err = str(e).strip() or repr(e)
-                self._ui_log_line.emit(
-                    f"[availability] ОШИБКА profile={pid} ({i}/{total}): {err}"
+            else:
+                check_studio_availability_in_profile(
+                    pid, local_token=token or None, headless=True
                 )
-                if kind_s == "local":
+
+        def _on_profile_done(pid: str, ok: bool, err: str) -> None:
+            if ok:
+                return
+            if kind_s == "local":
+                try:
+                    api = LocalAntidetectHttpAPI(base_u)
                     try:
-                        api = LocalAntidetectHttpAPI(
-                            (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
-                        )
-                        try:
-                            api.add_profile_tag(pid, STUDIO_AVAILABILITY_ERROR_TAG)
-                            self._ui_log_line.emit(
-                                f"[availability] profile={pid} tag_added="
-                                f"{STUDIO_AVAILABILITY_ERROR_TAG!r}"
-                            )
-                        finally:
-                            api.close()
-                    except Exception as te:
+                        api.add_profile_tag(pid, STUDIO_AVAILABILITY_ERROR_TAG)
                         self._ui_log_line.emit(
-                            f"[availability] profile={pid} tag_add_failed err={te!r}"
+                            f"[availability] profile={pid} tag_added="
+                            f"{STUDIO_AVAILABILITY_ERROR_TAG!r}"
                         )
-                else:
+                    finally:
+                        api.close()
+                except Exception as te:
                     self._ui_log_line.emit(
-                        f"[availability] profile={pid}: тег "
-                        f"{STUDIO_AVAILABILITY_ERROR_TAG!r} доступен только "
-                        "для локального антидетекта."
+                        f"[availability] profile={pid} tag_add_failed err={te!r}"
                     )
+            else:
+                self._ui_log_line.emit(
+                    f"[availability] profile={pid}: тег "
+                    f"{STUDIO_AVAILABILITY_ERROR_TAG!r} доступен только "
+                    "для локального антидетекта."
+                )
 
+        def _on_progress(done: int, total: int, profile_id: str) -> None:
+            self._studio_availability_progress.emit(done, total, profile_id)
+
+        mgr = MultiProfileAvailabilityChecker(
+            profile_ids=profile_ids,
+            check_one=_check_one,
+            on_profile_done=_on_profile_done,
+            on_progress=_on_progress,
+            log_sink=self._ui_log_line.emit,
+        )
+        ok_n, fail_n, failed_ids = mgr.run()
+        self._last_availability_failed_ids = list(failed_ids)
         self._studio_availability_finished.emit(ok_n, fail_n)
 
     def _on_studio_availability_progress(self, current: int, total: int, profile_id: str) -> None:
@@ -3351,6 +3349,12 @@ class MainWindow(QWidget):
         self._append_log(
             f"[availability] Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}."
         )
+        if int(fail_n) > 0:
+            failed = getattr(self, "_last_availability_failed_ids", None) or []
+            if failed:
+                self._append_log(
+                    "[availability] Недоступные профили (ID): " + ", ".join(failed)
+                )
         kind = self._default_browser_combo.currentData()
         if (kind or "").strip() == "local" and int(fail_n) > 0:
             self._refresh_antydetect_profiles()

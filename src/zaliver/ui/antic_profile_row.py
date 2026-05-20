@@ -211,6 +211,22 @@ def _proxy_state(profile: dict[str, object]) -> tuple[str, str, str]:
     return f"{head} · не проверен", "unknown", ""
 
 
+def _tag_semantic_kind(text: str) -> str:
+    """Семантика чипа для QSS: error | success | пусто (дефолтный фиолетовый)."""
+    low = _clean_tag_visible(text).lower()
+    if "ошибка" in low:
+        return "error"
+    if "успех" in low or "успешный" in low:
+        return "success"
+    return ""
+
+
+def _apply_tag_chip_style(chip: QLabel) -> None:
+    chip.setProperty("tagSemantic", _tag_semantic_kind(chip.text()))
+    chip.style().unpolish(chip)
+    chip.style().polish(chip)
+
+
 def _tag_chip_column_min_height(n_tags: int, tags_per_row: int) -> int:
     """Минимальная высота колонки фиолетовых чипов (строки × высота чипа + отступы)."""
     if n_tags <= 0 or tags_per_row <= 0:
@@ -347,6 +363,7 @@ class AnticProfileRow(QWidget):
                         continue
                     chip = QLabel(display)
                     chip.setObjectName("anticProfileTag")
+                    _apply_tag_chip_style(chip)
                     chip.setMinimumHeight(28)
                     chip.setAlignment(
                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter

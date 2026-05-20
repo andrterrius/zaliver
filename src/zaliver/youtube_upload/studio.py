@@ -26,6 +26,14 @@ class YoutubeStudioError(RuntimeError):
 # Тег профиля локального антидетекта при неуспешной проверке доступности Studio.
 STUDIO_AVAILABILITY_ERROR_TAG = "ОШИБКА ПРОВЕРКИ ДОСТУПНОСТИ"
 
+# Теги результата последнего залива на YouTube (локальный антидетект).
+UPLOAD_PREVIOUS_SUCCESS_TAG = "УСПЕШНЫЙ ПРОШЛЫЙ ЗАЛИВ"
+UPLOAD_PREVIOUS_ERROR_TAG = "ОШИБКА ПРОШЛОГО ЗАЛИВА"
+PREVIOUS_UPLOAD_RESULT_TAGS = (
+    UPLOAD_PREVIOUS_SUCCESS_TAG,
+    UPLOAD_PREVIOUS_ERROR_TAG,
+)
+
 
 _LOG_SINK = None
 

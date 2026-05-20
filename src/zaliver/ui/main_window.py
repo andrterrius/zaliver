@@ -4167,6 +4167,11 @@ class MainWindow(QWidget):
                 return
 
             from zaliver.youtube_upload.multi_uploader import MultiProfileUploader, VideoTask
+            from zaliver.youtube_upload.studio import _studio_canonical_watch_url
+
+            self._clear_previous_upload_result_tags(
+                profile_ids=profile_ids, kind=kind, base_url=base_url
+            )
 
             self._append_log(
                 f"YouTube: многопоточная заливка стартует. Видео={len(video_paths)}, профили={len(profile_ids)}…"
@@ -4228,6 +4233,10 @@ class MainWindow(QWidget):
                         pass
                 if not vid:
                     raise RuntimeError(f"Empty video_id (res={res!r})")
+                if not url:
+                    url = _studio_canonical_watch_url(vid)
+                if not url:
+                    raise RuntimeError(f"Empty url (res={res!r})")
 
                 sid = int(self._upload_session.id) if self._upload_session is not None else 0
                 if sid <= 0:
@@ -4264,6 +4273,15 @@ class MainWindow(QWidget):
                     pass
 
             def _on_profile_upload_attempt(pid: str, ok: bool, err: str) -> None:
+                try:
+                    self._set_previous_upload_result_tag(
+                        profile_id=pid,
+                        success=bool(ok),
+                        kind=kind,
+                        base_url=base_url,
+                    )
+                except Exception:
+                    pass
                 if ok:
                     self._upload_store.reset_profile_upload_errors(profile_id=pid)
                     return
@@ -4349,6 +4367,87 @@ class MainWindow(QWidget):
     def _append_log(self, line: str) -> None:
         self.log.appendPlainText(line)
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
+
+    def _local_antidetect_api_for_profile_tags(
+        self, *, kind: str, base_url: str
+    ) -> LocalAntidetectHttpAPI | None:
+        if (kind or "").strip() != "local":
+            return None
+        return LocalAntidetectHttpAPI(
+            (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
+        )
+
+    def _clear_previous_upload_result_tags(
+        self,
+        *,
+        profile_ids: list[str],
+        kind: str,
+        base_url: str,
+    ) -> None:
+        from zaliver.youtube_upload.studio import PREVIOUS_UPLOAD_RESULT_TAGS
+
+        pids = [p.strip() for p in (profile_ids or []) if (p or "").strip()]
+        if not pids:
+            return
+        api = self._local_antidetect_api_for_profile_tags(kind=kind, base_url=base_url)
+        if api is None:
+            self._ui_log_line.emit(
+                "[upload] Сброс тегов прошлого залива доступен только "
+                "для локального антидетекта."
+            )
+            return
+        try:
+            for pid in pids:
+                for tag in PREVIOUS_UPLOAD_RESULT_TAGS:
+                    try:
+                        api.remove_profile_tag(pid, tag)
+                        self._ui_log_line.emit(
+                            f"[upload] profile={pid} tag_removed={tag!r}"
+                        )
+                    except Exception:
+                        pass
+        finally:
+            api.close()
+
+    def _set_previous_upload_result_tag(
+        self,
+        *,
+        profile_id: str,
+        success: bool,
+        kind: str,
+        base_url: str,
+    ) -> None:
+        from zaliver.youtube_upload.studio import (
+            UPLOAD_PREVIOUS_ERROR_TAG,
+            UPLOAD_PREVIOUS_SUCCESS_TAG,
+        )
+
+        pid = (profile_id or "").strip()
+        if not pid:
+            return
+        tag = UPLOAD_PREVIOUS_SUCCESS_TAG if success else UPLOAD_PREVIOUS_ERROR_TAG
+        other = UPLOAD_PREVIOUS_ERROR_TAG if success else UPLOAD_PREVIOUS_SUCCESS_TAG
+        api = self._local_antidetect_api_for_profile_tags(kind=kind, base_url=base_url)
+        if api is None:
+            self._ui_log_line.emit(
+                f"[upload] profile={pid}: тег {tag!r} доступен только "
+                "для локального антидетекта."
+            )
+            return
+        try:
+            try:
+                try:
+                    api.remove_profile_tag(pid, other)
+                except Exception:
+                    pass
+                api.add_profile_tag(pid, tag)
+            finally:
+                api.close()
+            self._ui_log_line.emit(f"[upload] profile={pid} tag_added={tag!r}")
+        except Exception as e:
+            self._ui_log_line.emit(
+                f"[upload] profile={pid} tag_add_failed tag={tag!r} err={e!r}"
+            )
 
     def _on_upload_profile_failed_3x(
         self,

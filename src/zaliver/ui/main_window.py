@@ -9,6 +9,7 @@ import threading
 import time
 import urllib.request
 from datetime import datetime, timezone
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 
@@ -43,6 +44,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QMenu,
     QPlainTextEdit,
     QProgressDialog,
     QPushButton,
@@ -72,7 +74,13 @@ from zaliver.youtube_parsing.thumb_cache import (
     write_youtube_thumb_cache,
     youtube_mq_thumbnail_url,
 )
-from zaliver.ui.antic_profile_row import AnticProfileRow, _profile_id, _profile_name
+from zaliver.ui.antic_profile_row import _profile_id, _profile_name
+from zaliver.ui.profile_list_helpers import (
+    profile_matches_search,
+    profile_search_rank,
+    profile_search_tokens,
+)
+from zaliver.ui.profiles_list_interaction import ProfilesListInteraction
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
 from zaliver.stats_server_client import notify_uploaded_video
 from zaliver.ui.uploaded_stats_refresh_worker import UploadedStatsRefreshWorker
@@ -757,8 +765,7 @@ class MainWindow(QWidget):
         self._settings = QSettings("Zaliver", "Zaliver")
         self._profiles_raw: list[dict[str, object]] | None = None
         self._profiles_list_render_gen: int = 0
-        self._profiles_list_populating: bool = False
-        self._profiles_drag: dict[str, object] = {"anchor": None, "extending": False}
+        self._profiles_interaction: ProfilesListInteraction | None = None
         self._profiles_filter_timer = QTimer(self)
         self._profiles_filter_timer.setSingleShot(True)
         self._profiles_filter_timer.timeout.connect(self._apply_profiles_filter)
@@ -1476,18 +1483,30 @@ class MainWindow(QWidget):
         self._profiles_list = QListWidget()
         self._profiles_list.setObjectName("profilesList")
         self._profiles_list.setSpacing(4)
-        self._profiles_list.setSelectionMode(
-            QAbstractItemView.SelectionMode.ExtendedSelection
-        )
+        self._profiles_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._profiles_list.setMouseTracking(True)
+        self._profiles_list.viewport().setMouseTracking(True)
         self._dolphin_query.textChanged.connect(self._schedule_profiles_filter)
         self._dolphin_query.returnPressed.connect(self._refresh_antydetect_profiles)
-        self._profiles_list.itemSelectionChanged.connect(
-            self._on_profiles_list_selection_changed
+
+        self._profiles_interaction = ProfilesListInteraction(
+            self._profiles_list,
+            self._upload_store,
+            on_upload_pause_click=self._ask_reset_upload_cooldown_for_profile,
+        )
+        list_sel_row, self._lbl_checked_profiles_count = self._build_profiles_selection_toolbar(
+            self,
+            self._profiles_interaction,
+            on_select_filter=self._select_profiles_checked_filter,
+            on_clear=self._clear_profiles_checked_selection,
+        )
+        self._profiles_interaction.selection_changed.connect(
+            self._on_profiles_checked_selection_changed
         )
 
         profiles_l.addLayout(profiles_top)
         profiles_l.addWidget(self._profiles_hint)
+        profiles_l.addLayout(list_sel_row)
         profiles_l.addWidget(self._profiles_status)
         profiles_l.addWidget(self._profiles_list, 1)
 
@@ -2404,7 +2423,7 @@ class MainWindow(QWidget):
 
         lw = QListWidget()
         lw.setObjectName("uploadProfilesList")
-        lw.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        lw.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         lw.setSpacing(4)
         lw.setMinimumHeight(420)
         lw.setMouseTracking(True)
@@ -2421,64 +2440,29 @@ class MainWindow(QWidget):
             profile_rows.append((pid, p))
 
         preselect: set[str] = set()
-        try:
-            if hasattr(self, "_profiles_list"):
-                lw_m = self._profiles_list
-                for sel in lw_m.selectedItems():
-                    pids = str(sel.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
-                    if pids:
-                        preselect.add(pids)
-                if not preselect:
-                    it0 = lw_m.currentItem()
-                    if it0 is not None:
-                        pid0 = str(it0.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
-                        if pid0:
-                            preselect.add(pid0)
-        except Exception:
-            pass
+        if self._profiles_interaction is not None:
+            preselect = set(self._profiles_interaction.checked_profile_ids)
 
         last_upload_map = self._upload_store.last_uploaded_at_by_profiles(ids)
-        dlg_drag: dict[str, object] = {"anchor": None, "extending": False}
+        dlg_profiles = [p for _pid, p in profile_rows]
 
-        for pid, p in profile_rows:
-            lw_item = QListWidgetItem()
-            lw_item.setData(Qt.ItemDataRole.UserRole, p)
-            lw_item.setData(Qt.ItemDataRole.UserRole + 1, pid)
-            lw_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-
-            row_w = AnticProfileRow(
-                p,
-                lw,
-                last_uploaded_at=last_upload_map.get(pid),
-                on_left_press=lambda e, li=lw_item: self._profile_list_row_mouse_press(
-                    lw, li, e, dlg_drag
-                ),
-                on_left_drag=lambda e: self._profile_list_row_mouse_drag(lw, e, dlg_drag),
-                on_left_release=lambda e: self._profile_list_row_mouse_release(e, dlg_drag),
-                on_upload_pause_click=lambda pid=pid: self._ask_reset_upload_cooldown_for_profile(
-                    pid, dialog_parent=dlg, dialog_profile_list=lw
-                ),
-                select_checkbox_item=lw_item,
+        def _dlg_upload_pause_click(pid: str) -> None:
+            self._ask_reset_upload_cooldown_for_profile(
+                pid,
+                dialog_parent=dlg,
+                dialog_profiles_interaction=dlg_interaction,
             )
-            lw.addItem(lw_item)
-            lw.setItemWidget(lw_item, row_w)
-            row_w.updateGeometry()
-            lw_item.setSizeHint(row_w.sizeHint())
 
-        lw.blockSignals(True)
-        first_sel: QListWidgetItem | None = None
-        for i in range(lw.count()):
-            it_sel = lw.item(i)
-            if it_sel is None:
-                continue
-            pids = str(it_sel.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
-            if pids and pids in preselect:
-                it_sel.setSelected(True)
-                if first_sel is None:
-                    first_sel = it_sel
-        if first_sel is not None:
-            lw.setCurrentItem(first_sel)
-        lw.blockSignals(False)
+        dlg_interaction = ProfilesListInteraction(
+            lw,
+            self._upload_store,
+            on_upload_pause_click=_dlg_upload_pause_click,
+        )
+        dlg_interaction.populate(dlg_profiles, last_upload_map, preserve_checked=preselect)
+        dlg_by_id = self._profiles_by_id_map(dlg_profiles)
+
+        def _dlg_select_filter(mode: str) -> None:
+            dlg_interaction.select_checked_by_filter(mode, dlg_by_id, last_upload_map)
 
         n_inputs = len(self._selected_input_files or [])
         try:
@@ -2492,7 +2476,7 @@ class MainWindow(QWidget):
         dlg_profile_count_lbl.setWordWrap(True)
 
         def _update_dlg_upload_profile_count() -> None:
-            n = len(lw.selectedItems())
+            n = dlg_interaction.checked_count()
             uniq_line = f"Будет уникализировано видео: {uniquify_planned}"
             if n <= 0:
                 dlg_profile_count_lbl.setText(
@@ -2505,21 +2489,7 @@ class MainWindow(QWidget):
                     uniq_line + f"\nВыбрано профилей для залива: {n}"
                 )
 
-        def _sync_dlg_profile_checkboxes() -> None:
-            for i in range(lw.count()):
-                it_cb = lw.item(i)
-                if it_cb is None:
-                    continue
-                rw_cb = lw.itemWidget(it_cb)
-                if isinstance(rw_cb, AnticProfileRow):
-                    rw_cb.sync_select_checkbox_from_item()
-
-        def _on_dlg_profile_selection_changed() -> None:
-            _sync_dlg_profile_checkboxes()
-            _update_dlg_upload_profile_count()
-
-        lw.itemSelectionChanged.connect(_on_dlg_profile_selection_changed)
-        _sync_dlg_profile_checkboxes()
+        dlg_interaction.selection_changed.connect(_update_dlg_upload_profile_count)
         _update_dlg_upload_profile_count()
 
         if not ids:
@@ -2554,6 +2524,13 @@ class MainWindow(QWidget):
         profiles_col_l.setContentsMargins(0, 0, 0, 0)
         profiles_col_l.setSpacing(8)
         profiles_col_l.addWidget(dlg_profile_count_lbl)
+        dlg_sel_row, _dlg_checked_lbl = self._build_profiles_selection_toolbar(
+            dlg,
+            dlg_interaction,
+            on_select_filter=_dlg_select_filter,
+            on_clear=dlg_interaction.clear_checked_selection,
+        )
+        profiles_col_l.addLayout(dlg_sel_row)
         profiles_col_l.addWidget(lw, 1)
 
         grid.addWidget(QLabel("Профили:"), 2, 0, Qt.AlignmentFlag.AlignTop)
@@ -2567,18 +2544,7 @@ class MainWindow(QWidget):
 
         title = (title_edit.text() or "").strip()
         description = (desc_edit.toPlainText() or "").strip()
-        picked: list[str] = []
-        for i in range(lw.count()):
-            it = lw.item(i)
-            if it is None:
-                continue
-            try:
-                if it.isSelected():
-                    pid = str(it.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
-                    if pid:
-                        picked.append(pid)
-            except Exception:
-                continue
+        picked = dlg_interaction.batch_profile_ids()
 
         # Если профили не выбраны, считаем, что пользователь хочет только уникализировать видео,
         # без загрузки в YouTube. В этом случае title не обязателен.
@@ -2787,7 +2753,8 @@ class MainWindow(QWidget):
         if kind == "local":
             self._profiles_title.setText("Профили (локальный антидетект)")
             self._profiles_hint.setText(
-                "Клик по строке — запуск профиля и сценарий YouTube Studio."
+                "Отметьте квадратиками профили для залива; «Пауза 1 ч» — можно ли снова загружать "
+                "(клик по оранжевой подписи сбрасывает паузу)."
             )
             if hasattr(self, "_dolphin_query"):
                 self._dolphin_query.setPlaceholderText(
@@ -2796,7 +2763,8 @@ class MainWindow(QWidget):
         else:
             self._profiles_title.setText("Профили Dolphin Anty")
             self._profiles_hint.setText(
-                "Подгрузка профилей через глобальный Public API Dolphin{anty} "
+                "Подгрузка через Public API Dolphin{anty}. Квадратик — участие в заливе; "
+                "удерживайте ЛКМ по квадратикам для групповой отметки (Ctrl — добавить)."
             )
             if hasattr(self, "_dolphin_query"):
                 self._dolphin_query.setPlaceholderText("Поиск по загруженным профилям…")
@@ -3006,64 +2974,91 @@ class MainWindow(QWidget):
         add(profile.get("statusId"))
         return " ".join(parts).lower()
 
-    @staticmethod
-    def _profile_matches(profile: dict[str, object], needle: str) -> bool:
-        q = (needle or "").strip().lower()
-        if not q:
-            return True
-        return q in MainWindow._profile_search_blob(profile)
+    def _profiles_visible_matched(self) -> list[dict[str, object]]:
+        raw = self._profiles_raw or []
+        q_raw = (self._dolphin_query.text() if hasattr(self, "_dolphin_query") else "") or ""
+        tokens = profile_search_tokens(q_raw)
+        matched: list[tuple[int, dict[str, object]]] = []
+        for i, p in enumerate(raw):
+            if isinstance(p, dict) and profile_matches_search(p, tokens):
+                matched.append((i, p))
+        matched.sort(key=lambda ip: profile_search_rank(ip[1], tokens, q_raw, ip[0]))
+        return [p for _i, p in matched]
 
-    def _render_profiles_items(self, profiles: list[dict[str, object]]) -> int:
-        self._profiles_list_populating = True
-        self._profiles_list.blockSignals(True)
-        n = 0
-        try:
-            self._profiles_list.clear()
-            pids: list[str] = []
-            for it in profiles:
-                pid = str(
-                    it.get("id")
-                    or it.get("browserProfileId")
-                    or it.get("profile_id")
-                    or ""
-                ).strip()
-                if pid:
-                    pids.append(pid)
-            last_upload_map = self._upload_store.last_uploaded_at_by_profiles(pids)
-            for it in profiles:
-                pid = str(
-                    it.get("id")
-                    or it.get("browserProfileId")
-                    or it.get("profile_id")
-                    or ""
-                ).strip()
-                item = QListWidgetItem()
-                item.setData(Qt.ItemDataRole.UserRole, it)
-                item.setData(Qt.ItemDataRole.UserRole + 1, pid)
+    def _profiles_by_id_map(self, profiles: list[dict[str, object]]) -> dict[str, dict[str, object]]:
+        out: dict[str, dict[str, object]] = {}
+        for p in profiles:
+            pid = _profile_id(p)
+            if pid:
+                out[pid] = p
+        return out
 
-                row = AnticProfileRow(
-                    it,
-                    self._profiles_list,
-                    last_uploaded_at=last_upload_map.get(pid) if pid else None,
-                    on_left_press=lambda e, li=item: self._profiles_row_mouse_press(e, li),
-                    on_left_drag=self._profiles_row_mouse_drag,
-                    on_left_release=self._profiles_row_mouse_release,
-                    on_upload_pause_click=(
-                        lambda pid=pid: self._ask_reset_upload_cooldown_for_profile(pid)
-                    ),
-                )
-                self._profiles_list.addItem(item)
-                self._profiles_list.setItemWidget(item, row)
-                row.updateGeometry()
-                item.setSizeHint(row.sizeHint())
-                n += 1
-        finally:
-            self._profiles_list.blockSignals(False)
-            self._profiles_list_render_gen += 1
-            self._profiles_list_populating = False
-        if hasattr(self, "_dolphin_query") and (self._dolphin_query.text() or "").strip():
-            self._profiles_filter_timer.start(0)
-        return n
+    def _build_profiles_selection_toolbar(
+        self,
+        parent: QWidget,
+        interaction: ProfilesListInteraction,
+        *,
+        on_select_filter: Callable[[str], None],
+        on_clear: Callable[[], None] | None = None,
+    ) -> tuple[QHBoxLayout, QLabel]:
+        """Строка «Выделено» + «Выделить…» + «Снять выделение» для списка профилей."""
+        row = QHBoxLayout()
+        lbl = QLabel("Выделено: 0")
+        lbl.setObjectName("hint")
+        lbl.setToolTip("Число профилей, отмеченных для залива")
+
+        def _sync_count() -> None:
+            lbl.setText(f"Выделено: {interaction.checked_count()}")
+
+        btn_clear = QPushButton("Снять выделение")
+        btn_clear.setObjectName("secondary")
+        btn_clear.setAutoDefault(False)
+        btn_clear.setDefault(False)
+        btn_clear.clicked.connect(on_clear or interaction.clear_checked_selection)
+
+        btn_select = QPushButton("Выделить…")
+        btn_select.setObjectName("secondary")
+        btn_select.setAutoDefault(False)
+        btn_select.setDefault(False)
+        btn_select.setToolTip(
+            "Отметить профили по условию (пауза 1 ч, без ошибок в статусах)"
+        )
+        select_menu = QMenu(parent)
+        act_all = select_menu.addAction("Все видимые")
+        act_all.setToolTip("Отметить все профили в списке")
+        act_all.triggered.connect(lambda: on_select_filter("all"))
+        act_avail = select_menu.addAction("Доступные (пауза 1 ч прошла)")
+        act_avail.setToolTip(
+            "Профили, с которых снова можно заливать: прошёл час после последнего залива "
+            "или заливов ещё не было"
+        )
+        act_avail.triggered.connect(lambda: on_select_filter("available"))
+        act_clean = select_menu.addAction("Без ошибок в статусах")
+        act_clean.setToolTip(
+            "Прокси активен, нет тегов/флагов с «ошибка», профиль не помечен после сбоев залива"
+        )
+        act_clean.triggered.connect(lambda: on_select_filter("no_errors"))
+        btn_select.setMenu(select_menu)
+
+        row.addWidget(lbl)
+        row.addStretch()
+        row.addWidget(btn_select)
+        row.addWidget(btn_clear)
+
+        interaction.selection_changed.connect(_sync_count)
+        _sync_count()
+        return row, lbl
+
+    def _refresh_profiles_list_view(self) -> int:
+        if self._profiles_interaction is None:
+            return 0
+        visible = self._profiles_visible_matched()
+        pids = [_profile_id(p) for p in visible]
+        pids = [x for x in pids if x]
+        last_upload_map = self._upload_store.last_uploaded_at_by_profiles(pids)
+        self._profiles_interaction.populate(visible, last_upload_map)
+        self._profiles_list_render_gen += 1
+        return len(visible)
 
     def _schedule_profiles_filter(self) -> None:
         if not hasattr(self, "_profiles_list"):
@@ -3075,22 +3070,67 @@ class MainWindow(QWidget):
     def _apply_profiles_filter(self) -> None:
         if not hasattr(self, "_profiles_list"):
             return
-        if self._profiles_list_populating:
-            return
         raw = self._profiles_raw
         if raw is None:
             return
 
+        shown = self._refresh_profiles_list_view()
+        total = len(raw)
         q = (self._dolphin_query.text() if hasattr(self, "_dolphin_query") else "") or ""
         q = q.strip()
-        filtered = [p for p in raw if isinstance(p, dict) and self._profile_matches(p, q)]
-
-        shown = self._render_profiles_items(filtered)
-        total = len(raw)
+        n_checked = (
+            self._profiles_interaction.checked_count()
+            if self._profiles_interaction
+            else 0
+        )
         if q:
-            self._profiles_status.setText(f"Фильтр: показано {shown} из {total}")
+            base = f"Фильтр: показано {shown} из {total}"
         else:
-            self._profiles_status.setText(f"Загружено профилей: {total}")
+            base = f"Загружено профилей: {total}"
+        if n_checked:
+            self._profiles_status.setText(f"{base}. Отмечено: {n_checked}")
+        else:
+            self._profiles_status.setText(base)
+
+    def _clear_profiles_checked_selection(self) -> None:
+        if self._profiles_interaction is not None:
+            self._profiles_interaction.clear_checked_selection()
+
+    def _select_profiles_checked_filter(self, mode: str) -> None:
+        if self._profiles_interaction is None or self._profiles_raw is None:
+            return
+        visible = self._profiles_visible_matched()
+        by_id = self._profiles_by_id_map(visible)
+        pids = list(by_id.keys())
+        last_upload_map = self._upload_store.last_uploaded_at_by_profiles(pids)
+        self._profiles_interaction.select_checked_by_filter(mode, by_id, last_upload_map)
+
+    def _on_profiles_checked_selection_changed(self) -> None:
+        if hasattr(self, "_lbl_checked_profiles_count") and self._profiles_interaction:
+            n = self._profiles_interaction.checked_count()
+            self._lbl_checked_profiles_count.setText(f"Выделено: {n}")
+        if self._profiles_raw is not None:
+            self._apply_profiles_filter_status_line_only()
+
+    def _apply_profiles_filter_status_line_only(self) -> None:
+        raw = self._profiles_raw or []
+        shown = self._profiles_list.count()
+        total = len(raw)
+        q = (self._dolphin_query.text() if hasattr(self, "_dolphin_query") else "") or ""
+        q = q.strip()
+        n_checked = (
+            self._profiles_interaction.checked_count()
+            if self._profiles_interaction
+            else 0
+        )
+        if q:
+            base = f"Фильтр: показано {shown} из {total}"
+        else:
+            base = f"Загружено профилей: {total}"
+        if n_checked:
+            self._profiles_status.setText(f"{base}. Отмечено: {n_checked}")
+        else:
+            self._profiles_status.setText(base)
 
     def _refresh_antydetect_profiles(self) -> None:
         if not hasattr(self, "_profiles_list"):
@@ -3173,14 +3213,9 @@ class MainWindow(QWidget):
         self._apply_profiles_filter()
 
     def _collect_profile_ids_for_availability_check(self) -> list[str]:
-        raw = self._profiles_raw
-        if not raw:
+        if not self._profiles_raw:
             return []
-        q = (self._dolphin_query.text() if hasattr(self, "_dolphin_query") else "") or ""
-        q = q.strip()
-        profiles = [
-            p for p in raw if isinstance(p, dict) and self._profile_matches(p, q)
-        ]
+        profiles = self._profiles_visible_matched()
         ids: list[str] = []
         seen: set[str] = set()
         for p in profiles:
@@ -3371,6 +3406,9 @@ class MainWindow(QWidget):
                 not self._profiles_availability_running
             )
         self._profiles_raw = None
+        if self._profiles_interaction is not None:
+            self._profiles_interaction.clear_checked_selection()
+            self._profiles_interaction.checked_profile_ids.clear()
         if hasattr(self, "_profiles_list"):
             self._profiles_list.blockSignals(True)
             try:
@@ -3378,6 +3416,8 @@ class MainWindow(QWidget):
             finally:
                 self._profiles_list.blockSignals(False)
             self._profiles_list_render_gen += 1
+        if hasattr(self, "_lbl_checked_profiles_count"):
+            self._lbl_checked_profiles_count.setText("Выделено: 0")
         self._profiles_status.setText(f"Не удалось загрузить список профилей.\n{message}")
 
     def _ask_reset_upload_cooldown_for_profile(
@@ -3386,6 +3426,7 @@ class MainWindow(QWidget):
         *,
         dialog_parent: QWidget | None = None,
         dialog_profile_list: QListWidget | None = None,
+        dialog_profiles_interaction: ProfilesListInteraction | None = None,
     ) -> None:
         pid = (profile_id or "").strip()
         if not pid:
@@ -3413,137 +3454,14 @@ class MainWindow(QWidget):
             "Zaliver",
             "Пауза обновлена: с этого профиля снова можно загружать видео.",
         )
-        if dialog_profile_list is not None:
-            new_map = self._upload_store.last_uploaded_at_by_profiles([pid])
-            new_iso = new_map.get(pid)
-            lw2 = dialog_profile_list
-            for i in range(lw2.count()):
-                it2 = lw2.item(i)
-                if it2 is None:
-                    continue
-                if str(it2.data(Qt.ItemDataRole.UserRole + 1) or "").strip() != pid:
-                    continue
-                row_w = lw2.itemWidget(it2)
-                if isinstance(row_w, AnticProfileRow):
-                    row_w.set_last_upload_cooldown(new_iso)
-                break
+        new_map = self._upload_store.last_uploaded_at_by_profiles([pid])
+        new_iso = new_map.get(pid)
+        if dialog_profiles_interaction is not None:
+            dialog_profiles_interaction.update_upload_cooldown_for_profile(pid, new_iso)
+        elif self._profiles_interaction is not None:
+            self._profiles_interaction.update_upload_cooldown_for_profile(pid, new_iso)
         elif hasattr(self, "_profiles_list"):
             self._apply_profiles_filter()
-
-    def _profile_list_row_mouse_press(
-        self,
-        lw: QListWidget,
-        item: QListWidgetItem,
-        event: QMouseEvent,
-        state: dict[str, object],
-    ) -> None:
-        if lw is self._profiles_list and self._profiles_list_populating:
-            return
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
-        mods = event.modifiers()
-        ctrl = mods & (
-            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
-        )
-        shift = mods & Qt.KeyboardModifier.ShiftModifier
-        if ctrl:
-            item.setSelected(not item.isSelected())
-            lw.setCurrentItem(item)
-            state["extending"] = False
-            return
-        if shift:
-            anchor = lw.currentItem()
-            if anchor is None:
-                item.setSelected(True)
-                lw.setCurrentItem(item)
-            else:
-                i_a = lw.row(anchor)
-                i_b = lw.row(item)
-                top, bottom = sorted((i_a, i_b))
-                lw.clearSelection()
-                for r in range(top, bottom + 1):
-                    ri = lw.item(r)
-                    if ri is not None:
-                        ri.setSelected(True)
-                lw.setCurrentItem(item)
-            state["extending"] = False
-            return
-        lw.clearSelection()
-        item.setSelected(True)
-        lw.setCurrentItem(item)
-        state["anchor"] = lw.row(item)
-        state["extending"] = True
-
-    def _profile_list_row_mouse_drag(
-        self, lw: QListWidget, event: QMouseEvent, state: dict[str, object]
-    ) -> None:
-        if lw is self._profiles_list and self._profiles_list_populating:
-            return
-        if not state.get("extending") or state.get("anchor") is None:
-            return
-        if not (event.buttons() & Qt.MouseButton.LeftButton):
-            return
-        gp = event.globalPosition().toPoint()
-        loc = lw.viewport().mapFromGlobal(gp)
-        hit = lw.itemAt(loc)
-        if hit is None:
-            return
-        r1 = lw.row(hit)
-        r0 = int(state["anchor"])
-        top, bottom = sorted((r0, r1))
-        lw.clearSelection()
-        for r in range(top, bottom + 1):
-            ri = lw.item(r)
-            if ri is not None:
-                ri.setSelected(True)
-        lw.setCurrentItem(hit)
-
-    def _profile_list_row_mouse_release(
-        self, event: QMouseEvent, state: dict[str, object]
-    ) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            state["extending"] = False
-
-    def _profiles_row_mouse_press(self, event: QMouseEvent, item: QListWidgetItem) -> None:
-        self._profile_list_row_mouse_press(
-            self._profiles_list, item, event, self._profiles_drag
-        )
-
-    def _profiles_row_mouse_drag(self, event: QMouseEvent) -> None:
-        self._profile_list_row_mouse_drag(self._profiles_list, event, self._profiles_drag)
-
-    def _profiles_row_mouse_release(self, event: QMouseEvent) -> None:
-        self._profile_list_row_mouse_release(event, self._profiles_drag)
-
-    def _on_profiles_list_selection_changed(self) -> None:
-        if self._profiles_list_populating:
-            return
-        lw = self._profiles_list
-        it = lw.currentItem()
-        if it is None:
-            sel = lw.selectedItems()
-            it = sel[0] if sel else None
-        if it is None:
-            self._profiles_status.setText("Профиль не выбран")
-            return
-        pid = str(it.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
-        if not pid:
-            self._profiles_status.setText("У профиля нет ID — запуск через Local API невозможен.")
-            return
-        self._selected_profile_id = pid
-        prof = it.data(Qt.ItemDataRole.UserRole)
-        label = ""
-        if isinstance(prof, dict):
-            label = str(prof.get("name") or "").strip()
-        nsel = len(lw.selectedItems())
-        if nsel > 1:
-            self._profiles_status.setText(
-                f"Выбрано профилей: {nsel}. Активный: {label or pid}"
-            )
-        else:
-            self._profiles_status.setText(
-                f"Выбран профиль: {label}" if label else f"Выбран профиль: {pid}"
-            )
 
     def _dolphin_google_worker(
         self,

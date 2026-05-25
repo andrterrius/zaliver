@@ -300,8 +300,8 @@ QListWidget#profilesList::item:hover {
 }
 
 QListWidget#profilesList::item:selected {
-    background-color: rgba(99, 102, 241, 0.16);
-    border: 1px solid #6366f1;
+    background: transparent;
+    border: none;
 }
 
 QListWidget#uploadProfilesList {
@@ -323,8 +323,116 @@ QListWidget#uploadProfilesList::item:hover {
 }
 
 QListWidget#uploadProfilesList::item:selected {
-    background-color: rgba(99, 102, 241, 0.16);
-    border: 1px solid #6366f1;
+    background: transparent;
+    border: none;
+}
+
+/* Antidetect-style profile list row */
+QLabel#profileRowTitle {
+    color: #e4e6ef;
+    font-weight: 400;
+    border: none;
+    background: transparent;
+}
+
+QWidget#profileRow {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 10px;
+}
+
+QWidget#profileRowChecked {
+    background-color: rgba(99, 102, 241, 0.12);
+    border: 2px solid #6366f1;
+    border-radius: 10px;
+}
+
+QLabel#profileRowDesc {
+    color: #94a3b8;
+    font-size: 12px;
+}
+
+QWidget#profileRow QCheckBox::indicator {
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    border: 1px solid #3d4258;
+    background: #0f1118;
+}
+
+QWidget#profileRow QCheckBox::indicator:checked {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #6366f1, stop:1 #7c3aed);
+    border: 1px solid #818cf8;
+}
+
+QFrame#tagChip {
+    background-color: #252836;
+    border: 1px solid #3d4258;
+    border-radius: 8px;
+}
+QFrame#tagChip QLabel {
+    color: #e4e6ef;
+    font-size: 12px;
+    border: none;
+    background: transparent;
+    padding: 4px 6px;
+}
+QFrame#tagChipError {
+    background-color: rgba(190, 18, 60, 0.18);
+    border: 1px solid #be123c;
+    border-radius: 8px;
+}
+QFrame#tagChipError QLabel {
+    color: #fda4af;
+    font-size: 12px;
+    border: none;
+    background: transparent;
+    padding: 4px 6px;
+}
+QFrame#tagChipSuccess {
+    background-color: rgba(22, 163, 74, 0.18);
+    border: 1px solid #16a34a;
+    border-radius: 8px;
+}
+QFrame#tagChipSuccess QLabel {
+    color: #86efac;
+    font-size: 12px;
+    border: none;
+    background: transparent;
+    padding: 4px 6px;
+}
+
+QLabel#profileListUpload {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 999px;
+    min-width: 0;
+}
+
+QLabel#profileListUpload[uploadCooldown="ok"] {
+    color: #dcfce7;
+    background-color: rgba(34, 197, 94, 0.14);
+    border: 1px solid rgba(74, 222, 128, 0.35);
+}
+
+QLabel#profileListUpload[uploadCooldown="wait"] {
+    color: #ffedd5;
+    background-color: rgba(249, 115, 22, 0.14);
+    border: 1px solid rgba(251, 146, 60, 0.38);
+}
+
+QLabel#profileListUpload[uploadCooldown="none"] {
+    color: #94a3b8;
+    background-color: rgba(148, 163, 184, 0.10);
+    border: 1px dashed rgba(148, 163, 184, 0.30);
+}
+
+QLabel#profileListUpload[uploadCooldown="unknown"] {
+    color: #e5e7eb;
+    background-color: rgba(148, 163, 184, 0.12);
+    border: 1px solid rgba(148, 163, 184, 0.28);
 }
 
 QWidget#anticProfileRowRoot {

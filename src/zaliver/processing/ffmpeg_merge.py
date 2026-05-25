@@ -438,22 +438,37 @@ def pick_best_h264_encoder(
     return ("libx264", libx264_encode_args_for_target(target_video_bps))
 
 
-def concat_segments(
+# concat demuxer открывает все входы сразу; на Windows лимит ~512 дескрипторов.
+_MAX_FFMPEG_CONCAT_FILES = 16
+
+
+def _write_concat_demuxer_list(segment_paths: List[str], list_path: str) -> None:
+    with open(list_path, "w", encoding="utf-8") as f:
+        for p in segment_paths:
+            line = Path(p).resolve().as_posix().replace("'", "'\\''")
+            f.write(f"file '{line}'\n")
+
+
+def _concat_segments_once(
     segment_paths: List[str],
     out_path: str,
     log: LogFn = None,
     target_video_bps: Optional[int] = None,
 ) -> None:
+    """Один вызов ffmpeg concat (не больше _MAX_FFMPEG_CONCAT_FILES входов)."""
     if not segment_paths:
         raise ValueError("No segments to concat")
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
+    if len(segment_paths) == 1:
+        src = Path(segment_paths[0]).resolve()
+        if src != out.resolve():
+            shutil.copy2(src, out)
+        return
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", delete=False, encoding="utf-8"
     ) as f:
-        for p in segment_paths:
-            line = Path(p).resolve().as_posix().replace("'", "'\\''")
-            f.write(f"file '{line}'\n")
+        _write_concat_demuxer_list(segment_paths, f.name)
         list_path = f.name
     try:
         run_ffmpeg(
@@ -493,6 +508,62 @@ def concat_segments(
             Path(list_path).unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def concat_segments(
+    segment_paths: List[str],
+    out_path: str,
+    log: LogFn = None,
+    target_video_bps: Optional[int] = None,
+) -> None:
+    paths = [str(p) for p in segment_paths if p]
+    if not paths:
+        raise ValueError("No segments to concat")
+    if len(paths) <= _MAX_FFMPEG_CONCAT_FILES:
+        _concat_segments_once(
+            paths, out_path, log=log, target_video_bps=target_video_bps
+        )
+        return
+
+    if log:
+        log(
+            f"Склейка {len(paths)} частей пакетами по {_MAX_FFMPEG_CONCAT_FILES} "
+            f"(обход лимита открытых файлов ОС)"
+        )
+    work = Path(out_path).parent
+    temps: List[Path] = []
+    current = paths
+    batch_idx = 0
+    try:
+        while len(current) > _MAX_FFMPEG_CONCAT_FILES:
+            nxt: List[str] = []
+            for i in range(0, len(current), _MAX_FFMPEG_CONCAT_FILES):
+                batch = current[i : i + _MAX_FFMPEG_CONCAT_FILES]
+                if len(batch) == 1:
+                    nxt.append(batch[0])
+                    continue
+                tmp = work / f".zaliver_concat_{batch_idx:04d}.mp4"
+                batch_idx += 1
+                _concat_segments_once(
+                    batch,
+                    str(tmp),
+                    log=log,
+                    target_video_bps=target_video_bps,
+                )
+                temps.append(tmp)
+                nxt.append(str(tmp))
+            current = nxt
+        _concat_segments_once(
+            current, out_path, log=log, target_video_bps=target_video_bps
+        )
+    finally:
+        out_resolved = Path(out_path).resolve()
+        for tmp in temps:
+            try:
+                if tmp.resolve() != out_resolved:
+                    tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _atempo_chain(inp: str, speed_factor: float, out_label: str) -> str:

@@ -991,7 +991,7 @@ def mux_video_background_music(
     except Exception:
         music_dur = None
     if not source_file_has_audio(m):
-        raise RuntimeError("В выбранном музыкальном файле нет аудиопотока")
+        raise RuntimeError(f"Нет аудиопотока в файле фоновой музыки: {Path(m).name} ({m})")
 
     trim_start = _random_music_trim_start_sec(music_dur, dur_needed)
     vol_lin = _music_volume_linear_from_pct(music_volume_pct)

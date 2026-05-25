@@ -60,10 +60,8 @@ def ffprobe_json(path: str) -> Dict[str, Any]:
         "error",
         "-select_streams",
         "v:0",
-        "-show_entries",
-        "stream=width,height,avg_frame_rate,r_frame_rate,nb_frames,duration",
-        "-show_entries",
-        "format=duration",
+        "-show_streams",
+        "-show_format",
         "-of",
         "json",
         path,
@@ -110,6 +108,37 @@ def _frame_count_from_probe(
     )
 
 
+def _stream_rotation_degrees(st: Dict[str, Any]) -> int:
+    tags = st.get("tags") or {}
+    for key in ("rotate", "ROTATE"):
+        raw = tags.get(key)
+        if raw is None or str(raw).strip() in ("", "0", "N/A"):
+            continue
+        try:
+            return int(round(float(str(raw).strip())))
+        except ValueError:
+            continue
+    for sd in st.get("side_data_list") or []:
+        if str(sd.get("side_data_type") or "") != "Display Matrix":
+            continue
+        rot = sd.get("rotation")
+        if rot is None or str(rot).strip() in ("", "N/A", "0"):
+            continue
+        try:
+            return int(round(float(str(rot).strip())))
+        except ValueError:
+            continue
+    return 0
+
+
+def _display_dimensions(w: int, h: int, rotation_deg: int) -> tuple[int, int]:
+    """Размер кадра после autorotate ffmpeg (как в плеере), не сырой storage."""
+    r = int(rotation_deg) % 360
+    if r in (90, 270):
+        return h, w
+    return w, h
+
+
 def probe_video_stream(path: str) -> tuple[int, int, float, int, int]:
     """
     Returns (width, height, fps, frame_count, fourcc_int).
@@ -125,6 +154,7 @@ def probe_video_stream(path: str) -> tuple[int, int, float, int, int]:
     h = int(st.get("height") or 0)
     if w <= 0 or h <= 0:
         raise RuntimeError("ffprobe: некорректный размер кадра")
+    w, h = _display_dimensions(w, h, _stream_rotation_degrees(st))
     fps = _parse_frame_rate(str(st.get("avg_frame_rate") or ""))
     if fps <= 0.01:
         fps = _parse_frame_rate(str(st.get("r_frame_rate") or ""))

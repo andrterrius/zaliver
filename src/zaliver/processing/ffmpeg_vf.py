@@ -11,6 +11,14 @@ def _even_dim(x: int) -> int:
     return max(2, int(x) - (int(x) % 2))
 
 
+def _fit_scale_pad(w: int, h: int) -> str:
+    """Fit into w×h without stretching; letterbox/pillarbox with black if needed."""
+    return (
+        f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=bilinear,"
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black"
+    )
+
+
 def _scale_pct_block(w: int, h: int, scale_pct: float) -> str:
     f = float(scale_pct) / 100.0
     if abs(f - 1.0) < 1e-6:
@@ -37,7 +45,7 @@ def _crop_jitter_block(
     ih = h - t - b
     if iw <= 2 or ih <= 2:
         return ""
-    return f"crop={iw}:{ih}:{l}:{t},scale={w}:{h}:flags=bilinear"
+    return f"crop={iw}:{ih}:{l}:{t},{_fit_scale_pad(w, h)}"
 
 
 def _eq_block(settings: UniquifySettings) -> str:

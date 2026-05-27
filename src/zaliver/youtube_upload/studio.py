@@ -89,6 +89,146 @@ def _studio_login_required(page) -> bool:
     return False
 
 
+def _studio_channel_creation_dialog_locator(page):
+    return page.locator("ytd-channel-creation-dialog-renderer")
+
+
+def _studio_channel_creation_dialog_visible(page) -> bool:
+    try:
+        dlg = _studio_channel_creation_dialog_locator(page)
+        return dlg.count() > 0 and dlg.first.is_visible()
+    except Exception:
+        return False
+
+
+def _studio_handle_channel_creation_dialog_if_present(page) -> bool:
+    """
+    Аккаунт без канала: при входе в Studio — диалог «Основные сведения».
+    Нажимаем «Создать канал» (имя/псевдоним обычно уже предзаполнены Google).
+    """
+    if not _studio_channel_creation_dialog_visible(page):
+        return False
+
+    _log("Studio: диалог создания канала — нажимаем «Создать канал»…")
+    create_btn = (
+        page.locator(
+            "ytd-channel-creation-dialog-renderer #create-channel-button button"
+        )
+        .or_(
+            page.locator(
+                "ytd-channel-creation-dialog-renderer "
+                "ytd-button-renderer#create-channel-button button"
+            )
+        )
+        .or_(
+            page.locator(
+                'ytd-channel-creation-dialog-renderer button[aria-label="Создать канал"]'
+            )
+        )
+        .or_(
+            page.locator(
+                'ytd-channel-creation-dialog-renderer button[aria-label="Create channel"]'
+            )
+        )
+        .or_(
+            page.get_by_role(
+                "button",
+                name=re.compile(r"^создать\s+канал$|^create\s+channel$", re.I),
+            )
+        )
+    )
+    try:
+        create_btn.first.wait_for(state="visible", timeout=15_000)
+        create_btn.first.click(timeout=30_000)
+    except Exception as e:
+        raise YoutubeStudioError(
+            "YouTube Studio: не удалось нажать «Создать канал» в диалоге создания канала."
+        ) from e
+
+    dlg = _studio_channel_creation_dialog_locator(page)
+    try:
+        dlg.first.wait_for(state="hidden", timeout=_STUDIO_UI_MS)
+    except Exception:
+        deadline = time.monotonic() + (_STUDIO_UI_MS / 1000.0)
+        while time.monotonic() < deadline:
+            if not _studio_channel_creation_dialog_visible(page):
+                break
+            time.sleep(0.5)
+        else:
+            raise YoutubeStudioError(
+                "YouTube Studio: диалог создания канала не закрылся после «Создать канал»."
+            )
+
+    page.wait_for_timeout(800)
+    _log("Studio: диалог создания канала закрыт.")
+    return True
+
+
+def _studio_warm_welcome_dialog_locator(page):
+    return page.locator("ytcp-warm-welcome-dialog")
+
+
+def _studio_warm_welcome_dialog_visible(page) -> bool:
+    try:
+        welcome = _studio_warm_welcome_dialog_locator(page)
+        if welcome.count() == 0:
+            return False
+        dismiss = welcome.locator("#dismiss-button")
+        if dismiss.count() > 0 and dismiss.first.is_visible():
+            return True
+        return welcome.first.is_visible()
+    except Exception:
+        return False
+
+
+def _studio_handle_warm_welcome_dialog_if_present(page) -> bool:
+    """
+    Приветствие «Добро пожаловать в Творческую студию YouTube!» — кнопка «Далее».
+    Может появиться после создания канала или при первом заходе в Studio.
+    """
+    if not _studio_warm_welcome_dialog_visible(page):
+        return False
+
+    _log("Studio: приветственное окно — нажимаем «Далее»…")
+    next_btn = (
+        page.locator("ytcp-warm-welcome-dialog #dismiss-button button")
+        .or_(page.locator("ytcp-warm-welcome-dialog ytcp-button#dismiss-button button"))
+        .or_(page.locator('ytcp-warm-welcome-dialog button[aria-label="Далее"]'))
+        .or_(page.locator('ytcp-warm-welcome-dialog button[aria-label="Next"]'))
+        .or_(
+            page.get_by_role(
+                "button",
+                name=re.compile(r"^далее$|^next$", re.I),
+            )
+        )
+    )
+    try:
+        next_btn.first.wait_for(state="visible", timeout=15_000)
+        next_btn.first.click(timeout=30_000)
+    except Exception as e:
+        raise YoutubeStudioError(
+            "YouTube Studio: не удалось нажать «Далее» в приветственном окне."
+        ) from e
+
+    welcome = _studio_warm_welcome_dialog_locator(page)
+    try:
+        welcome.first.wait_for(state="hidden", timeout=_STUDIO_UI_MS)
+    except Exception:
+        deadline = time.monotonic() + (_STUDIO_UI_MS / 1000.0)
+        while time.monotonic() < deadline:
+            if not _studio_warm_welcome_dialog_visible(page):
+                break
+            time.sleep(0.5)
+        else:
+            raise YoutubeStudioError(
+                "YouTube Studio: приветственное окно не закрылось после «Далее»."
+            )
+
+    page.wait_for_timeout(500)
+    _log("Studio: приветственное окно закрыто.")
+    return True
+
+
 def _studio_wait_create_or_login(page, create_locator) -> None:
     """
     Ждём появления кнопки «Создать», но параллельно проверяем, что нас не выкинуло на логин.
@@ -100,6 +240,10 @@ def _studio_wait_create_or_login(page, create_locator) -> None:
                 "YouTube Studio: требуется вход в Google (профиль без активной сессии). "
                 "Останавливаем залив для этого профиля."
             )
+        if _studio_handle_channel_creation_dialog_if_present(page):
+            continue
+        if _studio_handle_warm_welcome_dialog_if_present(page):
+            continue
         try:
             if create_locator.count() > 0 and create_locator.first.is_visible():
                 return
@@ -149,6 +293,8 @@ def _studio_click_create_then_add_video(page) -> None:
         timeout=120_000,
     )
     _log(f"Studio: после загрузки URL: {page.url!r}")
+    _studio_handle_channel_creation_dialog_if_present(page)
+    _studio_handle_warm_welcome_dialog_if_present(page)
 
     create = (
         page.locator('ytcp-button-shape button[aria-label="Создать"]')

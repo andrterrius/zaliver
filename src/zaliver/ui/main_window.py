@@ -2234,25 +2234,6 @@ class MainWindow(QWidget):
                     pass
             if succ or err_lines:
                 self._refresh_uploaded_list()
-            if err_lines and not succ:
-                detail = "\n".join(str(x) for x in err_lines[:8])
-                if len(err_lines) > 8:
-                    detail += f"\n… и ещё {len(err_lines) - 8}"
-                QMessageBox.warning(
-                    self,
-                    "Zaliver",
-                    f"Не удалось обновить статистику:\n{detail}",
-                )
-            elif err_lines:
-                detail = "\n".join(str(x) for x in err_lines[:5])
-                if len(err_lines) > 5:
-                    detail += f"\n… и ещё {len(err_lines) - 5}"
-                QMessageBox.information(
-                    self,
-                    "Zaliver",
-                    f"Обновлено записей: {len(succ)} из {len(succ) + len(err_lines)}.\n"
-                    f"Ошибки по части роликов:\n{detail}",
-                )
         finally:
             t = self._stats_thread
             if t is not None:

@@ -176,15 +176,24 @@ def _strip_automation_from_tag_label(s: str) -> str:
 
 
 def _local_profile_tag_strings(raw: dict[str, Any]) -> list[str]:
-    """Теги из API (tags) + служебные engine / device_preset, без дубликатов."""
+    """Теги из API (tags), без engine / device_preset и дубликатов."""
     tags: list[str] = []
     seen: set[str] = set()
+    skip: set[str] = set()
+    eng = raw.get("engine")
+    if isinstance(eng, str) and eng.strip():
+        skip.add(eng.strip().lower())
+    dev = raw.get("device_preset")
+    if isinstance(dev, str) and dev.strip():
+        skip.add(dev.strip().lower())
 
     def add(s: str) -> None:
         t = _strip_automation_from_tag_label(s)
         if not t:
             return
         low = t.lower()
+        if low in skip:
+            return
         if low == "автоматизация" or low.startswith("автоматизация"):
             return
         if low == "automation" or low.startswith("automation"):
@@ -205,12 +214,6 @@ def _local_profile_tag_strings(raw: dict[str, Any]) -> list[str]:
                 ).strip()
                 if bit:
                     add(bit)
-    eng = raw.get("engine")
-    if isinstance(eng, str) and eng.strip():
-        add(eng.strip())
-    dev = raw.get("device_preset")
-    if isinstance(dev, str) and dev.strip():
-        add(dev.strip())
     return tags
 
 

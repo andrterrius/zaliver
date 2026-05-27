@@ -7,6 +7,13 @@ from pathlib import Path
 
 from playwright.sync_api import Error as PlaywrightError
 
+from zaliver.antydetect.profile_tags import (  # noqa: F401 — re-export
+    PREVIOUS_UPLOAD_RESULT_TAGS,
+    STUDIO_AVAILABILITY_ERROR_TAG,
+    UPLOAD_PREVIOUS_ERROR_TAG,
+    UPLOAD_PREVIOUS_SUCCESS_TAG,
+)
+
 
 _STUDIO_UI_MS = 120_000
 # После передачи файла ждём в Studio один из исходов: лимит или завершение проверок (часто >1 мин).
@@ -21,18 +28,6 @@ _PLAYWRIGHT_REMOTE_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
 
 class YoutubeStudioError(RuntimeError):
     pass
-
-
-# Тег профиля локального антидетекта при неуспешной проверке доступности Studio.
-STUDIO_AVAILABILITY_ERROR_TAG = "ОШИБКА ПРОВЕРКИ ДОСТУПНОСТИ"
-
-# Теги результата последнего залива на YouTube (локальный антидетект).
-UPLOAD_PREVIOUS_SUCCESS_TAG = "УСПЕШНЫЙ ПРОШЛЫЙ ЗАЛИВ"
-UPLOAD_PREVIOUS_ERROR_TAG = "ОШИБКА ПРОШЛОГО ЗАЛИВА"
-PREVIOUS_UPLOAD_RESULT_TAGS = (
-    UPLOAD_PREVIOUS_SUCCESS_TAG,
-    UPLOAD_PREVIOUS_ERROR_TAG,
-)
 
 
 _LOG_SINK = None

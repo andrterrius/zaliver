@@ -740,6 +740,8 @@ class MainWindow(QWidget):
     _youtube_upload_phase_finished = pyqtSignal(str)
     _studio_availability_progress = pyqtSignal(int, int, str)
     _studio_availability_finished = pyqtSignal(int, int)
+    _zaliver_profile_tags_clear_progress = pyqtSignal(int, int, str)
+    _zaliver_profile_tags_clear_finished = pyqtSignal(int, int)
 
     def __init__(self) -> None:
         super().__init__()
@@ -769,6 +771,10 @@ class MainWindow(QWidget):
         self._profiles_filter_timer = QTimer(self)
         self._profiles_filter_timer.setSingleShot(True)
         self._profiles_filter_timer.timeout.connect(self._apply_profiles_filter)
+        self._profiles_availability_running = False
+        self._profiles_tags_clear_running = False
+        self._profiles_refresh_running = False
+        self._last_availability_failed_ids: list[str] = []
         self._build_ui()
         self._ui_log_line.connect(self._append_log)
         self._profiles_loaded.connect(self._on_profiles_loaded)
@@ -790,11 +796,15 @@ class MainWindow(QWidget):
         self._upload_cancel_kind = ""
         self._upload_cancel_dolphin_token = ""
         self._upload_cancel_profile_ids: list[str] = []
-        self._profiles_availability_running = False
-        self._last_availability_failed_ids: list[str] = []
         self._youtube_upload_phase_finished.connect(self._on_youtube_upload_phase_finished)
         self._studio_availability_progress.connect(self._on_studio_availability_progress)
         self._studio_availability_finished.connect(self._on_studio_availability_finished)
+        self._zaliver_profile_tags_clear_progress.connect(
+            self._on_zaliver_profile_tags_clear_progress
+        )
+        self._zaliver_profile_tags_clear_finished.connect(
+            self._on_zaliver_profile_tags_clear_finished
+        )
         # Автозагрузка профилей при запуске (асинхронно).
         QTimer.singleShot(0, self._refresh_antydetect_profiles)
 
@@ -1470,6 +1480,17 @@ class MainWindow(QWidget):
         self._btn_profiles_check_availability.clicked.connect(
             self._start_profiles_availability_check
         )
+        self._btn_profiles_clear_zaliver_tags = QPushButton("Очистить теги залива")
+        self._btn_profiles_clear_zaliver_tags.setObjectName("secondary")
+        self._btn_profiles_clear_zaliver_tags.setAutoDefault(False)
+        self._btn_profiles_clear_zaliver_tags.setDefault(False)
+        self._btn_profiles_clear_zaliver_tags.setToolTip(
+            "С отмеченных профилей снимает служебные теги Zaliver "
+            "(ошибки залива, проверки Studio и т.д.). Только локальный антидетект."
+        )
+        self._btn_profiles_clear_zaliver_tags.clicked.connect(
+            self._start_clear_zaliver_profile_tags
+        )
         profiles_top.addWidget(self._profiles_title)
         profiles_top.addStretch()
         profiles_top.addWidget(self._dolphin_query, 1)
@@ -1500,6 +1521,7 @@ class MainWindow(QWidget):
             on_select_filter=self._select_profiles_checked_filter,
             on_clear=self._clear_profiles_checked_selection,
         )
+        list_sel_row.addWidget(self._btn_profiles_clear_zaliver_tags)
         self._profiles_interaction.selection_changed.connect(
             self._on_profiles_checked_selection_changed
         )
@@ -2731,6 +2753,7 @@ class MainWindow(QWidget):
     def _on_default_browser_combo_changed(self, _index: int) -> None:
         self._update_profiles_section_header()
         self._sync_antydetect_settings_groups_visibility()
+        self._sync_profiles_tab_action_buttons()
 
     def _sync_antydetect_settings_groups_visibility(self) -> None:
         if not hasattr(self, "_gb_antydetect_dolphin") or not hasattr(
@@ -2768,6 +2791,24 @@ class MainWindow(QWidget):
             )
             if hasattr(self, "_dolphin_query"):
                 self._dolphin_query.setPlaceholderText("Поиск по загруженным профилям…")
+        self._sync_profiles_tab_action_buttons()
+
+    def _sync_profiles_tab_action_buttons(self) -> None:
+        kind = self._default_browser_combo.currentData()
+        if not isinstance(kind, str) or not kind:
+            kind = "dolphin"
+        local = kind == "local"
+        busy = (
+            self._profiles_availability_running
+            or self._profiles_tags_clear_running
+            or self._profiles_refresh_running
+        )
+        if hasattr(self, "_btn_profiles_clear_zaliver_tags"):
+            self._btn_profiles_clear_zaliver_tags.setEnabled(local and not busy)
+        if hasattr(self, "_btn_profiles_check_availability"):
+            self._btn_profiles_check_availability.setEnabled(not busy)
+        if hasattr(self, "_btn_profiles_refresh"):
+            self._btn_profiles_refresh.setEnabled(not busy)
 
     def _load_antydetect_settings(self) -> None:
         if not hasattr(self, "_dolphin_token"):
@@ -3153,9 +3194,8 @@ class MainWindow(QWidget):
         if not base_url and kind == "local":
             base_url = DEFAULT_LOCAL_API_BASE_URL
 
-        self._btn_profiles_refresh.setEnabled(False)
-        if hasattr(self, "_btn_profiles_check_availability"):
-            self._btn_profiles_check_availability.setEnabled(False)
+        self._profiles_refresh_running = True
+        self._sync_profiles_tab_action_buttons()
         self._profiles_status.setText("Загрузка профилей…")
 
         t = threading.Thread(
@@ -3202,11 +3242,8 @@ class MainWindow(QWidget):
             self._profiles_load_failed.emit(repr(e))
 
     def _on_profiles_loaded(self, profiles_obj: object) -> None:
-        self._btn_profiles_refresh.setEnabled(True)
-        if hasattr(self, "_btn_profiles_check_availability"):
-            self._btn_profiles_check_availability.setEnabled(
-                not self._profiles_availability_running
-            )
+        self._profiles_refresh_running = False
+        self._sync_profiles_tab_action_buttons()
         profiles = profiles_obj if isinstance(profiles_obj, list) else []
         cleaned: list[dict[str, object]] = [p for p in profiles if isinstance(p, dict)]
         self._profiles_raw = cleaned
@@ -3266,8 +3303,7 @@ class MainWindow(QWidget):
             base_url = DEFAULT_LOCAL_API_BASE_URL
 
         self._profiles_availability_running = True
-        self._btn_profiles_check_availability.setEnabled(False)
-        self._btn_profiles_refresh.setEnabled(False)
+        self._sync_profiles_tab_action_buttons()
         self._profiles_status.setText(
             f"Проверка доступности Studio: 0 / {len(profile_ids)}…"
         )
@@ -3303,7 +3339,7 @@ class MainWindow(QWidget):
         from zaliver.youtube_upload.multi_availability_checker import (
             MultiProfileAvailabilityChecker,
         )
-        from zaliver.youtube_upload.studio import STUDIO_AVAILABILITY_ERROR_TAG
+        from zaliver.antydetect.profile_tags import STUDIO_AVAILABILITY_ERROR_TAG
 
         set_log_sink(self._ui_log_line.emit)
         kind_s = (kind or "").strip()
@@ -3363,6 +3399,140 @@ class MainWindow(QWidget):
         self._last_availability_failed_ids = list(failed_ids)
         self._studio_availability_finished.emit(ok_n, fail_n)
 
+    def _collect_checked_profile_ids(self) -> list[str]:
+        if self._profiles_interaction is None:
+            return []
+        return self._profiles_interaction.batch_profile_ids()
+
+    def _local_antidetect_base_url_from_settings(self) -> str:
+        base_url = (self._local_api_base_url.text() or "").strip()
+        if not base_url:
+            base_url = (
+                self._settings.value("antydetect/local_api_base_url", "", type=str) or ""
+            ).strip()
+        if not base_url:
+            base_url = DEFAULT_LOCAL_API_BASE_URL
+        return base_url
+
+    def _start_clear_zaliver_profile_tags(self) -> None:
+        if self._profiles_tags_clear_running:
+            QMessageBox.information(
+                self,
+                "Очистка тегов",
+                "Очистка уже выполняется. Дождитесь завершения.",
+            )
+            return
+        kind = self._default_browser_combo.currentData()
+        if not isinstance(kind, str) or kind.strip() != "local":
+            QMessageBox.warning(
+                self,
+                "Очистка тегов",
+                "Снятие тегов Zaliver доступно только для локального антидетекта. "
+                "Выберите «Свой (локальный API)» в настройках.",
+            )
+            return
+        if self._profiles_raw is None:
+            QMessageBox.warning(
+                self,
+                "Очистка тегов",
+                "Сначала загрузите список профилей (кнопка «Обновить»).",
+            )
+            return
+        profile_ids = self._collect_checked_profile_ids()
+        if not profile_ids:
+            QMessageBox.warning(
+                self,
+                "Очистка тегов",
+                "Отметьте профили квадратиками, с которых нужно снять теги залива.",
+            )
+            return
+        from zaliver.antydetect.profile_tags import ZALIVER_PROFILE_TAGS
+
+        tags_hint = ", ".join(ZALIVER_PROFILE_TAGS)
+        answer = QMessageBox.question(
+            self,
+            "Очистка тегов залива",
+            f"Снять служебные теги Zaliver с {len(profile_ids)} отмеченных профилей?\n\n"
+            f"Теги: {tags_hint}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        base_url = self._local_antidetect_base_url_from_settings()
+        self._profiles_tags_clear_running = True
+        self._sync_profiles_tab_action_buttons()
+        self._profiles_status.setText(
+            f"Очистка тегов залива: 0 / {len(profile_ids)}…"
+        )
+        self._append_log(
+            f"[tags] Старт очистки тегов у {len(profile_ids)} профилей…"
+        )
+        threading.Thread(
+            target=self._clear_zaliver_profile_tags_worker,
+            kwargs={"profile_ids": profile_ids, "base_url": base_url},
+            daemon=True,
+        ).start()
+
+    def _clear_zaliver_profile_tags_worker(
+        self, *, profile_ids: list[str], base_url: str
+    ) -> None:
+        from zaliver.antydetect.profile_tags import (
+            ZALIVER_PROFILE_TAGS,
+            clear_zaliver_tags_on_profile,
+        )
+
+        api = LocalAntidetectHttpAPI((base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL)
+        total = len(profile_ids)
+        removed_total = 0
+        try:
+            for i, pid in enumerate(profile_ids, start=1):
+                self._zaliver_profile_tags_clear_progress.emit(i, total, pid)
+                n = clear_zaliver_tags_on_profile(api, pid)
+                removed_total += n
+                if n > 0:
+                    self._ui_log_line.emit(
+                        f"[tags] profile={pid}: снято тегов {n} "
+                        f"из {len(ZALIVER_PROFILE_TAGS)}"
+                    )
+                try:
+                    self._upload_store.reset_profile_upload_errors(profile_id=pid)
+                except Exception:
+                    pass
+        finally:
+            api.close()
+        self._zaliver_profile_tags_clear_finished.emit(len(profile_ids), removed_total)
+
+    def _on_zaliver_profile_tags_clear_progress(
+        self, current: int, total: int, profile_id: str
+    ) -> None:
+        pid = (profile_id or "").strip()
+        self._profiles_status.setText(
+            f"Очистка тегов залива: {current} / {total}"
+            + (f" — профиль {pid}" if pid else "…")
+        )
+
+    def _on_zaliver_profile_tags_clear_finished(
+        self, profile_count: int, removed_total: int
+    ) -> None:
+        self._profiles_tags_clear_running = False
+        self._sync_profiles_tab_action_buttons()
+        n = int(profile_count)
+        r = int(removed_total)
+        self._profiles_status.setText(
+            f"Очистка тегов завершена: профилей {n}, снято тегов {r}."
+        )
+        self._append_log(
+            f"[tags] Итог: профилей {n}, снято тегов {r}."
+        )
+        self._refresh_antydetect_profiles()
+        QMessageBox.information(
+            self,
+            "Очистка тегов залива",
+            f"Обработано профилей: {n}.\nСнято тегов (успешных DELETE): {r}.",
+        )
+
     def _on_studio_availability_progress(self, current: int, total: int, profile_id: str) -> None:
         pid = (profile_id or "").strip()
         self._profiles_status.setText(
@@ -3372,10 +3542,7 @@ class MainWindow(QWidget):
 
     def _on_studio_availability_finished(self, ok_n: int, fail_n: int) -> None:
         self._profiles_availability_running = False
-        if hasattr(self, "_btn_profiles_check_availability"):
-            self._btn_profiles_check_availability.setEnabled(True)
-        if hasattr(self, "_btn_profiles_refresh"):
-            self._btn_profiles_refresh.setEnabled(True)
+        self._sync_profiles_tab_action_buttons()
         total = int(ok_n) + int(fail_n)
         self._profiles_status.setText(
             f"Проверка доступности завершена: успешно {ok_n}, с ошибкой {fail_n} "
@@ -3400,11 +3567,8 @@ class MainWindow(QWidget):
         )
 
     def _on_profiles_load_failed(self, message: str) -> None:
-        self._btn_profiles_refresh.setEnabled(True)
-        if hasattr(self, "_btn_profiles_check_availability"):
-            self._btn_profiles_check_availability.setEnabled(
-                not self._profiles_availability_running
-            )
+        self._profiles_refresh_running = False
+        self._sync_profiles_tab_action_buttons()
         self._profiles_raw = None
         if self._profiles_interaction is not None:
             self._profiles_interaction.clear_checked_selection()
@@ -4302,7 +4466,7 @@ class MainWindow(QWidget):
         kind: str,
         base_url: str,
     ) -> None:
-        from zaliver.youtube_upload.studio import PREVIOUS_UPLOAD_RESULT_TAGS
+        from zaliver.antydetect.profile_tags import PREVIOUS_UPLOAD_RESULT_TAGS
 
         pids = [p.strip() for p in (profile_ids or []) if (p or "").strip()]
         if not pids:
@@ -4335,7 +4499,7 @@ class MainWindow(QWidget):
         kind: str,
         base_url: str,
     ) -> None:
-        from zaliver.youtube_upload.studio import (
+        from zaliver.antydetect.profile_tags import (
             UPLOAD_PREVIOUS_ERROR_TAG,
             UPLOAD_PREVIOUS_SUCCESS_TAG,
         )
@@ -4376,6 +4540,8 @@ class MainWindow(QWidget):
         kind: str,
         base_url: str,
     ) -> None:
+        from zaliver.antydetect.profile_tags import UPLOAD_ERROR_3X_TAG
+
         pid = (profile_id or "").strip()
         if not pid:
             return
@@ -4397,11 +4563,11 @@ class MainWindow(QWidget):
 
                 api = LocalAntidetectHttpAPI((base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL)
                 try:
-                    api.add_profile_tag(pid, "upload_error_3x")
+                    api.add_profile_tag(pid, UPLOAD_ERROR_3X_TAG)
                 finally:
                     api.close()
                 self._ui_log_line.emit(
-                    f"[upload] [PROFILE] profile={pid} tag_added=upload_error_3x"
+                    f"[upload] [PROFILE] profile={pid} tag_added={UPLOAD_ERROR_3X_TAG!r}"
                 )
             except Exception as e:
                 self._ui_log_line.emit(

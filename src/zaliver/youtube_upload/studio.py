@@ -972,9 +972,58 @@ def _studio_upload_unavailable_extra_text(page) -> str:
     return ""
 
 
+def _studio_upload_checks_status_text(page) -> str:
+    """Текст статуса проверок: progress-label, tooltip и hover-блок copyright."""
+    chunks: list[str] = []
+    for sel in (
+        "ytcp-uploads-dialog ytcp-video-upload-progress .progress-label",
+        "ytcp-uploads-dialog ytcp-video-upload-progress-hover",
+        "ytcp-uploads-dialog #checks-tooltip",
+        "ytcp-uploads-dialog ytcp-paper-tooltip[for='checks-badge']",
+    ):
+        loc = page.locator(sel)
+        try:
+            if loc.count() == 0:
+                continue
+            el = loc.first
+            if not el.is_visible(timeout=500):
+                continue
+            txt = (el.inner_text(timeout=2_000) or "").strip()
+            if txt and txt not in chunks:
+                chunks.append(txt)
+        except Exception:
+            continue
+    return " ".join(chunks).strip()
+
+
+def _studio_is_copyright_claims_checks_completed_text(text: str) -> bool:
+    """
+    Проверка авторских прав завершена, но найден защищённый контент — считаем успехом.
+    EN: «Checks complete. Copyright-protected content found.»
+    RU: «Проверка завершена. Найден контент, защищенный авторским правом.»
+    """
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    if re.search(r"checks?\s+complete.*copyright[- ]protected", t):
+        return True
+    if re.search(r"copyright[- ]protected\s+conten[dt]\s+found", t):
+        return True
+    if re.search(r"copyright[- ]protected\s+material\s+found", t):
+        return True
+    if re.search(r"проверка на соблюдение авторских прав завершена", t):
+        return True
+    if "проверка завершена" in t and re.search(r"авторск|защищённ|защищенн", t):
+        return True
+    if "найден контент" in t and "авторск" in t:
+        return True
+    return False
+
+
 def _studio_is_upload_checks_completed(page) -> bool:
     """
     ytcp-video-upload-progress: проверки завершены (атрибут или подпись «Проверка завершена…»).
+    Найденный защищённый авторским правом контент — тоже считаем завершением.
     """
     by_attr = page.locator(
         'ytcp-uploads-dialog ytcp-video-upload-progress'
@@ -985,19 +1034,18 @@ def _studio_is_upload_checks_completed(page) -> bool:
             return True
     except Exception:
         pass
-    label = page.locator(
-        "ytcp-uploads-dialog ytcp-video-upload-progress .progress-label"
-    )
-    try:
-        if label.count() == 0:
-            return False
-        if not label.first.is_visible(timeout=2_000):
-            return False
-        t = (label.first.inner_text(timeout=3_000) or "").strip().lower()
-    except Exception:
-        return False
+
+    t = _studio_upload_checks_status_text(page).lower()
     if not t:
         return False
+
+    if _studio_is_copyright_claims_checks_completed_text(t):
+        _log(
+            "Studio: проверка авторских прав завершена (найден защищённый контент) — "
+            "считаем успехом, продолжаем пайплайн."
+        )
+        return True
+
     if "проверка завершена" in t and "нарушен" in t and "не найден" in t:
         return True
     if ("check" in t and "complete" in t) and (
@@ -1155,8 +1203,8 @@ def _studio_wait_after_upload_studio_outcome(page, browser, max_wait_sec: float)
     — успешные проверки → выход, дальше мастер.
     """
     _log(
-        "Studio: ожидание результата после загрузки — «Загрузка недоступна» "
-        "или «Проверка завершена… нарушений не найдено»…"
+        "Studio: ожидание результата после загрузки — «Загрузка недоступна», "
+        "«Проверка завершена…» (в т.ч. найден защищённый авторским правом контент)…"
     )
     deadline = time.monotonic() + max_wait_sec
     last_label: str = ""
@@ -1183,7 +1231,7 @@ def _studio_wait_after_upload_studio_outcome(page, browser, max_wait_sec: float)
 
         if _studio_is_upload_checks_completed(page):
             _studio_try_log_video_id_from_progress_dialog(page)
-            _log("Studio: проверки видео завершены успешно — переход к шагу «не для детей».")
+            _log("Studio: проверки видео завершены — переход к шагу «не для детей».")
             return
         remaining = deadline - time.monotonic()
         if remaining <= 0:

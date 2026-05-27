@@ -24,6 +24,8 @@ _STUDIO_WIZARD_NEXT_MAX = 30
 # Playwright при connect_over_cdp шлёт тело файла по CDP и режет ~50 MiB.
 # DOM.setFileInputFiles с путями на хосте браузера обходит это (Chromium читает файл сам).
 _PLAYWRIGHT_REMOTE_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
+# set_files / set_input_files по CDP для крупных файлов; дефолт Playwright 30 с часто мало.
+_STUDIO_FILE_PICKER_TRANSFER_MS = 600_000
 
 
 class YoutubeStudioError(RuntimeError):
@@ -675,7 +677,7 @@ def _studio_upload_pick_file(page, video_path: str) -> None:
                 _log(f"Studio: «Выбрать файлы» + file chooser… (попытка {attempt}/3)")
                 with page.expect_file_chooser(timeout=600_000) as fc_info:
                     select_btn.first.click(timeout=600_000)
-                fc_info.value.set_files(resolved)
+                fc_info.value.set_files(resolved, timeout=_STUDIO_FILE_PICKER_TRANSFER_MS)
                 last_pick_err = None
                 break
             except Exception as e:
@@ -687,7 +689,7 @@ def _studio_upload_pick_file(page, video_path: str) -> None:
                 )
                 try:
                     picker.first.locator('input[type="file"][name="Filedata"]').set_input_files(
-                        resolved
+                        resolved, timeout=_STUDIO_FILE_PICKER_TRANSFER_MS
                     )
                     last_pick_err = None
                     break

@@ -1474,8 +1474,9 @@ class MainWindow(QWidget):
         self._btn_profiles_check_availability.setAutoDefault(False)
         self._btn_profiles_check_availability.setDefault(False)
         self._btn_profiles_check_availability.setToolTip(
-            "Открывает профили в headless, до 5 одновременно (как при заливке), "
-            "проверяет доступность окна загрузки в YouTube Studio без выбора файла."
+            "Только для отмеченных профилей (квадратики): headless, до 5 одновременно "
+            "(как при заливке), создание канала и «Далее» при необходимости, "
+            "проверка окна загрузки в YouTube Studio без выбора файла."
         )
         self._btn_profiles_check_availability.clicked.connect(
             self._start_profiles_availability_check
@@ -3230,19 +3231,6 @@ class MainWindow(QWidget):
         self._profiles_raw = cleaned
         self._apply_profiles_filter()
 
-    def _collect_profile_ids_for_availability_check(self) -> list[str]:
-        if not self._profiles_raw:
-            return []
-        profiles = self._profiles_visible_matched()
-        ids: list[str] = []
-        seen: set[str] = set()
-        for p in profiles:
-            pid = _profile_id(p)
-            if pid and pid not in seen:
-                seen.add(pid)
-                ids.append(pid)
-        return ids
-
     def _start_profiles_availability_check(self) -> None:
         if self._profiles_availability_running:
             QMessageBox.information(
@@ -3258,12 +3246,12 @@ class MainWindow(QWidget):
                 "Сначала загрузите список профилей (кнопка «Обновить»).",
             )
             return
-        profile_ids = self._collect_profile_ids_for_availability_check()
+        profile_ids = self._collect_checked_profile_ids()
         if not profile_ids:
             QMessageBox.warning(
                 self,
                 "Проверка доступности",
-                "Нет профилей для проверки (список пуст или фильтр ничего не нашёл).",
+                "Отметьте квадратиками профили, для которых нужно проверить YouTube Studio.",
             )
             return
 
@@ -3342,28 +3330,38 @@ class MainWindow(QWidget):
                 )
 
         def _on_profile_done(pid: str, ok: bool, err: str) -> None:
-            if ok:
+            if kind_s != "local":
+                if not ok:
+                    self._ui_log_line.emit(
+                        f"[availability] profile={pid}: тег "
+                        f"{STUDIO_AVAILABILITY_ERROR_TAG!r} доступен только "
+                        "для локального антидетекта."
+                    )
                 return
-            if kind_s == "local":
+            try:
+                api = LocalAntidetectHttpAPI(base_u)
                 try:
-                    api = LocalAntidetectHttpAPI(base_u)
-                    try:
+                    if ok:
+                        try:
+                            api.remove_profile_tag(pid, STUDIO_AVAILABILITY_ERROR_TAG)
+                            self._ui_log_line.emit(
+                                f"[availability] profile={pid} tag_removed="
+                                f"{STUDIO_AVAILABILITY_ERROR_TAG!r}"
+                            )
+                        except Exception:
+                            pass
+                    else:
                         api.add_profile_tag(pid, STUDIO_AVAILABILITY_ERROR_TAG)
                         self._ui_log_line.emit(
                             f"[availability] profile={pid} tag_added="
                             f"{STUDIO_AVAILABILITY_ERROR_TAG!r}"
                         )
-                    finally:
-                        api.close()
-                except Exception as te:
-                    self._ui_log_line.emit(
-                        f"[availability] profile={pid} tag_add_failed err={te!r}"
-                    )
-            else:
+                finally:
+                    api.close()
+            except Exception as te:
+                action = "tag_remove_failed" if ok else "tag_add_failed"
                 self._ui_log_line.emit(
-                    f"[availability] profile={pid}: тег "
-                    f"{STUDIO_AVAILABILITY_ERROR_TAG!r} доступен только "
-                    "для локального антидетекта."
+                    f"[availability] profile={pid} {action} err={te!r}"
                 )
 
         def _on_progress(done: int, total: int, profile_id: str) -> None:
@@ -3539,7 +3537,7 @@ class MainWindow(QWidget):
                     "[availability] Недоступные профили (ID): " + ", ".join(failed)
                 )
         kind = self._default_browser_combo.currentData()
-        if (kind or "").strip() == "local" and int(fail_n) > 0:
+        if (kind or "").strip() == "local" and total > 0:
             self._refresh_antydetect_profiles()
         QMessageBox.information(
             self,

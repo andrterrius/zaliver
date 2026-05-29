@@ -20,6 +20,18 @@ _STUDIO_UI_MS = 120_000
 _POST_UPLOAD_STUDIO_OUTCOME_MAX_S = 3600.0
 _POST_UPLOAD_QUOTA_POLL_S = 2.0
 _STUDIO_WIZARD_NEXT_MAX = 30
+_STUDIO_WARM_WELCOME_NEXT_MAX = 10
+_WELCOME_TITLE_RE = re.compile(
+    r"добро\s+пожаловать|welcome\s+to\s+(the\s+)?youtube\s+studio",
+    re.I,
+)
+_NOT_FOR_KIDS_RADIO_NAME = "VIDEO_MADE_FOR_KIDS_NOT_MFK"
+_NOT_FOR_KIDS_LABEL_RE = re.compile(
+    r"no,?\s*it[''\u2019]?s?\s*not\s*made\s*for\s*kids|"
+    r"нет,?\s*это\s*видео\s*не\s*для\s*детей|"
+    r"not\s*made\s*for\s*kids",
+    re.I,
+)
 
 # Playwright при connect_over_cdp шлёт тело файла по CDP и режет ~50 MiB.
 # DOM.setFileInputFiles с путями на хосте браузера обходит это (Chromium читает файл сам).
@@ -167,18 +179,36 @@ def _studio_handle_channel_creation_dialog_if_present(page) -> bool:
 
 
 def _studio_warm_welcome_dialog_locator(page):
-    return page.locator("ytcp-warm-welcome-dialog")
+    """
+    Приветствие Studio: ytcp-dialog с кнопкой #dismiss-button («Далее»)
+    или legacy-элемент ytcp-warm-welcome-dialog.
+    """
+    by_dismiss = page.locator("ytcp-dialog").filter(
+        has=page.locator(
+            '#dismiss-button[label="Далее"], #dismiss-button[label="Next"]'
+        )
+    )
+    by_title = page.locator("ytcp-dialog").filter(
+        has=page.locator("p#title").filter(has_text=_WELCOME_TITLE_RE)
+    )
+    legacy = page.locator("ytcp-warm-welcome-dialog")
+    return by_dismiss.or_(by_title).or_(legacy)
+
+
+def _studio_warm_welcome_next_button_locator(page):
+    dialog = _studio_warm_welcome_dialog_locator(page)
+    return (
+        dialog.locator("#dismiss-button button[aria-label='Далее']")
+        .or_(dialog.locator("#dismiss-button button[aria-label='Next']"))
+        .or_(dialog.locator("ytcp-button#dismiss-button button"))
+        .or_(dialog.locator("#dismiss-button button"))
+    )
 
 
 def _studio_warm_welcome_dialog_visible(page) -> bool:
     try:
-        welcome = _studio_warm_welcome_dialog_locator(page)
-        if welcome.count() == 0:
-            return False
-        dismiss = welcome.locator("#dismiss-button")
-        if dismiss.count() > 0 and dismiss.first.is_visible():
-            return True
-        return welcome.first.is_visible()
+        btn = _studio_warm_welcome_next_button_locator(page)
+        return btn.count() > 0 and btn.first.is_visible()
     except Exception:
         return False
 
@@ -187,48 +217,51 @@ def _studio_handle_warm_welcome_dialog_if_present(page) -> bool:
     """
     Приветствие «Добро пожаловать в Творческую студию YouTube!» — кнопка «Далее».
     Может появиться после создания канала или при первом заходе в Studio.
+    Несколько шагов — нажимаем «Далее», пока окно не исчезнет.
     """
     if not _studio_warm_welcome_dialog_visible(page):
         return False
 
-    _log("Studio: приветственное окно — нажимаем «Далее»…")
-    next_btn = (
-        page.locator("ytcp-warm-welcome-dialog #dismiss-button button")
-        .or_(page.locator("ytcp-warm-welcome-dialog ytcp-button#dismiss-button button"))
-        .or_(page.locator('ytcp-warm-welcome-dialog button[aria-label="Далее"]'))
-        .or_(page.locator('ytcp-warm-welcome-dialog button[aria-label="Next"]'))
-        .or_(
-            page.get_by_role(
-                "button",
-                name=re.compile(r"^далее$|^next$", re.I),
-            )
+    handled = False
+    for step in range(_STUDIO_WARM_WELCOME_NEXT_MAX):
+        if not _studio_warm_welcome_dialog_visible(page):
+            break
+        handled = True
+        _log(
+            f"Studio: приветственное окно — нажимаем «Далее» "
+            f"(шаг {step + 1}/{_STUDIO_WARM_WELCOME_NEXT_MAX})…"
         )
-    )
-    try:
-        next_btn.first.wait_for(state="visible", timeout=15_000)
-        next_btn.first.click(timeout=30_000)
-    except Exception as e:
-        raise YoutubeStudioError(
-            "YouTube Studio: не удалось нажать «Далее» в приветственном окне."
-        ) from e
-
-    welcome = _studio_warm_welcome_dialog_locator(page)
-    try:
-        welcome.first.wait_for(state="hidden", timeout=_STUDIO_UI_MS)
-    except Exception:
-        deadline = time.monotonic() + (_STUDIO_UI_MS / 1000.0)
-        while time.monotonic() < deadline:
-            if not _studio_warm_welcome_dialog_visible(page):
-                break
-            time.sleep(0.5)
-        else:
+        next_btn = _studio_warm_welcome_next_button_locator(page)
+        try:
+            next_btn.first.wait_for(state="visible", timeout=15_000)
+            next_btn.first.click(timeout=30_000)
+        except Exception as e:
             raise YoutubeStudioError(
-                "YouTube Studio: приветственное окно не закрылось после «Далее»."
-            )
+                "YouTube Studio: не удалось нажать «Далее» в приветственном окне."
+            ) from e
+        page.wait_for_timeout(600)
 
-    page.wait_for_timeout(500)
-    _log("Studio: приветственное окно закрыто.")
-    return True
+    if _studio_warm_welcome_dialog_visible(page):
+        raise YoutubeStudioError(
+            "YouTube Studio: приветственное окно не закрылось после «Далее»."
+        )
+
+    if handled:
+        _log("Studio: приветственное окно закрыто.")
+    return handled
+
+
+def _studio_handle_onboarding_dialogs_if_present(page) -> bool:
+    """
+    Создание канала и приветственное окно «Далее» (как при заливе).
+    Возвращает True, если обработан хотя бы один диалог.
+    """
+    handled = False
+    if _studio_handle_channel_creation_dialog_if_present(page):
+        handled = True
+    if _studio_handle_warm_welcome_dialog_if_present(page):
+        handled = True
+    return handled
 
 
 def _studio_wait_create_or_login(page, create_locator) -> None:
@@ -242,9 +275,7 @@ def _studio_wait_create_or_login(page, create_locator) -> None:
                 "YouTube Studio: требуется вход в Google (профиль без активной сессии). "
                 "Останавливаем залив для этого профиля."
             )
-        if _studio_handle_channel_creation_dialog_if_present(page):
-            continue
-        if _studio_handle_warm_welcome_dialog_if_present(page):
+        if _studio_handle_onboarding_dialogs_if_present(page):
             continue
         try:
             if create_locator.count() > 0 and create_locator.first.is_visible():
@@ -295,8 +326,7 @@ def _studio_click_create_then_add_video(page) -> None:
         timeout=120_000,
     )
     _log(f"Studio: после загрузки URL: {page.url!r}")
-    _studio_handle_channel_creation_dialog_if_present(page)
-    _studio_handle_warm_welcome_dialog_if_present(page)
+    _studio_handle_onboarding_dialogs_if_present(page)
 
     create = (
         page.locator('ytcp-button-shape button[aria-label="Создать"]')
@@ -329,6 +359,7 @@ def _studio_click_create_then_add_video(page) -> None:
     upload_item.first.click(timeout=30_000)
     page.wait_for_timeout(500)
     _log(f"Studio: после «Добавить видео» URL: {page.url!r}")
+    _studio_wait_upload_file_picker_visible(page, timeout_ms=_STUDIO_UI_MS)
 
 
 def _studio_upload_file_picker_locator(page):
@@ -337,15 +368,42 @@ def _studio_upload_file_picker_locator(page):
     ).or_(page.locator("ytcp-uploads-file-picker"))
 
 
+def _studio_wait_upload_file_picker_visible(page, *, timeout_ms: int = 120_000) -> None:
+    """
+    Ждём ytcp-uploads-file-picker, параллельно закрывая диалоги создания канала
+    и приветствия «Далее» — те же шаги, что при заливе.
+    """
+    picker = _studio_upload_file_picker_locator(page)
+    _log("Studio: ожидание окна загрузки видео (ytcp-uploads-file-picker)…")
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
+    while time.monotonic() < deadline:
+        if _studio_login_required(page):
+            raise YoutubeStudioError(
+                "YouTube Studio: требуется вход в Google (профиль без активной сессии)."
+            )
+        if _studio_handle_onboarding_dialogs_if_present(page):
+            continue
+        try:
+            if picker.count() > 0 and picker.first.is_visible():
+                _log("Studio: окно загрузки видео доступно.")
+                return
+        except Exception:
+            pass
+        time.sleep(0.5)
+
+    raise YoutubeStudioError(
+        "YouTube Studio: не дождались окна загрузки (ytcp-uploads-file-picker). "
+        "Возможны диалог создания канала, приветствие «Далее» или блокировка аккаунта."
+    )
+
+
 def verify_studio_upload_dialog_available(page) -> None:
     """
     Проверка доступности YouTube Studio до окна загрузки (без выбора файла).
     Успех — видим ytcp-uploads-file-picker («Выбрать файлы»).
+    Тот же путь, что залив: Studio → создание канала / «Далее» → Создать → Добавить видео.
     """
     _studio_click_create_then_add_video(page)
-    picker = _studio_upload_file_picker_locator(page)
-    _log("Studio: ожидание окна загрузки видео (ytcp-uploads-file-picker)…")
-    picker.first.wait_for(state="visible", timeout=120_000)
     _log("Studio: окно загрузки видео доступно — проверка успешна.")
 
 
@@ -623,9 +681,8 @@ def _studio_upload_pick_file(page, video_path: str) -> None:
             )
         time.sleep(0.5)
 
-    _log("Studio: ожидание ytcp-uploads-file-picker…")
+    _studio_wait_upload_file_picker_visible(page)
     picker = _studio_upload_file_picker_locator(page)
-    picker.first.wait_for(state="visible", timeout=120_000)
 
     select_btn = (
         picker.first.locator(
@@ -795,26 +852,39 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
 
 
 def _studio_select_not_for_kids(page) -> None:
-    """«Нет, это видео не для детей» (VIDEO_MADE_FOR_KIDS_NOT_MFK)."""
-    _log("Studio: «Нет, это видео не для детей»…")
+    """«Нет, это видео не для детей» / «No, it's not made for kids»."""
+    _log(
+        "Studio: «Нет, это видео не для детей» / "
+        "«No, it's not made for kids»…"
+    )
+    kids_select = page.locator("ytkc-made-for-kids-select").or_(
+        page.locator(".made-for-kids-rating-container")
+    )
     not_kids = (
-        page.locator(
-            'ytkc-made-for-kids-select tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"]'
+        kids_select.locator(
+            f'tp-yt-paper-radio-button[name="{_NOT_FOR_KIDS_RADIO_NAME}"]'
         )
         .or_(
             page.locator(
-                '.made-for-kids-group tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"]'
+                f'.made-for-kids-group tp-yt-paper-radio-button[name="{_NOT_FOR_KIDS_RADIO_NAME}"]'
             )
         )
-        .or_(page.locator('tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"]'))
+        .or_(page.locator(f'tp-yt-paper-radio-button[name="{_NOT_FOR_KIDS_RADIO_NAME}"]'))
         .or_(
-            page.get_by_role(
-                "radio", name=re.compile(r"не для детей|not.*made for kids", re.I)
+            kids_select.locator("tp-yt-paper-radio-button").filter(
+                has_text=_NOT_FOR_KIDS_LABEL_RE
             )
         )
+        .or_(page.get_by_role("radio", name=_NOT_FOR_KIDS_LABEL_RE))
     )
-    not_kids.first.wait_for(state="visible", timeout=90_000)
-    not_kids.first.click(timeout=15_000)
+    btn = not_kids.first
+    btn.wait_for(state="visible", timeout=90_000)
+    btn.click(timeout=15_000)
+    try:
+        if (btn.get_attribute("aria-checked") or "").lower() != "true":
+            btn.locator("#radioContainer").click(timeout=15_000)
+    except Exception:
+        pass
 
 
 def _studio_click_next_until_visibility(page) -> None:

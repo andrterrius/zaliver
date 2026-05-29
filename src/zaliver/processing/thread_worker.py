@@ -22,10 +22,12 @@ from zaliver.processing.batch_paths import list_video_files
 from zaliver.processing.chunking import VideoInfo, build_n_even_chunks, probe_video
 from zaliver.processing.ffmpeg_probe import estimate_target_video_bps
 from zaliver.processing.ffmpeg_merge import (
+    BackgroundMusicUnavailableError,
     check_ffmpeg,
     check_ffmpeg_tools,
     encoder_runtime_error,
     ffmpeg_encoder_list_text,
+    is_background_music_probe_error,
     merge_segments_with_source_audio,
     mux_video_audio,
     mux_video_background_music,
@@ -42,6 +44,62 @@ LogCallback = Callable[[str], None]
 def _unique_output_filename(stem: str) -> str:
     """Случайное имя выходного файла (не счётчик), расширение .mp4."""
     return f"{stem}_u_{secrets.token_hex(10)}.mp4"
+
+
+def _job_bgm_alternates(j: OutputJob, music_pool: List[str]) -> List[str]:
+    if j.background_music_paths:
+        return list(j.background_music_paths)
+    return list(music_pool)
+
+
+def _mux_job_final_audio(
+    j: OutputJob,
+    *,
+    video_only: str,
+    av_tmp: str,
+    log: LogCallback,
+    n_jobs: int,
+    music_pool: List[str],
+) -> None:
+    """Приклеить звук к видео; при сбое фона — исходник и skip_youtube_upload."""
+    spd = _job_playback_speed(j.settings)
+    chorus = bool(j.settings.get("audio_chorus", False))
+    if j.background_music_path:
+        try:
+            mux_video_background_music(
+                video_only,
+                str(j.background_music_path),
+                av_tmp,
+                frame_count=int(j.info.frame_count),
+                fps=float(j.info.fps),
+                playback_speed=spd,
+                log=log,
+                target_video_bps=j.target_video_bps,
+                mix_with_source=bool(j.background_music_mix),
+                source_video_path=str(j.p),
+                audio_chorus=chorus,
+                music_volume_pct=float(j.background_music_volume_pct),
+                music_path_alternates=_job_bgm_alternates(j, music_pool),
+            )
+            return
+        except Exception as e:
+            if not is_background_music_probe_error(e):
+                raise
+            log(f"{j.tag(n_jobs)}: {e}")
+            log(
+                f"{j.tag(n_jobs)}: сохраняем со звуком исходника (без фона), "
+                "видео исключено из залива в YouTube."
+            )
+            j.skip_youtube_upload = True
+    mux_video_audio(
+        video_only,
+        str(j.p),
+        av_tmp,
+        playback_speed=spd,
+        audio_chorus=chorus,
+        log=log,
+        target_video_bps=j.target_video_bps,
+    )
 
 
 def _job_playback_speed(settings: Dict[str, Any]) -> float:
@@ -75,8 +133,10 @@ class OutputJob:
     settings: Dict[str, Any]
     target_video_bps: Optional[int] = None
     background_music_path: Optional[str] = None
+    background_music_paths: List[str] = field(default_factory=list)
     background_music_mix: bool = False
     background_music_volume_pct: float = 35.0
+    skip_youtube_upload: bool = False
     done_frames: int = 0
     finished: bool = False
     chunk_mode: bool = False
@@ -155,7 +215,7 @@ class ProcessingController(QObject):
     progress = pyqtSignal(int, int, str)
     finished = pyqtSignal(bool, str)
     log_line = pyqtSignal(str)
-    output_saved = pyqtSignal(str)
+    output_saved = pyqtSignal(str, bool)
 
     def __init__(self) -> None:
         super().__init__()
@@ -324,6 +384,9 @@ class ProcessingController(QObject):
                         settings=settings,
                         target_video_bps=tvb,
                         background_music_path=bg_track,
+                        background_music_paths=(
+                            [str(Path(x).resolve()) for x in music_pool] if bg_track else []
+                        ),
                         background_music_mix=bg_mix,
                         background_music_volume_pct=bg_vol_opt,
                     )
@@ -608,37 +671,14 @@ class ProcessingController(QObject):
                                     f"{j.outp.stem}._zaliver_av{j.outp.suffix}"
                                 )
                                 try:
-                                    if j.background_music_path:
-                                        mux_video_background_music(
-                                            str(video_only),
-                                            str(j.background_music_path),
-                                            str(av_tmp),
-                                            frame_count=int(j.info.frame_count),
-                                            fps=float(j.info.fps),
-                                            playback_speed=_job_playback_speed(j.settings),
-                                            log=log,
-                                            target_video_bps=j.target_video_bps,
-                                            mix_with_source=bool(j.background_music_mix),
-                                            source_video_path=str(j.p),
-                                            audio_chorus=bool(
-                                                j.settings.get("audio_chorus", False)
-                                            ),
-                                            music_volume_pct=float(
-                                                j.background_music_volume_pct
-                                            ),
-                                        )
-                                    else:
-                                        mux_video_audio(
-                                            str(video_only),
-                                            str(j.p),
-                                            str(av_tmp),
-                                            playback_speed=_job_playback_speed(j.settings),
-                                            audio_chorus=bool(
-                                                j.settings.get("audio_chorus", False)
-                                            ),
-                                            log=log,
-                                            target_video_bps=j.target_video_bps,
-                                        )
+                                    _mux_job_final_audio(
+                                        j,
+                                        video_only=str(video_only),
+                                        av_tmp=str(av_tmp),
+                                        log=log,
+                                        n_jobs=n_jobs,
+                                        music_pool=music_pool,
+                                    )
                                     try:
                                         av_tmp.replace(j.outp)
                                     except OSError:
@@ -659,7 +699,9 @@ class ProcessingController(QObject):
                             j.finished = True
                             j.done_frames = j.info.frame_count
                             log(f"{j.tag(n_jobs)}: Сохранено: {j.outp.name}")
-                            self.output_saved.emit(str(j.outp))
+                            self.output_saved.emit(
+                                str(j.outp), not j.skip_youtube_upload
+                            )
                             log(
                                 f"{j.tag(n_jobs)}: Пауза 3 секунды после сохранения "
                                 f"(файл: {str(j.outp)!r})…"
@@ -672,7 +714,7 @@ class ProcessingController(QObject):
                                     seg_paths = [str(t[2]) for t in j.chunks]
                                     # Склеиваем видео и добавляем аудио исходника.
                                     wd = str(j.chunk_work_dir or (out_dir / ".zaliver_chunks" / j.job_id))
-                                    merge_segments_with_source_audio(
+                                    bg_ok = merge_segments_with_source_audio(
                                         seg_paths,
                                         str(j.p),
                                         str(j.outp),
@@ -682,6 +724,9 @@ class ProcessingController(QObject):
                                         log=log,
                                         target_video_bps=j.target_video_bps,
                                         background_music_path=j.background_music_path,
+                                        background_music_alternates=_job_bgm_alternates(
+                                            j, music_pool
+                                        ),
                                         music_video_meta=(
                                             int(j.info.frame_count),
                                             float(j.info.fps),
@@ -691,12 +736,44 @@ class ProcessingController(QObject):
                                             j.background_music_volume_pct
                                         ),
                                     )
+                                    if not bg_ok:
+                                        j.skip_youtube_upload = True
                                 except Exception as e:
-                                    finish_error(
-                                        f"Склейка ffmpeg: {e}",
-                                        futures,
-                                    )
-                                    return
+                                    if is_background_music_probe_error(e):
+                                        log(f"{j.tag(n_jobs)}: {e}")
+                                        log(
+                                            f"{j.tag(n_jobs)}: сохраняем со звуком исходника "
+                                            "(без фона), видео исключено из залива в YouTube."
+                                        )
+                                        j.skip_youtube_upload = True
+                                        try:
+                                            merge_segments_with_source_audio(
+                                                seg_paths,
+                                                str(j.p),
+                                                str(j.outp),
+                                                work_dir=wd,
+                                                playback_speed=_job_playback_speed(
+                                                    j.settings
+                                                ),
+                                                audio_chorus=bool(
+                                                    j.settings.get("audio_chorus", False)
+                                                ),
+                                                log=log,
+                                                target_video_bps=j.target_video_bps,
+                                                background_music_path=None,
+                                            )
+                                        except Exception as e2:
+                                            finish_error(
+                                                f"Склейка ffmpeg: {e2}",
+                                                futures,
+                                            )
+                                            return
+                                    else:
+                                        finish_error(
+                                            f"Склейка ffmpeg: {e}",
+                                            futures,
+                                        )
+                                        return
                                 wd = j.chunk_work_dir
                                 if wd is not None:
                                     try:
@@ -713,7 +790,9 @@ class ProcessingController(QObject):
                                     f"{j.tag(n_jobs)}: Сохранено: {j.outp.name} "
                                     f"(склеено из {len(j.chunks)} частей)"
                                 )
-                                self.output_saved.emit(str(j.outp))
+                                self.output_saved.emit(
+                                    str(j.outp), not j.skip_youtube_upload
+                                )
                                 log(
                                     f"{j.tag(n_jobs)}: Пауза 3 секунды после сохранения "
                                     f"(файл: {str(j.outp)!r})…"

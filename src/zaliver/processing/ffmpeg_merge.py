@@ -9,10 +9,29 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 LogFn = Optional[Callable[[str], None]]
+
+
+class BackgroundMusicUnavailableError(RuntimeError):
+    """Ни один трек фона не прошёл проверку ffprobe (после ретраев и перебора пула)."""
+
+
+def is_background_music_probe_error(exc: BaseException) -> bool:
+    if isinstance(exc, BackgroundMusicUnavailableError):
+        return True
+    if isinstance(exc, RuntimeError):
+        s = str(exc).lower()
+        return "аудиопоток" in s or "треке фона" in s
+    return False
+
+
+# Фоновая музыка: повтор ffprobe при ложном «нет аудио» (облако, блокировка файла).
+_BGM_AUDIO_PROBE_RETRIES = 3
+_BGM_AUDIO_PROBE_DELAY_SEC = 10.0
 
 # Optional full path to ffmpeg.exe set from UI / settings (overrides auto-detect).
 _explicit_ffmpeg: Optional[str] = None
@@ -638,6 +657,158 @@ def source_file_has_audio(path: str) -> bool:
     return len(streams) > 0
 
 
+def _require_background_music_audio(
+    music_path: str,
+    *,
+    log: LogFn = None,
+    retries: int = _BGM_AUDIO_PROBE_RETRIES,
+    delay_sec: float = _BGM_AUDIO_PROBE_DELAY_SEC,
+) -> None:
+    """
+    Убедиться, что ffprobe видит аудиопоток. При сбое — до `retries` повторов с паузой.
+    sleep выполняется в потоке обработки, не в UI.
+    """
+    m = Path(music_path).resolve()
+    pstr = m.as_posix()
+    name = m.name
+    max_retries = max(0, int(retries))
+    delay = max(0.0, float(delay_sec))
+    total_attempts = max_retries + 1
+    for attempt in range(1, total_attempts + 1):
+        if source_file_has_audio(pstr):
+            if attempt > 1 and log:
+                log(
+                    f"Фоновая музыка: аудиопоток найден с попытки "
+                    f"{attempt}/{total_attempts} ({name})"
+                )
+            return
+        if attempt >= total_attempts:
+            break
+        if log:
+            log(
+                f"Фоновая музыка: аудиопоток не обнаружен ({name}), "
+                f"повтор {attempt}/{max_retries} через {delay:.0f} с…"
+            )
+        time.sleep(delay)
+    raise BackgroundMusicUnavailableError(
+        f"Нет аудиопотока в файле фоновой музыки: {name} ({pstr})"
+    )
+
+
+def _bgm_candidate_paths(
+    music_path: str, alternates: Optional[List[str]]
+) -> List[str]:
+    """Уникальные существующие пути: сначала выбранный трек, остальные из пула (случайный порядок)."""
+    keys: set[str] = set()
+    primary_key: Optional[str] = None
+    primary_path: Optional[str] = None
+    rest: List[str] = []
+
+    def _key(p: Path) -> str:
+        return os.path.normcase(str(p))
+
+    def _add(raw: str, *, as_primary: bool = False) -> None:
+        nonlocal primary_key, primary_path
+        try:
+            p = Path(raw).resolve()
+        except OSError:
+            return
+        if not p.is_file():
+            return
+        k = _key(p)
+        if k in keys:
+            return
+        keys.add(k)
+        ps = str(p)
+        if as_primary:
+            primary_key = k
+            primary_path = ps
+        else:
+            rest.append(ps)
+
+    _add(music_path, as_primary=True)
+    pool = list(alternates or [])
+    random.shuffle(pool)
+    for raw in pool:
+        try:
+            p = Path(raw).resolve()
+        except OSError:
+            continue
+        k = _key(p)
+        if primary_key is not None and k == primary_key:
+            continue
+        _add(raw)
+
+    if primary_path is None:
+        return rest
+    return [primary_path, *rest]
+
+
+def resolve_background_music_path(
+    music_path: str,
+    *,
+    alternates: Optional[List[str]] = None,
+    log: LogFn = None,
+) -> str:
+    """
+    Сначала ffprobe с ретраями на выбранном треке; только после их исчерпания —
+    следующие файлы из пула (у каждого снова полный цикл ретраев).
+    """
+    candidates = _bgm_candidate_paths(music_path, alternates)
+    if not candidates:
+        raise BackgroundMusicUnavailableError(
+            f"Нет доступных файлов фоновой музыки: {Path(music_path).name}"
+        )
+    primary = candidates[0]
+    fallbacks = candidates[1:]
+    last_err: Optional[BackgroundMusicUnavailableError] = None
+
+    if log:
+        log(
+            f"Фоновая музыка: основной трек {Path(primary).name} "
+            f"(до {_BGM_AUDIO_PROBE_RETRIES} повторов по {_BGM_AUDIO_PROBE_DELAY_SEC:.0f} с)…"
+        )
+    try:
+        _require_background_music_audio(primary, log=log)
+        return primary
+    except BackgroundMusicUnavailableError as e:
+        last_err = e
+        if not fallbacks:
+            raise
+        if log:
+            log(
+                f"Фоновая музыка: повторы для {Path(primary).name} исчерпаны, "
+                f"пробуем другие треки из пула ({len(fallbacks)})…"
+            )
+
+    for idx, candidate in enumerate(fallbacks, start=1):
+        if log:
+            log(
+                f"Фоновая музыка: запасной трек {idx}/{len(fallbacks)} — "
+                f"{Path(candidate).name} "
+                f"(до {_BGM_AUDIO_PROBE_RETRIES} повторов по {_BGM_AUDIO_PROBE_DELAY_SEC:.0f} с)…"
+            )
+        try:
+            _require_background_music_audio(candidate, log=log)
+            if log:
+                log(
+                    f"Фоновая музыка: вместо {Path(primary).name} — {Path(candidate).name}"
+                )
+            return candidate
+        except BackgroundMusicUnavailableError as e:
+            last_err = e
+            if log and idx < len(fallbacks):
+                log(
+                    f"Фоновая музыка: повторы для {Path(candidate).name} исчерпаны, "
+                    f"следующий трек ({len(fallbacks) - idx} осталось)…"
+                )
+
+    names = ", ".join(Path(p).name for p in candidates)
+    raise BackgroundMusicUnavailableError(
+        f"Не удалось прочитать аудио ни в одном треке фона ({len(candidates)}): {names}"
+    ) from last_err
+
+
 def mux_video_audio(
     video_path: str,
     audio_source_path: str,
@@ -801,10 +972,15 @@ def merge_segments_with_source_audio(
     log: LogFn = None,
     target_video_bps: Optional[int] = None,
     background_music_path: Optional[str] = None,
+    background_music_alternates: Optional[List[str]] = None,
     music_video_meta: Optional[Tuple[int, float]] = None,
     background_music_mix: bool = False,
     background_music_volume_pct: float = 35.0,
-) -> None:
+) -> bool:
+    """
+    Склеить сегменты и добавить звук.
+    Returns False, если фоновая музыка была нужна, но недоступна (звук — с исходника).
+    """
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
     concat_out = work / "concat_video.mp4"
@@ -813,30 +989,52 @@ def merge_segments_with_source_audio(
     )
     if background_music_path and str(background_music_path).strip():
         fc, fpsi = music_video_meta or (0, 30.0)
-        mux_video_background_music(
-            str(concat_out),
-            str(background_music_path).strip(),
-            final_output,
-            frame_count=max(1, int(fc)),
-            fps=float(fpsi) if float(fpsi) > 1e-6 else 30.0,
-            playback_speed=playback_speed,
-            log=log,
-            target_video_bps=target_video_bps,
-            mix_with_source=bool(background_music_mix),
-            source_video_path=str(source_video),
-            audio_chorus=bool(audio_chorus),
-            music_volume_pct=float(background_music_volume_pct),
-        )
-    else:
-        mux_video_audio(
-            str(concat_out),
-            source_video,
-            final_output,
-            playback_speed=playback_speed,
-            audio_chorus=audio_chorus,
-            log=log,
-            target_video_bps=target_video_bps,
-        )
+        try:
+            mux_video_background_music(
+                str(concat_out),
+                str(background_music_path).strip(),
+                final_output,
+                frame_count=max(1, int(fc)),
+                fps=float(fpsi) if float(fpsi) > 1e-6 else 30.0,
+                playback_speed=playback_speed,
+                log=log,
+                target_video_bps=target_video_bps,
+                mix_with_source=bool(background_music_mix),
+                source_video_path=str(source_video),
+                audio_chorus=bool(audio_chorus),
+                music_volume_pct=float(background_music_volume_pct),
+                music_path_alternates=background_music_alternates,
+            )
+        except (BackgroundMusicUnavailableError, RuntimeError) as e:
+            if not is_background_music_probe_error(e):
+                raise
+            if log:
+                log(f"Фоновая музыка: {e}")
+                log(
+                    "Видео сохраняется со звуком исходника (без фона); "
+                    "исключено из очереди залива в YouTube."
+                )
+            mux_video_audio(
+                str(concat_out),
+                source_video,
+                final_output,
+                playback_speed=playback_speed,
+                audio_chorus=audio_chorus,
+                log=log,
+                target_video_bps=target_video_bps,
+            )
+            return False
+        return True
+    mux_video_audio(
+        str(concat_out),
+        source_video,
+        final_output,
+        playback_speed=playback_speed,
+        audio_chorus=audio_chorus,
+        log=log,
+        target_video_bps=target_video_bps,
+    )
+    return True
 
 
 def _output_duration_after_speed(
@@ -971,6 +1169,7 @@ def mux_video_background_music(
     source_video_path: Optional[str] = None,
     audio_chorus: bool = False,
     music_volume_pct: float = 35.0,
+    music_path_alternates: Optional[List[str]] = None,
 ) -> None:
     """
     Видео без звука + фоновая музыка (случайный отрезок снаружи).
@@ -980,7 +1179,12 @@ def mux_video_background_music(
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     v = Path(video_path).resolve().as_posix()
-    m = Path(music_path).resolve().as_posix()
+    m = resolve_background_music_path(
+        music_path,
+        alternates=music_path_alternates,
+        log=log,
+    )
+    m = Path(m).resolve().as_posix()
     o = str(out)
     spd = float(playback_speed) if playback_speed is not None else 1.0
     want_speed = abs(spd - 1.0) > 1e-3
@@ -999,8 +1203,6 @@ def mux_video_background_music(
         music_dur = probe_media_duration_seconds(m)
     except Exception:
         music_dur = None
-    if not source_file_has_audio(m):
-        raise RuntimeError(f"Нет аудиопотока в файле фоновой музыки: {Path(m).name} ({m})")
 
     trim_start = _random_music_trim_start_sec(music_dur, dur_needed)
     vol_lin = _music_volume_linear_from_pct(music_volume_pct)
@@ -1023,7 +1225,7 @@ def mux_video_background_music(
     if not use_mix:
         _mux_bgm_replace_only(
             video_path,
-            music_path,
+            m,
             out_path,
             trim_start=trim_start,
             dur_needed=dur_needed,

@@ -2374,9 +2374,15 @@ class MainWindow(QWidget):
             row_w.remove_requested.connect(self._on_ready_remove_requested)
             self._ready_list.setItemWidget(it, row_w)
 
-    def _on_output_saved(self, path: str) -> None:
+    def _on_output_saved(self, path: str, include_in_upload: bool = True) -> None:
         if isinstance(path, str) and path.strip():
-            self._just_saved_outputs.append(path.strip())
+            p = path.strip()
+            if include_in_upload:
+                self._just_saved_outputs.append(p)
+            else:
+                self._append_log(
+                    f"Исключено из залива в YouTube: {Path(p).name}"
+                )
             try:
                 s = self._upload_session
                 if s is not None:

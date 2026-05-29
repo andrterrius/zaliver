@@ -850,16 +850,25 @@ def _output_duration_after_speed(
     return (float(frame_count) / fps) / spd
 
 
+_MUSIC_EDGE_SKIP_SEC = 10.0
+
+
 def _random_music_trim_start_sec(
     music_duration_sec: Optional[float], needed_sec: float
 ) -> float:
-    """Случайная фаза на шкале времени (сек); при зацикленном входе задаёт «случайный отрезок»."""
+    """Случайная фаза на шкале времени (сек); без первых и последних 10 с трека."""
     need = max(0.05, float(needed_sec))
+    edge = _MUSIC_EDGE_SKIP_SEC
     if music_duration_sec is None or music_duration_sec <= 0.05:
-        return random.uniform(0.0, max(need, 600.0))
+        return random.uniform(edge, max(need + edge, 600.0))
     d = float(music_duration_sec)
-    # Равномерно по кругу длины d (зацикленный поток).
-    return random.uniform(0.0, d)
+    lo = edge
+    hi = d - edge - need
+    if hi >= lo:
+        return random.uniform(lo, hi)
+    # Трек короче, чем нужно для полного отступа — центрируем отрезок.
+    usable = max(0.0, d - need)
+    return min(max(usable / 2.0, 0.0), usable)
 
 
 def _music_volume_linear_from_pct(pct: float) -> float:

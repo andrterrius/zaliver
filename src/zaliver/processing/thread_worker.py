@@ -27,7 +27,7 @@ from zaliver.processing.ffmpeg_merge import (
     check_ffmpeg_tools,
     encoder_runtime_error,
     ffmpeg_encoder_list_text,
-    is_background_music_probe_error,
+    is_background_music_failure,
     merge_segments_with_source_audio,
     mux_video_audio,
     mux_video_background_music,
@@ -60,6 +60,7 @@ def _mux_job_final_audio(
     log: LogCallback,
     n_jobs: int,
     music_pool: List[str],
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> None:
     """Приклеить звук к видео; при сбое фона — исходник и skip_youtube_upload."""
     spd = _job_playback_speed(j.settings)
@@ -80,11 +81,21 @@ def _mux_job_final_audio(
                 audio_chorus=chorus,
                 music_volume_pct=float(j.background_music_volume_pct),
                 music_path_alternates=_job_bgm_alternates(j, music_pool),
+                cancel_check=cancel_check,
             )
             return
-        except Exception as e:
-            if not is_background_music_probe_error(e):
+        except RuntimeError as e:
+            if str(e) == "cancelled":
                 raise
+            if not is_background_music_failure(e):
+                raise
+            log(f"{j.tag(n_jobs)}: {e}")
+            log(
+                f"{j.tag(n_jobs)}: сохраняем со звуком исходника (без фона), "
+                "видео исключено из залива в YouTube."
+            )
+            j.skip_youtube_upload = True
+        except BackgroundMusicUnavailableError as e:
             log(f"{j.tag(n_jobs)}: {e}")
             log(
                 f"{j.tag(n_jobs)}: сохраняем со звуком исходника (без фона), "
@@ -137,6 +148,7 @@ class OutputJob:
     background_music_mix: bool = False
     background_music_volume_pct: float = 35.0
     skip_youtube_upload: bool = False
+    finalize_error: Optional[str] = None
     done_frames: int = 0
     finished: bool = False
     chunk_mode: bool = False
@@ -163,6 +175,41 @@ class OutputJob:
         for i, (_, cnt, _) in enumerate(self.chunks):
             s += min(self.chunk_progress.get(i, 0), cnt)
         return s
+
+
+def _skip_job_finalize_error(
+    j: OutputJob,
+    err: BaseException,
+    *,
+    log: LogCallback,
+    n_jobs: int,
+) -> None:
+    """Пропустить один ролик после сбоя склейки/mux; остальные продолжают."""
+    msg = str(err).strip() or repr(err)
+    log(f"{j.tag(n_jobs)}: ошибка склейки/ffmpeg: {msg}")
+    log(f"{j.tag(n_jobs)}: файл пропущен, обработка остальных продолжается.")
+    j.finalize_error = msg
+    j.skip_youtube_upload = True
+    j.finished = True
+    j.done_frames = j.info.frame_count
+    for part in (
+        j.outp,
+        j.outp.with_name(f"{j.outp.stem}._zaliver_video{j.outp.suffix}"),
+        j.outp.with_name(f"{j.outp.stem}._zaliver_av{j.outp.suffix}"),
+        Path(f"{j.outp}.part"),
+    ):
+        try:
+            if part.is_file():
+                part.unlink()
+        except OSError:
+            pass
+    wd = j.chunk_work_dir
+    if wd is not None:
+        try:
+            shutil.rmtree(wd, ignore_errors=True)
+        except OSError:
+            pass
+        j.chunk_work_dir = None
 
 
 def _try_enable_chunk_mode(
@@ -226,7 +273,13 @@ class ProcessingController(QObject):
             self._mp_cancel.set()
 
     def run(self, options: Dict[str, Any]) -> None:
-        log: LogCallback = lambda m: self.log_line.emit(m)
+        def safe_log(msg: str) -> None:
+            try:
+                self.log_line.emit(msg)
+            except RuntimeError:
+                pass
+
+        log: LogCallback = safe_log
         self._mp_cancel = None
 
         try:
@@ -661,66 +714,88 @@ class ProcessingController(QObject):
                             finish_error("Отменено.", futures)
                             return
                         if meta.chunk_idx < 0:
-                            # После обработки: приклеиваем аудио из исходника (если есть ffmpeg).
-                            # Если аудио нет или ffmpeg не найден, сохранится "только видео".
                             video_only = j.outp.with_name(
                                 f"{j.outp.stem}._zaliver_video{j.outp.suffix}"
                             )
-                            if check_ffmpeg() and video_only.is_file():
-                                av_tmp = j.outp.with_name(
-                                    f"{j.outp.stem}._zaliver_av{j.outp.suffix}"
-                                )
-                                try:
-                                    _mux_job_final_audio(
-                                        j,
-                                        video_only=str(video_only),
-                                        av_tmp=str(av_tmp),
-                                        log=log,
-                                        n_jobs=n_jobs,
-                                        music_pool=music_pool,
+                            finalize_ok = False
+                            try:
+                                if check_ffmpeg() and video_only.is_file():
+                                    av_tmp = j.outp.with_name(
+                                        f"{j.outp.stem}._zaliver_av{j.outp.suffix}"
                                     )
                                     try:
-                                        av_tmp.replace(j.outp)
-                                    except OSError:
-                                        # If replace fails, keep whatever exists.
-                                        pass
-                                finally:
+                                        _mux_job_final_audio(
+                                            j,
+                                            video_only=str(video_only),
+                                            av_tmp=str(av_tmp),
+                                            log=log,
+                                            n_jobs=n_jobs,
+                                            music_pool=music_pool,
+                                            cancel_check=cancelled,
+                                        )
+                                        try:
+                                            av_tmp.replace(j.outp)
+                                        except OSError:
+                                            pass
+                                        finalize_ok = True
+                                    finally:
+                                        try:
+                                            if video_only.is_file():
+                                                video_only.unlink()
+                                        except OSError:
+                                            pass
+                                else:
                                     try:
                                         if video_only.is_file():
-                                            video_only.unlink()
+                                            video_only.replace(j.outp)
+                                            finalize_ok = True
                                     except OSError:
                                         pass
-                            else:
+                            except RuntimeError as e:
+                                if str(e) == "cancelled":
+                                    finish_error("Отменено.", futures)
+                                    return
+                                _skip_job_finalize_error(
+                                    j, e, log=log, n_jobs=n_jobs
+                                )
+                            except Exception as e:
+                                _skip_job_finalize_error(
+                                    j, e, log=log, n_jobs=n_jobs
+                                )
+                            if finalize_ok and not j.finalize_error:
+                                j.finished = True
+                                j.done_frames = j.info.frame_count
+                                log(f"{j.tag(n_jobs)}: Сохранено: {j.outp.name}")
                                 try:
-                                    if video_only.is_file():
-                                        video_only.replace(j.outp)
-                                except OSError:
+                                    self.output_saved.emit(
+                                        str(j.outp), not j.skip_youtube_upload
+                                    )
+                                except RuntimeError:
                                     pass
-                            j.finished = True
-                            j.done_frames = j.info.frame_count
-                            log(f"{j.tag(n_jobs)}: Сохранено: {j.outp.name}")
-                            self.output_saved.emit(
-                                str(j.outp), not j.skip_youtube_upload
-                            )
-                            log(
-                                f"{j.tag(n_jobs)}: Пауза 3 секунды после сохранения "
-                                f"(файл: {str(j.outp)!r})…"
-                            )
-                            time.sleep(3.0)
+                                log(
+                                    f"{j.tag(n_jobs)}: Пауза 3 секунды после сохранения "
+                                    f"(файл: {str(j.outp)!r})…"
+                                )
+                                time.sleep(3.0)
                         else:
                             j.chunks_finished.add(meta.chunk_idx)
                             if len(j.chunks_finished) >= len(j.chunks):
+                                seg_paths = [str(t[2]) for t in j.chunks]
+                                wd = str(
+                                    j.chunk_work_dir
+                                    or (out_dir / ".zaliver_chunks" / j.job_id)
+                                )
+                                finalize_ok = False
                                 try:
-                                    seg_paths = [str(t[2]) for t in j.chunks]
-                                    # Склеиваем видео и добавляем аудио исходника.
-                                    wd = str(j.chunk_work_dir or (out_dir / ".zaliver_chunks" / j.job_id))
                                     bg_ok = merge_segments_with_source_audio(
                                         seg_paths,
                                         str(j.p),
                                         str(j.outp),
                                         work_dir=wd,
                                         playback_speed=_job_playback_speed(j.settings),
-                                        audio_chorus=bool(j.settings.get("audio_chorus", False)),
+                                        audio_chorus=bool(
+                                            j.settings.get("audio_chorus", False)
+                                        ),
                                         log=log,
                                         target_video_bps=j.target_video_bps,
                                         background_music_path=j.background_music_path,
@@ -735,11 +810,16 @@ class ProcessingController(QObject):
                                         background_music_volume_pct=float(
                                             j.background_music_volume_pct
                                         ),
+                                        cancel_check=cancelled,
                                     )
                                     if not bg_ok:
                                         j.skip_youtube_upload = True
-                                except Exception as e:
-                                    if is_background_music_probe_error(e):
+                                    finalize_ok = True
+                                except RuntimeError as e:
+                                    if str(e) == "cancelled":
+                                        finish_error("Отменено.", futures)
+                                        return
+                                    if is_background_music_failure(e):
                                         log(f"{j.tag(n_jobs)}: {e}")
                                         log(
                                             f"{j.tag(n_jobs)}: сохраняем со звуком исходника "
@@ -761,43 +841,93 @@ class ProcessingController(QObject):
                                                 log=log,
                                                 target_video_bps=j.target_video_bps,
                                                 background_music_path=None,
+                                                cancel_check=cancelled,
+                                            )
+                                            finalize_ok = True
+                                        except RuntimeError as e2:
+                                            if str(e2) == "cancelled":
+                                                finish_error("Отменено.", futures)
+                                                return
+                                            _skip_job_finalize_error(
+                                                j, e2, log=log, n_jobs=n_jobs
                                             )
                                         except Exception as e2:
-                                            finish_error(
-                                                f"Склейка ffmpeg: {e2}",
-                                                futures,
+                                            _skip_job_finalize_error(
+                                                j, e2, log=log, n_jobs=n_jobs
                                             )
-                                            return
                                     else:
-                                        finish_error(
-                                            f"Склейка ffmpeg: {e}",
-                                            futures,
+                                        _skip_job_finalize_error(
+                                            j, e, log=log, n_jobs=n_jobs
                                         )
-                                        return
-                                wd = j.chunk_work_dir
-                                if wd is not None:
+                                except Exception as e:
+                                    if is_background_music_failure(e):
+                                        log(f"{j.tag(n_jobs)}: {e}")
+                                        log(
+                                            f"{j.tag(n_jobs)}: сохраняем со звуком исходника "
+                                            "(без фона), видео исключено из залива в YouTube."
+                                        )
+                                        j.skip_youtube_upload = True
+                                        try:
+                                            merge_segments_with_source_audio(
+                                                seg_paths,
+                                                str(j.p),
+                                                str(j.outp),
+                                                work_dir=wd,
+                                                playback_speed=_job_playback_speed(
+                                                    j.settings
+                                                ),
+                                                audio_chorus=bool(
+                                                    j.settings.get("audio_chorus", False)
+                                                ),
+                                                log=log,
+                                                target_video_bps=j.target_video_bps,
+                                                background_music_path=None,
+                                                cancel_check=cancelled,
+                                            )
+                                            finalize_ok = True
+                                        except RuntimeError as e2:
+                                            if str(e2) == "cancelled":
+                                                finish_error("Отменено.", futures)
+                                                return
+                                            _skip_job_finalize_error(
+                                                j, e2, log=log, n_jobs=n_jobs
+                                            )
+                                        except Exception as e2:
+                                            _skip_job_finalize_error(
+                                                j, e2, log=log, n_jobs=n_jobs
+                                            )
+                                    else:
+                                        _skip_job_finalize_error(
+                                            j, e, log=log, n_jobs=n_jobs
+                                        )
+                                if finalize_ok and not j.finalize_error:
+                                    wd_path = j.chunk_work_dir
+                                    if wd_path is not None:
+                                        try:
+                                            shutil.rmtree(wd_path, ignore_errors=True)
+                                        except OSError:
+                                            pass
+                                        j.chunk_work_dir = None
+                                    j.finished = True
+                                    j.done_frames = j.info.frame_count
+                                    j.chunk_progress.clear()
+                                    for i, (_, cnt, _) in enumerate(j.chunks):
+                                        j.chunk_progress[i] = cnt
+                                    log(
+                                        f"{j.tag(n_jobs)}: Сохранено: {j.outp.name} "
+                                        f"(склеено из {len(j.chunks)} частей)"
+                                    )
                                     try:
-                                        shutil.rmtree(wd, ignore_errors=True)
-                                    except OSError:
+                                        self.output_saved.emit(
+                                            str(j.outp), not j.skip_youtube_upload
+                                        )
+                                    except RuntimeError:
                                         pass
-                                    j.chunk_work_dir = None
-                                j.finished = True
-                                j.done_frames = j.info.frame_count
-                                j.chunk_progress.clear()
-                                for i, (_, cnt, _) in enumerate(j.chunks):
-                                    j.chunk_progress[i] = cnt
-                                log(
-                                    f"{j.tag(n_jobs)}: Сохранено: {j.outp.name} "
-                                    f"(склеено из {len(j.chunks)} частей)"
-                                )
-                                self.output_saved.emit(
-                                    str(j.outp), not j.skip_youtube_upload
-                                )
-                                log(
-                                    f"{j.tag(n_jobs)}: Пауза 3 секунды после сохранения "
-                                    f"(файл: {str(j.outp)!r})…"
-                                )
-                                time.sleep(3.0)
+                                    log(
+                                        f"{j.tag(n_jobs)}: Пауза 3 секунды после сохранения "
+                                        f"(файл: {str(j.outp)!r})…"
+                                    )
+                                    time.sleep(3.0)
                         emit_progress_global()
                     fill_pool()
 
@@ -808,12 +938,21 @@ class ProcessingController(QObject):
                 self.progress.emit(cur99, total_all, "YouTube: загрузка, прогресс 99%…")
             else:
                 self.progress.emit(total_all, total_all, "Готово")
+            saved_n = sum(
+                1 for j in jobs if j.finished and not j.finalize_error
+            )
+            failed_finalize = [j for j in jobs if j.finalize_error]
             done_msg = (
-                f"Сохранено выходных файлов: {n_jobs}\n"
+                f"Сохранено выходных файлов: {saved_n} из {n_jobs}\n"
                 f"Исходников: {n_sources}, копий на файл: {copies_per_file}\n"
                 f"Папка: {out_dir}\n"
                 "Формат: MP4 (H.264/AAC, если доступен ffmpeg)."
             )
+            if failed_finalize:
+                done_msg += (
+                    f"\n\nНе удалось склеить/сохранить: {len(failed_finalize)} "
+                    f"(подробности в логе, без остановки остальных)."
+                )
             self.finished.emit(True, done_msg)
         except Exception as e:
             self.finished.emit(False, str(e))

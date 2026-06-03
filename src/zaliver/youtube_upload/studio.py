@@ -25,6 +25,10 @@ _WELCOME_TITLE_RE = re.compile(
     r"добро\s+пожаловать|welcome\s+to\s+(the\s+)?youtube\s+studio",
     re.I,
 )
+_AADC_HEADING_RE = re.compile(
+    r"видео\s+в\s+открытом\s+доступе|videos?\s+(in\s+)?public|publicly\s+available",
+    re.I,
+)
 _NOT_FOR_KIDS_RADIO_NAME = "VIDEO_MADE_FOR_KIDS_NOT_MFK"
 _NOT_FOR_KIDS_LABEL_RE = re.compile(
     r"no,?\s*it[''\u2019]?s?\s*not\s*made\s*for\s*kids|"
@@ -251,17 +255,95 @@ def _studio_handle_warm_welcome_dialog_if_present(page) -> bool:
     return handled
 
 
-def _studio_handle_onboarding_dialogs_if_present(page) -> bool:
+def _studio_aadc_notice_dialog_locator(page):
     """
-    Создание канала и приветственное окно «Далее» (как при заливе).
-    Возвращает True, если обработан хотя бы один диалог.
+    AADC: ytcp-aadc-notice-dialog — «Видео в открытом доступе могут смотреть все», кнопка «ОК».
+    """
+    by_component = page.locator("ytcp-aadc-notice-dialog")
+    by_got_it = page.locator("ytcp-dialog").filter(
+        has=page.locator("#got-it-button")
+    )
+    by_heading = page.locator("ytcp-dialog").filter(
+        has=page.locator("#text-heading").filter(has_text=_AADC_HEADING_RE)
+    )
+    return by_component.or_(by_got_it).or_(by_heading)
+
+
+def _studio_aadc_notice_ok_button_locator(page):
+    dialog = _studio_aadc_notice_dialog_locator(page)
+    return (
+        dialog.locator("#got-it-button button[aria-label='ОК']")
+        .or_(dialog.locator("#got-it-button button[aria-label='OK']"))
+        .or_(dialog.locator("#got-it-button button[aria-label='Got it']"))
+        .or_(dialog.locator("ytcp-button#got-it-button button"))
+        .or_(dialog.locator("#got-it-button button"))
+    )
+
+
+def _studio_aadc_notice_dialog_visible(page) -> bool:
+    try:
+        btn = _studio_aadc_notice_ok_button_locator(page)
+        return btn.count() > 0 and btn.first.is_visible()
+    except Exception:
+        return False
+
+
+def _studio_handle_aadc_notice_dialog_if_present(page) -> bool:
+    """
+    AADC: «Видео в открытом доступе могут смотреть все» — кнопка «ОК» (#got-it-button).
+    Может появиться на любом этапе залива в Studio.
+    """
+    if not _studio_aadc_notice_dialog_visible(page):
+        return False
+
+    _log("Studio: окно AADC — нажимаем «ОК»…")
+    ok_btn = _studio_aadc_notice_ok_button_locator(page)
+    try:
+        ok_btn.first.wait_for(state="visible", timeout=15_000)
+        ok_btn.first.click(timeout=30_000)
+    except Exception as e:
+        raise YoutubeStudioError(
+            "YouTube Studio: не удалось нажать «ОК» в окне AADC."
+        ) from e
+
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        if not _studio_aadc_notice_dialog_visible(page):
+            break
+        time.sleep(0.3)
+    else:
+        raise YoutubeStudioError(
+            "YouTube Studio: окно AADC не закрылось после «ОК»."
+        )
+
+    page.wait_for_timeout(400)
+    _log("Studio: окно AADC закрыто.")
+    return True
+
+
+def _studio_handle_interrupt_dialogs_if_present(page) -> bool:
+    """
+    Прерывающие диалоги Studio: создание канала, приветствие «Далее», AADC «ОК».
+    Могут появиться на разных этапах залива — опрашиваем и закрываем.
     """
     handled = False
-    if _studio_handle_channel_creation_dialog_if_present(page):
-        handled = True
-    if _studio_handle_warm_welcome_dialog_if_present(page):
+    for _ in range(5):
+        step_handled = False
+        if _studio_handle_channel_creation_dialog_if_present(page):
+            step_handled = True
+        if _studio_handle_warm_welcome_dialog_if_present(page):
+            step_handled = True
+        if _studio_handle_aadc_notice_dialog_if_present(page):
+            step_handled = True
+        if not step_handled:
+            break
         handled = True
     return handled
+
+
+def _studio_handle_onboarding_dialogs_if_present(page) -> bool:
+    """См. ``_studio_handle_interrupt_dialogs_if_present`` (обратная совместимость)."""
+    return _studio_handle_interrupt_dialogs_if_present(page)
 
 
 def _studio_wait_create_or_login(page, create_locator) -> None:
@@ -791,6 +873,8 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
     if not t and not d:
         return
 
+    _studio_handle_interrupt_dialogs_if_present(page)
+
     editor = page.locator("ytcp-video-metadata-editor#details").or_(
         page.locator("ytcp-video-metadata-editor")
     )
@@ -878,7 +962,19 @@ def _studio_select_not_for_kids(page) -> None:
         .or_(page.get_by_role("radio", name=_NOT_FOR_KIDS_LABEL_RE))
     )
     btn = not_kids.first
-    btn.wait_for(state="visible", timeout=90_000)
+    deadline = time.monotonic() + 90.0
+    while time.monotonic() < deadline:
+        _studio_handle_interrupt_dialogs_if_present(page)
+        try:
+            if btn.is_visible():
+                break
+        except Exception:
+            pass
+        time.sleep(0.5)
+    else:
+        raise YoutubeStudioError(
+            "YouTube Studio: не появился выбор «Не для детей» (made-for-kids)."
+        )
     btn.click(timeout=15_000)
     try:
         if (btn.get_attribute("aria-checked") or "").lower() != "true":
@@ -898,6 +994,7 @@ def _studio_click_next_until_visibility(page) -> None:
         .or_(page.locator('ytcp-video-visibility-select tp-yt-paper-radio-button[name="PUBLIC"]'))
     )
     for i in range(_STUDIO_WIZARD_NEXT_MAX):
+        _studio_handle_interrupt_dialogs_if_present(page)
         if public_radio.first.is_visible():
             _log(f"Studio: экран доступа виден (шаг {i}).")
             return
@@ -975,6 +1072,7 @@ def _studio_try_extract_video_url(page) -> str:
 
 def _studio_select_public_visibility(page) -> str:
     """Ссылка на видео в лог, затем «Открытый доступ» (PUBLIC). Возвращает href (если нашли)."""
+    _studio_handle_interrupt_dialogs_if_present(page)
     _log("Studio: экран доступа — фиксируем ссылку на видео…")
     href = _studio_log_video_link_before_public(page)
     _log("Studio: «Открытый доступ»…")
@@ -992,6 +1090,7 @@ def _studio_select_public_visibility(page) -> str:
 
 def _studio_click_publish(page) -> None:
     """Кнопка «Опубликовать» / Publish."""
+    _studio_handle_interrupt_dialogs_if_present(page)
     _log("Studio: «Опубликовать»…")
     btn = (
         page.locator('ytcp-button-shape button[aria-label="Опубликовать"]')
@@ -1281,6 +1380,7 @@ def _studio_wait_after_upload_studio_outcome(page, browser, max_wait_sec: float)
     deadline = time.monotonic() + max_wait_sec
     last_label: str = ""
     while time.monotonic() < deadline:
+        _studio_handle_interrupt_dialogs_if_present(page)
         fatal = _studio_fatal_error_text(page)
         if fatal:
             _studio_abort_fatal_error(page, browser, fatal)

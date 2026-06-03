@@ -885,9 +885,9 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
         _log("Studio: метаданные (details) не видны — пропуск заполнения title/description.")
         return
 
-    def _clear_like_user(contenteditable) -> None:
+    def _clear_like_user(contenteditable, *, right_slack: int = 8) -> None:
         """
-        Очистка как просили: читаем содержимое поля на странице, ставим курсор в конец
+        Очистка: читаем содержимое поля, ставим курсор в конец (End + запас вправо)
         и нажимаем Backspace ровно столько раз, сколько символов в поле.
         """
         try:
@@ -900,18 +900,26 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
         # Фокус уже должен быть в поле.
         try:
             page.keyboard.press("End")
+            for _ in range(right_slack):
+                page.keyboard.press("ArrowRight")
         except Exception:
             # Иногда End не отрабатывает (layout/OS), тогда дожимаем стрелкой.
-            for _ in range(n + 8):
+            for _ in range(n + right_slack):
                 page.keyboard.press("ArrowRight")
         for _ in range(n):
             page.keyboard.press("Backspace")
 
-    def _fill(contenteditable, text: str, *, clear_first: bool = False) -> None:
+    def _fill(
+        contenteditable,
+        text: str,
+        *,
+        clear_first: bool = False,
+        right_slack: int = 8,
+    ) -> None:
         contenteditable.first.wait_for(state="visible", timeout=60_000)
         contenteditable.first.click(timeout=30_000)
         if clear_first:
-            _clear_like_user(contenteditable)
+            _clear_like_user(contenteditable, right_slack=right_slack)
             page.wait_for_timeout(80)
         page.keyboard.type(text, delay=0)
         page.wait_for_timeout(150)
@@ -923,7 +931,7 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
             .or_(editor.first.locator("#title-wrapper #textbox"))
             .or_(page.locator("ytcp-video-title #textbox"))
         )
-        _fill(title_box, t, clear_first=True)
+        _fill(title_box, t, clear_first=True, right_slack=10)
 
     if d:
         _log("Studio: заполнение поля «Описание»…")

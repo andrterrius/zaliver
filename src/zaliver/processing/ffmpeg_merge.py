@@ -94,6 +94,7 @@ def is_resource_exhausted_error(exc: BaseException) -> bool:
     s = str(exc).lower()
     markers = (
         "too many open files",
+        "too many files",
         "errno 24",
         "errno 23",
         "resource temporarily unavailable",
@@ -547,8 +548,51 @@ def pick_best_h264_encoder(
     return ("libx264", libx264_encode_args_for_target(target_video_bps))
 
 
-# concat demuxer открывает все входы сразу; лимит дескрипторов ОС (macOS часто 256).
-_MAX_FFMPEG_CONCAT_FILES = 8 if sys.platform == "darwin" else 16
+# concat demuxer открывает все входы в списке сразу; лимит дескрипторов ОС.
+# macOS: soft ulimit -n часто 256 — при фоновой музыке и параллельных чанках EMFILE на склейке.
+_MIN_FFMPEG_CONCAT_BATCH = 2
+
+
+def _max_ffmpeg_concat_batch() -> int:
+    if sys.platform == "darwin":
+        return 4
+    if sys.platform == "win32":
+        return 8
+    return 16
+
+
+def _max_bgm_alternates() -> int:
+    return 2 if sys.platform == "darwin" else 4
+
+
+def bgm_alternate_paths(
+    primary: str,
+    pool: List[str],
+    *,
+    max_alternates: Optional[int] = None,
+) -> List[str]:
+    """Случайные запасные треки из пула (без primary), не весь список из UI."""
+    try:
+        pkey = os.path.normcase(str(Path(primary).resolve()))
+    except OSError:
+        return []
+    rest: List[str] = []
+    seen: set[str] = set()
+    for raw in pool:
+        try:
+            p = Path(raw).resolve()
+        except OSError:
+            continue
+        if not p.is_file():
+            continue
+        k = os.path.normcase(str(p))
+        if k == pkey or k in seen:
+            continue
+        seen.add(k)
+        rest.append(str(p))
+    random.shuffle(rest)
+    cap = _max_bgm_alternates() if max_alternates is None else max(0, int(max_alternates))
+    return rest[:cap]
 
 
 def _write_concat_demuxer_list(segment_paths: List[str], list_path: str) -> None:
@@ -564,7 +608,7 @@ def _concat_segments_once(
     log: LogFn = None,
     target_video_bps: Optional[int] = None,
 ) -> None:
-    """Один вызов ffmpeg concat (не больше _MAX_FFMPEG_CONCAT_FILES входов)."""
+    """Один вызов ffmpeg concat (число file в list.txt = len(segment_paths))."""
     if not segment_paths:
         raise ValueError("No segments to concat")
     out = Path(out_path)
@@ -619,16 +663,19 @@ def _concat_segments_once(
             pass
 
 
-def concat_segments(
+def _concat_segments_batched(
     segment_paths: List[str],
     out_path: str,
+    *,
+    batch_limit: int,
     log: LogFn = None,
     target_video_bps: Optional[int] = None,
 ) -> None:
     paths = [str(p) for p in segment_paths if p]
     if not paths:
         raise ValueError("No segments to concat")
-    if len(paths) <= _MAX_FFMPEG_CONCAT_FILES:
+    batch_limit = max(2, int(batch_limit))
+    if len(paths) <= batch_limit:
         _concat_segments_once(
             paths, out_path, log=log, target_video_bps=target_video_bps
         )
@@ -636,7 +683,7 @@ def concat_segments(
 
     if log:
         log(
-            f"Склейка {len(paths)} частей пакетами по {_MAX_FFMPEG_CONCAT_FILES} "
+            f"Склейка {len(paths)} частей пакетами по {batch_limit} "
             f"(обход лимита открытых файлов ОС)"
         )
     work = Path(out_path).parent
@@ -644,10 +691,10 @@ def concat_segments(
     current = paths
     batch_idx = 0
     try:
-        while len(current) > _MAX_FFMPEG_CONCAT_FILES:
+        while len(current) > batch_limit:
             nxt: List[str] = []
-            for i in range(0, len(current), _MAX_FFMPEG_CONCAT_FILES):
-                batch = current[i : i + _MAX_FFMPEG_CONCAT_FILES]
+            for i in range(0, len(current), batch_limit):
+                batch = current[i : i + batch_limit]
                 if len(batch) == 1:
                     nxt.append(batch[0])
                     continue
@@ -673,6 +720,54 @@ def concat_segments(
                     tmp.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def concat_segments(
+    segment_paths: List[str],
+    out_path: str,
+    log: LogFn = None,
+    target_video_bps: Optional[int] = None,
+) -> None:
+    batch_limit = _max_ffmpeg_concat_batch()
+    min_batch = _MIN_FFMPEG_CONCAT_BATCH
+    retry_delay = (
+        _FFMPEG_RESOURCE_RETRY_DELAY_SEC * 1.5
+        if sys.platform == "darwin"
+        else _FFMPEG_RESOURCE_RETRY_DELAY_SEC
+    )
+    last_err: Optional[BaseException] = None
+    while batch_limit >= min_batch:
+        try:
+            _concat_segments_batched(
+                segment_paths,
+                out_path,
+                batch_limit=batch_limit,
+                log=log,
+                target_video_bps=target_video_bps,
+            )
+            return
+        except RuntimeError as e:
+            if not is_resource_exhausted_error(e):
+                raise
+            last_err = e
+            if batch_limit <= min_batch:
+                raise
+            smaller = max(min_batch, batch_limit // 2)
+            if log:
+                hint = (
+                    " (на macOS часто помогает уменьшить число потоков в настройках)"
+                    if sys.platform == "darwin"
+                    else ""
+                )
+                log(
+                    f"Склейка: нехватка дескрипторов ({str(e)[:120]}) — "
+                    f"повтор пакетами по {smaller}{hint}…"
+                )
+            gc.collect()
+            time.sleep(retry_delay)
+            batch_limit = smaller
+    if last_err is not None:
+        raise last_err
 
 
 def _atempo_chain(inp: str, speed_factor: float, out_label: str) -> str:

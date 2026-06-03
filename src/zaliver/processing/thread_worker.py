@@ -6,6 +6,7 @@ import queue
 import random
 import secrets
 import shutil
+import sys
 import time
 import uuid
 from collections import deque
@@ -23,6 +24,7 @@ from zaliver.processing.chunking import VideoInfo, build_n_even_chunks, probe_vi
 from zaliver.processing.ffmpeg_probe import estimate_target_video_bps
 from zaliver.processing.ffmpeg_merge import (
     BackgroundMusicUnavailableError,
+    bgm_alternate_paths,
     check_ffmpeg,
     check_ffmpeg_tools,
     encoder_runtime_error,
@@ -49,7 +51,9 @@ def _unique_output_filename(stem: str) -> str:
 def _job_bgm_alternates(j: OutputJob, music_pool: List[str]) -> List[str]:
     if j.background_music_paths:
         return list(j.background_music_paths)
-    return list(music_pool)
+    if j.background_music_path:
+        return bgm_alternate_paths(str(j.background_music_path), music_pool)
+    return []
 
 
 def _mux_job_final_audio(
@@ -227,8 +231,14 @@ def _try_enable_chunk_mode(
     n_by_size = max(2, (fc + _MIN_FRAMES_PER_CHUNK - 1) // _MIN_FRAMES_PER_CHUNK)
     # Чанков делаем заметно больше, чем воркеров, чтобы пул не простаивал из‑за
     # неодинаковой сложности участков (сцены/шум и т.п.).
-    # Для очень длинных роликов это обычно ускоряет обработку на многоядерных CPU.
-    n_target = min(_MAX_CHUNKS_PER_VIDEO, max(num_workers * 3, 2), n_by_size)
+    # macOS: меньше частей и меньший коэффициент — ниже риск EMFILE при ffmpeg concat.
+    if sys.platform == "darwin":
+        max_chunks = min(_MAX_CHUNKS_PER_VIDEO, 48)
+        worker_factor = 2
+    else:
+        max_chunks = _MAX_CHUNKS_PER_VIDEO
+        worker_factor = 3
+    n_target = min(max_chunks, max(num_workers * worker_factor, 2), n_by_size)
     specs = build_n_even_chunks(fc, n_target)
     if len(specs) < 2:
         return
@@ -438,7 +448,7 @@ class ProcessingController(QObject):
                         target_video_bps=tvb,
                         background_music_path=bg_track,
                         background_music_paths=(
-                            [str(Path(x).resolve()) for x in music_pool] if bg_track else []
+                            bgm_alternate_paths(bg_track, music_pool) if bg_track else []
                         ),
                         background_music_mix=bg_mix,
                         background_music_volume_pct=bg_vol_opt,

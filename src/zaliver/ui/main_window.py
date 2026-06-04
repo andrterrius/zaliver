@@ -7,7 +7,7 @@ import sqlite3
 import sys
 import threading
 import time
-import urllib.request
+from dataclasses import replace
 from datetime import datetime, timezone
 from collections.abc import Callable
 from functools import partial
@@ -17,11 +17,9 @@ from PyQt6.QtCore import (
     QEvent,
     QObject,
     QPointF,
-    QRunnable,
     QSettings,
     QSize,
     QThread,
-    QThreadPool,
     QTimer,
     Qt,
     QUrl,
@@ -76,11 +74,6 @@ from zaliver.processing.text_overlay import (
     TextOverlaySettings,
 )
 from zaliver.processing.thread_worker import ProcessingController
-from zaliver.youtube_parsing.thumb_cache import (
-    read_youtube_thumb_cache,
-    write_youtube_thumb_cache,
-    youtube_mq_thumbnail_url,
-)
 from zaliver.ui.antic_profile_row import _profile_id, _profile_name
 from zaliver.ui.profile_list_helpers import (
     profile_matches_search,
@@ -115,8 +108,10 @@ _BIG_FLOAT = 1.0e12
 _READY_THUMB_W = 176
 _READY_THUMB_H = 99
 
-_UPLOADED_THUMB_W = 72
-_UPLOADED_THUMB_H = 128
+_UPLOADED_ROW_H = 76
+_UPLOADED_RENDER_BATCH = 14
+_UPLOADED_RENDER_TICK_MS = 16
+_UPLOADED_SCROLL_BATCH = 20
 
 
 def _format_upload_combo_datetime(iso_s: str) -> str:
@@ -240,6 +235,40 @@ def _uploaded_stats_error_video_id(line: object) -> str | None:
         return None
     vid = s.split(":", 1)[0].strip()
     return vid or None
+
+
+def _uploaded_row_metrics_html(
+    *,
+    view_count: int | None,
+    like_count: int | None,
+    comment_count: int | None,
+    stats_unavailable: bool = False,
+    stats_unavailable_data_api: bool = False,
+    age_restricted: bool | None = None,
+) -> str:
+    if stats_unavailable and stats_unavailable_data_api:
+        return (
+            "<span style='color:#94a3b8;font-weight:700;'>API</span> "
+            "<span style='color:#f0abfc;font-weight:700;'>нет данных</span>"
+        )
+    if stats_unavailable:
+        return "<span style='color:#f0abfc;font-weight:700;'>недоступно</span>"
+    v = _format_int_compact(view_count)
+    l = _format_int_compact(like_count)
+    c = _format_int_compact(comment_count)
+    stats_html = (
+        "<span style='white-space:nowrap;'>"
+        f"<span style='color:#c7d2fe;font-weight:800;'>👁&nbsp;{v}</span>&nbsp;&nbsp;"
+        f"<span style='color:#e9d5ff;font-weight:800;'>♥&nbsp;{l}</span>&nbsp;&nbsp;"
+        f"<span style='color:#a8b0d4;font-weight:700;'>💬&nbsp;{c}</span>"
+        "</span>"
+    )
+    if age_restricted is True:
+        stats_html += (
+            "&nbsp;&nbsp;<span style='color:#fb923c;font-weight:800;'>18+</span>"
+            "<span style='color:#94a3b8;font-weight:600;font-size:11px;'>&nbsp;YT</span>"
+        )
+    return stats_html
 
 
 def _uploaded_row_profile_caption(
@@ -470,44 +499,9 @@ class _ReadyVideoRow(QWidget):
         self._body_mouse_release(event, on_thumb=on_thumb)
 
 
-class _UploadedThumbSignals(QObject):
-    loaded = pyqtSignal(str, object, int)
-
-
-class _FetchUploadedThumbRunnable(QRunnable):
-    def __init__(self, video_id: str, generation: int, sigs: _UploadedThumbSignals) -> None:
-        super().__init__()
-        self._video_id = (video_id or "").strip()
-        self._generation = int(generation)
-        self._sigs = sigs
-
-    def run(self) -> None:
-        vid = self._video_id
-        if not vid:
-            self._sigs.loaded.emit("", b"", self._generation)
-            return
-        cached = read_youtube_thumb_cache(vid)
-        if cached:
-            self._sigs.loaded.emit(vid, cached, self._generation)
-            return
-        data = b""
-        try:
-            req = urllib.request.Request(
-                youtube_mq_thumbnail_url(vid),
-                headers={"User-Agent": "Zaliver/1.0 (uploaded list thumbnail)"},
-            )
-            with urllib.request.urlopen(req, timeout=14) as resp:
-                data = resp.read()
-        except Exception:
-            data = b""
-        if data:
-            write_youtube_thumb_cache(vid, data)
-        self._sigs.loaded.emit(vid, data, self._generation)
-
-
 class _UploadedVideoRow(QWidget):
     """
-    Строка залитого видео: превью с YouTube, метрики справа, открыть ролик — кнопка «↗».
+    Строка залитого видео: метрики справа, открыть ролик — кнопка «↗».
     Ctrl/Shift — как в списке «Готовые видео».
     """
 
@@ -540,14 +534,7 @@ class _UploadedVideoRow(QWidget):
 
         row = QHBoxLayout(self)
         row.setSpacing(12)
-        row.setContentsMargins(8, 8, 10, 8)
-
-        self._thumb = QLabel()
-        self._thumb.setFixedSize(_UPLOADED_THUMB_W, _UPLOADED_THUMB_H)
-        self._thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._thumb.setObjectName("uploadedThumb")
-        self._thumb.setText("…")
-        self._thumb.setScaledContents(False)
+        row.setContentsMargins(10, 8, 10, 8)
 
         text_col = QVBoxLayout()
         text_col.setSpacing(4)
@@ -575,32 +562,17 @@ class _UploadedVideoRow(QWidget):
         stats_row = QHBoxLayout()
         stats_row.setSpacing(10)
 
-        if stats_unavailable and stats_unavailable_data_api:
-            stats_html = (
-                "<span style='color:#94a3b8;font-weight:700;'>API</span> "
-                "<span style='color:#f0abfc;font-weight:700;'>нет данных</span>"
+        metrics = QLabel(
+            _uploaded_row_metrics_html(
+                view_count=view_count,
+                like_count=like_count,
+                comment_count=comment_count,
+                stats_unavailable=stats_unavailable,
+                stats_unavailable_data_api=stats_unavailable_data_api,
+                age_restricted=age_restricted,
             )
-        elif stats_unavailable:
-            stats_html = (
-                "<span style='color:#f0abfc;font-weight:700;'>недоступно</span>"
-            )
-        else:
-            v = _format_int_compact(view_count)
-            l = _format_int_compact(like_count)
-            c = _format_int_compact(comment_count)
-            stats_html = (
-                "<span style='white-space:nowrap;'>"
-                f"<span style='color:#c7d2fe;font-weight:800;'>👁&nbsp;{v}</span>&nbsp;&nbsp;"
-                f"<span style='color:#e9d5ff;font-weight:800;'>♥&nbsp;{l}</span>&nbsp;&nbsp;"
-                f"<span style='color:#a8b0d4;font-weight:700;'>💬&nbsp;{c}</span>"
-                "</span>"
-            )
-            if age_restricted is True:
-                stats_html += (
-                    "&nbsp;&nbsp;<span style='color:#fb923c;font-weight:800;'>18+</span>"
-                    "<span style='color:#94a3b8;font-weight:600;font-size:11px;'>&nbsp;YT</span>"
-                )
-        metrics = QLabel(stats_html)
+        )
+        self._metrics = metrics
         metrics.setObjectName("uploadedRowMetrics")
         metrics.setTextFormat(Qt.TextFormat.RichText)
         metrics.setWordWrap(False)
@@ -622,15 +594,23 @@ class _UploadedVideoRow(QWidget):
         stats_row.addWidget(self._btn_open, 0, Qt.AlignmentFlag.AlignVCenter)
         stats_wrap.addLayout(stats_row)
 
-        row.addWidget(self._thumb)
         row.addLayout(text_col, 1)
         row.addLayout(stats_wrap, 0)
 
-        for w in (self._thumb, title_lbl, id_lbl, prof_lbl, metrics, ago):
+        for w in (title_lbl, id_lbl, prof_lbl, metrics, ago):
             w.installEventFilter(self)
 
-    def thumb_label(self) -> QLabel:
-        return self._thumb
+    def update_from_video(self, v: UploadedVideo) -> None:
+        self._metrics.setText(
+            _uploaded_row_metrics_html(
+                view_count=v.view_count,
+                like_count=v.like_count,
+                comment_count=v.comment_count,
+                stats_unavailable=v.stats_unavailable,
+                stats_unavailable_data_api=v.stats_unavailable_data_api,
+                age_restricted=v.age_restricted,
+            )
+        )
 
     def _own_item(self) -> QListWidgetItem | None:
         lw = self._list
@@ -1411,12 +1391,11 @@ class MainWindow(QWidget):
         uploaded_l.setSpacing(8)
         uploaded_l.setContentsMargins(12, 12, 12, 12)
 
-        self._uploaded_thumb_gen = 0
-        self._uploaded_thumb_labels: dict[str, QLabel] = {}
-        self._uploaded_thumb_signals = _UploadedThumbSignals(self)
-        self._uploaded_thumb_signals.loaded.connect(self._on_uploaded_thumb_loaded)
-        self._uploaded_thumb_pool = QThreadPool(self)
-        self._uploaded_thumb_pool.setMaxThreadCount(5)
+        self._uploaded_all: list[UploadedVideo] = []
+        self._uploaded_render_pos = 0
+        self._uploaded_render_timer = QTimer(self)
+        self._uploaded_render_timer.setInterval(_UPLOADED_RENDER_TICK_MS)
+        self._uploaded_render_timer.timeout.connect(self._tick_uploaded_list_render)
 
         uploaded_top = QHBoxLayout()
         self._uploaded_session_filter = QComboBox()
@@ -1449,6 +1428,10 @@ class MainWindow(QWidget):
         uploaded_hint.setObjectName("uploadedSectionHint")
         uploaded_hint.setWordWrap(True)
         uploaded_l.addWidget(uploaded_hint)
+        self._uploaded_stats_status = QLabel("")
+        self._uploaded_stats_status.setObjectName("uploadedStatsStatus")
+        self._uploaded_stats_status.setWordWrap(True)
+        uploaded_l.addWidget(self._uploaded_stats_status)
 
         self._uploaded_sort_mode: str = "views"
         body = QHBoxLayout()
@@ -1575,6 +1558,9 @@ class MainWindow(QWidget):
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
         self._uploaded_list.setUniformItemSizes(True)
+        self._uploaded_list.verticalScrollBar().valueChanged.connect(
+            self._on_uploaded_list_scrolled
+        )
         right_l.addWidget(self._uploaded_list, 1)
 
         body.addWidget(side, 0)
@@ -2032,101 +2018,135 @@ class MainWindow(QWidget):
             "Среднее: " + "   ".join(parts) if parts else "Среднее: —"
         )
 
-    def _schedule_uploaded_thumb(self, video_id: str, label: QLabel) -> None:
-        vid = (video_id or "").strip()
-        if not vid:
-            return
-        self._uploaded_thumb_labels[vid] = label
-        self._uploaded_thumb_pool.start(
-            _FetchUploadedThumbRunnable(
-                vid, self._uploaded_thumb_gen, self._uploaded_thumb_signals
-            )
-        )
+    def _uploaded_list_row_width(self) -> int:
+        vw = self._uploaded_list.viewport().width()
+        return max(520, vw - 8) if vw > 80 else 560
 
-    def _on_uploaded_thumb_loaded(self, video_id: str, data: object, generation: int) -> None:
-        if int(generation) != int(self._uploaded_thumb_gen):
-            return
-        vid = (video_id or "").strip()
-        if not vid:
-            return
-        lbl = self._uploaded_thumb_labels.get(vid)
-        if lbl is None:
-            return
-        blob = data if isinstance(data, (bytes, bytearray)) else b""
-        if blob:
-            pm = QPixmap()
-            if pm.loadFromData(bytes(blob)):
-                scaled = pm.scaled(
-                    _UPLOADED_THUMB_W,
-                    _UPLOADED_THUMB_H,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
+    def _uploaded_video_tooltip(self, v: UploadedVideo) -> str:
+        updated = (
+            _format_stored_datetime(v.stats_updated_at or "")
+            if v.stats_updated_at
+            else "—"
+        )
+        sess = (
+            _format_stored_datetime(v.session_started_at or "")
+            if v.session_started_at
+            else "—"
+        )
+        uploaded_at = _format_stored_datetime(v.uploaded_at or "")
+        tip_lines = [
+            (v.title or "").strip(),
+            f"videoId: {v.video_id}",
+            f"profile_id: {v.profile_id or '—'}",
+            f"url: {v.url}",
+            f"session_id: {v.session_id}",
+            f"session_started_at: {v.session_started_at or '—'}",
+            f"uploaded_at: {v.uploaded_at}",
+            f"stats_updated_at: {v.stats_updated_at or '—'}",
+            f"Обновлено (чит.): {updated}",
+            f"Сессия: #{v.session_id} ({sess})",
+            f"Загружено (чит.): {uploaded_at}",
+        ]
+        if v.stats_unavailable:
+            if v.stats_unavailable_data_api:
+                tip_lines.append(
+                    "Статистика: YoutubeDataApiError — ответ YouTube Data API "
+                    "без данных по этому videoId."
                 )
-                lbl.setPixmap(scaled)
-                lbl.setObjectName("uploadedThumb")
-                lbl.setText("")
-                st = lbl.style()
-                if st is not None:
-                    st.unpolish(lbl)
-                    st.polish(lbl)
-                return
-        lbl.clear()
-        lbl.setPixmap(QPixmap())
-        lbl.setText("—")
-        lbl.setObjectName("uploadedThumbEmpty")
-        st = lbl.style()
-        if st is not None:
-            st.unpolish(lbl)
-            st.polish(lbl)
+            else:
+                tip_lines.append(
+                    "Статистика: не удалось получить (блокировка, приват или удалено)."
+                )
+        elif v.age_restricted is True:
+            tip_lines.append(
+                "Возрастное ограничение YouTube (Data API): 18+ "
+                "(contentDetails.contentRating.ytRating = ytAgeRestricted)."
+            )
+        return "\n".join(tip_lines)
+
+    def _uploaded_add_list_row(self, v: UploadedVideo) -> None:
+        w_hint = self._uploaded_list_row_width()
+        row_h = _UPLOADED_ROW_H
+        tip = self._uploaded_video_tooltip(v)
+        it = QListWidgetItem()
+        it.setData(Qt.ItemDataRole.UserRole + 1, str(v.video_id))
+        it.setData(Qt.ItemDataRole.UserRole + 2, str(v.url))
+        it.setToolTip(tip)
+        it.setSizeHint(QSize(w_hint, row_h))
+        self._uploaded_list.addItem(it)
+        prof_cap = _uploaded_row_profile_caption(
+            profile_id=v.profile_id,
+            profiles=self._profiles_raw,
+        )
+        row_w = _UploadedVideoRow(
+            title=v.title,
+            url=v.url,
+            video_id=v.video_id,
+            uploaded_at_iso=v.uploaded_at or "",
+            view_count=v.view_count,
+            like_count=v.like_count,
+            comment_count=v.comment_count,
+            stats_unavailable=v.stats_unavailable,
+            stats_unavailable_data_api=v.stats_unavailable_data_api,
+            age_restricted=v.age_restricted,
+            profile_caption=prof_cap,
+            tooltip=tip,
+            list_widget=self._uploaded_list,
+            parent=self._uploaded_list,
+        )
+        row_w.activated.connect(self._open_uploaded_url)
+        self._uploaded_list.setItemWidget(it, row_w)
+
+    def _stop_uploaded_list_render(self) -> None:
+        if hasattr(self, "_uploaded_render_timer"):
+            self._uploaded_render_timer.stop()
+
+    def _uploaded_append_list_slice(self, count: int) -> None:
+        flat = self._uploaded_all
+        start = self._uploaded_render_pos
+        end = min(start + max(1, int(count)), len(flat))
+        if start >= end:
+            return
+        for v in flat[start:end]:
+            self._uploaded_add_list_row(v)
+        self._uploaded_render_pos = end
+
+    def _tick_uploaded_list_render(self) -> None:
+        if self._uploaded_render_pos >= len(self._uploaded_all):
+            self._stop_uploaded_list_render()
+            return
+        self._uploaded_append_list_slice(_UPLOADED_RENDER_BATCH)
+        if self._uploaded_render_pos >= len(self._uploaded_all):
+            self._stop_uploaded_list_render()
+
+    def _on_uploaded_list_scrolled(self, value: int) -> None:
+        flat = self._uploaded_all
+        if self._uploaded_render_pos >= len(flat):
+            return
+        sb = self._uploaded_list.verticalScrollBar()
+        if sb.maximum() <= 0 or value < sb.maximum() - 96:
+            return
+        self._uploaded_append_list_slice(_UPLOADED_SCROLL_BATCH)
+
+    def _start_uploaded_list_render(self) -> None:
+        self._stop_uploaded_list_render()
+        self._uploaded_render_pos = 0
+        if not self._uploaded_all:
+            return
+        self._uploaded_render_timer.start()
 
     def _refresh_uploaded_list(self) -> None:
         if not hasattr(self, "_uploaded_list"):
             return
 
         self._populate_uploaded_session_filter()
-
-        only_session_id = 0
-        try:
-            if hasattr(self, "_uploaded_session_filter"):
-                only_session_id = int(self._uploaded_session_filter.currentData() or 0)
-        except Exception:
-            only_session_id = 0
-
-        self._uploaded_thumb_gen += 1
-        self._uploaded_thumb_labels.clear()
+        self._stop_uploaded_list_render()
         self._uploaded_list.clear()
+        self._uploaded_all = self._uploaded_videos_for_current_filter_sorted()
+        self._update_uploaded_side_panel(self._uploaded_all)
 
-        try:
-            sessions = self._upload_store.list_sessions(limit=400)
-        except Exception:
-            sessions = []
-
-        ids = [int(s.id) for s in sessions]
-        m: dict[int, list[UploadedVideo]] = {}
-        try:
-            if ids:
-                raw = self._upload_store.list_uploaded_videos_for_sessions(ids)
-                m = raw if isinstance(raw, dict) else {}
-        except Exception:
-            m = {}
-
-        flat: list[UploadedVideo] = []
-        if only_session_id > 0:
-            flat = list(m.get(int(only_session_id), []) or [])
-        else:
-            for s in sessions:
-                flat.extend(m.get(int(s.id), []) or [])
-            flat.sort(key=lambda v: (v.uploaded_at or "", v.id), reverse=True)
-
-        mode = getattr(self, "_uploaded_sort_mode", "views")
-        flat = self._sorted_uploaded_videos(flat, mode)
-        self._update_uploaded_side_panel(flat)
-
-        vw = self._uploaded_list.viewport().width()
-        w_hint = max(520, vw - 8) if vw > 80 else 560
-        row_h = _UPLOADED_THUMB_H + 44
-
-        if not flat:
+        if not self._uploaded_all:
+            w_hint = self._uploaded_list_row_width()
             it = QListWidgetItem()
             it.setFlags(Qt.ItemFlag.ItemIsEnabled)
             it.setSizeHint(QSize(w_hint, 80))
@@ -2137,78 +2157,115 @@ class MainWindow(QWidget):
             self._uploaded_list.setItemWidget(it, empty)
             return
 
-        for v in flat:
-            updated = (
-                _format_stored_datetime(v.stats_updated_at or "")
-                if v.stats_updated_at
-                else "—"
-            )
-            sess = (
-                _format_stored_datetime(v.session_started_at or "")
-                if v.session_started_at
-                else "—"
-            )
-            uploaded_at = _format_stored_datetime(v.uploaded_at or "")
-            tip_lines = [
-                (v.title or "").strip(),
-                f"videoId: {v.video_id}",
-                f"profile_id: {v.profile_id or '—'}",
-                f"url: {v.url}",
-                f"session_id: {v.session_id}",
-                f"session_started_at: {v.session_started_at or '—'}",
-                f"uploaded_at: {v.uploaded_at}",
-                f"stats_updated_at: {v.stats_updated_at or '—'}",
-                f"Обновлено (чит.): {updated}",
-                f"Сессия: #{v.session_id} ({sess})",
-                f"Загружено (чит.): {uploaded_at}",
-            ]
-            if v.stats_unavailable:
-                if v.stats_unavailable_data_api:
-                    tip_lines.append(
-                        "Статистика: YoutubeDataApiError — ответ YouTube Data API "
-                        "без данных по этому videoId."
-                    )
-                else:
-                    tip_lines.append(
-                        "Статистика: не удалось получить (блокировка, приват или удалено)."
-                    )
-            elif v.age_restricted is True:
-                tip_lines.append(
-                    "Возрастное ограничение YouTube (Data API): 18+ "
-                    "(contentDetails.contentRating.ytRating = ytAgeRestricted)."
+        self._start_uploaded_list_render()
+
+    def _uploaded_merge_video_in_cache(self, v: UploadedVideo) -> None:
+        vid = (v.video_id or "").strip()
+        if not vid:
+            return
+        for i, cur in enumerate(self._uploaded_all):
+            if (cur.video_id or "").strip() == vid:
+                self._uploaded_all[i] = v
+                return
+
+    def _uploaded_patch_list_row(self, video_id: str) -> None:
+        vid = (video_id or "").strip()
+        if not vid:
+            return
+        v = next(
+            (x for x in self._uploaded_all if (x.video_id or "").strip() == vid),
+            None,
+        )
+        if v is None:
+            return
+        for i in range(self._uploaded_list.count()):
+            it = self._uploaded_list.item(i)
+            if it is None:
+                continue
+            if (it.data(Qt.ItemDataRole.UserRole + 1) or "").strip() != vid:
+                continue
+            row_w = self._uploaded_list.itemWidget(it)
+            if isinstance(row_w, _UploadedVideoRow):
+                row_w.update_from_video(v)
+            break
+
+    def _uploaded_persist_stats_batch(self, successes: object, errors: object) -> None:
+        """Сохраняет пакет в БД и обновляет кэш/видимые строки без перестройки списка."""
+        touched: set[str] = set()
+        succ = successes if isinstance(successes, list) else []
+        failures_raw = errors if isinstance(errors, list) else []
+        for item in failures_raw:
+            ve = ""
+            is_api = False
+            if isinstance(item, (list, tuple)) and len(item) >= 3:
+                ve = str(item[0] or "").strip()
+                is_api = bool(item[2])
+            else:
+                ev = _uploaded_stats_error_video_id(item)
+                if ev:
+                    ve = ev
+                    is_api = "YoutubeDataApiError" in str(item)
+            if not ve:
+                continue
+            try:
+                self._upload_store.mark_video_stats_unavailable(
+                    video_id=ve,
+                    youtube_data_api_error=is_api,
                 )
-            tip = "\n".join(tip_lines)
-
-            it = QListWidgetItem()
-            it.setData(Qt.ItemDataRole.UserRole + 1, str(v.video_id))
-            it.setData(Qt.ItemDataRole.UserRole + 2, str(v.url))
-            it.setToolTip(tip)
-            it.setSizeHint(QSize(w_hint, row_h))
-            self._uploaded_list.addItem(it)
-
-            prof_cap = _uploaded_row_profile_caption(
-                profile_id=v.profile_id,
-                profiles=self._profiles_raw,
-            )
-            row_w = _UploadedVideoRow(
-                title=v.title,
-                url=v.url,
-                video_id=v.video_id,
-                uploaded_at_iso=v.uploaded_at or "",
-                view_count=v.view_count,
-                like_count=v.like_count,
-                comment_count=v.comment_count,
-                stats_unavailable=v.stats_unavailable,
-                stats_unavailable_data_api=v.stats_unavailable_data_api,
-                age_restricted=v.age_restricted,
-                profile_caption=prof_cap,
-                tooltip=tip,
-                list_widget=self._uploaded_list,
-                parent=self._uploaded_list,
-            )
-            row_w.activated.connect(self._open_uploaded_url)
-            self._uploaded_list.setItemWidget(it, row_w)
-            self._schedule_uploaded_thumb((v.video_id or "").strip(), row_w.thumb_label())
+            except Exception:
+                pass
+            for cur in self._uploaded_all:
+                if (cur.video_id or "").strip() == ve:
+                    self._uploaded_merge_video_in_cache(
+                        replace(
+                            cur,
+                            view_count=None,
+                            like_count=None,
+                            comment_count=None,
+                            stats_unavailable=True,
+                            stats_unavailable_data_api=is_api,
+                            age_restricted=None,
+                        )
+                    )
+                    break
+            touched.add(ve)
+        for row in succ:
+            if not isinstance(row, (list, tuple)) or len(row) < 4:
+                continue
+            vid, vc, lc, cc = row[0], row[1], row[2], row[3]
+            ar = bool(row[4]) if len(row) >= 5 else False
+            ve = str(vid or "").strip()
+            if not ve:
+                continue
+            try:
+                self._upload_store.update_video_stats(
+                    video_id=ve,
+                    view_count=int(vc),
+                    like_count=lc if lc is None else int(lc),
+                    comment_count=cc if cc is None else int(cc),
+                    age_restricted=ar,
+                )
+            except Exception:
+                pass
+            for cur in self._uploaded_all:
+                if (cur.video_id or "").strip() == ve:
+                    self._uploaded_merge_video_in_cache(
+                        replace(
+                            cur,
+                            view_count=int(vc),
+                            like_count=lc if lc is None else int(lc),
+                            comment_count=cc if cc is None else int(cc),
+                            stats_unavailable=False,
+                            stats_unavailable_data_api=False,
+                            age_restricted=ar,
+                        )
+                    )
+                    break
+            touched.add(ve)
+        for ve in touched:
+            self._uploaded_patch_list_row(ve)
+        if touched:
+            self._update_uploaded_side_panel(self._uploaded_all)
 
     def _populate_uploaded_session_filter(
         self, *, preferred_session_id: int | None = None
@@ -2256,20 +2313,17 @@ class MainWindow(QWidget):
             return
         if self._stats_thread is not None and self._stats_thread.isRunning():
             return
-        vids: list[str] = []
-        for i in range(self._uploaded_list.count()):
-            it = self._uploaded_list.item(i)
-            if it is None:
-                continue
-            vid = (it.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
-            if vid:
-                vids.append(vid)
-        vids = sorted(set(vids))
+        flat = getattr(self, "_uploaded_all", None) or []
+        if not flat:
+            flat = self._uploaded_videos_for_current_filter_sorted()
+        vids = sorted(
+            {(v.video_id or "").strip() for v in flat if (v.video_id or "").strip()}
+        )
         if not vids:
             QMessageBox.information(
                 self,
                 "Zaliver",
-                "В списке нет видео для обновления статистики. "
+                "Нет видео для обновления статистики. "
                 "Выберите сессию с роликами или нажмите «Список».",
             )
             return
@@ -2277,109 +2331,49 @@ class MainWindow(QWidget):
         if hasattr(self, "_youtube_api_key"):
             key = (self._youtube_api_key.text() or "").strip()
 
-        dlg = QProgressDialog(self)
-        dlg.setWindowTitle("Обновление статистики")
-        dlg.setLabelText("Подготовка…")
-        n = len(vids)
-        dlg.setRange(0, max(1, n))
-        dlg.setValue(0)
-        dlg.setMinimumDuration(0)
-        dlg.setWindowModality(Qt.WindowModality.WindowModal)
-        try:
-            dlg.setCancelButton(None)
-        except (TypeError, AttributeError):
-            pass
-        self._stats_progress_dlg = dlg
-        dlg.show()
-
+        self._uploaded_stats_status.setText(
+            f"Обновление статистики: 0 / {len(vids)}…"
+        )
         self._btn_uploaded_check.setEnabled(False)
         self._stats_thread = QThread()
         self._stats_worker = UploadedStatsRefreshWorker(vids, key)
         self._stats_worker.moveToThread(self._stats_thread)
         self._stats_thread.started.connect(self._stats_worker.run)
         self._stats_worker.progress.connect(self._on_uploaded_stats_progress)
+        self._stats_worker.batch_done.connect(self._on_uploaded_stats_batch_done)
         self._stats_worker.finished.connect(self._on_uploaded_stats_worker_finished)
         self._stats_thread.finished.connect(self._on_uploaded_stats_thread_finished)
         self._stats_thread.start()
 
     def _on_uploaded_stats_progress(self, step: int, total: int, video_id: str) -> None:
-        dlg = self._stats_progress_dlg
-        if dlg is None:
+        if not hasattr(self, "_uploaded_stats_status"):
             return
         t = max(1, int(total))
         s = max(0, min(int(step), t))
-        dlg.setMaximum(t)
-        dlg.setValue(s)
         vid = (video_id or "").strip()
-        dlg.setLabelText(f"{s} / {t} — {vid}" if vid else f"{s} / {t}")
+        tail = f" — {vid}" if vid else ""
+        self._uploaded_stats_status.setText(
+            f"Обновление статистики: {s} / {t}{tail}"
+        )
+
+    def _on_uploaded_stats_batch_done(self, successes: object, errors: object) -> None:
+        self._uploaded_persist_stats_batch(successes, errors)
 
     def _on_uploaded_stats_worker_finished(self, successes: object, errors: object) -> None:
-        dlg = self._stats_progress_dlg
-        if dlg is not None:
-            mx = dlg.maximum()
-            dlg.setValue(mx)
-            dlg.close()
-        self._stats_progress_dlg = None
-        try:
-            succ = successes if isinstance(successes, list) else []
-            failures_raw = errors if isinstance(errors, list) else []
-            err_lines: list[str] = []
-            for item in failures_raw:
-                if isinstance(item, (list, tuple)) and len(item) >= 3:
-                    vid_e, msg_e, is_api = item[0], item[1], bool(item[2])
-                    err_lines.append(f"{vid_e}: {msg_e}")
-                    ve = str(vid_e or "").strip()
-                    if ve:
-                        try:
-                            self._upload_store.mark_video_stats_unavailable(
-                                video_id=ve,
-                                youtube_data_api_error=is_api,
-                            )
-                        except Exception:
-                            pass
-                else:
-                    line = str(item)
-                    err_lines.append(line)
-                    ev = _uploaded_stats_error_video_id(line)
-                    if ev:
-                        is_api = "YoutubeDataApiError" in line
-                        try:
-                            self._upload_store.mark_video_stats_unavailable(
-                                video_id=ev,
-                                youtube_data_api_error=is_api,
-                            )
-                        except Exception:
-                            pass
-            for row in succ:
-                if not isinstance(row, (list, tuple)) or len(row) < 4:
-                    continue
-                vid, vc, lc, cc = row[0], row[1], row[2], row[3]
-                ar = bool(row[4]) if len(row) >= 5 else False
-                try:
-                    self._upload_store.update_video_stats(
-                        video_id=str(vid),
-                        view_count=int(vc),
-                        like_count=lc if lc is None else int(lc),
-                        comment_count=cc if cc is None else int(cc),
-                        age_restricted=ar,
-                    )
-                except Exception:
-                    pass
-            if succ or err_lines:
-                self._refresh_uploaded_list()
-        finally:
-            t = self._stats_thread
-            if t is not None:
-                t.quit()
+        del successes, errors
+        if hasattr(self, "_uploaded_stats_status"):
+            self._uploaded_stats_status.setText("")
+        t = self._stats_thread
+        if t is not None:
+            t.quit()
 
     def _on_uploaded_stats_thread_finished(self) -> None:
         self._stats_thread = None
         if self._stats_worker is not None:
             self._stats_worker.deleteLater()
             self._stats_worker = None
-        if self._stats_progress_dlg is not None:
-            self._stats_progress_dlg.close()
-            self._stats_progress_dlg = None
+        if hasattr(self, "_uploaded_stats_status"):
+            self._uploaded_stats_status.setText("")
         if hasattr(self, "_btn_uploaded_check"):
             self._btn_uploaded_check.setEnabled(True)
 

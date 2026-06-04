@@ -19,6 +19,7 @@ class UploadedStatsRefreshWorker(QObject):
     """
 
     progress = pyqtSignal(int, int, str)
+    batch_done = pyqtSignal(object, object)
     finished = pyqtSignal(object, object)
 
     def __init__(self, video_ids: list[str], api_key: str) -> None:
@@ -48,24 +49,35 @@ class UploadedStatsRefreshWorker(QObject):
                 )
             except Exception as e:
                 is_data_api = isinstance(e, YoutubeDataApiError)
+                batch_fail_out: list[tuple[str, str, bool]] = []
                 for v in chunk:
-                    failures.append((v, str(e), is_data_api))
+                    row = (v, str(e), is_data_api)
+                    failures.append(row)
+                    batch_fail_out.append(row)
                 done += len(chunk)
+                if batch_fail_out:
+                    self.batch_done.emit([], batch_fail_out)
                 self.progress.emit(done, total, last_in_chunk)
                 continue
+            batch_succ: list[tuple[str, int, int | None, int | None, bool]] = []
             for st in batch_ok:
-                successes.append(
-                    (
-                        st.video_id,
-                        int(st.view_count),
-                        st.like_count,
-                        st.comment_count,
-                        bool(st.age_restricted),
-                    )
+                row = (
+                    st.video_id,
+                    int(st.view_count),
+                    st.like_count,
+                    st.comment_count,
+                    bool(st.age_restricted),
                 )
+                successes.append(row)
+                batch_succ.append(row)
+            batch_fail_out = []
             for vid_f, msg_f in batch_fail:
                 is_data_api = "Invalid video id" not in msg_f
-                failures.append((vid_f, msg_f, is_data_api))
+                row = (vid_f, msg_f, is_data_api)
+                failures.append(row)
+                batch_fail_out.append(row)
             done += len(chunk)
+            if batch_succ or batch_fail_out:
+                self.batch_done.emit(batch_succ, batch_fail_out)
             self.progress.emit(done, total, last_in_chunk)
         self.finished.emit(successes, failures)

@@ -28,7 +28,7 @@ _MAX_CONCURRENT_UPLOADS = 5
 # Последние N завершённых загрузок — не назначаем им новое видео, пока есть другие свободные очереди.
 _RECENT_COMPLETED_MAX = 5
 # Если «свободны» только недавно отработавшие профили — пауза диспетчера перед повторным назначением.
-_RECENT_BATCH_WAIT_S = 3600.0
+_RECENT_BATCH_WAIT_S = 10800.0
 
 
 class MultiProfileUploader:
@@ -41,10 +41,10 @@ class MultiProfileUploader:
     - Round-robin assignment via dispatcher thread; среди профилей с пустой per-profile
       очередью сначала выбираются те, кто не входит в последние `_RECENT_COMPLETED_MAX`
       завершённых загрузок (чтобы не гонять одни и те же 5, если другие свободны).
-    - Если подходят только «недавно отработавшие», диспетчер ждёт `_RECENT_BATCH_WAIT_S` (1 ч),
+    - Если подходят только «недавно отработавшие», диспетчер ждёт `_RECENT_BATCH_WAIT_S` (3 ч),
       затем сбрасывает список недавних и назначает снова (лог [WAIT]).
     - Per-profile cooldown: wait at least `cooldown_s` from *start time* of previous upload
-      in this run, and optionally `profile_upload_pause_remaining_s` (e.g. DB «Пауза 1 ч»).
+      in this run, and optionally `profile_upload_pause_remaining_s` (e.g. DB «Пауза 3 ч»).
     - Errors re-queue the same video to another profile (never the same one immediately),
       max `max_attempts_per_profile` attempts per video per profile.
     - stop() requests graceful shutdown; workers finish current upload and exit.
@@ -56,7 +56,7 @@ class MultiProfileUploader:
         self,
         *,
         profile_ids: list[str],
-        cooldown_s: float = 3600.0,
+        cooldown_s: float = 10800.0,
         max_attempts_per_profile: int = 2,
         max_concurrent_uploads: int = _MAX_CONCURRENT_UPLOADS,
         profile_upload_pause_remaining_s: Callable[[str], float] | None = None,

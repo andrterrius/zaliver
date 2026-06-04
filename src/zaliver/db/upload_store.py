@@ -36,8 +36,8 @@ def _parse_uploaded_at_iso_utc(s: str) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-# Должно совпадать с подписью «Пауза 1 ч» в UI (`antic_profile_row.format_upload_cooldown_line`).
-_UPLOAD_PAUSE_BETWEEN_UPLOADS = timedelta(hours=1)
+# Должно совпадать с подписью «Пауза 3 ч» в UI (`antic_profile_row.format_upload_cooldown_line`).
+_UPLOAD_PAUSE_BETWEEN_UPLOADS = timedelta(hours=3)
 
 
 @dataclass(frozen=True, slots=True)
@@ -596,7 +596,7 @@ class UploadStore:
     def profile_upload_pause_remaining_seconds(self, profile_id: str) -> float:
         """
         Секунды до конца паузы после последнего успешного залива с профиля (по БД),
-        по тем же правилам, что «Пауза 1 ч» в списке профилей. 0 — можно заливать.
+        по тем же правилам, что «Пауза 3 ч» в списке профилей. 0 — можно заливать.
         """
         pid = (profile_id or "").strip()
         if not pid:
@@ -617,13 +617,13 @@ class UploadStore:
 
     def reset_latest_upload_time_for_profile(self, *, profile_id: str) -> int:
         """
-        Сдвигает время последнего залива для profile_id на >1 ч назад (по одной последней записи),
-        чтобы в UI пауза 1 ч считалась пройденной. Возвращает число обновлённых строк (0 если записей нет).
+        Сдвигает время последнего залива для profile_id на >3 ч назад (по одной последней записи),
+        чтобы в UI пауза 3 ч считалась пройденной. Возвращает число обновлённых строк (0 если записей нет).
         """
         pid = (profile_id or "").strip()
         if not pid:
             return 0
-        old = (datetime.now(tz=timezone.utc) - timedelta(hours=2)).isoformat()
+        old = (datetime.now(tz=timezone.utc) - timedelta(hours=4)).isoformat()
         with self._connect() as con:
             con.execute(
                 """

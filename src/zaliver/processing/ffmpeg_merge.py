@@ -110,6 +110,20 @@ def set_ffmpeg_executable(path: Optional[str]) -> None:
         _explicit_ffmpeg = None
     else:
         _explicit_ffmpeg = str(path).strip()
+    sync_ffmpeg_env_for_children()
+
+
+def sync_ffmpeg_env_for_children() -> Optional[str]:
+    """
+    Publish resolved ffmpeg path in ZALIVER_FFMPEG for spawn workers
+    (macOS .app / кнопка «Установить ffmpeg» — иначе дочерний процесс не видит путь).
+    """
+    exe = resolve_ffmpeg_executable()
+    if exe:
+        os.environ["ZALIVER_FFMPEG"] = exe
+    else:
+        os.environ.pop("ZALIVER_FFMPEG", None)
+    return exe
 
 
 def _env_path() -> Optional[str]:
@@ -194,6 +208,11 @@ def _unix_candidates() -> List[Path]:
     ]
 
 
+def _macos_install_candidates() -> List[Path]:
+    """ffmpeg, установленный приложением (evermeet / Application Support)."""
+    return [Path.home() / "Library" / "Application Support" / "Zaliver" / "bin" / "ffmpeg"]
+
+
 def _bundle_roots() -> List[Path]:
     """Dirs where we ship ffmpeg.exe (PyInstaller, Nuitka standalone/onefile)."""
     frozen = bool(getattr(sys, "frozen", False))
@@ -255,11 +274,12 @@ def resolve_ffmpeg_executable() -> Optional[str]:
     scanned = _scan_os_path()
     if scanned:
         return scanned
-    cands = (
-        _windows_install_candidates()
-        if sys.platform == "win32"
-        else _unix_candidates()
-    )
+    if sys.platform == "win32":
+        cands = _windows_install_candidates()
+    elif sys.platform == "darwin":
+        cands = _unix_candidates() + _macos_install_candidates()
+    else:
+        cands = _unix_candidates()
     for c in cands:
         try:
             if c.is_file():

@@ -34,6 +34,7 @@ from zaliver.processing.ffmpeg_merge import (
     mux_video_audio,
     mux_video_background_music,
     pick_best_h264_encoder,
+    sync_ffmpeg_env_for_children,
 )
 from zaliver.processing.gpu_detect import detect_gpus, format_gpu_list
 from zaliver.processing.pipeline import RandomUniquifyBounds, random_uniquify_settings
@@ -395,6 +396,8 @@ class ProcessingController(QObject):
                 toc = TextOverlaySettings.from_dict(raw_text_overlay)
                 if toc.enabled and (toc.text or "").strip():
                     text_overlay_cfg = toc.to_dict()
+
+            sync_ffmpeg_env_for_children()
 
             ctx = multiprocessing.get_context("spawn")
             progress_q: multiprocessing.Queue = ctx.Queue()

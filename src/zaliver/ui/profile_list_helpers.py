@@ -152,7 +152,7 @@ def profile_upload_cooldown_kind(last_uploaded_iso: str | None) -> str:
 
 
 def profile_is_upload_available(last_uploaded_iso: str | None) -> bool:
-    """True if 1h pause elapsed or no prior upload (can upload now)."""
+    """True if upload pause elapsed or no prior upload (can upload now)."""
     return profile_upload_cooldown_kind(last_uploaded_iso) != "wait"
 
 

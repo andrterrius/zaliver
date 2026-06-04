@@ -24,7 +24,7 @@ from zaliver.ui.profile_list_helpers import make_profile_tags_widget, profile_ro
 
 
 class ProfileListRow(QWidget):
-    """Checkbox + title/desc/tags + proxy dot + «Пауза 1 ч» (objectName profileRow)."""
+    """Checkbox + title/desc/tags + proxy dot + «Пауза 3 ч» (objectName profileRow)."""
 
     def __init__(
         self,
@@ -109,7 +109,7 @@ class ProfileListRow(QWidget):
             self.upload_label.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             self.upload_label.setToolTip(
                 "Нажмите, чтобы обновить время паузы с последнего залива "
-                "(как если бы прошёл час) и снова разрешить загрузку с этого профиля."
+                "(как если бы прошли 3 часа) и снова разрешить загрузку с этого профиля."
             )
         else:
             self.upload_label.setCursor(QCursor(Qt.CursorShape.ArrowCursor))

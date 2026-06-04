@@ -2984,7 +2984,7 @@ class MainWindow(QWidget):
         if kind == "local":
             self._profiles_title.setText("Профили (локальный антидетект)")
             self._profiles_hint.setText(
-                "Отметьте квадратиками профили для залива; «Пауза 1 ч» — можно ли снова загружать "
+                "Отметьте квадратиками профили для залива; «Пауза 3 ч» — можно ли снова загружать "
                 "(клик по оранжевой подписи сбрасывает паузу)."
             )
             if hasattr(self, "_dolphin_query"):
@@ -3270,15 +3270,15 @@ class MainWindow(QWidget):
         btn_select.setAutoDefault(False)
         btn_select.setDefault(False)
         btn_select.setToolTip(
-            "Отметить профили по условию (пауза 1 ч, без ошибок в статусах)"
+            "Отметить профили по условию (пауза 3 ч, без ошибок в статусах)"
         )
         select_menu = QMenu(parent)
         act_all = select_menu.addAction("Все видимые")
         act_all.setToolTip("Отметить все профили в списке")
         act_all.triggered.connect(lambda: on_select_filter("all"))
-        act_avail = select_menu.addAction("Доступные (пауза 1 ч прошла)")
+        act_avail = select_menu.addAction("Доступные (пауза 3 ч прошла)")
         act_avail.setToolTip(
-            "Профили, с которых снова можно заливать: прошёл час после последнего залива "
+            "Профили, с которых снова можно заливать: прошли 3 часа после последнего залива "
             "или заливов ещё не было"
         )
         act_avail.triggered.connect(lambda: on_select_filter("available"))
@@ -3803,7 +3803,7 @@ class MainWindow(QWidget):
         parent = dialog_parent or self
         ans = QMessageBox.question(
             parent,
-            "Пауза 1 ч",
+            "Пауза 3 ч",
             "Обновить время паузы с последнего залива? После подтверждения с этим профилем снова можно будет загружать видео.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,

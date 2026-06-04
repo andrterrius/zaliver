@@ -17,6 +17,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from zaliver.db.upload_store import _UPLOAD_PAUSE_BETWEEN_UPLOADS
+
+_UPLOAD_PAUSE_HOURS = int(_UPLOAD_PAUSE_BETWEEN_UPLOADS.total_seconds() // 3600)
+
 
 def _as_str(v: object) -> str:
     if v is None:
@@ -165,20 +169,21 @@ def _parse_uploaded_at_iso(s: str) -> datetime | None:
 def format_upload_cooldown_line(last_uploaded_iso: str | None) -> tuple[str, str]:
     """
     Returns (label, kind) for QLabel property uploadCooldown:
-    ok — прошёл час; wait — ещё ждать; none — заливов не было.
+    ok — пауза прошла; wait — ещё ждать; none — заливов не было.
     """
+    label = f"Пауза {_UPLOAD_PAUSE_HOURS} ч"
     if not (last_uploaded_iso or "").strip():
-        return "Пауза 1 ч: заливов не было", "none"
+        return f"{label}: заливов не было", "none"
     dt = _parse_uploaded_at_iso(last_uploaded_iso)
     if dt is None:
-        return "Пауза 1 ч: дата залива неизвестна", "unknown"
+        return f"{label}: дата залива неизвестна", "unknown"
     now = datetime.now(tz=timezone.utc)
     delta = now - dt
-    if delta >= timedelta(hours=1):
-        return "Пауза 1 ч: можно заливать", "ok"
-    rem = timedelta(hours=1) - delta
+    if delta >= _UPLOAD_PAUSE_BETWEEN_UPLOADS:
+        return f"{label}: можно заливать", "ok"
+    rem = _UPLOAD_PAUSE_BETWEEN_UPLOADS - delta
     mins = max(1, int(rem.total_seconds() // 60))
-    return f"Пауза 1 ч: ждите ещё ~{mins} мин", "wait"
+    return f"{label}: ждите ещё ~{mins} мин", "wait"
 
 
 def _proxy_state(profile: dict[str, object]) -> tuple[str, str, str]:
@@ -432,7 +437,7 @@ class AnticProfileRow(QWidget):
             upload_lbl.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             upload_lbl.setToolTip(
                 "Нажмите, чтобы обновить время паузы с последнего залива "
-                "(как если бы прошёл час) и снова разрешить загрузку с этого профиля."
+                "(как если бы прошли 3 часа) и снова разрешить загрузку с этого профиля."
             )
 
         meta.addWidget(id_lbl, 0, Qt.AlignmentFlag.AlignLeft)
@@ -508,7 +513,7 @@ class AnticProfileRow(QWidget):
         self._select_cb.blockSignals(False)
 
     def set_last_upload_cooldown(self, last_uploaded_iso: str | None) -> None:
-        """Обновляет подпись «Пауза 1 ч» после смены времени последнего залива в БД."""
+        """Обновляет подпись паузы после смены времени последнего залива в БД."""
         if self._upload_lbl is None:
             return
         text, kind = format_upload_cooldown_line(last_uploaded_iso)
@@ -521,7 +526,7 @@ class AnticProfileRow(QWidget):
             self._upload_lbl.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             self._upload_lbl.setToolTip(
                 "Нажмите, чтобы обновить время паузы с последнего залива "
-                "(как если бы прошёл час) и снова разрешить загрузку с этого профиля."
+                "(как если бы прошли 3 часа) и снова разрешить загрузку с этого профиля."
             )
         else:
             self._upload_lbl.setCursor(QCursor(Qt.CursorShape.ArrowCursor))

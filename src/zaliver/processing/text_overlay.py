@@ -200,6 +200,8 @@ def resolve_font_path() -> str:
             ]
         )
     for p in candidates:
+        if p.suffix.lower() == ".ttc":
+            continue
         try:
             if p.is_file():
                 return str(p.resolve())

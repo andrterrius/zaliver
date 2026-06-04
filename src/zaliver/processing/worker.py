@@ -24,6 +24,19 @@ _progress_queue: Optional[multiprocessing.Queue] = None
 _cancel_event: Optional[multiprocessing.synchronize.Event] = None
 
 _FRAME_RE = re.compile(r"frame=\s*(\d+)")
+_MAX_FFMPEG_STDERR_LINES = 48
+
+
+def _ffmpeg_error_message(code: int, stderr_lines: list[str]) -> str:
+    err_lines = [ln for ln in stderr_lines if ln and not _FRAME_RE.search(ln)]
+    if not err_lines:
+        err_lines = [ln for ln in stderr_lines if ln][-8:]
+    detail = "\n".join(err_lines[-12:]).strip()
+    if detail:
+        if len(detail) > 700:
+            detail = detail[-700:]
+        return f"ffmpeg exited with code {code}: {detail}"
+    return f"ffmpeg exited with code {code}"
 
 
 def init_worker(
@@ -165,6 +178,7 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
     committed = False
     proc: Optional[subprocess.Popen] = None
     done_holder = [0]
+    stderr_lines: list[str] = []
 
     def _stderr_reader(p: subprocess.Popen) -> None:
         if p.stderr is None:
@@ -174,6 +188,9 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
                 break
             if not line:
                 break
+            stderr_lines.append(line.rstrip("\n\r"))
+            if len(stderr_lines) > _MAX_FFMPEG_STDERR_LINES:
+                del stderr_lines[: len(stderr_lines) - _MAX_FFMPEG_STDERR_LINES]
             m = _FRAME_RE.search(line)
             if not m:
                 continue
@@ -195,19 +212,25 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
         t = threading.Thread(target=_stderr_reader, args=(proc,), daemon=True)
         t.start()
         code = int(proc.wait(timeout=7200) or 0)
-        try:
-            if proc.stderr is not None:
+        t.join(timeout=5.0)
+        if proc.stderr is not None:
+            try:
+                tail = proc.stderr.read()
+                if tail:
+                    for line in tail.splitlines():
+                        stderr_lines.append(line.rstrip("\n\r"))
+                    if len(stderr_lines) > _MAX_FFMPEG_STDERR_LINES:
+                        stderr_lines[:] = stderr_lines[-_MAX_FFMPEG_STDERR_LINES :]
                 proc.stderr.close()
-        except OSError:
-            pass
-        t.join(timeout=2.0)
+            except OSError:
+                pass
         if _cancelled():
             return {"ok": False, "chunk_index": chunk_index, "error": "cancelled"}
         if code != 0:
             return {
                 "ok": False,
                 "chunk_index": chunk_index,
-                "error": f"ffmpeg exited with code {code}",
+                "error": _ffmpeg_error_message(code, stderr_lines),
             }
         _report(job_id, chunk_index, count, count)
         try:

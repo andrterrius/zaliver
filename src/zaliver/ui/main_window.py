@@ -27,10 +27,11 @@ from PyQt6.QtCore import (
     QUrl,
     pyqtSignal,
 )
-from PyQt6.QtGui import QDesktopServices, QMouseEvent, QPixmap, QShowEvent
+from PyQt6.QtGui import QDesktopServices, QMouseEvent, QPixmap, QShowEvent, QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
+    QColorDialog,
     QDoubleSpinBox,
     QDialog,
     QDialogButtonBox,
@@ -68,6 +69,12 @@ from zaliver.antydetect.local_antidetect_api import (
 )
 from zaliver.processing.ffmpeg_merge import check_ffmpeg_tools
 from zaliver.processing.pipeline import RandomUniquifyBounds, UniquifySettings
+from zaliver.processing.text_overlay import (
+    NEON_WAVE_AMP_FRAC,
+    NEON_WAVE_CHAR_PHASE,
+    NEON_WAVE_FRAME_SPEED,
+    TextOverlaySettings,
+)
 from zaliver.processing.thread_worker import ProcessingController
 from zaliver.youtube_parsing.thumb_cache import (
     read_youtube_thumb_cache,
@@ -90,6 +97,7 @@ from zaliver.ui.widgets import (
     SmoothSlider,
     ToggleSwitch,
 )
+from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
 
 from zaliver.antydetect.local_antidetect_api import (
     LocalAntidetectHttpAPI,
@@ -1025,6 +1033,123 @@ class MainWindow(QWidget):
         fx = QGroupBox("Уникализация (лёгкие эффекты)")
         fx_layout = QVBoxLayout(fx)
         fx_layout.setSpacing(8)
+
+        self._text_overlay_section = CollapsibleSection("Текст на видео (неон)")
+        text_inner = QWidget()
+        text_l = QVBoxLayout(text_inner)
+        text_l.setSpacing(8)
+        self.text_overlay_enabled = ToggleSwitch("Накладывать свой текст на каждое видео")
+        self.text_overlay_enabled.setChecked(False)
+        self.text_overlay_enabled.toggled.connect(self._update_text_overlay_controls)
+        self.text_overlay_enabled.toggled.connect(self._save_folder_settings)
+        text_l.addWidget(self.text_overlay_enabled)
+
+        self._text_overlay_panel = QWidget()
+        text_controls_l = QVBoxLayout(self._text_overlay_panel)
+        text_controls_l.setContentsMargins(0, 0, 0, 0)
+        text_controls_l.setSpacing(8)
+
+        self.text_overlay_edit = QPlainTextEdit()
+        self.text_overlay_edit.setPlaceholderText("Текст для наложения…")
+        self.text_overlay_edit.setMaximumHeight(72)
+        self.text_overlay_edit.textChanged.connect(self._on_text_overlay_content_changed)
+        text_controls_l.addWidget(self.text_overlay_edit)
+
+        text_opts = QGridLayout()
+        text_opts.setHorizontalSpacing(8)
+        self.text_overlay_font_size = QSpinBox()
+        self.text_overlay_font_size.setRange(12, 240)
+        self.text_overlay_font_size.setValue(48)
+        self.text_overlay_font_size.valueChanged.connect(self._on_text_overlay_font_size_changed)
+        self.text_overlay_orientation = QComboBox()
+        self.text_overlay_orientation.addItem("Вертикальное 9:16", "vertical")
+        self.text_overlay_orientation.addItem("Горизонтальное 16:9", "horizontal")
+        self.text_overlay_orientation.currentIndexChanged.connect(
+            self._on_text_overlay_orientation_changed
+        )
+        self.text_overlay_glow_btn = QPushButton("Цвет неона…")
+        self.text_overlay_glow_btn.setObjectName("secondary")
+        self._text_overlay_glow_color = "#00FFFF"
+        self._sync_text_overlay_color_btn(self.text_overlay_glow_btn, self._text_overlay_glow_color)
+        self.text_overlay_glow_btn.clicked.connect(self._pick_text_overlay_glow_color)
+        self.text_overlay_text_btn = QPushButton("Цвет текста…")
+        self.text_overlay_text_btn.setObjectName("secondary")
+        self._text_overlay_text_color = "#FFFFFF"
+        self._sync_text_overlay_color_btn(self.text_overlay_text_btn, self._text_overlay_text_color)
+        self.text_overlay_text_btn.clicked.connect(self._pick_text_overlay_text_color)
+        text_opts.addWidget(QLabel("Размер шрифта (на примере):"), 0, 0)
+        text_opts.addWidget(self.text_overlay_font_size, 0, 1)
+        text_opts.addWidget(QLabel("Пример кадра:"), 1, 0)
+        text_opts.addWidget(self.text_overlay_orientation, 1, 1)
+        text_opts.addWidget(QLabel("Свечение:"), 2, 0)
+        text_opts.addWidget(self.text_overlay_glow_btn, 2, 1)
+        text_opts.addWidget(QLabel("Текст:"), 3, 0)
+        text_opts.addWidget(self.text_overlay_text_btn, 3, 1)
+
+        self.text_overlay_wave_amp = SmoothSlider(Qt.Orientation.Horizontal)
+        self.text_overlay_wave_amp.setMinimum(0)
+        self.text_overlay_wave_amp.setMaximum(35)
+        self.text_overlay_wave_amp.setValue(int(round(NEON_WAVE_AMP_FRAC * 100)))
+        self.text_overlay_wave_amp.valueChanged.connect(self._on_text_overlay_wave_changed)
+        self.text_overlay_wave_amp_label = QLabel()
+        self.text_overlay_wave_speed = SmoothSlider(Qt.Orientation.Horizontal)
+        self.text_overlay_wave_speed.setMinimum(0)
+        self.text_overlay_wave_speed.setMaximum(25)
+        self.text_overlay_wave_speed.setValue(int(round(NEON_WAVE_FRAME_SPEED * 100)))
+        self.text_overlay_wave_speed.valueChanged.connect(self._on_text_overlay_wave_changed)
+        self.text_overlay_wave_speed_label = QLabel()
+        self._sync_text_overlay_wave_labels()
+        text_opts.addWidget(QLabel("Волна — амплитуда:"), 4, 0)
+        wave_amp_row = QHBoxLayout()
+        wave_amp_row.setContentsMargins(0, 0, 0, 0)
+        wave_amp_row.addWidget(self.text_overlay_wave_amp, 1)
+        wave_amp_row.addWidget(self.text_overlay_wave_amp_label)
+        wave_amp_w = QWidget()
+        wave_amp_w.setLayout(wave_amp_row)
+        text_opts.addWidget(wave_amp_w, 4, 1)
+        text_opts.addWidget(QLabel("Скорость:"), 5, 0)
+        wave_spd_row = QHBoxLayout()
+        wave_spd_row.setContentsMargins(0, 0, 0, 0)
+        wave_spd_row.addWidget(self.text_overlay_wave_speed, 1)
+        wave_spd_row.addWidget(self.text_overlay_wave_speed_label)
+        wave_spd_w = QWidget()
+        wave_spd_w.setLayout(wave_spd_row)
+        text_opts.addWidget(wave_spd_w, 5, 1)
+
+        text_opts_w = QWidget()
+        text_opts_w.setLayout(text_opts)
+        text_controls_l.addWidget(text_opts_w)
+
+        text_pos_row = QHBoxLayout()
+        text_pos_row.setContentsMargins(0, 0, 0, 0)
+        self.text_overlay_center_btn = QPushButton("По центру (горизонт.)")
+        self.text_overlay_center_btn.setObjectName("secondary")
+        self.text_overlay_center_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.text_overlay_center_btn.clicked.connect(self._center_text_overlay_horizontally)
+        text_pos_row.addWidget(self.text_overlay_center_btn)
+        text_pos_row.addStretch()
+        text_pos_w = QWidget()
+        text_pos_w.setLayout(text_pos_row)
+        text_controls_l.addWidget(text_pos_w)
+
+        self.text_overlay_preview = TextOverlayPreviewWidget()
+        self.text_overlay_preview.setMinimumHeight(240)
+        self.text_overlay_preview.setMaximumHeight(340)
+        self.text_overlay_preview.positionChanged.connect(self._on_text_overlay_position_changed)
+        text_controls_l.addWidget(self.text_overlay_preview)
+
+        text_hint = QLabel(
+            "Перетащите текст"
+        )
+        text_hint.setObjectName("hint")
+        text_hint.setWordWrap(True)
+        text_controls_l.addWidget(text_hint)
+
+        text_l.addWidget(self._text_overlay_panel)
+        self._text_overlay_section.content_layout().addWidget(text_inner)
+        self._text_overlay_section.set_expanded(True)
+        fx_layout.addWidget(self._text_overlay_section)
+        self._update_text_overlay_controls()
 
         self.random_uniquify = ToggleSwitch(
             "Случайные параметры для каждого файла (каждый запуск — новый набор)"
@@ -2719,6 +2844,68 @@ class MainWindow(QWidget):
                 self.background_music_volume_label.setText(f"{vv} %")
         self._sync_music_list_widget()
         self._update_music_mix_controls()
+        if hasattr(self, "text_overlay_enabled"):
+            self.text_overlay_enabled.setChecked(
+                bool(self._settings.value("text_overlay_enabled", False, type=bool))
+            )
+            self.text_overlay_edit.setPlainText(
+                self._settings.value("text_overlay_text", "", type=str) or ""
+            )
+            try:
+                fs = int(self._settings.value("text_overlay_font_size", 48, type=int))
+            except Exception:
+                fs = 48
+            self.text_overlay_font_size.setValue(max(12, min(240, fs)))
+            orient = self._settings.value("text_overlay_orientation", "vertical", type=str) or "vertical"
+            idx = self.text_overlay_orientation.findData(
+                "horizontal" if orient == "horizontal" else "vertical"
+            )
+            if idx >= 0:
+                self.text_overlay_orientation.setCurrentIndex(idx)
+            self._text_overlay_glow_color = (
+                self._settings.value("text_overlay_glow_color", "#00FFFF", type=str) or "#00FFFF"
+            )
+            self._text_overlay_text_color = (
+                self._settings.value("text_overlay_text_color", "#FFFFFF", type=str) or "#FFFFFF"
+            )
+            try:
+                ax = float(self._settings.value("text_overlay_anchor_x", 0.5, type=float))
+                ay = float(self._settings.value("text_overlay_anchor_y", 0.78, type=float))
+            except Exception:
+                ax, ay = 0.5, 0.78
+            try:
+                waf = float(
+                    self._settings.value(
+                        "text_overlay_wave_amp_frac", NEON_WAVE_AMP_FRAC, type=float
+                    )
+                )
+            except Exception:
+                waf = NEON_WAVE_AMP_FRAC
+            try:
+                wfs = float(
+                    self._settings.value(
+                        "text_overlay_wave_frame_speed", NEON_WAVE_FRAME_SPEED, type=float
+                    )
+                )
+            except Exception:
+                wfs = NEON_WAVE_FRAME_SPEED
+            waf = max(0.0, min(0.35, waf))
+            wfs = max(0.0, min(0.25, wfs))
+            self.text_overlay_wave_amp.blockSignals(True)
+            self.text_overlay_wave_amp.setValue(int(round(waf * 100)))
+            self.text_overlay_wave_amp.blockSignals(False)
+            self.text_overlay_wave_speed.blockSignals(True)
+            self.text_overlay_wave_speed.setValue(int(round(wfs * 100)))
+            self.text_overlay_wave_speed.blockSignals(False)
+            self._sync_text_overlay_wave_labels()
+            self._sync_text_overlay_color_btn(
+                self.text_overlay_glow_btn, self._text_overlay_glow_color
+            )
+            self._sync_text_overlay_color_btn(
+                self.text_overlay_text_btn, self._text_overlay_text_color
+            )
+            self._sync_text_overlay_preview(ax, ay)
+            self._update_text_overlay_controls()
 
     def _save_folder_settings(self) -> None:
         self._settings.setValue("output_folder", self.output_dir_edit.text().strip())
@@ -2737,6 +2924,29 @@ class MainWindow(QWidget):
             self._settings.setValue(
                 "background_music_volume_pct", int(self.background_music_volume.value())
             )
+        if hasattr(self, "text_overlay_enabled"):
+            self._settings.setValue(
+                "text_overlay_enabled", bool(self.text_overlay_enabled.isChecked())
+            )
+            self._settings.setValue(
+                "text_overlay_text", self.text_overlay_edit.toPlainText()
+            )
+            self._settings.setValue(
+                "text_overlay_font_size", int(self.text_overlay_font_size.value())
+            )
+            orient = self.text_overlay_orientation.currentData()
+            self._settings.setValue(
+                "text_overlay_orientation",
+                orient if isinstance(orient, str) else "vertical",
+            )
+            self._settings.setValue("text_overlay_glow_color", self._text_overlay_glow_color)
+            self._settings.setValue("text_overlay_text_color", self._text_overlay_text_color)
+            ax, ay = self.text_overlay_preview.anchor()
+            self._settings.setValue("text_overlay_anchor_x", float(ax))
+            self._settings.setValue("text_overlay_anchor_y", float(ay))
+            waf, wfs = self._text_overlay_wave_values()
+            self._settings.setValue("text_overlay_wave_amp_frac", float(waf))
+            self._settings.setValue("text_overlay_wave_frame_speed", float(wfs))
 
     def _on_default_browser_combo_changed(self, _index: int) -> None:
         self._update_profiles_section_header()
@@ -3907,6 +4117,130 @@ class MainWindow(QWidget):
         self._sync_music_list_widget()
         self._save_folder_settings()
 
+    def _text_overlay_wave_values(self) -> tuple[float, float]:
+        amp = max(0.0, min(0.35, int(self.text_overlay_wave_amp.value()) / 100.0))
+        speed = max(0.0, min(0.25, int(self.text_overlay_wave_speed.value()) / 100.0))
+        return amp, speed
+
+    def _sync_text_overlay_wave_labels(self) -> None:
+        if not hasattr(self, "text_overlay_wave_amp_label"):
+            return
+        amp, speed = self._text_overlay_wave_values()
+        self.text_overlay_wave_amp_label.setText(f"{int(round(amp * 100))} %")
+        self.text_overlay_wave_speed_label.setText(f"{speed:.2f}")
+
+    def _text_overlay_settings(self) -> TextOverlaySettings:
+        orient = self.text_overlay_orientation.currentData()
+        ax, ay = self.text_overlay_preview.anchor()
+        waf, wfs = self._text_overlay_wave_values()
+        return TextOverlaySettings(
+            enabled=bool(self.text_overlay_enabled.isChecked()),
+            text=self.text_overlay_edit.toPlainText(),
+            font_size=int(self.text_overlay_font_size.value()),
+            glow_color=self._text_overlay_glow_color,
+            text_color=self._text_overlay_text_color,
+            preview_orientation=orient if isinstance(orient, str) else "vertical",
+            anchor_x=float(ax),
+            anchor_y=float(ay),
+            wave_amp_frac=float(waf),
+            wave_char_phase=float(NEON_WAVE_CHAR_PHASE),
+            wave_frame_speed=float(wfs),
+        )
+
+    def _sync_text_overlay_color_btn(self, btn: QPushButton, hex_color: str) -> None:
+        c = QColor(hex_color)
+        fg = "#0f1117" if c.lightness() > 140 else "#f8fafc"
+        btn.setStyleSheet(
+            f"background-color: {c.name()}; color: {fg}; font-weight: 700;"
+        )
+
+    def _sync_text_overlay_preview(
+        self, anchor_x: float | None = None, anchor_y: float | None = None
+    ) -> None:
+        if not hasattr(self, "text_overlay_preview"):
+            return
+        if not bool(self.text_overlay_enabled.isChecked()):
+            return
+        orient = self.text_overlay_orientation.currentData()
+        preview = self.text_overlay_preview
+        preview.blockSignals(True)
+        preview.set_orientation(orient if isinstance(orient, str) else "vertical")
+        preview.set_font_size(int(self.text_overlay_font_size.value()))
+        preview.set_glow_color(self._text_overlay_glow_color)
+        preview.set_text_color(self._text_overlay_text_color)
+        waf, wfs = self._text_overlay_wave_values()
+        preview.set_wave_settings(waf, wfs)
+        preview.set_text(self.text_overlay_edit.toPlainText())
+        if anchor_x is not None and anchor_y is not None:
+            preview.set_anchor(anchor_x, anchor_y)
+        preview.blockSignals(False)
+
+    def _schedule_text_overlay_preview_sync(self) -> None:
+        if not hasattr(self, "_text_overlay_preview_timer"):
+            self._text_overlay_preview_timer = QTimer(self)
+            self._text_overlay_preview_timer.setSingleShot(True)
+            self._text_overlay_preview_timer.timeout.connect(self._sync_text_overlay_preview)
+        self._text_overlay_preview_timer.start(40)
+
+    def _update_text_overlay_controls(self, _checked: bool = False) -> None:
+        if not hasattr(self, "text_overlay_enabled"):
+            return
+        on = bool(self.text_overlay_enabled.isChecked())
+        self._text_overlay_panel.setEnabled(on)
+        if on:
+            self._sync_text_overlay_preview()
+
+    def _on_text_overlay_content_changed(self) -> None:
+        self._schedule_text_overlay_preview_sync()
+        self._save_folder_settings()
+
+    def _on_text_overlay_font_size_changed(self, _value: int) -> None:
+        self._schedule_text_overlay_preview_sync()
+        self._save_folder_settings()
+
+    def _on_text_overlay_orientation_changed(self, _index: int) -> None:
+        self._sync_text_overlay_preview()
+        self._save_folder_settings()
+
+    def _on_text_overlay_wave_changed(self, _value: int) -> None:
+        self._sync_text_overlay_wave_labels()
+        self._sync_text_overlay_preview()
+        self._save_folder_settings()
+
+    def _center_text_overlay_horizontally(self) -> None:
+        if not hasattr(self, "text_overlay_preview"):
+            return
+        _ax, ay = self.text_overlay_preview.anchor()
+        self.text_overlay_preview.set_anchor(0.5, ay)
+        self._save_folder_settings()
+
+    def _on_text_overlay_position_changed(self, ax: float, ay: float) -> None:
+        self._save_folder_settings()
+
+    def _pick_text_overlay_glow_color(self) -> None:
+        initial = QColor(self._text_overlay_glow_color)
+        picked = QColorDialog.getColor(initial, self, "Цвет неонового свечения")
+        if not picked.isValid():
+            return
+        self._text_overlay_glow_color = picked.name().upper()
+        self._sync_text_overlay_color_btn(
+            self.text_overlay_glow_btn, self._text_overlay_glow_color
+        )
+        self._sync_text_overlay_preview()
+        self._save_folder_settings()
+
+    def _pick_text_overlay_text_color(self) -> None:
+        initial = QColor(self._text_overlay_text_color)
+        picked = QColorDialog.getColor(initial, self, "Цвет текста")
+        if not picked.isValid():
+            return
+        self._text_overlay_text_color = picked.name().upper()
+        self._sync_text_overlay_color_btn(
+            self.text_overlay_text_btn, self._text_overlay_text_color
+        )
+        self._sync_text_overlay_preview()
+        self._save_folder_settings()
+
     def _on_random_uniquify_toggled(self, random_on: bool) -> None:
         # Keep section visible, but toggle relevant controls.
         if hasattr(self, "_manual_panel"):
@@ -3969,6 +4303,7 @@ class MainWindow(QWidget):
                 playback_speed_max=float(self.audio_speed_max.value()),
                 audio_chorus_prob=float(self.audio_chorus_prob.value()),
             ).to_dict(),
+            "text_overlay": self._text_overlay_settings().to_dict(),
         }
 
     def _start(self) -> None:
@@ -3990,6 +4325,15 @@ class MainWindow(QWidget):
                 self,
                 "Zaliver",
                 "Выберите хотя бы один видеофайл (кнопка «Выбрать файлы…»).",
+            )
+            return
+        toc = opts.get("text_overlay") or {}
+        if bool(toc.get("enabled")) and not str(toc.get("text") or "").strip():
+            QMessageBox.warning(
+                self,
+                "Zaliver",
+                "Включён текст на видео, но поле текста пустое.\n"
+                "Введите текст или выключите опцию.",
             )
             return
         if bool(opts.get("background_music_enabled")):

@@ -13,6 +13,7 @@ a = Analysis(
         ("src/zaliver/ui/theme.qss", "zaliver/ui"),
         ("src/zaliver/ui/icons/app.png", "zaliver/ui/icons"),
         ("src/zaliver/ui/icons/app.svg", "zaliver/ui/icons"),
+        ("src/zaliver/assets/fonts", "zaliver/assets/fonts"),
     ],
     hiddenimports=[],
     hookspath=[],

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 from zaliver.processing.pipeline import UniquifySettings
+from zaliver.processing.text_overlay import ScaledTextOverlay, build_text_overlay_filters
 
 
 def _even_dim(x: int) -> int:
@@ -70,6 +71,7 @@ def build_uniquify_filtergraph(
     h: int,
     w_out: int,
     h_out: int,
+    text_overlay: Optional[ScaledTextOverlay] = None,
 ) -> str:
     """
     Full -filter_complex graph: one video input [0:v] -> uniquified [outv].
@@ -90,4 +92,7 @@ def build_uniquify_filtergraph(
     tail.append(f"format=yuv420p,scale={w_out}:{h_out}:flags=bilinear")
     tail_s = ",".join(tail)
 
-    return f"[0:v]{head},{tail_s}[outv]"
+    base = f"[0:v]{head},{tail_s}[v0]"
+    if text_overlay and text_overlay.lines:
+        return f"{base};{build_text_overlay_filters(text_overlay, 'v0', start_frame=s)}"
+    return f"{base};[v0]null[outv]"

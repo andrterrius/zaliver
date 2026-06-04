@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -17,6 +18,7 @@ from zaliver.processing.ffmpeg_merge import (
 )
 from zaliver.processing.ffmpeg_vf import build_uniquify_filtergraph
 from zaliver.processing.pipeline import UniquifySettings, pick_chunk_crop_offsets
+from zaliver.processing.text_overlay import ScaledTextOverlay
 
 _progress_queue: Optional[multiprocessing.Queue] = None
 _cancel_event: Optional[multiprocessing.synchronize.Event] = None
@@ -46,6 +48,18 @@ def _popen_flags() -> int:
     if sys.platform == "win32":
         return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
     return 0
+
+
+def _filter_complex_argv(graph: str) -> tuple[list[str], Path | None]:
+    """Windows command line is ~32K; long neon drawtext graphs need a script file."""
+    use_script = sys.platform == "win32" or len(graph) > 7000
+    if not use_script:
+        return ["-filter_complex", graph], None
+    fd, name = tempfile.mkstemp(suffix=".txt", prefix="zv_fc_")
+    os.close(fd)
+    script = Path(name)
+    script.write_text(graph, encoding="utf-8")
+    return ["-filter_complex_script", str(script)], script
 
 
 def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
@@ -85,6 +99,10 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "chunk_index": chunk_index, "error": "ffmpeg not found"}
 
     crop = pick_chunk_crop_offsets(job_id, chunk_index, settings)
+    raw_overlay = task.get("text_overlay")
+    text_overlay: Optional[ScaledTextOverlay] = None
+    if isinstance(raw_overlay, dict) and raw_overlay.get("lines"):
+        text_overlay = ScaledTextOverlay.from_dict(raw_overlay)
     graph = build_uniquify_filtergraph(
         start_frame=start,
         frame_count=count,
@@ -94,6 +112,7 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
         h=h,
         w_out=w_out,
         h_out=h_out,
+        text_overlay=text_overlay,
     )
     tb = task.get("target_video_bps")
     tb_i: Optional[int]
@@ -110,6 +129,7 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
         prefer_gpu=use_gpu, target_video_bps=tb_i
     )
 
+    filter_argv, filter_script = _filter_complex_argv(graph)
     cmd = [
         exe,
         "-hide_banner",
@@ -119,8 +139,7 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
         "-y",
         "-i",
         path,
-        "-filter_complex",
-        graph,
+        *filter_argv,
         "-map",
         "[outv]",
         "-an",
@@ -200,6 +219,11 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         return {"ok": False, "chunk_index": chunk_index, "error": str(e)}
     finally:
+        if filter_script is not None:
+            try:
+                filter_script.unlink(missing_ok=True)
+            except OSError:
+                pass
         if proc is not None and proc.poll() is None:
             try:
                 proc.kill()

@@ -37,6 +37,7 @@ from zaliver.processing.ffmpeg_merge import (
 )
 from zaliver.processing.gpu_detect import detect_gpus, format_gpu_list
 from zaliver.processing.pipeline import RandomUniquifyBounds, random_uniquify_settings
+from zaliver.processing.text_overlay import TextOverlaySettings, compute_scaled_overlay
 from zaliver.processing.worker import init_worker, process_chunk_disk
 
 
@@ -151,6 +152,7 @@ class OutputJob:
     background_music_paths: List[str] = field(default_factory=list)
     background_music_mix: bool = False
     background_music_volume_pct: float = 35.0
+    text_overlay: Optional[Dict[str, Any]] = None
     skip_youtube_upload: bool = False
     finalize_error: Optional[str] = None
     done_frames: int = 0
@@ -387,6 +389,13 @@ class ProcessingController(QObject):
                 bg_vol_opt = 35.0
             bg_vol_opt = max(0.0, min(100.0, bg_vol_opt))
 
+            text_overlay_cfg: Optional[Dict[str, Any]] = None
+            raw_text_overlay = options.get("text_overlay")
+            if isinstance(raw_text_overlay, dict):
+                toc = TextOverlaySettings.from_dict(raw_text_overlay)
+                if toc.enabled and (toc.text or "").strip():
+                    text_overlay_cfg = toc.to_dict()
+
             ctx = multiprocessing.get_context("spawn")
             progress_q: multiprocessing.Queue = ctx.Queue()
             cancel_ev = ctx.Event()
@@ -452,6 +461,7 @@ class ProcessingController(QObject):
                         ),
                         background_music_mix=bg_mix,
                         background_music_volume_pct=bg_vol_opt,
+                        text_overlay=text_overlay_cfg,
                     )
                     if randomize:
                         log(
@@ -633,8 +643,16 @@ class ProcessingController(QObject):
                                 f"{j.tag(n_jobs)}: кадры {d}/{t}"
                             )
 
+                def _scaled_text_overlay_for_job(j: OutputJob) -> Optional[Dict[str, Any]]:
+                    if not j.text_overlay:
+                        return None
+                    toc = TextOverlaySettings.from_dict(j.text_overlay)
+                    scaled = compute_scaled_overlay(toc, j.info.width, j.info.height)
+                    return scaled.to_dict() if scaled else None
+
                 def _submit_task(meta: _PoolTaskMeta) -> None:
                     j = jobs_by_id[meta.job_id]
+                    scaled_overlay = _scaled_text_overlay_for_job(j)
                     if meta.chunk_idx < 0:
                         # Всегда считаем "видео без аудио" в temp-файл.
                         # Аудио добавим позже (mux из исходника) в одном потоке координатора.
@@ -654,6 +672,7 @@ class ProcessingController(QObject):
                             "fps": j.info.fps,
                             "use_gpu": use_gpu,
                             "target_video_bps": j.target_video_bps,
+                            "text_overlay": scaled_overlay,
                         }
                     else:
                         start, cnt, seg = j.chunks[meta.chunk_idx]
@@ -670,6 +689,7 @@ class ProcessingController(QObject):
                             "fps": j.info.fps,
                             "use_gpu": use_gpu,
                             "target_video_bps": j.target_video_bps,
+                            "text_overlay": scaled_overlay,
                         }
                     fut = pool.submit(process_chunk_disk, task)
                     futures[fut] = meta

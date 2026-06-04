@@ -707,15 +707,24 @@ class _UploadedVideoRow(QWidget):
 
 
 def _default_workers() -> int:
-    # Для одиночного длинного ролика приложение умеет нарезать на части (если есть ffmpeg)
-    # и тем самым эффективно загрузить все CPU. Поэтому по умолчанию используем все
-    # логические ядра, а не (CPU-1).
-    return max(1, os.cpu_count() or 2)
+    from zaliver.processing.fd_limit import cap_workers_for_fd_limit
+
+    n = max(1, os.cpu_count() or 2)
+    return cap_workers_for_fd_limit(n)
 
 
 def _max_worker_slider() -> int:
-    # До всех логических CPU: при разбиении ролика на части полезнее занять последнее ядро.
-    return max(1, os.cpu_count() or 2)
+    from zaliver.processing.fd_limit import cap_workers_for_fd_limit
+
+    return cap_workers_for_fd_limit(max(1, os.cpu_count() or 2))
+
+
+def _apply_thread_slider_fd_cap(slider: "SmoothSlider") -> None:
+    """После поднятия ulimit пересчитать максимум/значение слайдера потоков."""
+    cap_max = _max_worker_slider()
+    slider.setMaximum(cap_max)
+    if slider.value() > cap_max:
+        slider.setValue(_default_workers())
 
 
 class MainWindow(QWidget):
@@ -764,6 +773,7 @@ class MainWindow(QWidget):
         self._profiles_refresh_running = False
         self._last_availability_failed_ids: list[str] = []
         self._build_ui()
+        self._bootstrap_fd_limits()
         self._ui_log_line.connect(self._append_log)
         self._profiles_loaded.connect(self._on_profiles_loaded)
         self._profiles_load_failed.connect(self._on_profiles_load_failed)
@@ -4785,6 +4795,14 @@ class MainWindow(QWidget):
             self._upload_store.finish_session(session_id=int(s.id), status=status)
         except Exception:
             pass
+
+    def _bootstrap_fd_limits(self) -> None:
+        from zaliver.processing.fd_limit import bootstrap_fd_limits
+
+        msg = bootstrap_fd_limits()
+        _apply_thread_slider_fd_cap(self.thread_slider)
+        if msg:
+            self._append_log(msg)
 
     def _append_log(self, line: str) -> None:
         self.log.appendPlainText(line)

@@ -48,8 +48,10 @@ def main() -> None:
     from PyQt6.QtGui import QIcon
     from PyQt6.QtWidgets import QApplication
 
+    from zaliver.processing.fd_limit import bootstrap_fd_limits
     from zaliver.ui.main_window import MainWindow
 
+    bootstrap_fd_limits()
     app = QApplication(sys.argv)
     app.setApplicationName("Zaliver")
     icon_path = _app_icon_path()

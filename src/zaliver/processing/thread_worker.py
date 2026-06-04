@@ -22,6 +22,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from zaliver.processing.batch_paths import list_video_files
 from zaliver.processing.chunking import VideoInfo, build_n_even_chunks, probe_video
 from zaliver.processing.ffmpeg_probe import estimate_target_video_bps
+from zaliver.processing.fd_limit import cap_workers_for_fd_limit, raise_fd_limit_soft
 from zaliver.processing.ffmpeg_merge import (
     BackgroundMusicUnavailableError,
     bgm_alternate_paths,
@@ -364,7 +365,15 @@ class ProcessingController(QObject):
                 return
 
             total_all = max(1, sum(x[2].frame_count for x in plan))
-            num_workers = max(1, int(options.get("num_workers", 1)))
+            raise_fd_limit_soft()
+            raw_workers = max(1, int(options.get("num_workers", 1)))
+            num_workers = cap_workers_for_fd_limit(raw_workers)
+            if num_workers < raw_workers:
+                log(
+                    f"Потоков: {num_workers} (запрошено {raw_workers}) — "
+                    f"лимит открытых файлов ОС; на macOS уменьшите слайдер, "
+                    f"если снова Errno 24."
+                )
             use_gpu = bool(options.get("use_gpu", False))
             randomize = bool(options.get("randomize_uniquify", True))
             ui_settings = dict(options.get("settings", {}))

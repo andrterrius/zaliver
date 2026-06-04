@@ -86,12 +86,7 @@ def _popen_flags() -> int:
 
 
 def is_resource_exhausted_error(exc: BaseException) -> bool:
-    """EMFILE / «слишком много открытых файлов» и похожие сбои ресурсов."""
-    if isinstance(exc, OSError):
-        errno = getattr(exc, "errno", None)
-        if errno in (24, 23):  # EMFILE, ENFILE
-            return True
-    s = str(exc).lower()
+    """EMFILE / «слишком много открытых файлов» (в т.ч. внутри requests/urllib3)."""
     markers = (
         "too many open files",
         "too many files",
@@ -99,8 +94,26 @@ def is_resource_exhausted_error(exc: BaseException) -> bool:
         "errno 23",
         "resource temporarily unavailable",
         "[errno 24]",
+        "failed to establish a new connection",
     )
-    return any(m in s for m in markers)
+    seen: set[int] = set()
+    cur: Optional[BaseException] = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, OSError):
+            errno = getattr(cur, "errno", None)
+            if errno in (24, 23):  # EMFILE, ENFILE
+                return True
+        s = str(cur).lower()
+        if any(m in s for m in markers):
+            if "errno 24" in s or "errno 23" in s or "too many open files" in s:
+                return True
+            if "failed to establish a new connection" in s and (
+                "[errno 24]" in s or "errno 24" in s
+            ):
+                return True
+        cur = cur.__cause__ or cur.__context__
+    return False
 
 
 def set_ffmpeg_executable(path: Optional[str]) -> None:
@@ -575,7 +588,7 @@ _MIN_FFMPEG_CONCAT_BATCH = 2
 
 def _max_ffmpeg_concat_batch() -> int:
     if sys.platform == "darwin":
-        return 4
+        return 3
     if sys.platform == "win32":
         return 8
     return 16

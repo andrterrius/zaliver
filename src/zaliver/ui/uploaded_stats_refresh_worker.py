@@ -38,6 +38,20 @@ class UploadedStatsRefreshWorker(QObject):
             return
         self.progress.emit(0, total, ids[0])
         http = requests.Session()
+        try:
+            self._run_batches(http, ids, total, key, successes, failures)
+        finally:
+            http.close()
+
+    def _run_batches(
+        self,
+        http: requests.Session,
+        ids: list[str],
+        total: int,
+        key: str | None,
+        successes: list[tuple[str, int, int | None, int | None, bool]],
+        failures: list[tuple[str, str, bool]],
+    ) -> None:
         done = 0
         step = YOUTUBE_DATA_API_VIDEOS_LIST_MAX_IDS
         for batch_start in range(0, total, step):

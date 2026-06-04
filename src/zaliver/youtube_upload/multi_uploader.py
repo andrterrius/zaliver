@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import signal
+import sys
 import threading
 import time
 from collections import deque
@@ -24,7 +25,7 @@ class VideoTask:
 
 
 # Глобальный лимит одновременных upload_one (остальные ждут семафор).
-_MAX_CONCURRENT_UPLOADS = 5
+_MAX_CONCURRENT_UPLOADS = 3 if sys.platform == "darwin" else 5
 # Последние N завершённых загрузок — не назначаем им новое видео, пока есть другие свободные очереди.
 _RECENT_COMPLETED_MAX = 5
 # Если «свободны» только недавно отработавшие профили — пауза диспетчера перед повторным назначением.

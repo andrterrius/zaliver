@@ -12,6 +12,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from zaliver.processing.fd_limit import raise_fd_limit_soft
 from zaliver.processing.ffmpeg_merge import (
     pick_best_h264_encoder,
     resolve_ffmpeg_executable,
@@ -44,6 +45,7 @@ def init_worker(
     cancel_event: multiprocessing.synchronize.Event,
 ) -> None:
     global _progress_queue, _cancel_event
+    raise_fd_limit_soft()
     _progress_queue = progress_queue
     _cancel_event = cancel_event
 

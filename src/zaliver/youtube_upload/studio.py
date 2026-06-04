@@ -1106,7 +1106,7 @@ def _studio_click_publish(page) -> None:
         .or_(page.get_by_role("button", name=re.compile(r"опубликовать|publish", re.I)))
     )
     btn.first.wait_for(state="visible", timeout=90_000)
-    btn.first.click(timeout=30_000)
+    btn.first.click(timeout=60_000)
     _log("Studio: «Опубликовать» нажата.")
 
 

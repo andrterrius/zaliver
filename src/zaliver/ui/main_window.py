@@ -1055,6 +1055,13 @@ class MainWindow(QWidget):
         self.text_overlay_edit.textChanged.connect(self._on_text_overlay_content_changed)
         text_controls_l.addWidget(self.text_overlay_edit)
 
+        self.text_overlay_from_middle = QCheckBox(
+            "Текст с середины видео до конца"
+        )
+        self.text_overlay_from_middle.setChecked(True)
+        self.text_overlay_from_middle.toggled.connect(self._save_folder_settings)
+        text_controls_l.addWidget(self.text_overlay_from_middle)
+
         text_opts = QGridLayout()
         text_opts.setHorizontalSpacing(8)
         self.text_overlay_font_size = QSpinBox()
@@ -2851,6 +2858,11 @@ class MainWindow(QWidget):
             self.text_overlay_edit.setPlainText(
                 self._settings.value("text_overlay_text", "", type=str) or ""
             )
+            self.text_overlay_from_middle.setChecked(
+                bool(
+                    self._settings.value("text_overlay_from_middle", True, type=bool)
+                )
+            )
             try:
                 fs = int(self._settings.value("text_overlay_font_size", 48, type=int))
             except Exception:
@@ -2930,6 +2942,10 @@ class MainWindow(QWidget):
             )
             self._settings.setValue(
                 "text_overlay_text", self.text_overlay_edit.toPlainText()
+            )
+            self._settings.setValue(
+                "text_overlay_from_middle",
+                bool(self.text_overlay_from_middle.isChecked()),
             )
             self._settings.setValue(
                 "text_overlay_font_size", int(self.text_overlay_font_size.value())
@@ -4145,6 +4161,7 @@ class MainWindow(QWidget):
             wave_amp_frac=float(waf),
             wave_char_phase=float(NEON_WAVE_CHAR_PHASE),
             wave_frame_speed=float(wfs),
+            from_middle=bool(self.text_overlay_from_middle.isChecked()),
         )
 
     def _sync_text_overlay_color_btn(self, btn: QPushButton, hex_color: str) -> None:

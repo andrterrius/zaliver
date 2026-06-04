@@ -72,6 +72,7 @@ def build_uniquify_filtergraph(
     w_out: int,
     h_out: int,
     text_overlay: Optional[ScaledTextOverlay] = None,
+    total_frames: int = 0,
 ) -> str:
     """
     Full -filter_complex graph: one video input [0:v] -> uniquified [outv].
@@ -94,5 +95,7 @@ def build_uniquify_filtergraph(
 
     base = f"[0:v]{head},{tail_s}[v0]"
     if text_overlay and text_overlay.lines:
-        return f"{base};{build_text_overlay_filters(text_overlay, 'v0', start_frame=s)}"
+        return (
+            f"{base};{build_text_overlay_filters(text_overlay, 'v0', start_frame=s, frame_count=fc, total_frames=int(total_frames))}"
+        )
     return f"{base};[v0]null[outv]"

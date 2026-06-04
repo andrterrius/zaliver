@@ -33,6 +33,7 @@ class TextOverlaySettings:
     wave_amp_frac: float = NEON_WAVE_AMP_FRAC
     wave_char_phase: float = NEON_WAVE_CHAR_PHASE
     wave_frame_speed: float = NEON_WAVE_FRAME_SPEED
+    from_middle: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -76,6 +77,7 @@ class ScaledTextOverlay:
     wave_amp: int
     wave_char_phase: float
     wave_frame_speed: float
+    from_middle: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -106,6 +108,7 @@ class ScaledTextOverlay:
             wave_amp=int(d.get("wave_amp", 4)),
             wave_char_phase=float(d.get("wave_char_phase", NEON_WAVE_CHAR_PHASE)),
             wave_frame_speed=float(d.get("wave_frame_speed", NEON_WAVE_FRAME_SPEED)),
+            from_middle=bool(d.get("from_middle", True)),
         )
 
 
@@ -358,6 +361,7 @@ def compute_scaled_overlay(
         wave_amp=wave_amp,
         wave_char_phase=float(NEON_WAVE_CHAR_PHASE),
         wave_frame_speed=float(settings.wave_frame_speed),
+        from_middle=bool(settings.from_middle),
     )
 
 def _ffmpeg_escape_path(path: str) -> str:
@@ -416,15 +420,47 @@ def _y_expr_with_offset(y_expr: str, dy: int) -> str:
     return f"'({y_expr})+{dy}'"
 
 
+def overlay_enable_expr(
+    *,
+    from_middle: bool,
+    chunk_start_frame: int,
+    chunk_frame_count: int,
+    total_frames: int,
+) -> Optional[str]:
+    """None = always on; '__skip__' = no text in this chunk."""
+    if not from_middle or total_frames <= 0:
+        return None
+    mid = int(total_frames) // 2
+    start = int(chunk_start_frame)
+    count = int(chunk_frame_count)
+    if start + count <= mid:
+        return "__skip__"
+    local_start = max(0, mid - start)
+    if local_start <= 0:
+        return None
+    return f"gte(n\\,{local_start})"
+
+
 def build_text_overlay_filters(
     overlay: ScaledTextOverlay,
     input_label: str = "v0",
     *,
     start_frame: int = 0,
+    frame_count: int = 0,
+    total_frames: int = 0,
 ) -> str:
     """Return filter chain fragment: [input_label]...filters...[outv]"""
     if not overlay.lines or not overlay.char_lines:
         return f"[{input_label}]null[outv]"
+    enable = overlay_enable_expr(
+        from_middle=overlay.from_middle,
+        chunk_start_frame=start_frame,
+        chunk_frame_count=frame_count,
+        total_frames=total_frames,
+    )
+    if enable == "__skip__":
+        return f"[{input_label}]null[outv]"
+    enable_part = f":enable='{enable}'" if enable else ""
     fill = _hex_to_ffmpeg_color(overlay.text_color, 1.0)
     glow_layers = neon_glow_layers(
         overlay.font_size, max_layers=FFMPEG_GLOW_MAX_LAYERS
@@ -465,12 +501,14 @@ def build_text_overlay_filters(
             layer = (
                 f"drawtext={font_part}text='{esc}':fontsize={overlay.font_size}:"
                 f"x={cx + dx}:y={_y_expr_with_offset(y_expr, dy)}:fontcolor={col}:borderw=0"
+                f"{enable_part}"
             )
             parts.append(f"[{label}]{layer}[{gl}]")
             label = gl
         core = (
             f"drawtext={font_part}text='{esc}':fontsize={overlay.font_size}:"
             f"x={cx}:y={_y_expr_with_offset(y_expr, 0)}:fontcolor={fill}:borderw=0"
+            f"{enable_part}"
         )
         parts.append(f"[{label}]{core}[{nxt}]")
         cur = nxt

@@ -103,6 +103,12 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
     text_overlay: Optional[ScaledTextOverlay] = None
     if isinstance(raw_overlay, dict) and raw_overlay.get("lines"):
         text_overlay = ScaledTextOverlay.from_dict(raw_overlay)
+    try:
+        total_frames = int(task.get("total_frames") or 0)
+    except (TypeError, ValueError):
+        total_frames = 0
+    if total_frames <= 0:
+        total_frames = count
     graph = build_uniquify_filtergraph(
         start_frame=start,
         frame_count=count,
@@ -113,6 +119,7 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
         w_out=w_out,
         h_out=h_out,
         text_overlay=text_overlay,
+        total_frames=total_frames,
     )
     tb = task.get("target_video_bps")
     tb_i: Optional[int]

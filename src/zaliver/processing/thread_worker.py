@@ -673,6 +673,7 @@ class ProcessingController(QObject):
                             "use_gpu": use_gpu,
                             "target_video_bps": j.target_video_bps,
                             "text_overlay": scaled_overlay,
+                            "total_frames": int(j.info.frame_count),
                         }
                     else:
                         start, cnt, seg = j.chunks[meta.chunk_idx]
@@ -690,6 +691,7 @@ class ProcessingController(QObject):
                             "use_gpu": use_gpu,
                             "target_video_bps": j.target_video_bps,
                             "text_overlay": scaled_overlay,
+                            "total_frames": int(j.info.frame_count),
                         }
                     fut = pool.submit(process_chunk_disk, task)
                     futures[fut] = meta

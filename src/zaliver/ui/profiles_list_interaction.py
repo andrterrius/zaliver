@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import QEvent, QObject, QPoint, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QMouseEvent, QShortcut
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -37,11 +37,13 @@ class ProfilesListInteraction(QObject):
         upload_store: UploadStore,
         *,
         on_upload_pause_click: Callable[[str], None] | None = None,
+        on_account_data_click: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(list_widget)
         self.lw = list_widget
         self._upload_store = upload_store
         self._on_upload_pause_click = on_upload_pause_click
+        self._on_account_data_click = on_account_data_click
 
         self.checked_profile_ids: set[str] = set()
         self._profile_id_to_item: dict[str, QListWidgetItem] = {}
@@ -59,6 +61,7 @@ class ProfilesListInteraction(QObject):
         self._checkbox_row_pending: int | None = None
         self._checkbox_press_global: QPoint | None = None
         self._checkbox_press_modifiers = Qt.KeyboardModifier.NoModifier
+        self._account_data_armed_row: ProfileListRow | None = None
 
         self.lw.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self.lw.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -145,6 +148,7 @@ class ProfilesListInteraction(QObject):
         last_upload_map: dict[str, str],
         *,
         preserve_checked: set[str] | None = None,
+        show_account_data_button: bool = False,
     ) -> None:
         list_scroll = self.lw.verticalScrollBar().value()
         existing_ids = {_profile_id(p) for p in profiles}
@@ -177,6 +181,12 @@ class ProfilesListInteraction(QObject):
                 on_upload_pause_click=(
                     (lambda pid=pid: self._on_upload_pause_click(pid))
                     if self._on_upload_pause_click
+                    else None
+                ),
+                show_account_data_button=show_account_data_button,
+                on_account_data_click=(
+                    (lambda pid=pid: self._emit_account_data_click(pid))
+                    if show_account_data_button and self._on_account_data_click
                     else None
                 ),
             )
@@ -212,8 +222,14 @@ class ProfilesListInteraction(QObject):
         self._profile_row_filter_widgets.add(row)
         row.checkbox.installEventFilter(self)
         row.upload_label.installEventFilter(self)
+        if row.account_data_btn is not None:
+            row.account_data_btn.installEventFilter(self)
         for ch in row.findChildren(QWidget):
             if ch is row or ch is row.checkbox or ch is row.upload_label:
+                continue
+            if row.account_data_btn is not None and (
+                ch is row.account_data_btn or row.account_data_btn.isAncestorOf(ch)
+            ):
                 continue
             ch.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
@@ -426,6 +442,71 @@ class ProfilesListInteraction(QObject):
             return
         self._toggle_checkbox_row(row)
 
+    def _emit_account_data_click(self, profile_id: str) -> None:
+        cb = self._on_account_data_click
+        if cb is None:
+            return
+        pid = (profile_id or "").strip()
+        if not pid:
+            return
+        QTimer.singleShot(0, lambda p=pid: cb(p))
+
+    def _profile_row_for_account_button_hit(
+        self, watched: QWidget, vp_pos: QPoint
+    ) -> ProfileListRow | None:
+        widgets_to_check: list[QWidget] = [watched]
+        child = self.lw.viewport().childAt(vp_pos)
+        if child is not None and child is not watched:
+            widgets_to_check.append(child)
+
+        for w in widgets_to_check:
+            cur: QWidget | None = w
+            while cur is not None and cur is not self.lw.viewport():
+                for row in self._profile_id_to_row.values():
+                    btn = row.account_data_btn
+                    if btn is not None and (cur is btn or btn.isAncestorOf(cur)):
+                        return row
+                cur = cur.parentWidget()
+
+        for row in self._profile_id_to_row.values():
+            btn = row.account_data_btn
+            if btn is None or not btn.isVisible():
+                continue
+            top_left = btn.mapTo(self.lw.viewport(), QPoint(0, 0))
+            if QRect(top_left, btn.size()).contains(vp_pos):
+                return row
+        return None
+
+    def _invoke_account_data_click(self, row: ProfileListRow) -> None:
+        cb = row._account_data_cb
+        if cb is None:
+            return
+        cb()
+
+    def _account_data_button_at_vp(self, vp_pos: QPoint):
+        for row in self._profile_id_to_row.values():
+            btn = row.account_data_btn
+            if btn is None or not btn.isVisible():
+                continue
+            top_left = btn.mapTo(self.lw.viewport(), QPoint(0, 0))
+            if QRect(top_left, btn.size()).contains(vp_pos):
+                return btn
+        return None
+
+    def _is_account_data_button(self, watched: QWidget) -> bool:
+        for row in self._profile_id_to_row.values():
+            btn = row.account_data_btn
+            if btn is not None and (watched is btn or btn.isAncestorOf(watched)):
+                return True
+        return False
+
+    def _cancel_checkbox_click_pending(self) -> None:
+        try:
+            self.lw.viewport().releaseMouse()
+        except Exception:
+            pass
+        self._clear_checkbox_click_pending()
+
     def _is_upload_pause_click_widget(self, watched: QWidget, row_index: int) -> bool:
         pid = self._pid_at_row(row_index)
         if not pid:
@@ -460,6 +541,27 @@ class ProfilesListInteraction(QObject):
 
             vp_pos = self._vp_pos_from_event(self.lw, event)
             et = event.type()
+
+            if (
+                et == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton
+                and self._account_data_armed_row is not None
+            ):
+                row = self._account_data_armed_row
+                self._account_data_armed_row = None
+                self._cancel_checkbox_click_pending()
+                self._lmb_select_end()
+                self._invoke_account_data_click(row)
+                return True
+
+            if et == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                account_row = self._profile_row_for_account_button_hit(watched, vp_pos)
+                if account_row is not None:
+                    self._account_data_armed_row = account_row
+                    self._cancel_checkbox_click_pending()
+                    return True
+                self._account_data_armed_row = None
+
             paint_mode = self._lmb_select_active or self._checkbox_row_pending is not None
 
             if paint_mode and et == QEvent.Type.MouseMove:

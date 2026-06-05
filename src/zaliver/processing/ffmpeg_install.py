@@ -18,6 +18,7 @@ from typing import Callable, List, Optional
 
 from zaliver.processing.ffmpeg_merge import (
     check_ffmpeg,
+    ffmpeg_has_drawtext,
     resolve_ffmpeg_executable,
     set_ffmpeg_executable,
 )
@@ -89,6 +90,45 @@ def _resolve_after_pause() -> Optional[str]:
     time.sleep(0.6)
     set_ffmpeg_executable(None)
     return resolve_ffmpeg_executable()
+
+
+def _exe_has_drawtext(exe: str) -> bool:
+    """Проверка drawtext у конкретного бинарника (без кэша resolve)."""
+    try:
+        r = subprocess.run(
+            [exe, "-hide_banner", "-filters"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            creationflags=_popen_flags(),
+        )
+        out = f"{r.stdout or ''}\n{r.stderr or ''}"
+        return r.returncode == 0 and (
+            " drawtext " in out.replace("\n", " ") or "\ndrawtext " in out
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _mac_drawtext_missing_msg(*, evermeet_tried: bool = False) -> str:
+    base = (
+        "Установленный ffmpeg не поддерживает фильтр drawtext (текст на видео). "
+        "Нужна полная сборка через Homebrew: brew install ffmpeg"
+    )
+    if evermeet_tried:
+        return (
+            f"{base}. Статическая сборка evermeet.cx не подошла — "
+            "установите Homebrew (https://brew.sh) и нажмите «Установить ffmpeg» снова."
+        )
+    return (
+        f"{base}. Установите Homebrew (https://brew.sh), если brew ещё не в PATH."
+    )
+
+
+def _register_ffmpeg(exe: str) -> None:
+    set_ffmpeg_executable(str(Path(exe).resolve()))
 
 
 def _install_via_winget(log: LogCb, progress: ProgressCb) -> tuple[bool, str]:
@@ -170,15 +210,20 @@ def _mac_bundle_bin_dir() -> Path:
     return Path.home() / "Library" / "Application Support" / "Zaliver" / "bin"
 
 
-def _install_via_brew(log: LogCb, progress: ProgressCb) -> tuple[bool, str]:
+def _install_via_brew(
+    log: LogCb,
+    progress: ProgressCb,
+    *,
+    subcommand: str = "install",
+) -> tuple[bool, str]:
     brew = shutil.which("brew")
     if not brew:
         return False, "Homebrew (brew) не найден в PATH"
 
-    progress(2, "Установка через Homebrew (brew install ffmpeg)…")
-    log("Команда: brew install ffmpeg")
+    progress(2, f"Homebrew: brew {subcommand} ffmpeg…")
+    log(f"Команда: brew {subcommand} ffmpeg")
     code = _run_streaming(
-        [brew, "install", "ffmpeg"],
+        [brew, subcommand, "ffmpeg"],
         log,
         progress,
         5,
@@ -189,11 +234,20 @@ def _install_via_brew(log: LogCb, progress: ProgressCb) -> tuple[bool, str]:
         log(f"brew exit code: {code}")
 
     exe = _resolve_after_pause()
-    if exe:
-        progress(100, "ffmpeg найден")
+    if exe and _exe_has_drawtext(exe):
+        _register_ffmpeg(exe)
+        progress(100, "ffmpeg с drawtext найден")
         return True, exe
+    if exe:
+        log("ffmpeg найден, но без фильтра drawtext.")
+
+    if code == 0 and exe and subcommand == "install":
+        log("Пробуем brew reinstall ffmpeg (полная сборка с libfreetype)…")
+        return _install_via_brew(log, progress, subcommand="reinstall")
 
     if code == 0:
+        if exe:
+            return False, _mac_drawtext_missing_msg()
         return False, "brew завершился, но ffmpeg не найден в стандартных путях."
     return False, f"brew завершился с кодом {code}"
 
@@ -326,15 +380,24 @@ def _install_via_evermeet_zip(log: LogCb, progress: ProgressCb) -> tuple[bool, s
                 )
             return False, str(e)
 
-        set_ffmpeg_executable(str(dest_bin.resolve()))
+        exe = str(dest_bin.resolve())
+        if not _exe_has_drawtext(exe):
+            log("Статическая сборка evermeet.cx не содержит drawtext — не используем её.")
+            try:
+                dest_bin.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False, _mac_drawtext_missing_msg(evermeet_tried=True)
+
+        _register_ffmpeg(exe)
         progress(100, "Готово")
-        return True, str(dest_bin.resolve())
+        return True, exe
     except Exception as e:
         return False, str(e)
 
 
 def _install_macos(log: LogCb, progress: ProgressCb) -> tuple[bool, str]:
-    progress(1, "macOS: пробуем Homebrew…")
+    progress(1, "macOS: пробуем Homebrew (полная сборка с drawtext)…")
     ok, msg = _install_via_brew(log, progress)
     if ok:
         return True, msg
@@ -342,7 +405,10 @@ def _install_macos(log: LogCb, progress: ProgressCb) -> tuple[bool, str]:
     log(f"Homebrew: {msg}")
     log("Пробуем загрузку статической сборки (evermeet.cx)…")
     progress(5, "Загрузка статической сборки…")
-    return _install_via_evermeet_zip(log, progress)
+    ok, msg = _install_via_evermeet_zip(log, progress)
+    if ok:
+        return True, msg
+    return False, msg
 
 
 def install_ffmpeg_best_effort(log: LogCb, progress: ProgressCb) -> tuple[bool, str]:
@@ -353,6 +419,21 @@ def install_ffmpeg_best_effort(log: LogCb, progress: ProgressCb) -> tuple[bool, 
     progress(0, "Проверка…")
     if check_ffmpeg():
         p = resolve_ffmpeg_executable()
+        if p and ffmpeg_has_drawtext():
+            progress(100, "Уже установлен")
+            return True, p
+        if sys.platform == "darwin" and p:
+            log(
+                "ffmpeg уже есть, но без drawtext — ставим полную сборку через Homebrew…"
+            )
+            progress(2, "Обновление ffmpeg (drawtext)…")
+            ok, msg = _install_via_brew(log, progress)
+            if ok:
+                return True, msg
+            log(f"Homebrew: {msg}")
+            progress(5, "Пробуем статическую сборку evermeet.cx…")
+            ok, msg = _install_via_evermeet_zip(log, progress)
+            return ok, msg
         progress(100, "Уже установлен")
         return True, p or "ffmpeg уже доступен"
 

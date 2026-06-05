@@ -64,8 +64,9 @@ from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI, Dolphi
 from zaliver.antydetect.local_antidetect_api import (
     DEFAULT_LOCAL_API_BASE_URL,
     LocalAntidetectError,
+    LocalAntidetectHttpAPI,
+    normalize_local_profile_for_ui,
 )
-from zaliver.processing.ffmpeg_merge import check_ffmpeg_tools
 from zaliver.processing.pipeline import RandomUniquifyBounds, UniquifySettings
 from zaliver.processing.text_overlay import (
     NEON_WAVE_AMP_FRAC,
@@ -80,6 +81,7 @@ from zaliver.ui.profile_list_helpers import (
     profile_search_rank,
     profile_search_tokens,
 )
+from zaliver.ui.profile_account_data_dialog import ProfileAccountDataDialog
 from zaliver.ui.profiles_list_interaction import ProfilesListInteraction
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
 from zaliver.stats_server_client import notify_uploaded_video
@@ -92,12 +94,7 @@ from zaliver.ui.widgets import (
 )
 from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
 
-from zaliver.antydetect.local_antidetect_api import (
-    LocalAntidetectHttpAPI,
-    normalize_local_profile_for_ui,
-)
-
-# Qt SpinBox/DoubleSpinBox всегда имеют min/max.
+from zaliver.processing.ffmpeg_merge import check_ffmpeg_tools
 # Чтобы в UI не было "лимитов", используем максимально широкие диапазоны,
 # но оставляем минимальные логические ограничения там, где отрицательные значения
 # ломают смысл (например, количество копий).
@@ -1602,9 +1599,9 @@ class MainWindow(QWidget):
         self._btn_profiles_check_availability.setAutoDefault(False)
         self._btn_profiles_check_availability.setDefault(False)
         self._btn_profiles_check_availability.setToolTip(
-            "Только для отмеченных профилей (квадратики): headless, до 5 одновременно "
-            "(как при заливке), создание канала и «Далее» при необходимости, "
-            "проверка окна загрузки в YouTube Studio без выбора файла."
+            "Только для отмеченных профилей (квадратики): режим Headless из настроек, "
+            "до 5 одновременно (как при заливке), создание канала и «Далее» при "
+            "необходимости, проверка окна загрузки в YouTube Studio без выбора файла."
         )
         self._btn_profiles_check_availability.clicked.connect(
             self._start_profiles_availability_check
@@ -1643,6 +1640,7 @@ class MainWindow(QWidget):
             self._profiles_list,
             self._upload_store,
             on_upload_pause_click=self._ask_reset_upload_cooldown_for_profile,
+            on_account_data_click=self._open_profile_account_data_dialog,
         )
         list_sel_row, self._lbl_checked_profiles_count = self._build_profiles_selection_toolbar(
             self,
@@ -2714,9 +2712,8 @@ class MainWindow(QWidget):
         if sys.platform == "darwin":
             hint = (
                 "ffmpeg/ffprobe не найдены — без них обработка недоступна. "
-                "Кнопка справа: сначала Homebrew (brew install ffmpeg), иначе "
-                "скачивание статической сборки (нужен интернет). На Apple Silicon "
-                "лучше поставить brew."
+                "Кнопка справа: Homebrew (brew install ffmpeg, с drawtext для текста), "
+                "иначе статическая сборка evermeet.cx. На Apple Silicon лучше brew."
             )
         else:
             hint = (
@@ -3315,7 +3312,17 @@ class MainWindow(QWidget):
         pids = [_profile_id(p) for p in visible]
         pids = [x for x in pids if x]
         last_upload_map = self._upload_store.last_uploaded_at_by_profiles(pids)
-        self._profiles_interaction.populate(visible, last_upload_map)
+        kind = (
+            self._default_browser_combo.currentData()
+            if hasattr(self, "_default_browser_combo")
+            else "dolphin"
+        )
+        show_account = isinstance(kind, str) and kind.strip() == "local"
+        self._profiles_interaction.populate(
+            visible,
+            last_upload_map,
+            show_account_data_button=show_account,
+        )
         self._profiles_list_render_gen += 1
         return len(visible)
 
@@ -3507,14 +3514,23 @@ class MainWindow(QWidget):
         if not base_url and kind == "local":
             base_url = DEFAULT_LOCAL_API_BASE_URL
 
+        headless = True
+        if hasattr(self, "_dolphin_headless"):
+            headless = bool(self._dolphin_headless.isChecked())
+        else:
+            headless = bool(
+                self._settings.value("antydetect/dolphin_headless", True, type=bool)
+            )
+
         self._profiles_availability_running = True
         self._sync_profiles_tab_action_buttons()
         self._profiles_status.setText(
             f"Проверка доступности Studio: 0 / {len(profile_ids)}…"
         )
+        headless_label = "headless" if headless else "с окном браузера"
         self._append_log(
             f"[availability] Старт проверки {len(profile_ids)} профилей "
-            f"(headless, до 5 параллельно)…"
+            f"({headless_label}, до 5 параллельно)…"
         )
 
         threading.Thread(
@@ -3524,6 +3540,7 @@ class MainWindow(QWidget):
                 "kind": kind,
                 "token": token,
                 "base_url": base_url,
+                "headless": headless,
             },
             daemon=True,
         ).start()
@@ -3535,6 +3552,7 @@ class MainWindow(QWidget):
         kind: str,
         token: str,
         base_url: str,
+        headless: bool,
     ) -> None:
         from zaliver.antydetect.antic_open import (
             check_studio_availability_in_local_antidetect_profile,
@@ -3551,6 +3569,7 @@ class MainWindow(QWidget):
         base_u = (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
 
         def _check_one(pid: str) -> None:
+            creds = self._profile_login_credentials(pid)
             if kind_s == "local":
                 u = (base_url or "").strip()
                 if not u:
@@ -3558,11 +3577,17 @@ class MainWindow(QWidget):
                         "Укажите базовый URL локального API в настройках."
                     )
                 check_studio_availability_in_local_antidetect_profile(
-                    pid, base_url=u, headless=True
+                    pid,
+                    base_url=u,
+                    headless=headless,
+                    login_credentials=creds,
                 )
             else:
                 check_studio_availability_in_profile(
-                    pid, local_token=token or None, headless=True
+                    pid,
+                    local_token=token or None,
+                    headless=headless,
+                    login_credentials=creds,
                 )
 
         def _on_profile_done(pid: str, ok: bool, err: str) -> None:
@@ -3628,6 +3653,100 @@ class MainWindow(QWidget):
         if not base_url:
             base_url = DEFAULT_LOCAL_API_BASE_URL
         return base_url
+
+    def _profile_login_credentials(self, profile_id: str):
+        from zaliver.youtube_upload.google_login import credentials_from_custom_data
+
+        pid = (profile_id or "").strip()
+        for p in self._profiles_raw or []:
+            if _profile_id(p) != pid:
+                continue
+            cd = p.get("custom_data")
+            if isinstance(cd, dict):
+                return credentials_from_custom_data(cd)
+        return None
+
+    def _open_profile_account_data_dialog(self, profile_id: str) -> None:
+        pid = (profile_id or "").strip()
+        if not pid:
+            return
+        self._show_profile_account_data_dialog(pid)
+
+    def _show_profile_account_data_dialog(self, profile_id: str) -> None:
+        pid = (profile_id or "").strip()
+        if not pid:
+            return
+
+        profile: dict[str, object] | None = None
+        for p in self._profiles_raw or []:
+            if _profile_id(p) == pid:
+                profile = p
+                break
+        name = _profile_name(profile) if profile else pid
+        custom_data: dict[str, object] = {}
+        if profile is not None:
+            cd = profile.get("custom_data")
+            if isinstance(cd, dict):
+                custom_data = dict(cd)
+
+        base_url = self._local_antidetect_base_url_from_settings()
+        load_error: str | None = None
+        try:
+            api = LocalAntidetectHttpAPI(base_url)
+            try:
+                fresh = api.get_profile(pid)
+                cd_fresh = fresh.get("custom_data")
+                if isinstance(cd_fresh, dict):
+                    custom_data = dict(cd_fresh)
+            finally:
+                api.close()
+        except LocalAntidetectError as e:
+            load_error = str(e)
+
+        dlg = ProfileAccountDataDialog(
+            profile_name=name,
+            profile_id=pid,
+            custom_data=custom_data,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        payload = dlg.account_data_payload()
+        try:
+            api = LocalAntidetectHttpAPI(base_url)
+            try:
+                updated = api.merge_profile_custom_data(pid, payload)
+            finally:
+                api.close()
+        except LocalAntidetectError as e:
+            QMessageBox.warning(
+                self,
+                "Данные учетки",
+                f"Не удалось сохранить:\n{e}",
+            )
+            return
+
+        cd_upd = updated.get("custom_data")
+        if self._profiles_raw is not None:
+            for i, p in enumerate(self._profiles_raw):
+                if _profile_id(p) != pid:
+                    continue
+                merged = dict(p)
+                if isinstance(cd_upd, dict):
+                    merged["custom_data"] = dict(cd_upd)
+                else:
+                    merged["custom_data"] = dict(payload)
+                self._profiles_raw[i] = merged
+                break
+
+        msg = "Сохранено в custom_data профиля."
+        if load_error:
+            msg = (
+                "Сохранено в custom_data профиля.\n\n"
+                f"При открытии не удалось обновить данные с API: {load_error}"
+            )
+        QMessageBox.information(self, "Данные учетки", msg)
 
     def _start_clear_zaliver_profile_tags(self) -> None:
         if self._profiles_tags_clear_running:
@@ -3882,6 +4001,7 @@ class MainWindow(QWidget):
                     self._settings.value("antydetect/dolphin_headless", True, type=bool)
                 )
 
+            creds = self._profile_login_credentials(profile_id)
             if kind == "local":
                 u = (base_url or "").strip()
                 if not u:
@@ -3895,6 +4015,7 @@ class MainWindow(QWidget):
                     video_path=upload_video_path,
                     title=upload_title,
                     description=upload_description,
+                    login_credentials=creds,
                 )
             else:
                 res = open_google_in_profile(
@@ -3904,6 +4025,7 @@ class MainWindow(QWidget):
                     video_path=upload_video_path,
                     title=upload_title,
                     description=upload_description,
+                    login_credentials=creds,
                 )
             try:
                 vid = ""
@@ -4632,6 +4754,7 @@ class MainWindow(QWidget):
                         )
                     )
 
+                creds = self._profile_login_credentials(profile_id)
                 if kind == "local":
                     res = open_google_in_local_antidetect_profile(
                         profile_id,
@@ -4640,6 +4763,7 @@ class MainWindow(QWidget):
                         video_path=task.video_path,
                         title=task.title,
                         description=task.description,
+                        login_credentials=creds,
                     )
                 else:
                     res = open_google_in_profile(
@@ -4649,6 +4773,7 @@ class MainWindow(QWidget):
                         video_path=task.video_path,
                         title=task.title,
                         description=task.description,
+                        login_credentials=creds,
                     )
 
                 vid = ""

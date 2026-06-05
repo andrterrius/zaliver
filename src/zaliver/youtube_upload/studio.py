@@ -72,6 +72,34 @@ def _log(message: str) -> None:
             pass
 
 
+def _studio_try_google_login_if_needed(page, login_credentials) -> bool:
+    """
+    При необходимости проходит Google-вход (личность → пароль → 2FA → канал).
+    Возвращает True, если попытка была и экран входа снят.
+    """
+    from zaliver.youtube_upload.google_login import (
+        GoogleLoginPasswordMissingError,
+        attempt_google_login_for_studio,
+        google_auth_interaction_visible,
+        handle_channel_switcher_if_present,
+    )
+
+    if handle_channel_switcher_if_present(page):
+        return True
+    if login_credentials is None:
+        return False
+
+    if not (_studio_login_required(page) or google_auth_interaction_visible(page)):
+        return False
+    try:
+        attempt_google_login_for_studio(page, login_credentials)
+    except GoogleLoginPasswordMissingError:
+        raise
+    except RuntimeError as e:
+        raise YoutubeStudioError(str(e)) from e
+    return True
+
+
 def _studio_login_required(page) -> bool:
     """
     Иногда вместо Studio открывается окно логина Google/YouTube.
@@ -326,9 +354,13 @@ def _studio_handle_interrupt_dialogs_if_present(page) -> bool:
     Прерывающие диалоги Studio: создание канала, приветствие «Далее», AADC «ОК».
     Могут появиться на разных этапах залива — опрашиваем и закрываем.
     """
+    from zaliver.youtube_upload.google_login import handle_channel_switcher_if_present
+
     handled = False
     for _ in range(5):
         step_handled = False
+        if handle_channel_switcher_if_present(page):
+            step_handled = True
         if _studio_handle_channel_creation_dialog_if_present(page):
             step_handled = True
         if _studio_handle_warm_welcome_dialog_if_present(page):
@@ -346,12 +378,14 @@ def _studio_handle_onboarding_dialogs_if_present(page) -> bool:
     return _studio_handle_interrupt_dialogs_if_present(page)
 
 
-def _studio_wait_create_or_login(page, create_locator) -> None:
+def _studio_wait_create_or_login(page, create_locator, *, login_credentials=None) -> None:
     """
     Ждём появления кнопки «Создать», но параллельно проверяем, что нас не выкинуло на логин.
     """
     deadline = time.monotonic() + (_STUDIO_UI_MS / 1000.0)
     while True:
+        if _studio_try_google_login_if_needed(page, login_credentials):
+            continue
         if _studio_login_required(page):
             raise YoutubeStudioError(
                 "YouTube Studio: требуется вход в Google (профиль без активной сессии). "
@@ -395,7 +429,7 @@ def resolve_latest_zaliver_video_on_disk(*, db_path: Path | None = None) -> str:
     )
 
 
-def _studio_click_create_then_add_video(page) -> None:
+def _studio_click_create_then_add_video(page, *, login_credentials=None) -> None:
     """
     studio.youtube.com → кнопка «Создать» (ytcp-button-shape) → меню ytcp-text-menu
     → пункт «Добавить видео» (test-id=upload).
@@ -408,6 +442,7 @@ def _studio_click_create_then_add_video(page) -> None:
         timeout=120_000,
     )
     _log(f"Studio: после загрузки URL: {page.url!r}")
+    _studio_try_google_login_if_needed(page, login_credentials)
     _studio_handle_onboarding_dialogs_if_present(page)
 
     create = (
@@ -416,7 +451,7 @@ def _studio_click_create_then_add_video(page) -> None:
         .or_(page.get_by_role("button", name=re.compile(r"^создать$|^create$", re.I)))
     )
     _log("Studio: ожидание кнопки «Создать»…")
-    _studio_wait_create_or_login(page, create)
+    _studio_wait_create_or_login(page, create, login_credentials=login_credentials)
     create.first.scroll_into_view_if_needed(timeout=15_000)
     _log("Studio: клик по «Создать»…")
     create.first.click(timeout=30_000)
@@ -441,7 +476,9 @@ def _studio_click_create_then_add_video(page) -> None:
     upload_item.first.click(timeout=30_000)
     page.wait_for_timeout(500)
     _log(f"Studio: после «Добавить видео» URL: {page.url!r}")
-    _studio_wait_upload_file_picker_visible(page, timeout_ms=_STUDIO_UI_MS)
+    _studio_wait_upload_file_picker_visible(
+        page, timeout_ms=_STUDIO_UI_MS, login_credentials=login_credentials
+    )
 
 
 def _studio_upload_file_picker_locator(page):
@@ -450,7 +487,9 @@ def _studio_upload_file_picker_locator(page):
     ).or_(page.locator("ytcp-uploads-file-picker"))
 
 
-def _studio_wait_upload_file_picker_visible(page, *, timeout_ms: int = 120_000) -> None:
+def _studio_wait_upload_file_picker_visible(
+    page, *, timeout_ms: int = 120_000, login_credentials=None
+) -> None:
     """
     Ждём ytcp-uploads-file-picker, параллельно закрывая диалоги создания канала
     и приветствия «Далее» — те же шаги, что при заливе.
@@ -459,6 +498,8 @@ def _studio_wait_upload_file_picker_visible(page, *, timeout_ms: int = 120_000) 
     _log("Studio: ожидание окна загрузки видео (ytcp-uploads-file-picker)…")
     deadline = time.monotonic() + (timeout_ms / 1000.0)
     while time.monotonic() < deadline:
+        if _studio_try_google_login_if_needed(page, login_credentials):
+            continue
         if _studio_login_required(page):
             raise YoutubeStudioError(
                 "YouTube Studio: требуется вход в Google (профиль без активной сессии)."
@@ -479,13 +520,13 @@ def _studio_wait_upload_file_picker_visible(page, *, timeout_ms: int = 120_000) 
     )
 
 
-def verify_studio_upload_dialog_available(page) -> None:
+def verify_studio_upload_dialog_available(page, *, login_credentials=None) -> None:
     """
     Проверка доступности YouTube Studio до окна загрузки (без выбора файла).
     Успех — видим ytcp-uploads-file-picker («Выбрать файлы»).
     Тот же путь, что залив: Studio → создание канала / «Далее» → Создать → Добавить видео.
     """
-    _studio_click_create_then_add_video(page)
+    _studio_click_create_then_add_video(page, login_credentials=login_credentials)
     _log("Studio: окно загрузки видео доступно — проверка успешна.")
 
 
@@ -742,7 +783,7 @@ def _studio_set_file_input_via_cdp(page, preferred_frame, resolved_local_path: s
     return False
 
 
-def _studio_upload_pick_file(page, video_path: str) -> None:
+def _studio_upload_pick_file(page, video_path: str, *, login_credentials=None) -> None:
     """Диалог ytcp-uploads-file-picker: «Выбрать файлы» + файл (file chooser или input Filedata)."""
     p = Path(video_path).expanduser()
     # На Windows иногда бывает гонка: файл только что "сохранён",
@@ -763,7 +804,7 @@ def _studio_upload_pick_file(page, video_path: str) -> None:
             )
         time.sleep(0.5)
 
-    _studio_wait_upload_file_picker_visible(page)
+    _studio_wait_upload_file_picker_visible(page, login_credentials=login_credentials)
     picker = _studio_upload_file_picker_locator(page)
 
     select_btn = (
@@ -1450,6 +1491,7 @@ def run_upload_latest_ready_video(
     video_path: str | None = None,
     title: str | None = None,
     description: str | None = None,
+    login_credentials=None,
 ) -> None:
     """
     Полный сценарий Studio: Create → Upload → ждать outcome → мастер → Publish.
@@ -1457,12 +1499,12 @@ def run_upload_latest_ready_video(
     best_url = ""
     best_vid = ""
 
-    _studio_click_create_then_add_video(page)
+    _studio_click_create_then_add_video(page, login_credentials=login_credentials)
     chosen = (video_path or "").strip()
     if not chosen:
         chosen = resolve_latest_zaliver_video_on_disk(db_path=zaliver_db_path)
     _log(f"Studio: файл для загрузки: {chosen!r}")
-    _studio_upload_pick_file(page, chosen)
+    _studio_upload_pick_file(page, chosen, login_credentials=login_credentials)
     _studio_set_title_and_description(page, title=title, description=description)
     _log(
         f"Ожидание до {_POST_UPLOAD_STUDIO_OUTCOME_MAX_S:.0f} с исхода Studio "

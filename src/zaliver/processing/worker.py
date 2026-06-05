@@ -34,6 +34,11 @@ def _ffmpeg_error_message(code: int, stderr_lines: list[str]) -> str:
         err_lines = [ln for ln in stderr_lines if ln][-8:]
     detail = "\n".join(err_lines[-12:]).strip()
     if detail:
+        low = detail.lower()
+        if "no such filter" in low and "drawtext" in low:
+            from zaliver.processing.ffmpeg_merge import FFMPEG_DRAWTEXT_MISSING_MSG
+
+            return FFMPEG_DRAWTEXT_MISSING_MSG
         if len(detail) > 700:
             detail = detail[-700:]
         return f"ffmpeg exited with code {code}: {detail}"
@@ -74,7 +79,8 @@ def _filter_complex_argv(graph: str) -> tuple[list[str], Path | None]:
     os.close(fd)
     script = Path(name)
     script.write_text(graph, encoding="utf-8")
-    return ["-filter_complex_script", str(script)], script
+    # FFmpeg 8+: -filter_complex_script deprecated; -/filter_complex reads graph from file.
+    return ["-/filter_complex", str(script)], script
 
 
 def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:

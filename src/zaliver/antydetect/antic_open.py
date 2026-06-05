@@ -30,6 +30,10 @@ def _wrap_exc(e: Exception) -> DolphinAntyError:
         return e
     if isinstance(e, YoutubeStudioError):
         return DolphinAntyError(str(e))
+    from zaliver.youtube_upload.google_login import GoogleLoginPasswordMissingError
+
+    if isinstance(e, GoogleLoginPasswordMissingError):
+        return DolphinAntyError(str(e))
     return DolphinAntyError(repr(e))
 
 
@@ -69,6 +73,7 @@ def check_studio_availability_in_profile(
     *,
     local_token: str | None = None,
     headless: bool = True,
+    login_credentials=None,
 ) -> None:
     """
     Запуск профиля Dolphin → Studio → окно «Добавить видео» (без загрузки файла).
@@ -94,7 +99,9 @@ def check_studio_availability_in_profile(
                 p, (conn.ws_url(), conn.http_url())
             )
             try:
-                verify_studio_upload_dialog_available(page)
+                verify_studio_upload_dialog_available(
+                    page, login_credentials=login_credentials
+                )
                 _studio_dismiss_upload_dialog(page)
             finally:
                 try:
@@ -117,6 +124,7 @@ def check_studio_availability_in_local_antidetect_profile(
     *,
     base_url: str,
     headless: bool = True,
+    login_credentials=None,
 ) -> None:
     """Локальный антидетект → Studio → окно загрузки (без файла)."""
     _log(
@@ -148,7 +156,9 @@ def check_studio_availability_in_local_antidetect_profile(
         with sync_playwright() as p:
             browser, _context, page = _playwright_page_from_cdp(p, (ws_url,))
             try:
-                verify_studio_upload_dialog_available(page)
+                verify_studio_upload_dialog_available(
+                    page, login_credentials=login_credentials
+                )
                 _studio_dismiss_upload_dialog(page)
             finally:
                 try:
@@ -182,6 +192,7 @@ def open_google_in_profile(
     video_path: str | None = None,
     title: str | None = None,
     description: str | None = None,
+    login_credentials=None,
 ) -> dict | None:
     """
     Запуск профиля через Dolphin Local API + Playwright CDP.
@@ -221,6 +232,7 @@ def open_google_in_profile(
                     video_path=video_path,
                     title=title,
                     description=description,
+                    login_credentials=login_credentials,
                 )
                 return res
             else:
@@ -254,6 +266,7 @@ def open_google_in_local_antidetect_profile(
     video_path: str | None = None,
     title: str | None = None,
     description: str | None = None,
+    login_credentials=None,
 ) -> dict | None:
     """
     Запуск профиля через локальный HTTP API (см. OpenAPI антидетекта: launch + опрос сессии на cdp_ws_url),
@@ -313,6 +326,7 @@ def open_google_in_local_antidetect_profile(
                         video_path=video_path,
                         title=title,
                         description=description,
+                        login_credentials=login_credentials,
                     )
                     _log("Studio upload: сценарий завершён.")
                     return res

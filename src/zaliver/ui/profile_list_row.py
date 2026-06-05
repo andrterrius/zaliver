@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -33,6 +34,8 @@ class ProfileListRow(QWidget):
         *,
         last_uploaded_at: str | None = None,
         on_upload_pause_click: Callable[[], None] | None = None,
+        show_account_data_button: bool = False,
+        on_account_data_click: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -44,6 +47,7 @@ class ProfileListRow(QWidget):
         upload_text, upload_kind = format_upload_cooldown_line(last_uploaded_at)
         self._upload_cooldown_kind = upload_kind
         self._upload_pause_cb = on_upload_pause_click
+        self._account_data_cb = on_account_data_click
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(10, 6, 10, 6)
@@ -98,6 +102,18 @@ class ProfileListRow(QWidget):
         self.upload_label.setProperty("uploadCooldown", upload_kind)
         self._apply_upload_pause_interaction()
         outer.addWidget(self.upload_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.account_data_btn: QPushButton | None = None
+        if show_account_data_button and on_account_data_click is not None:
+            self.account_data_btn = QPushButton("Данные учетки")
+            self.account_data_btn.setObjectName("secondary")
+            self.account_data_btn.setAutoDefault(False)
+            self.account_data_btn.setDefault(False)
+            self.account_data_btn.setToolTip(
+                "Логин, пароль и 2FA YouTube (custom_data локального антидетекта)"
+            )
+            self.account_data_btn.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            outer.addWidget(self.account_data_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         tip_lines = [profile_row_title_text(profile), upload_text]
         if dot_tip:

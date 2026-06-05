@@ -123,6 +123,7 @@ def set_ffmpeg_executable(path: Optional[str]) -> None:
         _explicit_ffmpeg = None
     else:
         _explicit_ffmpeg = str(path).strip()
+    _reset_ffmpeg_capability_cache()
     sync_ffmpeg_env_for_children()
 
 
@@ -313,6 +314,49 @@ def check_ffmpeg_tools() -> bool:
     from zaliver.processing.ffmpeg_probe import resolve_ffprobe_executable
 
     return resolve_ffprobe_executable() is not None
+
+
+_drawtext_available: Optional[bool] = None
+
+
+def _reset_ffmpeg_capability_cache() -> None:
+    global _drawtext_available
+    _drawtext_available = None
+
+
+def ffmpeg_has_drawtext() -> bool:
+    """True if the resolved ffmpeg build includes the drawtext filter (libfreetype)."""
+    global _drawtext_available
+    if _drawtext_available is not None:
+        return _drawtext_available
+    exe = resolve_ffmpeg_executable()
+    if not exe:
+        _drawtext_available = False
+        return False
+    try:
+        r = subprocess.run(
+            [exe, "-hide_banner", "-filters"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            creationflags=_popen_flags(),
+        )
+        out = f"{r.stdout or ''}\n{r.stderr or ''}"
+        _drawtext_available = r.returncode == 0 and (
+            " drawtext " in out.replace("\n", " ") or "\ndrawtext " in out
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        _drawtext_available = False
+    return _drawtext_available
+
+
+FFMPEG_DRAWTEXT_MISSING_MSG = (
+    "Текст на видео требует фильтр drawtext в ffmpeg (libfreetype). "
+    "Установите полную сборку: Windows — «Установить ffmpeg» (winget) или "
+    "Gyan.FFmpeg; macOS — brew install ffmpeg (не минимальную статику без drawtext)."
+)
 
 
 def run_ffmpeg(

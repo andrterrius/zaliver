@@ -85,6 +85,34 @@ class LocalAntidetectHttpAPI:
             raise LocalAntidetectError(f"Remove tag failed: status={resp.status_code}, body={data!r}")
         return data
 
+    def get_profile(self, profile_id: str) -> dict[str, Any]:
+        pid = (profile_id or "").strip()
+        if not pid:
+            raise LocalAntidetectError("profile_id пуст.")
+        url = f"{self._base}/profiles/{quote(pid)}"
+        resp = self._session.get(url, timeout=self._timeout_s)
+        data = _json_body(resp)
+        if resp.status_code != 200 or not isinstance(data, dict):
+            raise LocalAntidetectError(f"Get profile failed: status={resp.status_code}, body={data!r}")
+        return data
+
+    def merge_profile_custom_data(
+        self, profile_id: str, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        pid = (profile_id or "").strip()
+        if not pid:
+            raise LocalAntidetectError("profile_id пуст.")
+        if not isinstance(data, dict):
+            raise LocalAntidetectError("custom_data должен быть объектом.")
+        url = f"{self._base}/profiles/{quote(pid)}/custom-data"
+        resp = self._session.patch(url, json={"data": data}, timeout=self._timeout_s)
+        body = _json_body(resp)
+        if resp.status_code != 200 or not isinstance(body, dict):
+            raise LocalAntidetectError(
+                f"Merge custom_data failed: status={resp.status_code}, body={body!r}"
+            )
+        return body
+
     def launch_profile(
         self,
         profile_id: str,
@@ -242,6 +270,11 @@ def normalize_local_profile_for_ui(raw: dict[str, Any]) -> dict[str, object]:
                 lc["ip"] = pm.strip()
             proxy["lastCheck"] = lc
 
+    custom_data_raw = raw.get("custom_data")
+    custom_data: dict[str, object] = (
+        dict(custom_data_raw) if isinstance(custom_data_raw, dict) else {}
+    )
+
     return {
         "id": pid,
         "browserProfileId": pid,
@@ -252,4 +285,5 @@ def normalize_local_profile_for_ui(raw: dict[str, Any]) -> dict[str, object]:
         "description": description,
         "status": "",
         "proxy": proxy,
+        "custom_data": custom_data,
     }

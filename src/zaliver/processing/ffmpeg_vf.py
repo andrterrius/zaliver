@@ -12,6 +12,19 @@ def _even_dim(x: int) -> int:
     return max(2, int(x) - (int(x) % 2))
 
 
+def _normalize_sar_block() -> str:
+    """К square pixels до любых scale/crop (иначе SAR даёт «растянутое» видео)."""
+    return "scale=iw*sar:ih,setsar=1"
+
+
+def _final_scale_block(w_out: int, h_out: int) -> str:
+    """Финальный кадр без растягивания + явный SAR 1:1 для плееров."""
+    return (
+        f"scale={w_out}:{h_out}:force_original_aspect_ratio=decrease:flags=bilinear,"
+        f"pad={w_out}:{h_out}:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
+    )
+
+
 def _fit_scale_pad(w: int, h: int) -> str:
     """Fit into w×h without stretching; letterbox/pillarbox with black if needed."""
     return (
@@ -80,7 +93,10 @@ def build_uniquify_filtergraph(
     s = int(start_frame)
     fc = int(frame_count)
     e = s + fc
-    head = f"trim=start_frame={s}:end_frame={e},setpts=PTS-STARTPTS"
+    head = (
+        f"trim=start_frame={s}:end_frame={e},setpts=PTS-STARTPTS,"
+        f"{_normalize_sar_block()}"
+    )
 
     tail: list[str] = []
     sp = _scale_pct_block(w, h, float(settings.scale_pct))
@@ -90,7 +106,7 @@ def build_uniquify_filtergraph(
     if cj:
         tail.append(cj)
     tail.append(_eq_block(settings))
-    tail.append(f"format=yuv420p,scale={w_out}:{h_out}:flags=bilinear")
+    tail.append(f"format=yuv420p,{_final_scale_block(w_out, h_out)}")
     tail_s = ",".join(tail)
 
     base = f"[0:v]{head},{tail_s}[v0]"

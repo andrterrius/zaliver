@@ -131,12 +131,40 @@ def _stream_rotation_degrees(st: Dict[str, Any]) -> int:
     return 0
 
 
-def _display_dimensions(w: int, h: int, rotation_deg: int) -> tuple[int, int]:
+def _parse_sample_aspect_ratio(st: Dict[str, Any]) -> tuple[float, float]:
+    raw = st.get("sample_aspect_ratio")
+    if raw is None or str(raw).strip() in ("", "N/A", "0:1", "1:0"):
+        return 1.0, 1.0
+    s = str(raw).strip()
+    if ":" in s:
+        a, b = s.split(":", 1)
+        try:
+            x, y = float(a), float(b)
+            if x > 0 and y > 0:
+                return x, y
+        except ValueError:
+            pass
+    try:
+        r = float(s)
+        if r > 0:
+            return r, 1.0
+    except ValueError:
+        pass
+    return 1.0, 1.0
+
+
+def _display_dimensions(
+    w: int, h: int, rotation_deg: int, *, sar_num: float = 1.0, sar_den: float = 1.0
+) -> tuple[int, int]:
     """Размер кадра после autorotate ffmpeg (как в плеере), не сырой storage."""
+    dw = max(2, int(round(w * float(sar_num) / float(sar_den))))
+    dh = h
+    if dw % 2:
+        dw += 1
     r = int(rotation_deg) % 360
     if r in (90, 270):
-        return h, w
-    return w, h
+        return dh, dw
+    return dw, dh
 
 
 def probe_video_stream(path: str) -> tuple[int, int, float, int, int]:
@@ -154,7 +182,10 @@ def probe_video_stream(path: str) -> tuple[int, int, float, int, int]:
     h = int(st.get("height") or 0)
     if w <= 0 or h <= 0:
         raise RuntimeError("ffprobe: некорректный размер кадра")
-    w, h = _display_dimensions(w, h, _stream_rotation_degrees(st))
+    sar_num, sar_den = _parse_sample_aspect_ratio(st)
+    w, h = _display_dimensions(
+        w, h, _stream_rotation_degrees(st), sar_num=sar_num, sar_den=sar_den
+    )
     fps = _parse_frame_rate(str(st.get("avg_frame_rate") or ""))
     if fps <= 0.01:
         fps = _parse_frame_rate(str(st.get("r_frame_rate") or ""))

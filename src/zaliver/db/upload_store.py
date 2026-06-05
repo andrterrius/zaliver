@@ -36,6 +36,12 @@ def _parse_uploaded_at_iso_utc(s: str) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+def uploaded_at_sort_ts(iso_s: str) -> float:
+    """UTC timestamp for stable sort by upload time (mixed ISO formats, Z vs +00:00)."""
+    dt = _parse_uploaded_at_iso_utc(iso_s)
+    return dt.timestamp() if dt is not None else 0.0
+
+
 # Должно совпадать с подписью «Пауза 3 ч» в UI (`antic_profile_row.format_upload_cooldown_line`).
 _UPLOAD_PAUSE_BETWEEN_UPLOADS = timedelta(hours=3)
 

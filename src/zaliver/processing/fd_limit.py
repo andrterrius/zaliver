@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 _DEFAULT_TARGET = 4096
 _LIMIT_TARGETS = (65536, 16384, 4096, 2048, 1024)
-# Запас под concat, ffprobe, SQLite, HTTP, UI.
-_BASELINE_FDS = 80
-_FDS_PER_WORKER = 28
-_DARWIN_WORKER_CAP = 6
+# CPython ProcessPoolExecutor на Windows: max_workers <= 60
+_WIN_PROCESS_POOL_MAX_WORKERS = 60
 
 
 def soft_fd_limit() -> int:
@@ -63,18 +62,24 @@ def bootstrap_fd_limits() -> str | None:
         return f"Лимит открытых файлов: {after} (было {before}) — выставлено автоматически."
     if after < 1024:
         return (
-            f"Лимит открытых файлов низкий ({after}); потоки обработки ограничены автоматически. "
-            "При Errno 24 уменьшите параллельные заливы/браузеры."
+            f"Лимит открытых файлов низкий ({after}). "
+            "При Errno 24 уменьшите число потоков или параллельные заливы."
         )
     return None
 
 
 def cap_workers_for_fd_limit(requested: int) -> int:
-    """Ограничить число параллельных ffmpeg-воркеров под текущий ulimit."""
-    req = max(1, int(requested))
-    soft = soft_fd_limit()
-    budget = max(32, soft - _BASELINE_FDS)
-    cap = max(1, budget // _FDS_PER_WORKER)
-    if sys.platform == "darwin":
-        cap = min(cap, _DARWIN_WORKER_CAP)
-    return max(1, min(req, cap))
+    """Число параллельных ffmpeg-воркеров (без искусственного потолка)."""
+    return max(1, int(requested))
+
+
+def max_process_pool_workers() -> int:
+    """Верхняя граница ProcessPoolExecutor (для UI и run())."""
+    if sys.platform == "win32":
+        return _WIN_PROCESS_POOL_MAX_WORKERS
+    n = max(1, os.cpu_count() or 2)
+    return max(n * 4, 64)
+
+
+def cap_process_pool_workers(requested: int) -> int:
+    return max(1, min(int(requested), max_process_pool_workers()))

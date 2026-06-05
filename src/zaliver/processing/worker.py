@@ -17,6 +17,11 @@ from zaliver.processing.ffmpeg_merge import (
     pick_best_h264_encoder,
     resolve_ffmpeg_executable,
 )
+from zaliver.processing.ffmpeg_gpu import (
+    build_gpu_uniquify_filtergraph,
+    is_gpu_filter_fallback_error,
+    resolve_gpu_pipeline,
+)
 from zaliver.processing.ffmpeg_vf import build_uniquify_filtergraph
 from zaliver.processing.pipeline import UniquifySettings, pick_chunk_crop_offsets
 from zaliver.processing.text_overlay import ScaledTextOverlay
@@ -83,107 +88,13 @@ def _filter_complex_argv(graph: str) -> tuple[list[str], Path | None]:
     return ["-/filter_complex", str(script)], script
 
 
-def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
-    """Trim + uniquify filter graph + encode (single ffmpeg child)."""
-    path = str(task["video_path"])
-    start = int(task["start_frame"])
-    count = int(task["frame_count"])
-    chunk_index = int(task["chunk_index"])
-    job_id = str(task["job_id"])
-    settings = UniquifySettings.from_dict(task["settings"])
-    w = int(task["width"])
-    h = int(task["height"])
-    fps = float(task["fps"])
-    use_gpu = bool(task.get("use_gpu", False))
-    w_out = max(2, w - (w % 2))
-    h_out = max(2, h - (h % 2))
-
-    out_p = Path(task["output_path"]).expanduser()
-    try:
-        out_p = out_p.resolve()
-    except OSError:
-        pass
-    try:
-        out_p.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        return {"ok": False, "chunk_index": chunk_index, "error": f"mkdir: {e}"}
-    out_path = str(out_p)
-    part_p = out_p.with_name(f"{out_p.stem}._zaliver_tmp{out_p.suffix}")
-    part_path = str(part_p)
-    try:
-        part_p.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-    exe = resolve_ffmpeg_executable()
-    if not exe:
-        return {"ok": False, "chunk_index": chunk_index, "error": "ffmpeg not found"}
-
-    crop = pick_chunk_crop_offsets(job_id, chunk_index, settings)
-    raw_overlay = task.get("text_overlay")
-    text_overlay: Optional[ScaledTextOverlay] = None
-    if isinstance(raw_overlay, dict) and raw_overlay.get("lines"):
-        text_overlay = ScaledTextOverlay.from_dict(raw_overlay)
-    try:
-        total_frames = int(task.get("total_frames") or 0)
-    except (TypeError, ValueError):
-        total_frames = 0
-    if total_frames <= 0:
-        total_frames = count
-    graph = build_uniquify_filtergraph(
-        start_frame=start,
-        frame_count=count,
-        settings=settings,
-        crop=crop,
-        w=w,
-        h=h,
-        w_out=w_out,
-        h_out=h_out,
-        text_overlay=text_overlay,
-        total_frames=total_frames,
-    )
-    tb = task.get("target_video_bps")
-    tb_i: Optional[int]
-    if tb is None:
-        tb_i = None
-    else:
-        try:
-            tb_i = int(tb)
-        except (TypeError, ValueError):
-            tb_i = None
-    if tb_i is not None and tb_i <= 0:
-        tb_i = None
-    enc, enc_args = pick_best_h264_encoder(
-        prefer_gpu=use_gpu, target_video_bps=tb_i
-    )
-
-    filter_argv, filter_script = _filter_complex_argv(graph)
-    cmd = [
-        exe,
-        "-hide_banner",
-        "-loglevel",
-        "info",
-        "-stats",
-        "-y",
-        "-i",
-        path,
-        *filter_argv,
-        "-map",
-        "[outv]",
-        "-an",
-        "-r",
-        f"{fps:.6f}",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        "-c:v",
-        enc,
-        *enc_args,
-        part_path,
-    ]
-
-    committed = False
+def _run_ffmpeg_cmd(
+    cmd: list[str],
+    *,
+    job_id: str,
+    chunk_index: int,
+    count: int,
+) -> tuple[int, list[str]]:
     proc: Optional[subprocess.Popen] = None
     done_holder = [0]
     stderr_lines: list[str] = []
@@ -232,27 +143,192 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
                 proc.stderr.close()
             except OSError:
                 pass
-        if _cancelled():
-            return {"ok": False, "chunk_index": chunk_index, "error": "cancelled"}
-        if code != 0:
-            return {
-                "ok": False,
-                "chunk_index": chunk_index,
-                "error": _ffmpeg_error_message(code, stderr_lines),
-            }
-        _report(job_id, chunk_index, count, count)
-        try:
-            os.replace(part_path, out_path)
-        except OSError as e:
-            return {"ok": False, "chunk_index": chunk_index, "error": f"rename: {e}"}
-        committed = True
-        return {"ok": True, "chunk_index": chunk_index, "error": None}
+        return code, stderr_lines
     except subprocess.TimeoutExpired:
         if proc is not None:
             try:
                 proc.kill()
             except OSError:
                 pass
+        raise
+    finally:
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+
+def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
+    """Trim + uniquify filter graph + encode (single ffmpeg child)."""
+    path = str(task["video_path"])
+    start = int(task["start_frame"])
+    count = int(task["frame_count"])
+    chunk_index = int(task["chunk_index"])
+    job_id = str(task["job_id"])
+    settings = UniquifySettings.from_dict(task["settings"])
+    w = int(task["width"])
+    h = int(task["height"])
+    fps = float(task["fps"])
+    use_gpu = bool(task.get("use_gpu", False))
+    w_out = max(2, w - (w % 2))
+    h_out = max(2, h - (h % 2))
+
+    out_p = Path(task["output_path"]).expanduser()
+    try:
+        out_p = out_p.resolve()
+    except OSError:
+        pass
+    try:
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return {"ok": False, "chunk_index": chunk_index, "error": f"mkdir: {e}"}
+    out_path = str(out_p)
+    part_p = out_p.with_name(f"{out_p.stem}._zaliver_tmp{out_p.suffix}")
+    part_path = str(part_p)
+    try:
+        part_p.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    exe = resolve_ffmpeg_executable()
+    if not exe:
+        return {"ok": False, "chunk_index": chunk_index, "error": "ffmpeg not found"}
+
+    crop = pick_chunk_crop_offsets(job_id, chunk_index, settings)
+    raw_overlay = task.get("text_overlay")
+    text_overlay: Optional[ScaledTextOverlay] = None
+    if isinstance(raw_overlay, dict) and raw_overlay.get("lines"):
+        text_overlay = ScaledTextOverlay.from_dict(raw_overlay)
+    try:
+        total_frames = int(task.get("total_frames") or 0)
+    except (TypeError, ValueError):
+        total_frames = 0
+    if total_frames <= 0:
+        total_frames = count
+    tb = task.get("target_video_bps")
+    tb_i: Optional[int]
+    if tb is None:
+        tb_i = None
+    else:
+        try:
+            tb_i = int(tb)
+        except (TypeError, ValueError):
+            tb_i = None
+    if tb_i is not None and tb_i <= 0:
+        tb_i = None
+    enc, enc_args = pick_best_h264_encoder(
+        prefer_gpu=use_gpu, target_video_bps=tb_i
+    )
+
+    graph_common = dict(
+        start_frame=start,
+        frame_count=count,
+        settings=settings,
+        crop=crop,
+        w=w,
+        h=h,
+        w_out=w_out,
+        h_out=h_out,
+        text_overlay=text_overlay,
+        total_frames=total_frames,
+    )
+
+    attempts: list[tuple[str, Optional[object], list[str]]] = []
+    if use_gpu:
+        gpu_pipeline = resolve_gpu_pipeline(prefer_gpu=True, encoder=enc)
+        if gpu_pipeline is not None:
+            attempts.append(
+                (
+                    "gpu",
+                    gpu_pipeline,
+                    [
+                        *gpu_pipeline.global_args,
+                        *gpu_pipeline.input_args,
+                    ],
+                )
+            )
+    attempts.append(("cpu", None, []))
+
+    filter_script: Path | None = None
+    last_stderr: list[str] = []
+    code = 1
+
+    try:
+        for mode, pipeline, hw_args in attempts:
+            if mode == "gpu" and pipeline is not None:
+                graph = build_gpu_uniquify_filtergraph(
+                    pipeline=pipeline,  # type: ignore[arg-type]
+                    **graph_common,
+                )
+            else:
+                graph = build_uniquify_filtergraph(**graph_common)
+
+            if filter_script is not None:
+                try:
+                    filter_script.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                filter_script = None
+
+            filter_argv, filter_script = _filter_complex_argv(graph)
+            cmd = [
+                exe,
+                "-hide_banner",
+                "-loglevel",
+                "info",
+                "-stats",
+                "-y",
+                *hw_args,
+                "-i",
+                path,
+                *filter_argv,
+                "-map",
+                "[outv]",
+                "-an",
+                "-r",
+                f"{fps:.6f}",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                "-c:v",
+                enc,
+                *enc_args,
+                part_path,
+            ]
+
+            try:
+                code, last_stderr = _run_ffmpeg_cmd(
+                    cmd,
+                    job_id=job_id,
+                    chunk_index=chunk_index,
+                    count=count,
+                )
+            except subprocess.TimeoutExpired:
+                return {"ok": False, "chunk_index": chunk_index, "error": "ffmpeg timeout"}
+
+            if code == 0:
+                break
+            if use_gpu and mode == "gpu" and is_gpu_filter_fallback_error(last_stderr):
+                continue
+            break
+
+        if _cancelled():
+            return {"ok": False, "chunk_index": chunk_index, "error": "cancelled"}
+        if code != 0:
+            return {
+                "ok": False,
+                "chunk_index": chunk_index,
+                "error": _ffmpeg_error_message(code, last_stderr),
+            }
+        _report(job_id, chunk_index, count, count)
+        try:
+            os.replace(part_path, out_path)
+        except OSError as e:
+            return {"ok": False, "chunk_index": chunk_index, "error": f"rename: {e}"}
+        return {"ok": True, "chunk_index": chunk_index, "error": None}
+    except subprocess.TimeoutExpired:
         return {"ok": False, "chunk_index": chunk_index, "error": "ffmpeg timeout"}
     except Exception as e:
         return {"ok": False, "chunk_index": chunk_index, "error": str(e)}
@@ -262,13 +338,8 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
                 filter_script.unlink(missing_ok=True)
             except OSError:
                 pass
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.kill()
-            except OSError:
-                pass
-        if not committed:
-            try:
+        try:
+            if not Path(out_path).is_file():
                 Path(part_path).unlink(missing_ok=True)
-            except OSError:
-                pass
+        except OSError:
+            pass

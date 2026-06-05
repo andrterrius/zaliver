@@ -673,6 +673,7 @@ def run_ffmpeg(
 
 
 _cached_encoder_list: Optional[str] = None
+_cached_filter_list: Optional[str] = None
 _encoder_runtime_ok: dict[str, bool] = {}
 _encoder_runtime_err: dict[str, str] = {}
 
@@ -700,6 +701,31 @@ def ffmpeg_encoder_list_text() -> str:
     except Exception:
         _cached_encoder_list = ""
     return _cached_encoder_list
+
+
+def ffmpeg_filters_list_text() -> str:
+    """Return ffmpeg -filters output (cached)."""
+    global _cached_filter_list
+    if _cached_filter_list is not None:
+        return _cached_filter_list
+    exe = resolve_ffmpeg_executable()
+    if not exe:
+        _cached_filter_list = ""
+        return _cached_filter_list
+    try:
+        p = subprocess.run(
+            [exe, "-hide_banner", "-filters"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=12,
+            creationflags=_popen_flags(),
+        )
+        _cached_filter_list = (p.stdout or "") + "\n" + (p.stderr or "")
+    except Exception:
+        _cached_filter_list = ""
+    return _cached_filter_list
 
 
 def _probe_encoder_runtime(encoder: str) -> bool:
@@ -866,7 +892,7 @@ def _h264_amf_args(target_video_bps: Optional[int]) -> List[str]:
 
 
 def pick_best_h264_encoder(
-    *, prefer_gpu: bool = True, target_video_bps: Optional[int] = None
+    *, prefer_gpu: bool = False, target_video_bps: Optional[int] = None
 ) -> Tuple[str, List[str]]:
     """
     Return (encoder_name, extra_args) preferring GPU encoders if available.
@@ -883,17 +909,24 @@ def pick_best_h264_encoder(
     return ("libx264", libx264_encode_args_for_target(target_video_bps))
 
 
+def video_encoder_for_mux(
+    target_video_bps: Optional[int],
+    *,
+    prefer_gpu: bool = False,
+) -> Tuple[str, List[str]]:
+    """Энкодер для склейки/mux (перекодирование при concat fallback, speed, BGM)."""
+    return pick_best_h264_encoder(
+        prefer_gpu=prefer_gpu, target_video_bps=target_video_bps
+    )
+
+
 # concat demuxer открывает все входы в списке сразу; лимит дескрипторов ОС.
 # macOS: soft ulimit -n часто 256 — при фоновой музыке и параллельных чанках EMFILE на склейке.
 _MIN_FFMPEG_CONCAT_BATCH = 2
 
 
 def _max_ffmpeg_concat_batch() -> int:
-    if sys.platform == "darwin":
-        return 3
-    if sys.platform == "win32":
-        return 8
-    return 16
+    return 64
 
 
 def _max_bgm_alternates() -> int:
@@ -937,11 +970,26 @@ def _write_concat_demuxer_list(segment_paths: List[str], list_path: str) -> None
             f.write(f"file '{line}'\n")
 
 
+def _concat_reencode_vf(segment_paths: List[str]) -> Tuple[str, float]:
+    """Фильтр нормализации кадра при перекодировании concat (без растягивания)."""
+    from zaliver.processing.ffmpeg_probe import probe_video_stream
+
+    w, h, fps, _, _ = probe_video_stream(segment_paths[0])
+    w = max(2, w - (w % 2))
+    h = max(2, h - (h % 2))
+    vf = (
+        f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=bilinear,"
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
+    )
+    return vf, float(fps) if fps > 1e-6 else 30.0
+
+
 def _concat_segments_once(
     segment_paths: List[str],
     out_path: str,
     log: LogFn = None,
     target_video_bps: Optional[int] = None,
+    prefer_gpu: bool = False,
 ) -> None:
     """Один вызов ffmpeg concat (число file в list.txt = len(segment_paths))."""
     if not segment_paths:
@@ -967,6 +1015,10 @@ def _concat_segments_once(
                 "0",
                 "-i",
                 list_path,
+                "-fflags",
+                "+genpts",
+                "-avoid_negative_ts",
+                "make_zero",
                 "-c",
                 "copy",
                 str(out),
@@ -974,7 +1026,14 @@ def _concat_segments_once(
             log=log,
         )
     except RuntimeError:
-        vargs = libx264_encode_args_for_target(target_video_bps)
+        if log:
+            log(
+                "Склейка: stream copy не удался — перекодирование с нормализацией кадра"
+            )
+        enc, enc_args = video_encoder_for_mux(
+            target_video_bps, prefer_gpu=prefer_gpu
+        )
+        vf, fps = _concat_reencode_vf(segment_paths)
         run_ffmpeg(
             [
                 "-f",
@@ -983,9 +1042,17 @@ def _concat_segments_once(
                 "0",
                 "-i",
                 list_path,
+                "-vf",
+                vf,
+                "-r",
+                f"{fps:.6f}",
+                "-vsync",
+                "cfr",
                 "-c:v",
-                "libx264",
-                *vargs,
+                enc,
+                *enc_args,
+                "-pix_fmt",
+                "yuv420p",
                 "-an",
                 str(out),
             ],
@@ -1005,6 +1072,7 @@ def _concat_segments_batched(
     batch_limit: int,
     log: LogFn = None,
     target_video_bps: Optional[int] = None,
+    prefer_gpu: bool = False,
 ) -> None:
     paths = [str(p) for p in segment_paths if p]
     if not paths:
@@ -1012,7 +1080,8 @@ def _concat_segments_batched(
     batch_limit = max(2, int(batch_limit))
     if len(paths) <= batch_limit:
         _concat_segments_once(
-            paths, out_path, log=log, target_video_bps=target_video_bps
+            paths, out_path, log=log, target_video_bps=target_video_bps,
+            prefer_gpu=prefer_gpu,
         )
         return
 
@@ -1040,12 +1109,14 @@ def _concat_segments_batched(
                     str(tmp),
                     log=log,
                     target_video_bps=target_video_bps,
+                    prefer_gpu=prefer_gpu,
                 )
                 temps.append(tmp)
                 nxt.append(str(tmp))
             current = nxt
         _concat_segments_once(
-            current, out_path, log=log, target_video_bps=target_video_bps
+            current, out_path, log=log, target_video_bps=target_video_bps,
+            prefer_gpu=prefer_gpu,
         )
     finally:
         out_resolved = Path(out_path).resolve()
@@ -1062,6 +1133,7 @@ def concat_segments(
     out_path: str,
     log: LogFn = None,
     target_video_bps: Optional[int] = None,
+    prefer_gpu: bool = False,
 ) -> None:
     batch_limit = _max_ffmpeg_concat_batch()
     min_batch = _MIN_FFMPEG_CONCAT_BATCH
@@ -1079,6 +1151,7 @@ def concat_segments(
                 batch_limit=batch_limit,
                 log=log,
                 target_video_bps=target_video_bps,
+                prefer_gpu=prefer_gpu,
             )
             return
         except RuntimeError as e:
@@ -1398,6 +1471,7 @@ def mux_video_audio(
     audio_chorus: bool = False,
     log: LogFn = None,
     target_video_bps: Optional[int] = None,
+    prefer_gpu: bool = False,
 ) -> None:
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1422,7 +1496,9 @@ def mux_video_audio(
                     log("В исходнике нет аудио — сохраняется только ускоренное видео (без звука).")
             if want_speed:
                 filt = f"[0:v]setpts=PTS/{spd:.9f}[vout]"
-                vargs = libx264_encode_args_for_target(target_video_bps)
+                enc, enc_args = video_encoder_for_mux(
+                    target_video_bps, prefer_gpu=prefer_gpu
+                )
                 run_ffmpeg(
                     [
                         "-i",
@@ -1433,8 +1509,8 @@ def mux_video_audio(
                         "[vout]",
                         "-an",
                         "-c:v",
-                        "libx264",
-                        *vargs,
+                        enc,
+                        *enc_args,
                         "-pix_fmt",
                         "yuv420p",
                         "-movflags",
@@ -1460,7 +1536,9 @@ def mux_video_audio(
             else:
                 parts.append(_atempo_chain("[1:a]", spd, "[aout]"))
             filt = ";".join(parts)
-            vargs = libx264_encode_args_for_target(target_video_bps)
+            enc, enc_args = video_encoder_for_mux(
+                target_video_bps, prefer_gpu=prefer_gpu
+            )
             run_ffmpeg(
                 [
                     "-i",
@@ -1474,8 +1552,8 @@ def mux_video_audio(
                     "-map",
                     "[aout]",
                     "-c:v",
-                    "libx264",
-                    *vargs,
+                    enc,
+                    *enc_args,
                     "-pix_fmt",
                     "yuv420p",
                     "-movflags",
@@ -1558,6 +1636,7 @@ def merge_segments_with_source_audio(
     background_music_mix: bool = False,
     background_music_volume_pct: float = 35.0,
     cancel_check: CancelCheck = None,
+    prefer_gpu: bool = False,
 ) -> bool:
     """
     Склеить сегменты и добавить звук.
@@ -1567,7 +1646,11 @@ def merge_segments_with_source_audio(
     work.mkdir(parents=True, exist_ok=True)
     concat_out = work / "concat_video.mp4"
     concat_segments(
-        segment_paths, str(concat_out), log=log, target_video_bps=target_video_bps
+        segment_paths,
+        str(concat_out),
+        log=log,
+        target_video_bps=target_video_bps,
+        prefer_gpu=prefer_gpu,
     )
     if background_music_path and str(background_music_path).strip():
         fc, fpsi = music_video_meta or (0, 30.0)
@@ -1587,6 +1670,7 @@ def merge_segments_with_source_audio(
                 music_volume_pct=float(background_music_volume_pct),
                 music_path_alternates=background_music_alternates,
                 cancel_check=cancel_check,
+                prefer_gpu=prefer_gpu,
             )
         except (BackgroundMusicUnavailableError, RuntimeError) as e:
             if str(e) == "cancelled":
@@ -1607,6 +1691,7 @@ def merge_segments_with_source_audio(
                 audio_chorus=audio_chorus,
                 log=log,
                 target_video_bps=target_video_bps,
+                prefer_gpu=prefer_gpu,
             )
             return False
         return True
@@ -1618,6 +1703,7 @@ def merge_segments_with_source_audio(
         audio_chorus=audio_chorus,
         log=log,
         target_video_bps=target_video_bps,
+        prefer_gpu=prefer_gpu,
     )
     return True
 
@@ -1674,6 +1760,7 @@ def _mux_bgm_replace_only(
     spd: float,
     log: LogFn,
     target_video_bps: Optional[int],
+    prefer_gpu: bool = False,
 ) -> None:
     """Видео + только музыка (как раньше)."""
     v = Path(video_path).resolve().as_posix()
@@ -1683,8 +1770,10 @@ def _mux_bgm_replace_only(
         f"[1:a]atrim=start={trim_start:.6f}:duration={dur_needed:.6f},"
         f"asetpts=PTS-STARTPTS[aout]"
     )
-    vargs = libx264_encode_args_for_target(target_video_bps)
     if want_speed:
+        enc, enc_args = video_encoder_for_mux(
+            target_video_bps, prefer_gpu=prefer_gpu
+        )
         filt = f"[0:v]setpts=PTS/{spd:.9f}[vout];{a_filt}"
         run_ffmpeg(
             [
@@ -1701,8 +1790,8 @@ def _mux_bgm_replace_only(
                 "-map",
                 "[aout]",
                 "-c:v",
-                "libx264",
-                *vargs,
+                enc,
+                *enc_args,
                 "-pix_fmt",
                 "yuv420p",
                 "-movflags",
@@ -1754,6 +1843,7 @@ def _mux_video_background_music_impl(
     source_video_path: Optional[str] = None,
     audio_chorus: bool = False,
     music_volume_pct: float = 35.0,
+    prefer_gpu: bool = False,
 ) -> None:
     """Один трек фона (путь уже проверен)."""
     out = Path(out_path)
@@ -1808,6 +1898,7 @@ def _mux_video_background_music_impl(
             spd=spd,
             log=log,
             target_video_bps=target_video_bps,
+            prefer_gpu=prefer_gpu,
         )
         return
 
@@ -1821,7 +1912,9 @@ def _mux_video_background_music_impl(
     )
 
     if want_speed:
-        vargs = libx264_encode_args_for_target(target_video_bps)
+        enc, enc_args = video_encoder_for_mux(
+            target_video_bps, prefer_gpu=prefer_gpu
+        )
         parts: List[str] = [f"[0:v]setpts=PTS/{spd:.9f}[vout]"]
         if want_chorus:
             parts.append(_atempo_chain("[1:a]", spd, "[aspd]"))
@@ -1848,8 +1941,8 @@ def _mux_video_background_music_impl(
                 "-map",
                 "[aout]",
                 "-c:v",
-                "libx264",
-                *vargs,
+                enc,
+                *enc_args,
                 "-pix_fmt",
                 "yuv420p",
                 "-movflags",
@@ -1937,6 +2030,7 @@ def mux_video_background_music(
     music_volume_pct: float = 35.0,
     music_path_alternates: Optional[List[str]] = None,
     cancel_check: CancelCheck = None,
+    prefer_gpu: bool = False,
 ) -> None:
     """
     Видео без звука + фоновая музыка (случайный отрезок снаружи).
@@ -1960,6 +2054,7 @@ def mux_video_background_music(
         source_video_path=source_video_path,
         audio_chorus=audio_chorus,
         music_volume_pct=music_volume_pct,
+        prefer_gpu=prefer_gpu,
     )
 
     if log:

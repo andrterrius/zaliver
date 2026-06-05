@@ -10,7 +10,13 @@ import sys
 import time
 import uuid
 from collections import deque
-from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Future,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    wait,
+)
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -22,7 +28,11 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from zaliver.processing.batch_paths import list_video_files
 from zaliver.processing.chunking import VideoInfo, build_n_even_chunks, probe_video
 from zaliver.processing.ffmpeg_probe import estimate_target_video_bps
-from zaliver.processing.fd_limit import cap_workers_for_fd_limit, raise_fd_limit_soft
+from zaliver.processing.fd_limit import (
+    cap_process_pool_workers,
+    max_process_pool_workers,
+    raise_fd_limit_soft,
+)
 from zaliver.processing.ffmpeg_merge import (
     BackgroundMusicUnavailableError,
     bgm_alternate_paths,
@@ -39,6 +49,7 @@ from zaliver.processing.ffmpeg_merge import (
     pick_best_h264_encoder,
     sync_ffmpeg_env_for_children,
 )
+from zaliver.processing.ffmpeg_gpu import gpu_pipeline_label, resolve_gpu_pipeline
 from zaliver.processing.gpu_detect import detect_gpus, format_gpu_list
 from zaliver.processing.pipeline import RandomUniquifyBounds, random_uniquify_settings
 from zaliver.processing.text_overlay import TextOverlaySettings, compute_scaled_overlay
@@ -91,6 +102,7 @@ def _mux_job_final_audio(
                 music_volume_pct=float(j.background_music_volume_pct),
                 music_path_alternates=_job_bgm_alternates(j, music_pool),
                 cancel_check=cancel_check,
+                prefer_gpu=bool(j.use_gpu_finalize),
             )
             return
         except RuntimeError as e:
@@ -119,6 +131,7 @@ def _mux_job_final_audio(
         audio_chorus=chorus,
         log=log,
         target_video_bps=j.target_video_bps,
+        prefer_gpu=bool(j.use_gpu_finalize),
     )
 
 
@@ -131,12 +144,25 @@ def _job_playback_speed(settings: Dict[str, Any]) -> float:
         return 1.0
 
 
-# Один чанк не короче стольки кадров (иначе накладные расходы > выгоды).
-_MIN_FRAMES_PER_CHUNK = 360
-# Не дробить ролик на больше стольки частей (склейка и диск).
-# При большом числе логических CPU (24/32/64) фиксированного лимита 24
-# недостаточно, чтобы загрузить машину на одном видео.
+# Минимальный размер фрагмента (кадры); слишком мелкие части ломают concat и тайминг.
+_MIN_FRAMES_PER_CHUNK = 180
+# Не дробить ролик на больше стольки частей (склейка, тайминг, диск).
 _MAX_CHUNKS_PER_VIDEO = 64
+# Сколько фрагментов на одно видеo относительно числа воркеров (больше → меньше простоя пула).
+_CHUNKS_PER_WORKER = 6
+# Склейка/mux ffmpeg — в фоне, чтобы не блокировать подачу чанков в process pool.
+_FINALIZE_MAX_THREADS = 48
+
+
+def _max_concurrent_encode_jobs(num_workers: int) -> int:
+    """Сколько роликов одновременно на этапе кадров (остальные — в очереди или склейке)."""
+    return max(1, num_workers // 2)
+
+
+def _finalize_thread_count(num_workers: int) -> int:
+    """Параллельные ffmpeg concat/mux; не привязываем к лимиту роликов на кадрах."""
+    cap = min(int(num_workers), max_process_pool_workers())
+    return max(2, min(_FINALIZE_MAX_THREADS, cap))
 
 
 @dataclass
@@ -157,8 +183,10 @@ class OutputJob:
     background_music_mix: bool = False
     background_music_volume_pct: float = 35.0
     text_overlay: Optional[Dict[str, Any]] = None
+    use_gpu_finalize: bool = False
     skip_youtube_upload: bool = False
     finalize_error: Optional[str] = None
+    finalize_submitted: bool = False
     done_frames: int = 0
     finished: bool = False
     chunk_mode: bool = False
@@ -222,6 +250,177 @@ def _skip_job_finalize_error(
         j.chunk_work_dir = None
 
 
+def _run_whole_file_finalize(
+    j: OutputJob,
+    *,
+    log: LogCallback,
+    n_jobs: int,
+    music_pool: List[str],
+    cancel_check: Callable[[], bool],
+) -> str:
+    """Склейка не нужна — mux звука. Возвращает ok | cancelled | error."""
+    video_only = j.outp.with_name(f"{j.outp.stem}._zaliver_video{j.outp.suffix}")
+    finalize_ok = False
+    try:
+        if check_ffmpeg() and video_only.is_file():
+            av_tmp = j.outp.with_name(f"{j.outp.stem}._zaliver_av{j.outp.suffix}")
+            try:
+                _mux_job_final_audio(
+                    j,
+                    video_only=str(video_only),
+                    av_tmp=str(av_tmp),
+                    log=log,
+                    n_jobs=n_jobs,
+                    music_pool=music_pool,
+                    cancel_check=cancel_check,
+                )
+                try:
+                    av_tmp.replace(j.outp)
+                except OSError:
+                    pass
+                finalize_ok = True
+            finally:
+                try:
+                    if video_only.is_file():
+                        video_only.unlink()
+                except OSError:
+                    pass
+        else:
+            try:
+                if video_only.is_file():
+                    video_only.replace(j.outp)
+                    finalize_ok = True
+            except OSError:
+                pass
+    except RuntimeError as e:
+        if str(e) == "cancelled":
+            return "cancelled"
+        _skip_job_finalize_error(j, e, log=log, n_jobs=n_jobs)
+        return "error"
+    except Exception as e:
+        _skip_job_finalize_error(j, e, log=log, n_jobs=n_jobs)
+        return "error"
+    if finalize_ok and not j.finalize_error:
+        j.finished = True
+        j.done_frames = j.info.frame_count
+        return "ok"
+    return "error"
+
+
+def _run_chunked_finalize(
+    j: OutputJob,
+    seg_paths: List[str],
+    work_dir: str,
+    *,
+    log: LogCallback,
+    n_jobs: int,
+    music_pool: List[str],
+    cancel_check: Callable[[], bool],
+) -> str:
+    """concat + mux в фоне. Возвращает ok | cancelled | error."""
+    finalize_ok = False
+    try:
+        bg_ok = merge_segments_with_source_audio(
+            seg_paths,
+            str(j.p),
+            str(j.outp),
+            work_dir=work_dir,
+            playback_speed=_job_playback_speed(j.settings),
+            audio_chorus=bool(j.settings.get("audio_chorus", False)),
+            log=log,
+            target_video_bps=j.target_video_bps,
+            background_music_path=j.background_music_path,
+            background_music_alternates=_job_bgm_alternates(j, music_pool),
+            music_video_meta=(int(j.info.frame_count), float(j.info.fps)),
+            background_music_mix=bool(j.background_music_mix),
+            background_music_volume_pct=float(j.background_music_volume_pct),
+            cancel_check=cancel_check,
+            prefer_gpu=bool(j.use_gpu_finalize),
+        )
+        if not bg_ok:
+            j.skip_youtube_upload = True
+        finalize_ok = True
+    except RuntimeError as e:
+        if str(e) == "cancelled":
+            return "cancelled"
+        if is_background_music_failure(e):
+            log(f"{j.tag(n_jobs)}: {e}")
+            log(
+                f"{j.tag(n_jobs)}: сохраняем со звуком исходника "
+                "(без фона), видео исключено из залива в YouTube."
+            )
+            j.skip_youtube_upload = True
+            try:
+                merge_segments_with_source_audio(
+                    seg_paths,
+                    str(j.p),
+                    str(j.outp),
+                    work_dir=work_dir,
+                    playback_speed=_job_playback_speed(j.settings),
+                    audio_chorus=bool(j.settings.get("audio_chorus", False)),
+                    log=log,
+                    target_video_bps=j.target_video_bps,
+                    background_music_path=None,
+                    cancel_check=cancel_check,
+                    prefer_gpu=bool(j.use_gpu_finalize),
+                )
+                finalize_ok = True
+            except RuntimeError as e2:
+                if str(e2) == "cancelled":
+                    return "cancelled"
+                _skip_job_finalize_error(j, e2, log=log, n_jobs=n_jobs)
+            except Exception as e2:
+                _skip_job_finalize_error(j, e2, log=log, n_jobs=n_jobs)
+        else:
+            _skip_job_finalize_error(j, e, log=log, n_jobs=n_jobs)
+    except Exception as e:
+        if is_background_music_failure(e):
+            log(f"{j.tag(n_jobs)}: {e}")
+            log(
+                f"{j.tag(n_jobs)}: сохраняем со звуком исходника "
+                "(без фона), видео исключено из залива в YouTube."
+            )
+            j.skip_youtube_upload = True
+            try:
+                merge_segments_with_source_audio(
+                    seg_paths,
+                    str(j.p),
+                    str(j.outp),
+                    work_dir=work_dir,
+                    playback_speed=_job_playback_speed(j.settings),
+                    audio_chorus=bool(j.settings.get("audio_chorus", False)),
+                    log=log,
+                    target_video_bps=j.target_video_bps,
+                    background_music_path=None,
+                    cancel_check=cancel_check,
+                    prefer_gpu=bool(j.use_gpu_finalize),
+                )
+                finalize_ok = True
+            except RuntimeError as e2:
+                if str(e2) == "cancelled":
+                    return "cancelled"
+                _skip_job_finalize_error(j, e2, log=log, n_jobs=n_jobs)
+            except Exception as e2:
+                _skip_job_finalize_error(j, e2, log=log, n_jobs=n_jobs)
+        else:
+            _skip_job_finalize_error(j, e, log=log, n_jobs=n_jobs)
+    if finalize_ok and not j.finalize_error:
+        wd_path = j.chunk_work_dir
+        if wd_path is not None:
+            try:
+                shutil.rmtree(wd_path, ignore_errors=True)
+            except OSError:
+                pass
+            j.chunk_work_dir = None
+        j.finished = True
+        j.done_frames = j.info.frame_count
+        j.chunk_progress.clear()
+        for i, (_, cnt, _) in enumerate(j.chunks):
+            j.chunk_progress[i] = cnt
+        return "ok"
+    return "error"
+
+
 def _try_enable_chunk_mode(
     job: OutputJob,
     num_workers: int,
@@ -235,16 +434,11 @@ def _try_enable_chunk_mode(
     if fc < _MIN_FRAMES_PER_CHUNK * 2:
         return
     n_by_size = max(2, (fc + _MIN_FRAMES_PER_CHUNK - 1) // _MIN_FRAMES_PER_CHUNK)
-    # Чанков делаем заметно больше, чем воркеров, чтобы пул не простаивал из‑за
-    # неодинаковой сложности участков (сцены/шум и т.п.).
-    # macOS: меньше частей и меньший коэффициент — ниже риск EMFILE при ffmpeg concat.
-    if sys.platform == "darwin":
-        max_chunks = min(_MAX_CHUNKS_PER_VIDEO, 48)
-        worker_factor = 2
-    else:
-        max_chunks = _MAX_CHUNKS_PER_VIDEO
-        worker_factor = 3
-    n_target = min(max_chunks, max(num_workers * worker_factor, 2), n_by_size)
+    n_target = min(
+        n_by_size,
+        max(num_workers * _CHUNKS_PER_WORKER, 2),
+        _MAX_CHUNKS_PER_VIDEO,
+    )
     specs = build_n_even_chunks(fc, n_target)
     if len(specs) < 2:
         return
@@ -274,6 +468,13 @@ class _PoolTaskMeta:
     chunk_idx: int  # -1 = целый ролик одним процессом
 
 
+@dataclass
+class _JobEncodeQueue:
+    """Очередь задач кадров одного выходного ролика."""
+
+    pending: deque[_PoolTaskMeta] = field(default_factory=deque)
+
+
 class ProcessingController(QObject):
     progress = pyqtSignal(int, int, str)
     finished = pyqtSignal(bool, str)
@@ -299,12 +500,6 @@ class ProcessingController(QObject):
         self._mp_cancel = None
 
         try:
-            # Informational: list detected adapters (NVIDIA/AMD/Intel) early in the log.
-            try:
-                log(format_gpu_list(detect_gpus()))
-            except Exception:
-                pass
-
             out_dir = Path(options["output_dir"])
             raw_selected = options.get("input_files") or []
             selected: List[Path] = []
@@ -368,15 +563,22 @@ class ProcessingController(QObject):
 
             total_all = max(1, sum(x[2].frame_count for x in plan))
             raise_fd_limit_soft()
-            raw_workers = max(1, int(options.get("num_workers", 1)))
-            num_workers = cap_workers_for_fd_limit(raw_workers)
-            if num_workers < raw_workers:
-                log(
-                    f"Потоков: {num_workers} (запрошено {raw_workers}) — "
-                    f"лимит открытых файлов ОС; на macOS уменьшите слайдер, "
-                    f"если снова Errno 24."
-                )
+            num_workers = cap_process_pool_workers(int(options.get("num_workers", 1)))
             use_gpu = bool(options.get("use_gpu", False))
+            use_gpu_finalize = bool(options.get("use_gpu_finalize", False))
+            if use_gpu or use_gpu_finalize:
+                try:
+                    log(format_gpu_list(detect_gpus()))
+                except Exception:
+                    pass
+            if use_gpu:
+                log("GPU обработка кадров: включена.")
+            else:
+                log("GPU обработка кадров: выключена (CPU, libx264).")
+            if use_gpu_finalize:
+                log("GPU склейка/mux: включена.")
+            else:
+                log("GPU склейка/mux: выключена (CPU, libx264).")
             randomize = bool(options.get("randomize_uniquify", True))
             ui_settings = dict(options.get("settings", {}))
             playback_speed_enabled = bool(
@@ -480,6 +682,7 @@ class ProcessingController(QObject):
                         background_music_mix=bg_mix,
                         background_music_volume_pct=bg_vol_opt,
                         text_overlay=text_overlay_cfg,
+                        use_gpu_finalize=use_gpu_finalize,
                     )
                     if randomize:
                         log(
@@ -524,9 +727,15 @@ class ProcessingController(QObject):
             if check_ffmpeg():
                 try:
                     enc, _ = pick_best_h264_encoder(prefer_gpu=use_gpu)
-                    if use_gpu and enc != "libx264":
-                        log(f"GPU-энкодер ffmpeg: {enc}")
-                    elif use_gpu and enc == "libx264":
+                    if use_gpu:
+                        pipe = resolve_gpu_pipeline(prefer_gpu=True, encoder=enc)
+                        log(
+                            f"Кадры — {gpu_pipeline_label(pipe)} · кодирование: {enc}"
+                        )
+                    if use_gpu_finalize:
+                        enc_f, _ = pick_best_h264_encoder(prefer_gpu=True)
+                        log(f"Склейка/mux — кодирование: {enc_f}")
+                    if use_gpu and enc == "libx264":
                         # Explain why we didn't pick a GPU encoder (if ffmpeg reports any).
                         txt = ffmpeg_encoder_list_text().lower()
                         hints: List[str] = []
@@ -571,29 +780,35 @@ class ProcessingController(QObject):
                         except OSError:
                             pass
 
-            def finish_error(msg: str, fut_map: Dict[Future, _PoolTaskMeta]) -> None:
+            def finish_error(
+                msg: str,
+                fut_map: Dict[Future, _PoolTaskMeta],
+                fin_map: Dict[Future, str],
+            ) -> None:
                 cancel_ev.set()
-                while fut_map:
-                    done, _ = wait(
-                        list(fut_map.keys()),
-                        timeout=2.0,
-                        return_when=FIRST_COMPLETED,
-                    )
-                    if not done:
-                        break
-                    for fut in done:
-                        fut_map.pop(fut, None)
+                for pending in (fut_map, fin_map):
+                    while pending:
+                        done, _ = wait(
+                            list(pending.keys()),
+                            timeout=2.0,
+                            return_when=FIRST_COMPLETED,
+                        )
+                        if not done:
+                            break
+                        for fut in done:
+                            pending.pop(fut, None)
+                            try:
+                                fut.result(timeout=0.1)
+                            except Exception:
+                                pass
+                    for fut in list(pending.keys()):
+                        pending.pop(fut, None)
                         try:
                             fut.result(timeout=0.1)
                         except Exception:
                             pass
-                for fut in list(fut_map.keys()):
-                    fut_map.pop(fut, None)
-                    try:
-                        fut.result(timeout=0.1)
-                    except Exception:
-                        pass
                 fut_map.clear()
+                fin_map.clear()
                 _cleanup_partial_outputs()
                 self.finished.emit(False, msg)
 
@@ -603,383 +818,319 @@ class ProcessingController(QObject):
                 initializer=init_worker,
                 initargs=(progress_q, cancel_ev),
             ) as pool:
-                pending_tasks: deque[_PoolTaskMeta] = deque()
-                chunked = [j for j in jobs if j.chunk_mode]
-                max_c = max((len(j.chunks) for j in chunked), default=0)
-                for ci in range(max_c):
-                    for j in chunked:
-                        if ci < len(j.chunks):
-                            pending_tasks.append(_PoolTaskMeta(j.job_id, ci))
-                for j in jobs:
-                    if not j.chunk_mode:
-                        pending_tasks.append(_PoolTaskMeta(j.job_id, -1))
-
-                futures: Dict[Future, _PoolTaskMeta] = {}
-                last_emit = 0.0
-
-                def global_done_frames() -> int:
-                    s = 0
-                    for j in jobs:
-                        if j.finished:
-                            s += j.info.frame_count
-                        else:
-                            s += min(j.estimated_done_frames(), j.info.frame_count)
-                    return s
-
-                def emit_progress_global(msg: str = "") -> None:
-                    nonlocal last_emit
-                    now = time.monotonic()
-                    cur = global_done_frames()
-                    if now - last_emit < 0.05 and msg == "":
-                        return
-                    last_emit = now
-                    inflight = len(futures)
-                    hint = msg or (
-                        f"Параллельно · задач в работе: {inflight} · "
-                        f"кадров ~{min(cur, total_all)}/{total_all}"
+                with ThreadPoolExecutor(
+                    max_workers=_finalize_thread_count(num_workers),
+                    thread_name_prefix="zaliver-finalize",
+                ) as finalize_pool:
+                    max_encode_jobs = _max_concurrent_encode_jobs(num_workers)
+                    log(
+                        f"Конвейер: до {max_encode_jobs} роликов на кадрах одновременно, "
+                        f"до {num_workers} потоков кадров, "
+                        f"{_finalize_thread_count(num_workers)} потоков склейки"
                     )
-                    self.progress.emit(min(cur, total_all), total_all, hint)
 
-                def drain_progress_queue() -> None:
-                    while True:
-                        try:
-                            jid, ci, d, t = progress_q.get_nowait()
-                        except queue.Empty:
-                            break
-                        j = jobs_by_id.get(jid)
-                        if j is None or t <= 0:
-                            continue
-                        if j.chunk_mode and ci >= 0:
-                            j.chunk_progress[ci] = max(j.chunk_progress.get(ci, 0), d)
-                            emit_progress_global(
-                                f"{j.tag(n_jobs)}: часть {ci + 1}/{len(j.chunks)} "
-                                f"кадры {d}/{t}"
-                            )
+                    job_encode: Dict[str, _JobEncodeQueue] = {}
+                    job_wait_queue: deque[str] = deque()
+                    for j in jobs:
+                        q = _JobEncodeQueue()
+                        if j.chunk_mode:
+                            for ci in range(len(j.chunks)):
+                                q.pending.append(_PoolTaskMeta(j.job_id, ci))
                         else:
-                            j.done_frames = max(j.done_frames, d)
-                            emit_progress_global(
-                                f"{j.tag(n_jobs)}: кадры {d}/{t}"
-                            )
+                            q.pending.append(_PoolTaskMeta(j.job_id, -1))
+                        job_encode[j.job_id] = q
+                        job_wait_queue.append(j.job_id)
 
-                def _scaled_text_overlay_for_job(j: OutputJob) -> Optional[Dict[str, Any]]:
-                    if not j.text_overlay:
-                        return None
-                    toc = TextOverlaySettings.from_dict(j.text_overlay)
-                    scaled = compute_scaled_overlay(toc, j.info.width, j.info.height)
-                    return scaled.to_dict() if scaled else None
+                    active_encode: Set[str] = set()
+                    active_encode_rr: deque[str] = deque()
 
-                def _submit_task(meta: _PoolTaskMeta) -> None:
-                    j = jobs_by_id[meta.job_id]
-                    scaled_overlay = _scaled_text_overlay_for_job(j)
-                    if meta.chunk_idx < 0:
-                        # Всегда считаем "видео без аудио" в temp-файл.
-                        # Аудио добавим позже (mux из исходника) в одном потоке координатора.
-                        temp_out = j.outp.with_name(
-                            f"{j.outp.stem}._zaliver_video{j.outp.suffix}"
-                        )
-                        task = {
-                            "video_path": str(j.p),
-                            "start_frame": 0,
-                            "frame_count": int(j.info.frame_count),
-                            "output_path": str(temp_out),
-                            "chunk_index": 0,
-                            "job_id": j.job_id,
-                            "settings": j.settings,
-                            "width": j.info.width,
-                            "height": j.info.height,
-                            "fps": j.info.fps,
-                            "use_gpu": use_gpu,
-                            "target_video_bps": j.target_video_bps,
-                            "text_overlay": scaled_overlay,
-                            "total_frames": int(j.info.frame_count),
-                        }
-                    else:
-                        start, cnt, seg = j.chunks[meta.chunk_idx]
-                        task = {
-                            "video_path": str(j.p),
-                            "start_frame": start,
-                            "frame_count": cnt,
-                            "output_path": str(seg),
-                            "chunk_index": meta.chunk_idx,
-                            "job_id": j.job_id,
-                            "settings": j.settings,
-                            "width": j.info.width,
-                            "height": j.info.height,
-                            "fps": j.info.fps,
-                            "use_gpu": use_gpu,
-                            "target_video_bps": j.target_video_bps,
-                            "text_overlay": scaled_overlay,
-                            "total_frames": int(j.info.frame_count),
-                        }
-                    fut = pool.submit(process_chunk_disk, task)
-                    futures[fut] = meta
+                    futures: Dict[Future, _PoolTaskMeta] = {}
+                    finalize_futures: Dict[Future, str] = {}
+                    last_emit = 0.0
 
-                def fill_pool() -> None:
-                    while len(futures) < num_workers and pending_tasks:
-                        _submit_task(pending_tasks.popleft())
+                    def _activate_encode_jobs() -> None:
+                        while (
+                            len(active_encode) < max_encode_jobs and job_wait_queue
+                        ):
+                            jid = job_wait_queue.popleft()
+                            if jid not in job_encode:
+                                continue
+                            if not job_encode[jid].pending:
+                                continue
+                            active_encode.add(jid)
+                            active_encode_rr.append(jid)
 
-                fill_pool()
-                while pending_tasks or futures:
-                    if cancelled():
-                        finish_error("Отменено.", futures)
-                        return
-
-                    drain_progress_queue()
-                    emit_progress_global()
-
-                    if not pending_tasks and not futures:
-                        break
-
-                    if futures:
-                        done, _ = wait(
-                            list(futures.keys()),
-                            timeout=0.08,
-                            return_when=FIRST_COMPLETED,
-                        )
-                    else:
-                        done = []
-                        fill_pool()
-                        continue
-
-                    drain_progress_queue()
-                    for fut in done:
-                        meta = futures.pop(fut, None)
-                        if meta is None:
-                            continue
+                    def _release_encode_slot(job_id: str) -> None:
+                        active_encode.discard(job_id)
                         try:
-                            res = fut.result()
-                        except Exception as e:
-                            res = {"ok": False, "error": str(e)}
-                        if not res.get("ok"):
-                            err = res.get("error") or "unknown"
-                            msg = (
-                                "Отменено."
-                                if err == "cancelled"
-                                else f"Ошибка обработки: {err}"
-                            )
-                            finish_error(msg, futures)
+                            active_encode_rr.remove(job_id)
+                        except ValueError:
+                            pass
+                        _activate_encode_jobs()
+
+                    def _pick_next_encode_task() -> Optional[_PoolTaskMeta]:
+                        _activate_encode_jobs()
+                        if not active_encode_rr:
+                            return None
+                        n = len(active_encode_rr)
+                        for _ in range(n):
+                            jid = active_encode_rr[0]
+                            active_encode_rr.rotate(-1)
+                            q = job_encode.get(jid)
+                            if q and q.pending:
+                                return q.pending.popleft()
+                        return None
+
+                    def _has_encode_work_left() -> bool:
+                        if job_wait_queue or active_encode:
+                            return True
+                        return any(q.pending for q in job_encode.values())
+
+                    def global_done_frames() -> int:
+                        s = 0
+                        for j in jobs:
+                            if j.finished:
+                                s += j.info.frame_count
+                            else:
+                                s += min(j.estimated_done_frames(), j.info.frame_count)
+                        return s
+
+                    def emit_progress_global(msg: str = "") -> None:
+                        nonlocal last_emit
+                        now = time.monotonic()
+                        cur = global_done_frames()
+                        if now - last_emit < 0.05 and msg == "":
                             return
+                        last_emit = now
+                        inflight = len(futures)
+                        finalizing = len(finalize_futures)
+                        encoding_jobs = len(active_encode)
+                        waiting_jobs = len(job_wait_queue)
+                        hint = msg or (
+                            f"Кадры: {inflight} задач · {encoding_jobs} роликов · "
+                            f"очередь {waiting_jobs} · склейка {finalizing} · "
+                            f"~{min(cur, total_all)}/{total_all}"
+                        )
+                        self.progress.emit(min(cur, total_all), total_all, hint)
+
+                    def drain_progress_queue() -> None:
+                        while True:
+                            try:
+                                jid, ci, d, t = progress_q.get_nowait()
+                            except queue.Empty:
+                                break
+                            j = jobs_by_id.get(jid)
+                            if j is None or t <= 0:
+                                continue
+                            if j.chunk_mode and ci >= 0:
+                                j.chunk_progress[ci] = max(
+                                    j.chunk_progress.get(ci, 0), d
+                                )
+                                emit_progress_global(
+                                    f"{j.tag(n_jobs)}: часть {ci + 1}/{len(j.chunks)} "
+                                    f"кадры {d}/{t}"
+                                )
+                            else:
+                                j.done_frames = max(j.done_frames, d)
+                                emit_progress_global(
+                                    f"{j.tag(n_jobs)}: кадры {d}/{t}"
+                                )
+
+                    def _scaled_text_overlay_for_job(
+                        j: OutputJob,
+                    ) -> Optional[Dict[str, Any]]:
+                        if not j.text_overlay:
+                            return None
+                        toc = TextOverlaySettings.from_dict(j.text_overlay)
+                        scaled = compute_scaled_overlay(
+                            toc, j.info.width, j.info.height
+                        )
+                        return scaled.to_dict() if scaled else None
+
+                    def _submit_task(meta: _PoolTaskMeta) -> None:
                         j = jobs_by_id[meta.job_id]
-                        if cancelled():
-                            finish_error("Отменено.", futures)
-                            return
+                        scaled_overlay = _scaled_text_overlay_for_job(j)
                         if meta.chunk_idx < 0:
-                            video_only = j.outp.with_name(
+                            temp_out = j.outp.with_name(
                                 f"{j.outp.stem}._zaliver_video{j.outp.suffix}"
                             )
-                            finalize_ok = False
-                            try:
-                                if check_ffmpeg() and video_only.is_file():
-                                    av_tmp = j.outp.with_name(
-                                        f"{j.outp.stem}._zaliver_av{j.outp.suffix}"
-                                    )
-                                    try:
-                                        _mux_job_final_audio(
-                                            j,
-                                            video_only=str(video_only),
-                                            av_tmp=str(av_tmp),
-                                            log=log,
-                                            n_jobs=n_jobs,
-                                            music_pool=music_pool,
-                                            cancel_check=cancelled,
-                                        )
-                                        try:
-                                            av_tmp.replace(j.outp)
-                                        except OSError:
-                                            pass
-                                        finalize_ok = True
-                                    finally:
-                                        try:
-                                            if video_only.is_file():
-                                                video_only.unlink()
-                                        except OSError:
-                                            pass
-                                else:
-                                    try:
-                                        if video_only.is_file():
-                                            video_only.replace(j.outp)
-                                            finalize_ok = True
-                                    except OSError:
-                                        pass
-                            except RuntimeError as e:
-                                if str(e) == "cancelled":
-                                    finish_error("Отменено.", futures)
-                                    return
-                                _skip_job_finalize_error(
-                                    j, e, log=log, n_jobs=n_jobs
-                                )
-                            except Exception as e:
-                                _skip_job_finalize_error(
-                                    j, e, log=log, n_jobs=n_jobs
-                                )
-                            if finalize_ok and not j.finalize_error:
-                                j.finished = True
-                                j.done_frames = j.info.frame_count
-                                log(f"{j.tag(n_jobs)}: Сохранено: {j.outp.name}")
-                                try:
-                                    self.output_saved.emit(
-                                        str(j.outp), not j.skip_youtube_upload
-                                    )
-                                except RuntimeError:
-                                    pass
-                                log(
-                                    f"{j.tag(n_jobs)}: Пауза 3 секунды после сохранения "
-                                    f"(файл: {str(j.outp)!r})…"
-                                )
-                                time.sleep(3.0)
+                            task = {
+                                "video_path": str(j.p),
+                                "start_frame": 0,
+                                "frame_count": int(j.info.frame_count),
+                                "output_path": str(temp_out),
+                                "chunk_index": 0,
+                                "job_id": j.job_id,
+                                "settings": j.settings,
+                                "width": j.info.width,
+                                "height": j.info.height,
+                                "fps": j.info.fps,
+                                "use_gpu": use_gpu,
+                                "target_video_bps": j.target_video_bps,
+                                "text_overlay": scaled_overlay,
+                                "total_frames": int(j.info.frame_count),
+                            }
                         else:
-                            j.chunks_finished.add(meta.chunk_idx)
-                            if len(j.chunks_finished) >= len(j.chunks):
-                                seg_paths = [str(t[2]) for t in j.chunks]
-                                wd = str(
-                                    j.chunk_work_dir
-                                    or (out_dir / ".zaliver_chunks" / j.job_id)
-                                )
-                                finalize_ok = False
-                                try:
-                                    bg_ok = merge_segments_with_source_audio(
-                                        seg_paths,
-                                        str(j.p),
-                                        str(j.outp),
-                                        work_dir=wd,
-                                        playback_speed=_job_playback_speed(j.settings),
-                                        audio_chorus=bool(
-                                            j.settings.get("audio_chorus", False)
-                                        ),
-                                        log=log,
-                                        target_video_bps=j.target_video_bps,
-                                        background_music_path=j.background_music_path,
-                                        background_music_alternates=_job_bgm_alternates(
-                                            j, music_pool
-                                        ),
-                                        music_video_meta=(
-                                            int(j.info.frame_count),
-                                            float(j.info.fps),
-                                        ),
-                                        background_music_mix=bool(j.background_music_mix),
-                                        background_music_volume_pct=float(
-                                            j.background_music_volume_pct
-                                        ),
-                                        cancel_check=cancelled,
-                                    )
-                                    if not bg_ok:
-                                        j.skip_youtube_upload = True
-                                    finalize_ok = True
-                                except RuntimeError as e:
-                                    if str(e) == "cancelled":
-                                        finish_error("Отменено.", futures)
-                                        return
-                                    if is_background_music_failure(e):
-                                        log(f"{j.tag(n_jobs)}: {e}")
-                                        log(
-                                            f"{j.tag(n_jobs)}: сохраняем со звуком исходника "
-                                            "(без фона), видео исключено из залива в YouTube."
-                                        )
-                                        j.skip_youtube_upload = True
-                                        try:
-                                            merge_segments_with_source_audio(
-                                                seg_paths,
-                                                str(j.p),
-                                                str(j.outp),
-                                                work_dir=wd,
-                                                playback_speed=_job_playback_speed(
-                                                    j.settings
-                                                ),
-                                                audio_chorus=bool(
-                                                    j.settings.get("audio_chorus", False)
-                                                ),
-                                                log=log,
-                                                target_video_bps=j.target_video_bps,
-                                                background_music_path=None,
-                                                cancel_check=cancelled,
-                                            )
-                                            finalize_ok = True
-                                        except RuntimeError as e2:
-                                            if str(e2) == "cancelled":
-                                                finish_error("Отменено.", futures)
-                                                return
-                                            _skip_job_finalize_error(
-                                                j, e2, log=log, n_jobs=n_jobs
-                                            )
-                                        except Exception as e2:
-                                            _skip_job_finalize_error(
-                                                j, e2, log=log, n_jobs=n_jobs
-                                            )
-                                    else:
-                                        _skip_job_finalize_error(
-                                            j, e, log=log, n_jobs=n_jobs
-                                        )
-                                except Exception as e:
-                                    if is_background_music_failure(e):
-                                        log(f"{j.tag(n_jobs)}: {e}")
-                                        log(
-                                            f"{j.tag(n_jobs)}: сохраняем со звуком исходника "
-                                            "(без фона), видео исключено из залива в YouTube."
-                                        )
-                                        j.skip_youtube_upload = True
-                                        try:
-                                            merge_segments_with_source_audio(
-                                                seg_paths,
-                                                str(j.p),
-                                                str(j.outp),
-                                                work_dir=wd,
-                                                playback_speed=_job_playback_speed(
-                                                    j.settings
-                                                ),
-                                                audio_chorus=bool(
-                                                    j.settings.get("audio_chorus", False)
-                                                ),
-                                                log=log,
-                                                target_video_bps=j.target_video_bps,
-                                                background_music_path=None,
-                                                cancel_check=cancelled,
-                                            )
-                                            finalize_ok = True
-                                        except RuntimeError as e2:
-                                            if str(e2) == "cancelled":
-                                                finish_error("Отменено.", futures)
-                                                return
-                                            _skip_job_finalize_error(
-                                                j, e2, log=log, n_jobs=n_jobs
-                                            )
-                                        except Exception as e2:
-                                            _skip_job_finalize_error(
-                                                j, e2, log=log, n_jobs=n_jobs
-                                            )
-                                    else:
-                                        _skip_job_finalize_error(
-                                            j, e, log=log, n_jobs=n_jobs
-                                        )
-                                if finalize_ok and not j.finalize_error:
-                                    wd_path = j.chunk_work_dir
-                                    if wd_path is not None:
-                                        try:
-                                            shutil.rmtree(wd_path, ignore_errors=True)
-                                        except OSError:
-                                            pass
-                                        j.chunk_work_dir = None
-                                    j.finished = True
-                                    j.done_frames = j.info.frame_count
-                                    j.chunk_progress.clear()
-                                    for i, (_, cnt, _) in enumerate(j.chunks):
-                                        j.chunk_progress[i] = cnt
-                                    log(
-                                        f"{j.tag(n_jobs)}: Сохранено: {j.outp.name} "
-                                        f"(склеено из {len(j.chunks)} частей)"
-                                    )
-                                    try:
-                                        self.output_saved.emit(
-                                            str(j.outp), not j.skip_youtube_upload
-                                        )
-                                    except RuntimeError:
-                                        pass
-                                    log(
-                                        f"{j.tag(n_jobs)}: Пауза 3 секунды после сохранения "
-                                        f"(файл: {str(j.outp)!r})…"
-                                    )
-                                    time.sleep(3.0)
+                            start, cnt, seg = j.chunks[meta.chunk_idx]
+                            task = {
+                                "video_path": str(j.p),
+                                "start_frame": start,
+                                "frame_count": cnt,
+                                "output_path": str(seg),
+                                "chunk_index": meta.chunk_idx,
+                                "job_id": j.job_id,
+                                "settings": j.settings,
+                                "width": j.info.width,
+                                "height": j.info.height,
+                                "fps": j.info.fps,
+                                "use_gpu": use_gpu,
+                                "target_video_bps": j.target_video_bps,
+                                "text_overlay": scaled_overlay,
+                                "total_frames": int(j.info.frame_count),
+                            }
+                        fut = pool.submit(process_chunk_disk, task)
+                        futures[fut] = meta
+
+                    def _submit_whole_finalize(j: OutputJob) -> None:
+                        if j.finalize_submitted:
+                            return
+                        j.finalize_submitted = True
+                        ff = finalize_pool.submit(
+                            _run_whole_file_finalize,
+                            j,
+                            log=log,
+                            n_jobs=n_jobs,
+                            music_pool=music_pool,
+                            cancel_check=cancelled,
+                        )
+                        finalize_futures[ff] = j.job_id
+
+                    def _submit_chunked_finalize(j: OutputJob) -> None:
+                        if j.finalize_submitted:
+                            return
+                        j.finalize_submitted = True
+                        seg_paths = [str(t[2]) for t in j.chunks]
+                        wd = str(
+                            j.chunk_work_dir
+                            or (out_dir / ".zaliver_chunks" / j.job_id)
+                        )
+                        ff = finalize_pool.submit(
+                            _run_chunked_finalize,
+                            j,
+                            seg_paths,
+                            wd,
+                            log=log,
+                            n_jobs=n_jobs,
+                            music_pool=music_pool,
+                            cancel_check=cancelled,
+                        )
+                        finalize_futures[ff] = j.job_id
+
+                    def _emit_job_saved(j: OutputJob) -> None:
+                        if j.chunk_mode:
+                            log(
+                                f"{j.tag(n_jobs)}: Сохранено: {j.outp.name} "
+                                f"(склеено из {len(j.chunks)} частей)"
+                            )
+                        else:
+                            log(f"{j.tag(n_jobs)}: Сохранено: {j.outp.name}")
+                        try:
+                            self.output_saved.emit(
+                                str(j.outp), not j.skip_youtube_upload
+                            )
+                        except RuntimeError:
+                            pass
+
+                    def _handle_finalize_done(fut: Future) -> bool:
+                        job_id = finalize_futures.pop(fut, None)
+                        if job_id is None:
+                            return False
+                        j = jobs_by_id.get(job_id)
+                        if j is None:
+                            return False
+                        try:
+                            status = fut.result()
+                        except Exception as e:
+                            _skip_job_finalize_error(j, e, log=log, n_jobs=n_jobs)
+                            emit_progress_global()
+                            return False
+                        if status == "cancelled":
+                            finish_error("Отменено.", futures, finalize_futures)
+                            return True
+                        if status == "ok" and not j.finalize_error:
+                            _emit_job_saved(j)
                         emit_progress_global()
+                        return False
+
+                    def fill_pool() -> None:
+                        while len(futures) < num_workers:
+                            meta = _pick_next_encode_task()
+                            if meta is None:
+                                break
+                            _submit_task(meta)
+
                     fill_pool()
+                    while futures or finalize_futures or _has_encode_work_left():
+                        if cancelled():
+                            finish_error("Отменено.", futures, finalize_futures)
+                            return
+
+                        drain_progress_queue()
+                        emit_progress_global()
+
+                        if not futures and not finalize_futures and not _has_encode_work_left():
+                            break
+
+                        wait_set = list(futures.keys()) + list(
+                            finalize_futures.keys()
+                        )
+                        if wait_set:
+                            done, _ = wait(
+                                wait_set,
+                                timeout=0.08,
+                                return_when=FIRST_COMPLETED,
+                            )
+                        else:
+                            done = []
+                            fill_pool()
+                            continue
+
+                        drain_progress_queue()
+                        for fut in done:
+                            if fut in finalize_futures:
+                                if _handle_finalize_done(fut):
+                                    return
+                                continue
+                            meta = futures.pop(fut, None)
+                            if meta is None:
+                                continue
+                            try:
+                                res = fut.result()
+                            except Exception as e:
+                                res = {"ok": False, "error": str(e)}
+                            if not res.get("ok"):
+                                err = res.get("error") or "unknown"
+                                msg = (
+                                    "Отменено."
+                                    if err == "cancelled"
+                                    else f"Ошибка обработки: {err}"
+                                )
+                                finish_error(msg, futures, finalize_futures)
+                                return
+                            j = jobs_by_id[meta.job_id]
+                            if cancelled():
+                                finish_error("Отменено.", futures, finalize_futures)
+                                return
+                            if meta.chunk_idx < 0:
+                                _submit_whole_finalize(j)
+                                _release_encode_slot(j.job_id)
+                            else:
+                                j.chunks_finished.add(meta.chunk_idx)
+                                if len(j.chunks_finished) >= len(j.chunks):
+                                    _submit_chunked_finalize(j)
+                                    _release_encode_slot(j.job_id)
+                            emit_progress_global()
+                        fill_pool()
 
             if bool(options.get("youtube_upload_after_processing")) and total_all > 0:
                 cur99 = (total_all * 99) // 100

@@ -59,7 +59,7 @@ from PyQt6.QtWidgets import (
 )
 
 from zaliver.db.video_store import VideoStore
-from zaliver.db.upload_store import UploadedVideo, UploadStore
+from zaliver.db.upload_store import UploadedVideo, UploadStore, uploaded_at_sort_ts
 from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI, DolphinAntyPublicAPI
 from zaliver.antydetect.local_antidetect_api import (
     DEFAULT_LOCAL_API_BASE_URL,
@@ -709,24 +709,23 @@ class _UploadedVideoRow(QWidget):
 
 
 def _default_workers() -> int:
-    from zaliver.processing.fd_limit import cap_workers_for_fd_limit
+    from zaliver.processing.fd_limit import cap_process_pool_workers
 
-    n = max(1, os.cpu_count() or 2)
-    return cap_workers_for_fd_limit(n)
+    return cap_process_pool_workers(max(1, os.cpu_count() or 2))
 
 
 def _max_worker_slider() -> int:
-    from zaliver.processing.fd_limit import cap_workers_for_fd_limit
+    from zaliver.processing.fd_limit import max_process_pool_workers
 
-    return cap_workers_for_fd_limit(max(1, os.cpu_count() or 2))
+    return max_process_pool_workers()
 
 
 def _apply_thread_slider_fd_cap(slider: "SmoothSlider") -> None:
-    """После поднятия ulimit пересчитать максимум/значение слайдера потоков."""
+    """После поднятия ulimit обновить максимум слайдера потоков."""
     cap_max = _max_worker_slider()
     slider.setMaximum(cap_max)
     if slider.value() > cap_max:
-        slider.setValue(_default_workers())
+        slider.setValue(cap_max)
 
 
 class MainWindow(QWidget):
@@ -1001,18 +1000,28 @@ class MainWindow(QWidget):
         ff_row.addWidget(self.btn_install_ffmpeg, 0, Qt.AlignmentFlag.AlignRight)
         pg.addWidget(self._ffmpeg_row, 1, 0, 1, 2)
 
-        self.use_gpu = ToggleSwitch("Использовать GPU для кодирования (если доступно)")
-        self.use_gpu.setChecked(True)
+        self.use_gpu = ToggleSwitch("GPU при обработке кадров (декод, фильтры, кодирование)")
+        self.use_gpu.setChecked(
+            bool(self._settings.value("use_gpu_enabled", False, type=bool))
+        )
+        self.use_gpu.toggled.connect(self._save_folder_settings)
+        self.use_gpu_finalize = ToggleSwitch(
+            "GPU при склейке и mux звука (concat, ускорение, фон)"
+        )
+        self.use_gpu_finalize.setChecked(
+            bool(self._settings.value("use_gpu_finalize_enabled", False, type=bool))
+        )
+        self.use_gpu_finalize.toggled.connect(self._save_folder_settings)
         gpu_hint = QLabel(
-            "Если ffmpeg поддерживает NVENC/QSV/AMF, сегменты будут кодироваться быстрее. "
-            "Эффекты считаются в CPU, ускоряется именно энкод."
+            "Независимо друг от друга. Можно кадры на CPU, а склейку на GPU (NVENC/QSV/AMF)."
         )
         gpu_hint.setObjectName("hint")
         gpu_hint.setWordWrap(True)
         pg.addWidget(self.use_gpu, 2, 0, 1, 2)
-        pg.addWidget(gpu_hint, 3, 0, 1, 2)
+        pg.addWidget(self.use_gpu_finalize, 3, 0, 1, 2)
+        pg.addWidget(gpu_hint, 4, 0, 1, 2)
 
-        pg.addWidget(QLabel("Потоков процессов:"), 4, 0, Qt.AlignmentFlag.AlignVCenter)
+        pg.addWidget(QLabel("Потоков процессов:"), 5, 0, Qt.AlignmentFlag.AlignVCenter)
         thr_row = QHBoxLayout()
         thr_row.setSpacing(8)
         thr_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
@@ -1020,7 +1029,7 @@ class MainWindow(QWidget):
         thr_row.addWidget(self.thread_label, 0, Qt.AlignmentFlag.AlignVCenter)
         w_thr = QWidget()
         w_thr.setLayout(thr_row)
-        pg.addWidget(w_thr, 4, 1, Qt.AlignmentFlag.AlignVCenter)
+        pg.addWidget(w_thr, 5, 1, Qt.AlignmentFlag.AlignVCenter)
 
         fx = QGroupBox("Уникализация (лёгкие эффекты)")
         fx_layout = QVBoxLayout(fx)
@@ -1828,19 +1837,23 @@ class MainWindow(QWidget):
         self, videos: list[UploadedVideo], mode: str
     ) -> list[UploadedVideo]:
         m = (mode or "views").strip().lower()
+
+        def _tiebreak(v: UploadedVideo) -> tuple[float, int]:
+            return (-uploaded_at_sort_ts(v.uploaded_at), -int(v.id))
+
         if m == "likes":
 
             def key_l(v: UploadedVideo) -> tuple:
                 if v.stats_unavailable or v.like_count is None:
-                    return (1, 0, v.uploaded_at or "", v.id)
-                return (0, -int(v.like_count), v.uploaded_at or "", v.id)
+                    return (1, 0, *_tiebreak(v))
+                return (0, -int(v.like_count), *_tiebreak(v))
 
             return sorted(videos, key=key_l)
 
         def key_v(v: UploadedVideo) -> tuple:
             if v.stats_unavailable or v.view_count is None:
-                return (1, 0, v.uploaded_at or "", v.id)
-            return (0, -int(v.view_count), v.uploaded_at or "", v.id)
+                return (1, 0, *_tiebreak(v))
+            return (0, -int(v.view_count), *_tiebreak(v))
 
         return sorted(videos, key=key_v)
 
@@ -1881,7 +1894,10 @@ class MainWindow(QWidget):
         else:
             for s in sessions:
                 flat.extend(m.get(int(s.id), []) or [])
-            flat.sort(key=lambda v: (v.uploaded_at or "", v.id), reverse=True)
+            flat.sort(
+                key=lambda v: (uploaded_at_sort_ts(v.uploaded_at), int(v.id)),
+                reverse=True,
+            )
         mode = getattr(self, "_uploaded_sort_mode", "views")
         return self._sorted_uploaded_videos(flat, mode)
 
@@ -2306,6 +2322,8 @@ class MainWindow(QWidget):
             combo.addItem("Все сессии", 0)
             for s in sessions:
                 up = int(s.uploaded_ok or 0)
+                if up <= 0:
+                    continue
                 proc = int(s.processed_videos or 0)
                 dt = _format_upload_combo_datetime(s.started_at or "")
                 combo.addItem(f"{dt} ({up}/{proc})", int(s.id))
@@ -2389,6 +2407,13 @@ class MainWindow(QWidget):
             self._uploaded_stats_status.setText("")
         if hasattr(self, "_btn_uploaded_check"):
             self._btn_uploaded_check.setEnabled(True)
+        if hasattr(self, "_uploaded_all") and self._uploaded_all:
+            mode = getattr(self, "_uploaded_sort_mode", "views")
+            self._uploaded_all = self._sorted_uploaded_videos(self._uploaded_all, mode)
+            self._stop_uploaded_list_render()
+            self._uploaded_list.clear()
+            self._update_uploaded_side_panel(self._uploaded_all)
+            self._start_uploaded_list_render()
 
     def _open_uploaded_url(self, url: str) -> None:
         u = (url or "").strip()
@@ -2594,6 +2619,21 @@ class MainWindow(QWidget):
 
         last_upload_map = self._upload_store.last_uploaded_at_by_profiles(ids)
         dlg_profiles = [p for _pid, p in profile_rows]
+        total_dlg_profiles = len(dlg_profiles)
+
+        dlg_query = QLineEdit()
+        dlg_query.setPlaceholderText("Поиск по профилям (имя, ID, теги)…")
+        dlg_filter_timer = QTimer(dlg)
+        dlg_filter_timer.setSingleShot(True)
+
+        def _dlg_profiles_matched(q_raw: str) -> list[dict[str, object]]:
+            tokens = profile_search_tokens(q_raw)
+            matched: list[tuple[int, dict[str, object]]] = []
+            for i, p in enumerate(dlg_profiles):
+                if isinstance(p, dict) and profile_matches_search(p, tokens):
+                    matched.append((i, p))
+            matched.sort(key=lambda ip: profile_search_rank(ip[1], tokens, q_raw, ip[0]))
+            return [p for _i, p in matched]
 
         def _dlg_upload_pause_click(pid: str) -> None:
             self._ask_reset_upload_cooldown_for_profile(
@@ -2608,10 +2648,26 @@ class MainWindow(QWidget):
             on_upload_pause_click=_dlg_upload_pause_click,
         )
         dlg_interaction.populate(dlg_profiles, last_upload_map, preserve_checked=preselect)
-        dlg_by_id = self._profiles_by_id_map(dlg_profiles)
+
+        def _apply_dlg_profiles_filter() -> None:
+            visible = _dlg_profiles_matched(dlg_query.text())
+            pids = [_profile_id(p) for p in visible]
+            pids = [x for x in pids if x]
+            filtered_last = {k: last_upload_map[k] for k in pids if k in last_upload_map}
+            dlg_interaction.populate(visible, filtered_last)
+
+        def _schedule_dlg_profiles_filter() -> None:
+            dlg_filter_timer.start(150)
+
+        dlg_filter_timer.timeout.connect(_apply_dlg_profiles_filter)
+        dlg_query.textChanged.connect(_schedule_dlg_profiles_filter)
 
         def _dlg_select_filter(mode: str) -> None:
-            dlg_interaction.select_checked_by_filter(mode, dlg_by_id, last_upload_map)
+            visible = _dlg_profiles_matched(dlg_query.text())
+            by_id = self._profiles_by_id_map(visible)
+            pids = list(by_id.keys())
+            filtered_last = {k: last_upload_map[k] for k in pids if k in last_upload_map}
+            dlg_interaction.select_checked_by_filter(mode, by_id, filtered_last)
 
         n_inputs = len(self._selected_input_files or [])
         try:
@@ -2626,17 +2682,19 @@ class MainWindow(QWidget):
 
         def _update_dlg_upload_profile_count() -> None:
             n = dlg_interaction.checked_count()
-            uniq_line = f"Будет уникализировано видео: {uniquify_planned}"
+            shown = dlg_interaction.lw.count()
+            q = dlg_query.text().strip()
+            lines = [f"Будет уникализировано видео: {uniquify_planned}"]
+            if q:
+                lines.append(f"Показано профилей: {shown} из {total_dlg_profiles}")
             if n <= 0:
-                dlg_profile_count_lbl.setText(
-                    uniq_line
-                    + "\nВыбрано профилей для залива: 0 — без залива в YouTube "
+                lines.append(
+                    "Выбрано профилей для залива: 0 — без залива в YouTube "
                     "(только уникализация)."
                 )
             else:
-                dlg_profile_count_lbl.setText(
-                    uniq_line + f"\nВыбрано профилей для залива: {n}"
-                )
+                lines.append(f"Выбрано профилей для залива: {n}")
+            dlg_profile_count_lbl.setText("\n".join(lines))
 
         dlg_interaction.selection_changed.connect(_update_dlg_upload_profile_count)
         _update_dlg_upload_profile_count()
@@ -2673,6 +2731,7 @@ class MainWindow(QWidget):
         profiles_col_l.setContentsMargins(0, 0, 0, 0)
         profiles_col_l.setSpacing(8)
         profiles_col_l.addWidget(dlg_profile_count_lbl)
+        profiles_col_l.addWidget(dlg_query)
         dlg_sel_row, _dlg_checked_lbl = self._build_profiles_selection_toolbar(
             dlg,
             dlg_interaction,
@@ -2854,6 +2913,14 @@ class MainWindow(QWidget):
             self.background_music.setChecked(
                 bool(self._settings.value("background_music_enabled", False, type=bool))
             )
+        if hasattr(self, "use_gpu"):
+            self.use_gpu.setChecked(
+                bool(self._settings.value("use_gpu_enabled", False, type=bool))
+            )
+        if hasattr(self, "use_gpu_finalize"):
+            self.use_gpu_finalize.setChecked(
+                bool(self._settings.value("use_gpu_finalize_enabled", False, type=bool))
+            )
         if hasattr(self, "background_music_mix"):
             self.background_music_mix.setChecked(
                 bool(self._settings.value("background_music_mix_with_source", False, type=bool))
@@ -2946,6 +3013,12 @@ class MainWindow(QWidget):
         if hasattr(self, "background_music"):
             self._settings.setValue(
                 "background_music_enabled", bool(self.background_music.isChecked())
+            )
+        if hasattr(self, "use_gpu"):
+            self._settings.setValue("use_gpu_enabled", bool(self.use_gpu.isChecked()))
+        if hasattr(self, "use_gpu_finalize"):
+            self._settings.setValue(
+                "use_gpu_finalize_enabled", bool(self.use_gpu_finalize.isChecked())
             )
         if hasattr(self, "background_music_mix"):
             self._settings.setValue(
@@ -4435,6 +4508,7 @@ class MainWindow(QWidget):
             "input_files": list(self._selected_input_files),
             "num_workers": int(self.thread_slider.value()),
             "use_gpu": bool(self.use_gpu.isChecked()),
+            "use_gpu_finalize": bool(self.use_gpu_finalize.isChecked()),
             "settings": st.to_dict(),
             "randomize_uniquify": self.random_uniquify.isChecked(),
             "copies_per_file": int(self.copies_per_file.value()),

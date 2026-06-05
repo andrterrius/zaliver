@@ -36,6 +36,18 @@ _NOT_FOR_KIDS_LABEL_RE = re.compile(
     r"not\s*made\s*for\s*kids",
     re.I,
 )
+_CHANNEL_REMOVED_PAGE_TITLE_RE = re.compile(
+    r"удален\s+с\s+youtube|removed\s+from\s+youtube",
+    re.I,
+)
+_CHANNEL_REMOVED_LABEL_RE = re.compile(
+    r"канал\s+удален|channel\s+removed|removed\s+from\s+youtube",
+    re.I,
+)
+_SWITCH_ACCOUNT_LABEL_RE = re.compile(
+    r"сменить\s+аккаунт|switch\s+account",
+    re.I,
+)
 
 # Playwright при connect_over_cdp шлёт тело файла по CDP и режет ~50 MiB.
 # DOM.setFileInputFiles с путями на хосте браузера обходит это (Chromium читает файл сам).
@@ -145,6 +157,273 @@ def _studio_channel_creation_dialog_visible(page) -> bool:
         return dlg.count() > 0 and dlg.first.is_visible()
     except Exception:
         return False
+
+
+def _studio_channel_removed_page_visible(page) -> bool:
+    """Страница апелляции: канал удалён/заблокирован при входе в Studio."""
+    try:
+        url = (page.url or "").lower()
+        if "channel-appeal" in url:
+            return True
+    except Exception:
+        pass
+    try:
+        appeal = page.locator("yttou-channel-appeal-app")
+        if appeal.count() > 0 and appeal.first.is_visible(timeout=500):
+            return True
+    except Exception:
+        pass
+    try:
+        title = page.locator(
+            "yttou-channel-appeal-status h2#title, "
+            "yttou-shared-display-page h2#title"
+        )
+        if title.count() > 0 and title.first.is_visible(timeout=500):
+            txt = (title.first.inner_text(timeout=1_500) or "").strip()
+            if _CHANNEL_REMOVED_PAGE_TITLE_RE.search(txt):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _studio_account_item_removed_label(item) -> str:
+    for sel in (
+        "yt-formatted-string[secondary]",
+        "tp-yt-paper-item-body yt-formatted-string[secondary]",
+    ):
+        loc = item.locator(sel)
+        try:
+            if loc.count() > 0:
+                label = (loc.first.inner_text(timeout=1_500) or "").strip()
+                if label:
+                    return label
+        except Exception:
+            continue
+    try:
+        body_lines = item.locator("tp-yt-paper-item-body yt-formatted-string")
+        if body_lines.count() >= 3:
+            label = (body_lines.nth(2).inner_text(timeout=1_500) or "").strip()
+            if label:
+                return label
+    except Exception:
+        pass
+    return ""
+
+
+def _studio_account_item_channel_name(item) -> str:
+    try:
+        title = item.locator("yt-formatted-string#channel-title")
+        if title.count() > 0:
+            name = (title.first.inner_text(timeout=1_500) or "").strip()
+            if name:
+                return name
+    except Exception:
+        pass
+    try:
+        lines = [
+            ln.strip()
+            for ln in (item.inner_text(timeout=1_500) or "").splitlines()
+            if ln.strip()
+        ]
+        if lines:
+            return lines[0]
+    except Exception:
+        pass
+    return ""
+
+
+def _studio_account_item_is_removed(item) -> bool:
+    return bool(_CHANNEL_REMOVED_LABEL_RE.search(_studio_account_item_removed_label(item)))
+
+
+def _studio_account_item_is_selected(item) -> bool:
+    try:
+        selected = item.locator("yt-icon#selected")
+        if selected.count() == 0:
+            return False
+        return selected.first.is_visible(timeout=300)
+    except Exception:
+        return False
+
+
+def _studio_collect_available_account_switcher_channels(page) -> list[tuple[int, str]]:
+    """
+    Каналы в меню «Аккаунты», не помеченные как удалённые.
+    Возвращает (индекс, имя).
+    """
+    switcher = page.locator(
+        'ytd-multi-page-menu-renderer[menu-style="multi-page-menu-style-type-switcher"]'
+    ).or_(
+        page.locator("ytd-multi-page-menu-renderer").filter(
+            has=page.locator(
+                "ytd-simple-menu-header-renderer yt-formatted-string",
+                has_text=re.compile(r"аккаунты|accounts", re.I),
+            )
+        )
+    )
+    try:
+        switcher.first.wait_for(state="visible", timeout=15_000)
+    except Exception:
+        return []
+
+    items = switcher.first.locator("ytd-account-item-renderer")
+    count = items.count()
+    available: list[tuple[int, str]] = []
+    for i in range(count):
+        item = items.nth(i)
+        name = _studio_account_item_channel_name(item) or f"#{i + 1}"
+        if _studio_account_item_is_removed(item):
+            _log(f"Studio: канал «{name}» пропущен — помечен как удалённый.")
+            continue
+        available.append((i, name))
+    return available
+
+
+def _studio_open_account_switcher_menu(page) -> None:
+    """Профиль → «Сменить аккаунт» → меню выбора канала."""
+    avatar = (
+        page.locator("yttou-channel-appeal-app #avatar-btn")
+        .or_(page.locator("ytd-topbar-menu-button-renderer #avatar-btn"))
+        .or_(page.locator("button#avatar-btn"))
+    )
+    avatar.first.wait_for(state="visible", timeout=15_000)
+    avatar.first.click(timeout=30_000)
+    page.wait_for_timeout(600)
+
+    switch_item = (
+        page.locator("ytd-compact-link-renderer")
+        .filter(
+            has=page.locator(
+                "yt-formatted-string#label", has_text=_SWITCH_ACCOUNT_LABEL_RE
+            )
+        )
+        .locator("tp-yt-paper-item")
+        .or_(
+            page.locator("ytd-compact-link-renderer yt-formatted-string#label").filter(
+                has_text=_SWITCH_ACCOUNT_LABEL_RE
+            )
+        )
+        .or_(page.get_by_text(_SWITCH_ACCOUNT_LABEL_RE))
+    )
+    switch_item.first.wait_for(state="visible", timeout=15_000)
+    switch_item.first.click(timeout=30_000)
+    page.wait_for_timeout(800)
+
+
+def _studio_click_account_switcher_channel(page, item_index: int, channel_name: str) -> None:
+    switcher = page.locator(
+        'ytd-multi-page-menu-renderer[menu-style="multi-page-menu-style-type-switcher"]'
+    ).or_(
+        page.locator("ytd-multi-page-menu-renderer").filter(
+            has=page.locator(
+                "ytd-simple-menu-header-renderer yt-formatted-string",
+                has_text=re.compile(r"аккаунты|accounts", re.I),
+            )
+        )
+    )
+    item = switcher.first.locator("ytd-account-item-renderer").nth(item_index)
+    clicked = False
+    for sel in (
+        item.locator("tp-yt-paper-icon-item"),
+        item.locator("tp-yt-paper-item"),
+        item.locator('[role="option"]'),
+        item,
+    ):
+        try:
+            target = sel.first
+            target.wait_for(state="visible", timeout=5_000)
+            target.click(timeout=30_000)
+            clicked = True
+            break
+        except Exception:
+            continue
+    if not clicked:
+        raise YoutubeStudioError(
+            f"YouTube Studio: не удалось выбрать канал «{channel_name}» в меню аккаунтов."
+        )
+
+
+def _studio_wait_after_account_switch(page, *, timeout_s: float = 60.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if not _studio_channel_removed_page_visible(page):
+            return
+        try:
+            url = (page.url or "").lower()
+            if "studio.youtube.com" in url and "channel-appeal" not in url:
+                return
+        except Exception:
+            pass
+        time.sleep(0.5)
+
+
+def _studio_handle_channel_removed_if_present(page) -> bool:
+    """
+    Канал удалён при входе в Studio: профиль → сменить аккаунт → другой канал.
+    После переключения возвращаемся в Studio и продолжаем сценарий.
+    """
+    if not _studio_channel_removed_page_visible(page):
+        return False
+
+    _log("Studio: канал удалён/заблокирован — пробуем сменить аккаунт…")
+    _studio_open_account_switcher_menu(page)
+    available = _studio_collect_available_account_switcher_channels(page)
+    if not available:
+        raise YoutubeStudioError(
+            "YouTube Studio: все каналы в аккаунте удалены или заблокированы — "
+            "сменить аккаунт на доступный канал не удалось."
+        )
+
+    switcher = page.locator(
+        'ytd-multi-page-menu-renderer[menu-style="multi-page-menu-style-type-switcher"]'
+    ).or_(
+        page.locator("ytd-multi-page-menu-renderer").filter(
+            has=page.locator(
+                "ytd-simple-menu-header-renderer yt-formatted-string",
+                has_text=re.compile(r"аккаунты|accounts", re.I),
+            )
+        )
+    )
+    items = switcher.first.locator("ytd-account-item-renderer")
+
+    pick: tuple[int, str] | None = None
+    for idx, name in available:
+        try:
+            if not _studio_account_item_is_selected(items.nth(idx)):
+                pick = (idx, name)
+                break
+        except Exception:
+            pick = (idx, name)
+            break
+    if pick is None:
+        pick = available[0]
+
+    pick_idx, pick_name = pick
+    _log(f"Studio: выбираем канал «{pick_name}» (позиция {pick_idx + 1})…")
+    _studio_click_account_switcher_channel(page, pick_idx, pick_name)
+    _studio_wait_after_account_switch(page)
+
+    try:
+        url = (page.url or "").lower()
+    except Exception:
+        url = ""
+    if "studio.youtube.com" not in url or "channel-appeal" in url:
+        _log("Studio: после смены аккаунта — переход на https://studio.youtube.com/ …")
+        page.goto(
+            "https://studio.youtube.com/",
+            wait_until="domcontentloaded",
+            timeout=120_000,
+        )
+        page.wait_for_timeout(800)
+
+    if _studio_channel_removed_page_visible(page):
+        raise YoutubeStudioError(
+            "YouTube Studio: после смены аккаунта всё ещё открыта страница удалённого канала."
+        )
+
+    _log("Studio: смена аккаунта выполнена — продолжаем сценарий Studio.")
+    return True
 
 
 def _studio_handle_channel_creation_dialog_if_present(page) -> bool:
@@ -359,6 +638,8 @@ def _studio_handle_interrupt_dialogs_if_present(page) -> bool:
     handled = False
     for _ in range(5):
         step_handled = False
+        if _studio_handle_channel_removed_if_present(page):
+            step_handled = True
         if handle_channel_switcher_if_present(page):
             step_handled = True
         if _studio_handle_channel_creation_dialog_if_present(page):
@@ -443,6 +724,7 @@ def _studio_click_create_then_add_video(page, *, login_credentials=None) -> None
     )
     _log(f"Studio: после загрузки URL: {page.url!r}")
     _studio_try_google_login_if_needed(page, login_credentials)
+    _studio_handle_channel_removed_if_present(page)
     _studio_handle_onboarding_dialogs_if_present(page)
 
     create = (

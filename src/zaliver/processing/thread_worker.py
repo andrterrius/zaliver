@@ -895,23 +895,14 @@ class ProcessingController(QObject):
                                 s += min(j.estimated_done_frames(), j.info.frame_count)
                         return s
 
-                    def emit_progress_global(msg: str = "") -> None:
+                    def emit_progress_global() -> None:
                         nonlocal last_emit
                         now = time.monotonic()
                         cur = global_done_frames()
-                        if now - last_emit < 0.05 and msg == "":
+                        if now - last_emit < 0.05:
                             return
                         last_emit = now
-                        inflight = len(futures)
-                        finalizing = len(finalize_futures)
-                        encoding_jobs = len(active_encode)
-                        waiting_jobs = len(job_wait_queue)
-                        hint = msg or (
-                            f"Кадры: {inflight} задач · {encoding_jobs} роликов · "
-                            f"очередь {waiting_jobs} · склейка {finalizing} · "
-                            f"~{min(cur, total_all)}/{total_all}"
-                        )
-                        self.progress.emit(min(cur, total_all), total_all, hint)
+                        self.progress.emit(min(cur, total_all), total_all, "")
 
                     def drain_progress_queue() -> None:
                         while True:
@@ -926,15 +917,10 @@ class ProcessingController(QObject):
                                 j.chunk_progress[ci] = max(
                                     j.chunk_progress.get(ci, 0), d
                                 )
-                                emit_progress_global(
-                                    f"{j.tag(n_jobs)}: часть {ci + 1}/{len(j.chunks)} "
-                                    f"кадры {d}/{t}"
-                                )
+                                emit_progress_global()
                             else:
                                 j.done_frames = max(j.done_frames, d)
-                                emit_progress_global(
-                                    f"{j.tag(n_jobs)}: кадры {d}/{t}"
-                                )
+                                emit_progress_global()
 
                     def _scaled_text_overlay_for_job(
                         j: OutputJob,

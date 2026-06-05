@@ -4741,7 +4741,8 @@ class MainWindow(QWidget):
     def _on_progress(self, cur: int, total: int, msg: str) -> None:
         self.progress.setRange(0, max(1, total))
         self.progress.setValue(cur)
-        self.progress_label.setText(msg or f"{cur} / {total} кадров")
+        if msg:
+            self.progress_label.setText(msg)
 
     def _on_finished(self, ok: bool, msg: str) -> None:
         self._upload_session_processing_done = True

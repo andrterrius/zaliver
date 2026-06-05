@@ -94,7 +94,12 @@ from zaliver.ui.widgets import (
 )
 from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
 
-from zaliver.processing.ffmpeg_merge import check_ffmpeg_tools
+from zaliver.processing.ffmpeg_merge import (
+    MACOS_BREW_FFMPEG_FORMULA,
+    check_ffmpeg_tools,
+    macos_ffmpeg_needs_full_install,
+    needs_ffmpeg_install_prompt,
+)
 # Чтобы в UI не было "лимитов", используем максимально широкие диапазоны,
 # но оставляем минимальные логические ограничения там, где отрицательные значения
 # ломают смысл (например, количество копий).
@@ -2705,17 +2710,26 @@ class MainWindow(QWidget):
         self._sync_ffmpeg_install_row()
 
     def _sync_ffmpeg_install_row(self) -> None:
-        if check_ffmpeg_tools():
+        if not needs_ffmpeg_install_prompt():
             self._ffmpeg_row.setVisible(False)
             return
         self._ffmpeg_row.setVisible(True)
         if sys.platform == "darwin":
-            hint = (
-                "ffmpeg/ffprobe не найдены — без них обработка недоступна. "
-                "Кнопка справа: Homebrew (brew install ffmpeg, с drawtext для текста), "
-                "иначе статическая сборка evermeet.cx. На Apple Silicon лучше brew."
-            )
+            btn = f"Установить {MACOS_BREW_FFMPEG_FORMULA}"
+            self.btn_install_ffmpeg.setText(btn)
+            if macos_ffmpeg_needs_full_install():
+                hint = (
+                    "Найден обычный ffmpeg без фильтра drawtext (текст на видео не заработает). "
+                    f"Нажмите «{btn}» — Homebrew поставит полную сборку "
+                    f"(brew install {MACOS_BREW_FFMPEG_FORMULA})."
+                )
+            else:
+                hint = (
+                    "ffmpeg/ffprobe не найдены — без них обработка недоступна. "
+                    f"Кнопка справа: Homebrew (brew install {MACOS_BREW_FFMPEG_FORMULA})."
+                )
         else:
+            self.btn_install_ffmpeg.setText("Установить ffmpeg")
             hint = (
                 "ffmpeg/ffprobe не найдены — без них обработка недоступна. "
                 "Нажмите кнопку справа (winget или pip, нужен интернет)."
@@ -2766,12 +2780,17 @@ class MainWindow(QWidget):
                 "Дождитесь окончания обработки видео или нажмите «Отмена».",
             )
             return
-        if check_ffmpeg_tools():
+        if not needs_ffmpeg_install_prompt():
             self._sync_ffmpeg_install_row()
             return
 
         dlg = QProgressDialog(self)
-        dlg.setWindowTitle("Установка ffmpeg")
+        dlg_title = (
+            f"Установка {MACOS_BREW_FFMPEG_FORMULA}"
+            if sys.platform == "darwin"
+            else "Установка ffmpeg"
+        )
+        dlg.setWindowTitle(dlg_title)
         dlg.setLabelText("Подготовка…")
         dlg.setRange(0, 100)
         dlg.setValue(0)

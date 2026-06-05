@@ -36,9 +36,9 @@ def _ffmpeg_error_message(code: int, stderr_lines: list[str]) -> str:
     if detail:
         low = detail.lower()
         if "no such filter" in low and "drawtext" in low:
-            from zaliver.processing.ffmpeg_merge import FFMPEG_DRAWTEXT_MISSING_MSG
+            from zaliver.processing.ffmpeg_merge import ffmpeg_drawtext_missing_user_message
 
-            return FFMPEG_DRAWTEXT_MISSING_MSG
+            return ffmpeg_drawtext_missing_user_message()
         if len(detail) > 700:
             detail = detail[-700:]
         return f"ffmpeg exited with code {code}: {detail}"

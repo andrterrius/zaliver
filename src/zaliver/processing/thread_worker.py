@@ -25,11 +25,11 @@ from zaliver.processing.ffmpeg_probe import estimate_target_video_bps
 from zaliver.processing.fd_limit import cap_workers_for_fd_limit, raise_fd_limit_soft
 from zaliver.processing.ffmpeg_merge import (
     BackgroundMusicUnavailableError,
-    FFMPEG_DRAWTEXT_MISSING_MSG,
     bgm_alternate_paths,
     check_ffmpeg,
     check_ffmpeg_tools,
     encoder_runtime_error,
+    ffmpeg_drawtext_missing_user_message,
     ffmpeg_encoder_list_text,
     ffmpeg_has_drawtext,
     is_background_music_failure,
@@ -411,7 +411,7 @@ class ProcessingController(QObject):
             sync_ffmpeg_env_for_children()
 
             if text_overlay_cfg and not ffmpeg_has_drawtext():
-                self.finished.emit(False, FFMPEG_DRAWTEXT_MISSING_MSG)
+                self.finished.emit(False, ffmpeg_drawtext_missing_user_message())
                 return
 
             ctx = multiprocessing.get_context("spawn")

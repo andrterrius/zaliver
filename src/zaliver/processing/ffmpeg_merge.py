@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -123,6 +124,8 @@ def set_ffmpeg_executable(path: Optional[str]) -> None:
         _explicit_ffmpeg = None
     else:
         _explicit_ffmpeg = str(path).strip()
+        if sys.platform == "darwin" and ffmpeg_binary_has_drawtext(_explicit_ffmpeg):
+            persist_ffmpeg_path(_explicit_ffmpeg)
     _reset_ffmpeg_capability_cache()
     sync_ffmpeg_env_for_children()
 
@@ -148,9 +151,19 @@ def _env_path() -> Optional[str]:
     return str(p.resolve()) if p.is_file() else None
 
 
+def _ffmpeg_which() -> Optional[str]:
+    if sys.platform == "darwin":
+        hit = shutil.which("ffmpeg", path=_darwin_tool_path_env().get("PATH"))
+        if hit:
+            return hit
+    return shutil.which("ffmpeg")
+
+
 def _scan_os_path() -> Optional[str]:
     """Walk PATH entries (GUI apps on Windows often miss entries that a new shell has)."""
     path_env = os.environ.get("PATH", "")
+    if sys.platform == "darwin":
+        path_env = _darwin_tool_path_env().get("PATH", path_env)
     if not path_env:
         return None
     names = ("ffmpeg.exe", "ffmpeg") if sys.platform == "win32" else ("ffmpeg",)
@@ -216,15 +229,144 @@ def _winget_ffmpeg_glob() -> Optional[str]:
 
 
 def _unix_candidates() -> List[Path]:
+    if sys.platform == "darwin":
+        return _darwin_ffmpeg_std_paths()
     return [
         Path("/opt/homebrew/bin/ffmpeg"),
         Path("/usr/local/bin/ffmpeg"),
     ]
 
 
+def _darwin_ffmpeg_std_paths() -> List[Path]:
+    """Стандартные пути Homebrew (GUI .app часто не видит их в PATH)."""
+    paths = [
+        # ffmpeg-full — полная сборка с drawtext (harfbuzz + freetype)
+        Path("/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"),
+        Path("/usr/local/opt/ffmpeg-full/bin/ffmpeg"),
+        Path("/opt/homebrew/bin/ffmpeg"),
+        Path("/opt/homebrew/opt/ffmpeg/bin/ffmpeg"),
+        Path("/usr/local/bin/ffmpeg"),
+        Path("/usr/local/opt/ffmpeg/bin/ffmpeg"),
+    ]
+    for brew in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew"):
+        if not Path(brew).is_file():
+            continue
+        for formula in ("ffmpeg-full", "ffmpeg"):
+            try:
+                r = subprocess.run(
+                    [brew, "--prefix", formula],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=20,
+                    creationflags=_popen_flags(),
+                )
+                if r.returncode == 0:
+                    prefix = (r.stdout or "").strip()
+                    if prefix:
+                        paths.append(Path(prefix) / "bin" / "ffmpeg")
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+    seen: set[str] = set()
+    out: List[Path] = []
+    for p in paths:
+        key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+def _darwin_tool_path_env() -> dict[str, str]:
+    env = dict(os.environ)
+    extra = [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+    ]
+    cur = env.get("PATH", "")
+    parts = extra + ([cur] if cur else [])
+    env["PATH"] = os.pathsep.join(parts)
+    return env
+
+
+def ffmpeg_path_config_file() -> Path:
+    return Path.home() / "Library/Application Support/Zaliver/ffmpeg.path"
+
+
+def load_persisted_ffmpeg_path() -> Optional[str]:
+    if sys.platform != "darwin":
+        return None
+    cfg = ffmpeg_path_config_file()
+    if not cfg.is_file():
+        return None
+    try:
+        raw = cfg.read_text(encoding="utf-8").strip()
+        if not raw:
+            return None
+        p = Path(raw)
+        if p.is_file():
+            return str(p.resolve())
+    except OSError:
+        pass
+    return None
+
+
+def persist_ffmpeg_path(exe: Optional[str]) -> None:
+    if sys.platform != "darwin":
+        return
+    cfg = ffmpeg_path_config_file()
+    try:
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        if not exe:
+            cfg.unlink(missing_ok=True)
+            return
+        resolved = str(Path(exe).resolve())
+        if ffmpeg_binary_has_drawtext(resolved):
+            cfg.write_text(resolved + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def clear_persisted_ffmpeg_path() -> None:
+    if sys.platform != "darwin":
+        return
+    try:
+        ffmpeg_path_config_file().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _macos_install_candidates() -> List[Path]:
     """ffmpeg, установленный приложением (evermeet / Application Support)."""
-    return [Path.home() / "Library" / "Application Support" / "Zaliver" / "bin" / "ffmpeg"]
+    return [zaliver_managed_ffmpeg_path()]
+
+
+def zaliver_managed_ffmpeg_path() -> Path:
+    return Path.home() / "Library" / "Application Support" / "Zaliver" / "bin" / "ffmpeg"
+
+
+def remove_zaliver_managed_ffmpeg() -> None:
+    """Удалить старую копию ffmpeg, скачанную приложением (evermeet без drawtext)."""
+    if sys.platform != "darwin":
+        return
+    managed = zaliver_managed_ffmpeg_path()
+    managed_s = str(managed)
+    try:
+        if managed.is_file():
+            managed_s = str(managed.resolve())
+    except OSError:
+        pass
+    persisted = load_persisted_ffmpeg_path()
+    try:
+        managed.unlink(missing_ok=True)
+    except OSError:
+        pass
+    if persisted and persisted == managed_s:
+        clear_persisted_ffmpeg_path()
 
 
 def _bundle_roots() -> List[Path]:
@@ -270,37 +412,59 @@ def _bundled_ffmpeg() -> Optional[str]:
     return None
 
 
+def _add_ffmpeg_candidate(paths: List[str], seen: set[str], raw: Optional[str | Path]) -> None:
+    if not raw:
+        return
+    try:
+        p = Path(raw)
+        if not p.is_file():
+            return
+        resolved = str(p.resolve())
+    except OSError:
+        return
+    if resolved in seen:
+        return
+    seen.add(resolved)
+    paths.append(resolved)
+
+
+def _ffmpeg_candidate_paths() -> List[str]:
+    """Все известные пути к ffmpeg в порядке приоритета (без дубликатов)."""
+    paths: List[str] = []
+    seen: set[str] = set()
+    if _explicit_ffmpeg:
+        _add_ffmpeg_candidate(paths, seen, _explicit_ffmpeg)
+    _add_ffmpeg_candidate(paths, seen, load_persisted_ffmpeg_path())
+    if sys.platform == "darwin":
+        for c in _darwin_ffmpeg_std_paths():
+            _add_ffmpeg_candidate(paths, seen, c)
+    _add_ffmpeg_candidate(paths, seen, _env_path())
+    _add_ffmpeg_candidate(paths, seen, _bundled_ffmpeg())
+    _add_ffmpeg_candidate(paths, seen, _ffmpeg_which())
+    _add_ffmpeg_candidate(paths, seen, _scan_os_path())
+    if sys.platform == "win32":
+        platform_cands = _windows_install_candidates()
+    elif sys.platform == "darwin":
+        platform_cands = _macos_install_candidates()
+    else:
+        platform_cands = _unix_candidates()
+    for c in platform_cands:
+        _add_ffmpeg_candidate(paths, seen, c)
+    _add_ffmpeg_candidate(paths, seen, _winget_ffmpeg_glob())
+    return paths
+
+
 def resolve_ffmpeg_executable() -> Optional[str]:
     """Return absolute path to ffmpeg, or None."""
-    if _explicit_ffmpeg:
-        p = Path(_explicit_ffmpeg)
-        if p.is_file():
-            return str(p.resolve())
-    hit = _env_path()
-    if hit:
-        return hit
-    bundled = _bundled_ffmpeg()
-    if bundled:
-        return bundled
-    w = shutil.which("ffmpeg")
-    if w:
-        return w
-    scanned = _scan_os_path()
-    if scanned:
-        return scanned
-    if sys.platform == "win32":
-        cands = _windows_install_candidates()
-    elif sys.platform == "darwin":
-        cands = _unix_candidates() + _macos_install_candidates()
-    else:
-        cands = _unix_candidates()
-    for c in cands:
-        try:
-            if c.is_file():
-                return str(c.resolve())
-        except OSError:
-            continue
-    return _winget_ffmpeg_glob()
+    candidates = _ffmpeg_candidate_paths()
+    if not candidates:
+        return None
+    if sys.platform == "darwin":
+        for exe in candidates:
+            if ffmpeg_binary_has_drawtext(exe):
+                persist_ffmpeg_path(exe)
+                return exe
+    return candidates[0]
 
 
 def check_ffmpeg() -> bool:
@@ -316,12 +480,96 @@ def check_ffmpeg_tools() -> bool:
     return resolve_ffprobe_executable() is not None
 
 
+MACOS_BREW_FFMPEG_FORMULA = "ffmpeg-full"
+
+
+def macos_ffmpeg_needs_full_install() -> bool:
+    """На macOS есть ffmpeg, но без drawtext (обычный brew ffmpeg / evermeet)."""
+    if sys.platform != "darwin":
+        return False
+    if not check_ffmpeg():
+        return False
+    return not ffmpeg_has_drawtext()
+
+
+def needs_ffmpeg_install_prompt() -> bool:
+    """Показывать в UI строку с кнопкой установки ffmpeg."""
+    if not check_ffmpeg():
+        return True
+    from zaliver.processing.ffmpeg_probe import resolve_ffprobe_executable
+
+    if resolve_ffprobe_executable() is None:
+        return True
+    if macos_ffmpeg_needs_full_install():
+        return True
+    return False
+
+
 _drawtext_available: Optional[bool] = None
+_drawtext_by_exe: dict[str, bool] = {}
+_DRAWTEXT_FILTER_RE = re.compile(r"(?:^|\s|\.)drawtext(?:\s|$|[.:(])", re.MULTILINE)
 
 
 def _reset_ffmpeg_capability_cache() -> None:
     global _drawtext_available
     _drawtext_available = None
+    _drawtext_by_exe.clear()
+
+
+def ffmpeg_binary_has_drawtext(exe: str) -> bool:
+    """True if this ffmpeg binary includes the drawtext filter."""
+    try:
+        key = str(Path(exe).resolve())
+    except OSError:
+        key = exe
+    cached = _drawtext_by_exe.get(key)
+    if cached is not None:
+        return cached
+    ok = False
+    try:
+        r = subprocess.run(
+            [key, "-hide_banner", "-filters"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            creationflags=_popen_flags(),
+        )
+        out = f"{r.stdout or ''}\n{r.stderr or ''}"
+        ok = bool(_DRAWTEXT_FILTER_RE.search(out))
+        if not ok:
+            probe = subprocess.run(
+                [
+                    key,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:s=32x32:d=0.01",
+                    "-vf",
+                    "drawtext=text='t':fontsize=12:x=1:y=1",
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "null",
+                    "-",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                creationflags=_popen_flags(),
+            )
+            err = f"{probe.stderr or ''}\n{probe.stdout or ''}".lower()
+            ok = probe.returncode == 0 and "no such filter" not in err
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    _drawtext_by_exe[key] = ok
+    return ok
 
 
 def ffmpeg_has_drawtext() -> bool:
@@ -333,30 +581,40 @@ def ffmpeg_has_drawtext() -> bool:
     if not exe:
         _drawtext_available = False
         return False
-    try:
-        r = subprocess.run(
-            [exe, "-hide_banner", "-filters"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-            creationflags=_popen_flags(),
-        )
-        out = f"{r.stdout or ''}\n{r.stderr or ''}"
-        _drawtext_available = r.returncode == 0 and (
-            " drawtext " in out.replace("\n", " ") or "\ndrawtext " in out
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        _drawtext_available = False
+    _drawtext_available = ffmpeg_binary_has_drawtext(exe)
     return _drawtext_available
 
 
 FFMPEG_DRAWTEXT_MISSING_MSG = (
-    "Текст на видео требует фильтр drawtext в ffmpeg (libfreetype). "
-    "Установите полную сборку: Windows — «Установить ffmpeg» (winget) или "
-    "Gyan.FFmpeg; macOS — brew install ffmpeg (не минимальную статику без drawtext)."
+    "Текст на видео требует фильтр drawtext в ffmpeg (libfreetype + libharfbuzz). "
+    "На macOS: brew install ffmpeg-full (или brew install harfbuzz freetype && brew reinstall ffmpeg)."
 )
+
+
+def ffmpeg_drawtext_missing_user_message() -> str:
+    """Сообщение об ошибке с путём к ffmpeg и шагами для macOS."""
+    exe = resolve_ffmpeg_executable()
+    checked = _ffmpeg_candidate_paths()
+    msg = FFMPEG_DRAWTEXT_MISSING_MSG
+    if exe:
+        msg += f"\n\nСейчас Zaliver использует:\n{exe}"
+    if sys.platform == "darwin":
+        msg += (
+            "\n\nВ Терминале (проверка — должна быть строка drawtext):\n"
+            "  /opt/homebrew/opt/ffmpeg-full/bin/ffmpeg -filters 2>&1 | grep drawtext\n"
+            "  /opt/homebrew/bin/ffmpeg -filters 2>&1 | grep drawtext\n\n"
+            "Установка полной сборки с drawtext:\n"
+            "  brew install ffmpeg-full\n"
+            "  # или:\n"
+            "  brew install harfbuzz freetype fribidi fontconfig\n"
+            "  brew reinstall ffmpeg\n\n"
+            "Затем удалите старые копии Zaliver и перезапустите приложение:\n"
+            "  rm ~/Library/Application\\ Support/Zaliver/bin/ffmpeg\n"
+            "  rm ~/Library/Application\\ Support/Zaliver/ffmpeg.path"
+        )
+        if checked:
+            msg += "\n\nПроверенные пути:\n" + "\n".join(f"  • {p}" for p in checked[:8])
+    return msg
 
 
 def run_ffmpeg(

@@ -26,6 +26,13 @@ def resolve_gpu_pipeline(*, prefer_gpu: bool, encoder: str) -> Optional[GpuPipel
         return None
     enc = str(encoder).strip().lower()
     flt = ffmpeg_filters_list_text().lower()
+    if enc == "h264_videotoolbox":
+        return GpuPipeline(
+            name="videotoolbox",
+            global_args=(),
+            input_args=("-hwaccel", "videotoolbox"),
+            gpu_eq=False,
+        )
     if enc == "h264_nvenc" and "scale_cuda" in flt:
         return GpuPipeline(
             name="cuda",
@@ -57,6 +64,7 @@ def gpu_pipeline_label(pipeline: Optional[GpuPipeline]) -> str:
         "cuda": "NVIDIA CUDA (декод + scale_cuda, eq/noise на CPU)",
         "qsv": "Intel QSV (декод + scale/vpp_qsv, шум на CPU)",
         "d3d11va": "AMD/Windows D3D11VA (декод на GPU, фильтры на CPU)",
+        "videotoolbox": "Apple VideoToolbox (HW-декод, фильтры на CPU)",
     }
     return labels.get(pipeline.name, pipeline.name)
 
@@ -198,7 +206,11 @@ def build_gpu_uniquify_filtergraph(
         scale_pct=scale_pct,
     )
 
-    chain = [*gpu_parts, "hwdownload,format=nv12", *cpu_tail]
+    chain = (
+        [*gpu_parts, *cpu_tail]
+        if pipeline.name == "videotoolbox"
+        else [*gpu_parts, "hwdownload,format=nv12", *cpu_tail]
+    )
     tail_s = ",".join(chain)
     base = f"[0:v]{tail_s}[v0]"
     if text_overlay and text_overlay.lines:
@@ -220,6 +232,7 @@ def is_gpu_filter_fallback_error(stderr_lines: List[str]) -> bool:
         "cuda",
         "qsv",
         "d3d11",
+        "videotoolbox",
         "no device available",
         "cannot load",
         "error reinitializing filters",

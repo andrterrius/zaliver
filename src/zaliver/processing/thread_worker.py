@@ -573,10 +573,17 @@ class ProcessingController(QObject):
                     pass
             if use_gpu:
                 log("GPU обработка кадров: включена.")
+            elif sys.platform == "darwin":
+                log(
+                    "GPU обработка кадров: выключена (фильтры CPU; "
+                    "кодирование — VideoToolbox по умолчанию)."
+                )
             else:
                 log("GPU обработка кадров: выключена (CPU, libx264).")
             if use_gpu_finalize:
                 log("GPU склейка/mux: включена.")
+            elif sys.platform == "darwin":
+                log("GPU склейка/mux: выключена (VideoToolbox/libx264 по умолчанию).")
             else:
                 log("GPU склейка/mux: выключена (CPU, libx264).")
             randomize = bool(options.get("randomize_uniquify", True))
@@ -727,7 +734,14 @@ class ProcessingController(QObject):
             if check_ffmpeg():
                 try:
                     enc, _ = pick_best_h264_encoder(prefer_gpu=use_gpu)
-                    if use_gpu:
+                    if enc == "h264_videotoolbox":
+                        log("Кодирование: h264_videotoolbox (Apple VideoToolbox).")
+                        if use_gpu:
+                            pipe = resolve_gpu_pipeline(
+                                prefer_gpu=True, encoder=enc
+                            )
+                            log(f"Кадры — {gpu_pipeline_label(pipe)}")
+                    elif use_gpu:
                         pipe = resolve_gpu_pipeline(prefer_gpu=True, encoder=enc)
                         log(
                             f"Кадры — {gpu_pipeline_label(pipe)} · кодирование: {enc}"
@@ -736,21 +750,35 @@ class ProcessingController(QObject):
                         enc_f, _ = pick_best_h264_encoder(prefer_gpu=True)
                         log(f"Склейка/mux — кодирование: {enc_f}")
                     if use_gpu and enc == "libx264":
-                        # Explain why we didn't pick a GPU encoder (if ffmpeg reports any).
-                        txt = ffmpeg_encoder_list_text().lower()
-                        hints: List[str] = []
-                        for cand in ("h264_nvenc", "h264_qsv", "h264_amf"):
-                            if cand in txt:
-                                err = encoder_runtime_error(cand)
-                                if err:
-                                    hints.append(f"{cand}: {err}")
-                        if hints:
-                            log(
-                                "GPU включён, но GPU-энкодер не стартует. Будет CPU (libx264/mp4v).\n"
-                                + "\n".join(hints)
-                            )
+                        if sys.platform == "darwin":
+                            vt_err = encoder_runtime_error("h264_videotoolbox")
+                            if vt_err:
+                                log(
+                                    "VideoToolbox недоступен, будет libx264.\n"
+                                    + vt_err[:400]
+                                )
+                            else:
+                                log(
+                                    "VideoToolbox не найден в ffmpeg, будет libx264."
+                                )
                         else:
-                            log("GPU включён, но доступного GPU-энкодера нет. Будет CPU (libx264/mp4v).")
+                            # Explain why we didn't pick a GPU encoder (if ffmpeg reports any).
+                            txt = ffmpeg_encoder_list_text().lower()
+                            hints: List[str] = []
+                            for cand in ("h264_nvenc", "h264_qsv", "h264_amf"):
+                                if cand in txt:
+                                    err = encoder_runtime_error(cand)
+                                    if err:
+                                        hints.append(f"{cand}: {err}")
+                            if hints:
+                                log(
+                                    "GPU включён, но GPU-энкодер не стартует. Будет CPU (libx264/mp4v).\n"
+                                    + "\n".join(hints)
+                                )
+                            else:
+                                log(
+                                    "GPU включён, но доступного GPU-энкодера нет. Будет CPU (libx264/mp4v)."
+                                )
                 except Exception:
                     if use_gpu:
                         log("GPU-режим: не удалось определить/проверить энкодер ffmpeg, будет CPU.")

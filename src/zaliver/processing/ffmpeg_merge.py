@@ -751,6 +751,9 @@ def _probe_encoder_runtime(encoder: str) -> bool:
     elif enc in ("h264_qsv", "hevc_qsv", "av1_qsv"):
         lavfi = "color=c=black:s=1280x720:r=30"
         vf = "format=nv12"
+    elif enc in ("h264_videotoolbox", "hevc_videotoolbox"):
+        lavfi = "color=c=black:s=1280x720:r=30"
+        vf = "format=yuv420p"
     else:
         lavfi = "color=c=black:s=640x360:r=30"
         vf = "format=yuv420p"
@@ -891,14 +894,50 @@ def _h264_amf_args(target_video_bps: Optional[int]) -> List[str]:
     ]
 
 
+def _h264_videotoolbox_args(target_video_bps: Optional[int]) -> List[str]:
+    """Apple VideoToolbox (macOS): аппаратный H.264."""
+    if target_video_bps is None or target_video_bps <= 0:
+        return ["-q:v", "65", "-allow_sw", "1"]
+    b = clamp_target_video_bps(target_video_bps)
+    maxr = max(b + 1, int(b * 1.35))
+    buf = max(b * 2, int(b * 2))
+    return [
+        "-b:v",
+        str(b),
+        "-maxrate",
+        str(maxr),
+        "-bufsize",
+        str(buf),
+        "-allow_sw",
+        "1",
+    ]
+
+
+def _try_h264_videotoolbox(
+    target_video_bps: Optional[int],
+) -> Optional[Tuple[str, List[str]]]:
+    if sys.platform != "darwin":
+        return None
+    txt = ffmpeg_encoder_list_text().lower()
+    if "h264_videotoolbox" not in txt:
+        return None
+    if not _probe_encoder_runtime("h264_videotoolbox"):
+        return None
+    return ("h264_videotoolbox", _h264_videotoolbox_args(target_video_bps))
+
+
 def pick_best_h264_encoder(
     *, prefer_gpu: bool = False, target_video_bps: Optional[int] = None
 ) -> Tuple[str, List[str]]:
     """
     Return (encoder_name, extra_args) preferring GPU encoders if available.
+    On macOS h264_videotoolbox is used by default when ffmpeg supports it.
     If target_video_bps is set, args target that video bitrate (VBR) to approximate source file size.
     Otherwise NVENC/QSV/AMF use quality (CQ) presets and libx264 uses CRF 20.
     """
+    vt = _try_h264_videotoolbox(target_video_bps)
+    if vt is not None:
+        return vt
     txt = ffmpeg_encoder_list_text().lower()
     if prefer_gpu and "h264_nvenc" in txt and _probe_encoder_runtime("h264_nvenc"):
         return ("h264_nvenc", _h264_nvenc_args(target_video_bps))

@@ -123,7 +123,7 @@ class ProfilesListInteraction(QObject):
         self._apply_checkbox_visuals()
 
     def select_checked_by_filter(self, mode: str, profiles_by_id: dict[str, dict[str, object]], last_upload_map: dict[str, str]) -> None:
-        """mode: all | available | no_errors"""
+        """mode: all | available | no_errors | with_errors"""
         existing = set(profiles_by_id.keys())
         if mode == "all":
             self.checked_profile_ids = set(existing)
@@ -137,6 +137,12 @@ class ProfilesListInteraction(QObject):
             picked = set()
             for pid, prof in profiles_by_id.items():
                 if not profile_has_any_status_error(prof, upload_store=self._upload_store):
+                    picked.add(pid)
+            self.checked_profile_ids = picked
+        elif mode == "with_errors":
+            picked = set()
+            for pid, prof in profiles_by_id.items():
+                if profile_has_any_status_error(prof, upload_store=self._upload_store):
                     picked.add(pid)
             self.checked_profile_ids = picked
         else:

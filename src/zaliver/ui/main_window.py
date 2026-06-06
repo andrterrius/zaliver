@@ -3377,7 +3377,7 @@ class MainWindow(QWidget):
         btn_select.setAutoDefault(False)
         btn_select.setDefault(False)
         btn_select.setToolTip(
-            "Отметить профили по условию (пауза 3 ч, без ошибок в статусах)"
+            "Отметить профили по условию (пауза 3 ч, с ошибками или без ошибок в статусах)"
         )
         select_menu = QMenu(parent)
         act_all = select_menu.addAction("Все видимые")
@@ -3394,6 +3394,11 @@ class MainWindow(QWidget):
             "Прокси активен, нет тегов/флагов с «ошибка», профиль не помечен после сбоев залива"
         )
         act_clean.triggered.connect(lambda: on_select_filter("no_errors"))
+        act_errors = select_menu.addAction("С ошибками в статусах")
+        act_errors.setToolTip(
+            "Прокси неактивен, есть теги/флаги с «ошибка» или профиль помечен после сбоев залива"
+        )
+        act_errors.triggered.connect(lambda: on_select_filter("with_errors"))
         btn_select.setMenu(select_menu)
 
         row.addWidget(lbl)

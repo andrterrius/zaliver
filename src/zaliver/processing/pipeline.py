@@ -113,6 +113,11 @@ class RandomUniquifyBounds:
         return cls(**merged).normalized()  # type: ignore[arg-type]
 
 
+def neutral_uniquify_settings() -> UniquifySettings:
+    """Без визуальных/аудио-эффектов уникализации (трек и текст — отдельно)."""
+    return UniquifySettings()
+
+
 def random_uniquify_settings(
     bounds: Optional[RandomUniquifyBounds] = None,
 ) -> UniquifySettings:

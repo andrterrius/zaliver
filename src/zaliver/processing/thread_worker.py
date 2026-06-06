@@ -51,7 +51,11 @@ from zaliver.processing.ffmpeg_merge import (
 )
 from zaliver.processing.ffmpeg_gpu import gpu_pipeline_label, resolve_gpu_pipeline
 from zaliver.processing.gpu_detect import detect_gpus, format_gpu_list
-from zaliver.processing.pipeline import RandomUniquifyBounds, random_uniquify_settings
+from zaliver.processing.pipeline import (
+    RandomUniquifyBounds,
+    neutral_uniquify_settings,
+    random_uniquify_settings,
+)
 from zaliver.processing.text_overlay import TextOverlaySettings, compute_scaled_overlay
 from zaliver.processing.worker import init_worker, process_chunk_disk
 
@@ -185,6 +189,7 @@ class OutputJob:
     text_overlay: Optional[Dict[str, Any]] = None
     use_gpu_finalize: bool = False
     skip_youtube_upload: bool = False
+    no_effects: bool = False
     finalize_error: Optional[str] = None
     finalize_submitted: bool = False
     done_frames: int = 0
@@ -198,11 +203,15 @@ class OutputJob:
 
     def tag(self, n_jobs: int) -> str:
         if self.copies_per_file == 1:
-            return f"[{self.file_idx}/{n_jobs}] {self.p.name}"
-        return (
-            f"[{self.file_idx}/{n_jobs}] {self.p.name} "
-            f"(копия {self.copy_index}/{self.copies_per_file})"
-        )
+            base = f"[{self.file_idx}/{n_jobs}] {self.p.name}"
+        else:
+            base = (
+                f"[{self.file_idx}/{n_jobs}] {self.p.name} "
+                f"(копия {self.copy_index}/{self.copies_per_file})"
+            )
+        if self.no_effects:
+            return f"{base} (без эффектов)"
+        return base
 
     def estimated_done_frames(self) -> int:
         if self.finished:
@@ -587,6 +596,7 @@ class ProcessingController(QObject):
             else:
                 log("GPU склейка/mux: выключена (CPU, libx264).")
             randomize = bool(options.get("randomize_uniquify", True))
+            one_copy_no_effects = bool(options.get("one_copy_no_effects", False))
             ui_settings = dict(options.get("settings", {}))
             playback_speed_enabled = bool(
                 options.get("playback_speed_enabled", options.get("audio_speed_enabled", True))
@@ -651,7 +661,10 @@ class ProcessingController(QObject):
                         self.finished.emit(False, "Отменено.")
                         return
 
-                    if randomize:
+                    no_effects = bool(one_copy_no_effects and copy_index == 1)
+                    if no_effects:
+                        settings = neutral_uniquify_settings().to_dict()
+                    elif randomize:
                         rb = RandomUniquifyBounds.from_options_dict(
                             options.get("random_bounds") or {}
                         )
@@ -690,8 +703,14 @@ class ProcessingController(QObject):
                         background_music_volume_pct=bg_vol_opt,
                         text_overlay=text_overlay_cfg,
                         use_gpu_finalize=use_gpu_finalize,
+                        no_effects=no_effects,
                     )
-                    if randomize:
+                    if no_effects:
+                        log(
+                            f"{job.tag(n_jobs)} — без эффектов уникализации "
+                            f"(только фоновый трек и текст, если включены)"
+                        )
+                    elif randomize:
                         log(
                             f"{job.tag(n_jobs)} — случайно: "
                             f"ярк.{settings['brightness_delta']:.1f}, "

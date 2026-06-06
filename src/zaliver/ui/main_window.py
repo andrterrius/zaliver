@@ -877,8 +877,16 @@ class MainWindow(QWidget):
         self.copies_per_file = QSpinBox()
         self.copies_per_file.setRange(1, _INT_MAX)
         self.copies_per_file.setValue(1)
+        self.one_copy_no_effects = QCheckBox("1 копия без эффектов")
+        self.one_copy_no_effects.setChecked(False)
+        self.one_copy_no_effects.setToolTip(
+            "Первая копия каждого исходника без уникализации: "
+            "яркость, контраст, шум и прочие эффекты не применяются; "
+            "добавляются только фоновый трек и текст на видео."
+        )
         io_grid.addWidget(QLabel("Копий на исходник:"), 2, 0)
         io_grid.addWidget(self.copies_per_file, 2, 1)
+        io_grid.addWidget(self.one_copy_no_effects, 2, 2)
         copies_hint = QLabel(
             "Каждая копия — отдельный прогон со своими случайными параметрами "
             "(при включённой случайной уникализации). Например: 10 видео × 5 = 50 файлов."
@@ -4512,6 +4520,7 @@ class MainWindow(QWidget):
             "settings": st.to_dict(),
             "randomize_uniquify": self.random_uniquify.isChecked(),
             "copies_per_file": int(self.copies_per_file.value()),
+            "one_copy_no_effects": bool(self.one_copy_no_effects.isChecked()),
             "playback_speed_enabled": bool(self.audio_speed.isChecked()),
             "audio_chorus_enabled": bool(self.audio_chorus.isChecked()),
             "background_music_enabled": bool(self.background_music.isChecked()),

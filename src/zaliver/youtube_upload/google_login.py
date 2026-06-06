@@ -260,9 +260,9 @@ def _google_next_button_locator(page):
 
 def _click_google_next(page) -> None:
     btn = _google_next_button_locator(page)
-    btn.first.wait_for(state="visible", timeout=20_000)
-    btn.first.click(timeout=30_000)
-    page.wait_for_timeout(700)
+    btn.first.wait_for(state="visible", timeout=60_000)
+    btn.first.click(timeout=60_000)
+    page.wait_for_timeout(1000)
 
 
 def _fill_input_and_click_next(page, locator, value: str) -> None:

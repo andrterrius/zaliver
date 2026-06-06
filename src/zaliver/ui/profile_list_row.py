@@ -12,16 +12,24 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPushButton,
     QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from zaliver.ui.antic_profile_row import (
     _profile_description,
+    _profile_id,
+    _profile_name,
     _profile_tag_list,
     format_upload_cooldown_line,
 )
-from zaliver.ui.profile_list_helpers import make_profile_tags_widget, profile_row_title_text, proxy_health_dot_ui
+from zaliver.ui.profile_list_helpers import (
+    make_profile_copy_id_button,
+    make_profile_tags_widget,
+    profile_row_title_text,
+    proxy_health_dot_ui,
+)
 
 
 class ProfileListRow(QWidget):
@@ -67,10 +75,32 @@ class ProfileListRow(QWidget):
         info_l.setContentsMargins(0, 0, 0, 0)
         info_l.setSpacing(4)
 
-        self.title_label = QLabel(profile_row_title_text(profile))
+        pid = _profile_id(profile)
+        name = _profile_name(profile)
+        title_row_w = QWidget(info)
+        title_row = QHBoxLayout(title_row_w)
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(4)
+
+        self.title_label = QLabel(name)
         self.title_label.setObjectName("profileRowTitle")
         self.title_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByKeyboard)
-        info_l.addWidget(self.title_label, 0)
+        title_row.addWidget(self.title_label, 0)
+
+        self.id_label: QLabel | None = None
+        self.copy_id_btn: QToolButton | None = None
+        if pid:
+            self.id_label = QLabel(f"({pid})")
+            self.id_label.setObjectName("profileRowId")
+            self.id_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByKeyboard)
+            title_row.addWidget(self.id_label, 0)
+            self.copy_id_btn = make_profile_copy_id_button(pid, title_row_w)
+
+        if self.copy_id_btn is not None:
+            title_row.addWidget(self.copy_id_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        title_row.addStretch(1)
+        info_l.addWidget(title_row_w, 0)
 
         desc = (_profile_description(profile) or "").strip()
         if desc:

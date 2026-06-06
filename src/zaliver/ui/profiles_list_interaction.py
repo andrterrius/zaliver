@@ -62,6 +62,7 @@ class ProfilesListInteraction(QObject):
         self._checkbox_press_global: QPoint | None = None
         self._checkbox_press_modifiers = Qt.KeyboardModifier.NoModifier
         self._account_data_armed_row: ProfileListRow | None = None
+        self._copy_id_armed_row: ProfileListRow | None = None
 
         self.lw.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self.lw.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -224,11 +225,17 @@ class ProfilesListInteraction(QObject):
         row.upload_label.installEventFilter(self)
         if row.account_data_btn is not None:
             row.account_data_btn.installEventFilter(self)
+        if row.copy_id_btn is not None:
+            row.copy_id_btn.installEventFilter(self)
         for ch in row.findChildren(QWidget):
             if ch is row or ch is row.checkbox or ch is row.upload_label:
                 continue
             if row.account_data_btn is not None and (
                 ch is row.account_data_btn or row.account_data_btn.isAncestorOf(ch)
+            ):
+                continue
+            if row.copy_id_btn is not None and (
+                ch is row.copy_id_btn or row.copy_id_btn.isAncestorOf(ch)
             ):
                 continue
             ch.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -500,6 +507,38 @@ class ProfilesListInteraction(QObject):
                 return True
         return False
 
+    def _profile_row_for_copy_id_button_hit(
+        self, watched: QWidget, vp_pos: QPoint
+    ) -> ProfileListRow | None:
+        widgets_to_check: list[QWidget] = [watched]
+        child = self.lw.viewport().childAt(vp_pos)
+        if child is not None and child is not watched:
+            widgets_to_check.append(child)
+
+        for w in widgets_to_check:
+            cur: QWidget | None = w
+            while cur is not None and cur is not self.lw.viewport():
+                for row in self._profile_id_to_row.values():
+                    btn = row.copy_id_btn
+                    if btn is not None and (cur is btn or btn.isAncestorOf(cur)):
+                        return row
+                cur = cur.parentWidget()
+
+        for row in self._profile_id_to_row.values():
+            btn = row.copy_id_btn
+            if btn is None or not btn.isVisible():
+                continue
+            top_left = btn.mapTo(self.lw.viewport(), QPoint(0, 0))
+            if QRect(top_left, btn.size()).contains(vp_pos):
+                return row
+        return None
+
+    def _invoke_copy_id_click(self, row: ProfileListRow) -> None:
+        btn = row.copy_id_btn
+        if btn is None:
+            return
+        btn.click()
+
     def _cancel_checkbox_click_pending(self) -> None:
         try:
             self.lw.viewport().releaseMouse()
@@ -545,6 +584,18 @@ class ProfilesListInteraction(QObject):
             if (
                 et == QEvent.Type.MouseButtonRelease
                 and event.button() == Qt.MouseButton.LeftButton
+                and self._copy_id_armed_row is not None
+            ):
+                row = self._copy_id_armed_row
+                self._copy_id_armed_row = None
+                self._cancel_checkbox_click_pending()
+                self._lmb_select_end()
+                self._invoke_copy_id_click(row)
+                return True
+
+            if (
+                et == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton
                 and self._account_data_armed_row is not None
             ):
                 row = self._account_data_armed_row
@@ -555,6 +606,14 @@ class ProfilesListInteraction(QObject):
                 return True
 
             if et == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                copy_row = self._profile_row_for_copy_id_button_hit(watched, vp_pos)
+                if copy_row is not None:
+                    self._copy_id_armed_row = copy_row
+                    self._account_data_armed_row = None
+                    self._cancel_checkbox_click_pending()
+                    return True
+                self._copy_id_armed_row = None
+
                 account_row = self._profile_row_for_account_button_hit(watched, vp_pos)
                 if account_row is not None:
                     self._account_data_armed_row = account_row

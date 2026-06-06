@@ -4,9 +4,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QFontMetrics, QTextDocument, QTextOption
-from PyQt6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QWidget
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QCursor, QFont, QFontMetrics, QTextDocument, QTextOption
+from PyQt6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QSizePolicy,
+    QToolButton,
+    QWidget,
+)
 
 from zaliver.ui.antic_profile_row import (
     _profile_description,
@@ -222,3 +231,35 @@ def profile_row_title_text(profile: dict[str, object]) -> str:
     pid = _profile_id(profile)
     name = _profile_name(profile)
     return f"{name}  ({pid})" if pid else name
+
+
+def copy_text_to_clipboard(text: str) -> bool:
+    value = (text or "").strip()
+    if not value:
+        return False
+    QApplication.clipboard().setText(value)
+    return True
+
+
+def make_profile_copy_id_button(profile_id: str, parent: QWidget | None = None) -> QToolButton | None:
+    pid = (profile_id or "").strip()
+    if not pid:
+        return None
+    btn = QToolButton(parent)
+    btn.setObjectName("profileRowCopyId")
+    btn.setText("⧉")
+    btn.setToolTip("Скопировать ID профиля")
+    btn.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+    btn.setAutoRaise(True)
+    btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+    btn.clicked.connect(lambda _checked=False, p=pid, b=btn: _on_copy_id_clicked(p, b))
+    return btn
+
+
+def _on_copy_id_clicked(profile_id: str, btn: QToolButton) -> None:
+    if not copy_text_to_clipboard(profile_id):
+        return
+    prev_tip = btn.toolTip() or "Скопировать ID профиля"
+    btn.setToolTip("Скопировано!")
+    QTimer.singleShot(1500, lambda: btn.setToolTip(prev_tip))

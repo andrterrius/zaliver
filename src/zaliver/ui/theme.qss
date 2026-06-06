@@ -335,6 +335,31 @@ QLabel#profileRowTitle {
     background: transparent;
 }
 
+QLabel#profileRowId {
+    color: #94a3b8;
+    font-size: 12px;
+    border: none;
+    background: transparent;
+}
+
+QToolButton#profileRowCopyId {
+    background: transparent;
+    border: none;
+    color: #94a3b8;
+    padding: 0 2px;
+    min-width: 20px;
+    max-width: 20px;
+    min-height: 20px;
+    max-height: 20px;
+    font-size: 13px;
+}
+
+QToolButton#profileRowCopyId:hover {
+    color: #e4e6ef;
+    background-color: rgba(99, 102, 241, 0.15);
+    border-radius: 4px;
+}
+
 QWidget#profileRow {
     background: transparent;
     border: 1px solid transparent;

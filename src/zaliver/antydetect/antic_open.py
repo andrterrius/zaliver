@@ -9,6 +9,7 @@ from patchright.sync_api import sync_playwright
 from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI
 from zaliver.youtube_upload.studio import (
     YoutubeStudioError,
+    run_studio_channel_description_and_link,
     run_upload_latest_ready_video,
     set_log_sink,
     verify_studio_upload_dialog_available,
@@ -60,7 +61,16 @@ def _playwright_page_from_cdp(p, endpoint_candidates: tuple[str, ...]):
         f"contexts={len(browser.contexts)}"
     )
     context = browser.contexts[0] if browser.contexts else browser.new_context()
-    page = context.pages[0] if context.pages else context.new_page()
+    page = None
+    for pg in context.pages:
+        try:
+            if "studio.youtube.com" in (pg.url or ""):
+                page = pg
+                break
+        except Exception:
+            continue
+    if page is None:
+        page = context.pages[0] if context.pages else context.new_page()
     _log(
         "Playwright: выбраны объекты. "
         f"context_pages={len(context.pages)}, page_url={page.url!r}"
@@ -177,6 +187,135 @@ def check_studio_availability_in_local_antidetect_profile(
                 pass
         try:
             _log(f"Local antidetect: проверка завершена за {time.perf_counter() - started_at:.1f} с.")
+        except Exception:
+            pass
+        api.close()
+
+
+def fill_channel_description_and_link_in_profile(
+    profile_id: str,
+    *,
+    description: str | None = None,
+    link_title: str | None = None,
+    link_url: str | None = None,
+    local_token: str | None = None,
+    headless: bool = True,
+    login_credentials=None,
+) -> None:
+    """Dolphin → Studio → «Настройка канала» → описание и ссылка."""
+    _log(
+        "Dolphin: заполнение описания/ссылки канала. "
+        f"profile_id={profile_id!r}, headless={headless}"
+    )
+    api = DolphinAntyLocalAPI()
+    try:
+        tok = (local_token or "").strip()
+        if tok:
+            _log("Dolphin: login_with_token…")
+            api.login_with_token(tok)
+        _log("Dolphin: start_profile…")
+        conn = api.start_profile(profile_id, headless=headless)
+        _log(
+            "Dolphin: профиль запущен. "
+            f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+        )
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_cdp(
+                p, (conn.ws_url(), conn.http_url())
+            )
+            try:
+                run_studio_channel_description_and_link(
+                    page,
+                    description=description,
+                    link_title=link_title,
+                    link_url=link_url,
+                    login_credentials=login_credentials,
+                )
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        _log(f"Ошибка заполнения канала: {type(e).__name__}: {e!r}")
+        raise _wrap_exc(e) from e
+    finally:
+        try:
+            api.stop_profile(profile_id)
+        except Exception as e:
+            _log(f"Dolphin: stop_profile: {e!r}")
+        api.close()
+
+
+def fill_channel_description_and_link_in_local_antidetect_profile(
+    profile_id: str,
+    *,
+    description: str | None = None,
+    link_title: str | None = None,
+    link_url: str | None = None,
+    base_url: str,
+    headless: bool = True,
+    login_credentials=None,
+) -> None:
+    """Локальный антидетект → Studio → «Настройка канала» → описание и ссылка."""
+    _log(
+        "Local antidetect: заполнение описания/ссылки канала. "
+        f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}"
+    )
+    from zaliver.antydetect.local_antidetect_api import (
+        LocalAntidetectError,
+        LocalAntidetectHttpAPI,
+    )
+    from zaliver.antydetect.local_active_sessions import (
+        register_local_session,
+        unregister_local_session,
+    )
+
+    api = LocalAntidetectHttpAPI(base_url)
+    session_id: str | None = None
+    started_at = time.perf_counter()
+    try:
+        acc = api.launch_profile(profile_id, headless=headless, expose_cdp=True)
+        sid = acc.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+        session_id = sid.strip()
+        bu = (base_url or "").strip() or "http://127.0.0.1:18765"
+        register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
+        ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+        _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_cdp(p, (ws_url,))
+            try:
+                run_studio_channel_description_and_link(
+                    page,
+                    description=description,
+                    link_title=link_title,
+                    link_url=link_url,
+                    login_credentials=login_credentials,
+                )
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        _log(f"Ошибка заполнения канала: {type(e).__name__}: {e!r}")
+        raise LocalAntidetectError(
+            f"Ошибка заполнения описания/ссылки канала: {e}"
+        ) from e
+    finally:
+        if session_id:
+            unregister_local_session(profile_id=profile_id)
+            try:
+                api.stop_session(session_id)
+            except Exception:
+                pass
+        try:
+            _log(
+                "Local antidetect: заполнение канала завершено за "
+                f"{time.perf_counter() - started_at:.1f} с."
+            )
         except Exception:
             pass
         api.close()

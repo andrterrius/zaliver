@@ -736,6 +736,8 @@ class MainWindow(QWidget):
     _youtube_upload_phase_finished = pyqtSignal(str)
     _studio_availability_progress = pyqtSignal(int, int, str)
     _studio_availability_finished = pyqtSignal(int, int)
+    _studio_channel_fill_progress = pyqtSignal(int, int, str)
+    _studio_channel_fill_finished = pyqtSignal(int, int)
     _zaliver_profile_tags_clear_progress = pyqtSignal(int, int, str)
     _zaliver_profile_tags_clear_finished = pyqtSignal(int, int)
 
@@ -768,9 +770,11 @@ class MainWindow(QWidget):
         self._profiles_filter_timer.setSingleShot(True)
         self._profiles_filter_timer.timeout.connect(self._apply_profiles_filter)
         self._profiles_availability_running = False
+        self._profiles_channel_fill_running = False
         self._profiles_tags_clear_running = False
         self._profiles_refresh_running = False
         self._last_availability_failed_ids: list[str] = []
+        self._last_channel_fill_failed_ids: list[str] = []
         self._build_ui()
         self._bootstrap_fd_limits()
         self._ui_log_line.connect(self._append_log)
@@ -796,6 +800,8 @@ class MainWindow(QWidget):
         self._youtube_upload_phase_finished.connect(self._on_youtube_upload_phase_finished)
         self._studio_availability_progress.connect(self._on_studio_availability_progress)
         self._studio_availability_finished.connect(self._on_studio_availability_finished)
+        self._studio_channel_fill_progress.connect(self._on_studio_channel_fill_progress)
+        self._studio_channel_fill_finished.connect(self._on_studio_channel_fill_finished)
         self._zaliver_profile_tags_clear_progress.connect(
             self._on_zaliver_profile_tags_clear_progress
         )
@@ -1627,6 +1633,18 @@ class MainWindow(QWidget):
         self._btn_profiles_check_availability.clicked.connect(
             self._start_profiles_availability_check
         )
+        self._btn_profiles_fill_channel = QPushButton("Заполнить описание и ссылку")
+        self._btn_profiles_fill_channel.setObjectName("secondary")
+        self._btn_profiles_fill_channel.setAutoDefault(False)
+        self._btn_profiles_fill_channel.setDefault(False)
+        self._btn_profiles_fill_channel.setToolTip(
+            "Только для отмеченных профилей: Studio → «Настройка канала», "
+            "описание канала и ссылка, затем «Опубликовать». "
+            "Браузер всегда с окном (не headless), до 5 параллельно."
+        )
+        self._btn_profiles_fill_channel.clicked.connect(
+            self._start_profiles_channel_fill
+        )
         self._btn_profiles_clear_zaliver_tags = QPushButton("Очистить теги залива")
         self._btn_profiles_clear_zaliver_tags.setObjectName("secondary")
         self._btn_profiles_clear_zaliver_tags.setAutoDefault(False)
@@ -1641,6 +1659,7 @@ class MainWindow(QWidget):
         profiles_top.addWidget(self._profiles_title)
         profiles_top.addStretch()
         profiles_top.addWidget(self._dolphin_query, 1)
+        profiles_top.addWidget(self._btn_profiles_fill_channel)
         profiles_top.addWidget(self._btn_profiles_check_availability)
         profiles_top.addWidget(self._btn_profiles_refresh)
 
@@ -3114,6 +3133,7 @@ class MainWindow(QWidget):
         local = kind == "local"
         busy = (
             self._profiles_availability_running
+            or self._profiles_channel_fill_running
             or self._profiles_tags_clear_running
             or self._profiles_refresh_running
         )
@@ -3121,6 +3141,8 @@ class MainWindow(QWidget):
             self._btn_profiles_clear_zaliver_tags.setEnabled(local and not busy)
         if hasattr(self, "_btn_profiles_check_availability"):
             self._btn_profiles_check_availability.setEnabled(not busy)
+        if hasattr(self, "_btn_profiles_fill_channel"):
+            self._btn_profiles_fill_channel.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_refresh"):
             self._btn_profiles_refresh.setEnabled(not busy)
 
@@ -3743,6 +3765,221 @@ class MainWindow(QWidget):
         self._last_availability_failed_ids = list(failed_ids)
         self._studio_availability_finished.emit(ok_n, fail_n)
 
+    def _prompt_channel_description_and_link(
+        self,
+    ) -> tuple[str, str, str] | None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Описание и ссылка канала")
+        dlg.setModal(True)
+        dlg.setMinimumWidth(520)
+        v = QVBoxLayout(dlg)
+
+        hint = QLabel(
+            "Текст будет применён ко всем отмеченным профилям. "
+            "Описание и ссылку можно указать вместе или по отдельности "
+            "(для ссылки нужны и название, и URL)."
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("hint")
+        v.addWidget(hint)
+
+        desc_edit = QPlainTextEdit()
+        desc_edit.setPlaceholderText("Описание канала…")
+        desc_edit.setMinimumHeight(120)
+        v.addWidget(QLabel("Описание"))
+        v.addWidget(desc_edit)
+
+        link_title_edit = QLineEdit()
+        link_title_edit.setPlaceholderText("Название ссылки…")
+        v.addWidget(QLabel("Название ссылки"))
+        v.addWidget(link_title_edit)
+
+        link_url_edit = QLineEdit()
+        link_url_edit.setPlaceholderText("https://…")
+        v.addWidget(QLabel("Ссылка"))
+        v.addWidget(link_url_edit)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.setObjectName("danger")
+        btn_start = QPushButton("Заполнить")
+        btn_start.setDefault(True)
+        btn_start.setAutoDefault(True)
+
+        def on_start() -> None:
+            desc = (desc_edit.toPlainText() or "").strip()
+            link_title = (link_title_edit.text() or "").strip()
+            link_url = (link_url_edit.text() or "").strip()
+            if not desc and not (link_title and link_url):
+                QMessageBox.warning(
+                    dlg,
+                    "Описание и ссылка канала",
+                    "Укажите описание и/или пару «Название ссылки + Ссылка».",
+                )
+                return
+            if (link_title and not link_url) or (link_url and not link_title):
+                QMessageBox.warning(
+                    dlg,
+                    "Описание и ссылка канала",
+                    "Для ссылки нужны и название, и URL.",
+                )
+                return
+            dlg.accept()
+
+        btn_start.clicked.connect(on_start)
+        btn_cancel.clicked.connect(dlg.reject)
+        row.addWidget(btn_cancel)
+        row.addWidget(btn_start)
+        v.addLayout(row)
+
+        desc_edit.setFocus()
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return (
+            (desc_edit.toPlainText() or "").strip(),
+            (link_title_edit.text() or "").strip(),
+            (link_url_edit.text() or "").strip(),
+        )
+
+    def _start_profiles_channel_fill(self) -> None:
+        if self._profiles_channel_fill_running:
+            QMessageBox.information(
+                self,
+                "Описание и ссылка канала",
+                "Заполнение уже выполняется. Дождитесь завершения.",
+            )
+            return
+        if self._profiles_raw is None:
+            QMessageBox.warning(
+                self,
+                "Описание и ссылка канала",
+                "Сначала загрузите список профилей (кнопка «Обновить»).",
+            )
+            return
+        profile_ids = self._collect_checked_profile_ids()
+        if not profile_ids:
+            QMessageBox.warning(
+                self,
+                "Описание и ссылка канала",
+                "Отметьте квадратиками профили, для которых нужно заполнить канал.",
+            )
+            return
+
+        values = self._prompt_channel_description_and_link()
+        if values is None:
+            return
+        description, link_title, link_url = values
+
+        token = (self._dolphin_token.text() or "").strip()
+        if not token:
+            token = (
+                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
+            ).strip()
+        kind = self._default_browser_combo.currentData()
+        if not isinstance(kind, str) or not kind.strip():
+            kind = "dolphin"
+        base_url = (self._local_api_base_url.text() or "").strip()
+        if not base_url:
+            base_url = (
+                self._settings.value("antydetect/local_api_base_url", "", type=str) or ""
+            ).strip()
+        if not base_url and kind == "local":
+            base_url = DEFAULT_LOCAL_API_BASE_URL
+
+        headless = False
+
+        self._profiles_channel_fill_running = True
+        self._sync_profiles_tab_action_buttons()
+        self._profiles_status.setText(
+            f"Заполнение описания/ссылки канала: 0 / {len(profile_ids)}…"
+        )
+        self._append_log(
+            f"[channel_fill] Старт для {len(profile_ids)} профилей "
+            f"(с окном браузера, до 5 параллельно)…"
+        )
+
+        threading.Thread(
+            target=self._profiles_channel_fill_worker,
+            kwargs={
+                "profile_ids": profile_ids,
+                "kind": kind,
+                "token": token,
+                "base_url": base_url,
+                "headless": headless,
+                "description": description,
+                "link_title": link_title,
+                "link_url": link_url,
+            },
+            daemon=True,
+        ).start()
+
+    def _profiles_channel_fill_worker(
+        self,
+        *,
+        profile_ids: list[str],
+        kind: str,
+        token: str,
+        base_url: str,
+        headless: bool,
+        description: str,
+        link_title: str,
+        link_url: str,
+    ) -> None:
+        from zaliver.antydetect.antic_open import (
+            fill_channel_description_and_link_in_local_antidetect_profile,
+            fill_channel_description_and_link_in_profile,
+            set_log_sink,
+        )
+        from zaliver.youtube_upload.multi_availability_checker import (
+            MultiProfileAvailabilityChecker,
+        )
+
+        set_log_sink(self._ui_log_line.emit)
+        kind_s = (kind or "").strip()
+        base_u = (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
+
+        def _fill_one(pid: str) -> None:
+            creds = self._profile_login_credentials(pid)
+            if kind_s == "local":
+                u = (base_url or "").strip()
+                if not u:
+                    raise LocalAntidetectError(
+                        "Укажите базовый URL локального API в настройках."
+                    )
+                fill_channel_description_and_link_in_local_antidetect_profile(
+                    pid,
+                    description=description or None,
+                    link_title=link_title or None,
+                    link_url=link_url or None,
+                    base_url=u,
+                    headless=headless,
+                    login_credentials=creds,
+                )
+            else:
+                fill_channel_description_and_link_in_profile(
+                    pid,
+                    description=description or None,
+                    link_title=link_title or None,
+                    link_url=link_url or None,
+                    local_token=token or None,
+                    headless=headless,
+                    login_credentials=creds,
+                )
+
+        def _on_progress(done: int, total: int, profile_id: str) -> None:
+            self._studio_channel_fill_progress.emit(done, total, profile_id)
+
+        mgr = MultiProfileAvailabilityChecker(
+            profile_ids=profile_ids,
+            check_one=_fill_one,
+            on_progress=_on_progress,
+            log_sink=self._ui_log_line.emit,
+        )
+        ok_n, fail_n, failed_ids = mgr.run()
+        self._last_channel_fill_failed_ids = list(failed_ids)
+        self._studio_channel_fill_finished.emit(ok_n, fail_n)
+
     def _collect_checked_profile_ids(self) -> list[str]:
         if self._profiles_interaction is None:
             return []
@@ -4001,6 +4238,38 @@ class MainWindow(QWidget):
         QMessageBox.information(
             self,
             "Проверка доступности",
+            f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
+        )
+
+    def _on_studio_channel_fill_progress(
+        self, current: int, total: int, profile_id: str
+    ) -> None:
+        pid = (profile_id or "").strip()
+        self._profiles_status.setText(
+            f"Заполнение описания/ссылки канала: {current} / {total}"
+            + (f" — профиль {pid}" if pid else "…")
+        )
+
+    def _on_studio_channel_fill_finished(self, ok_n: int, fail_n: int) -> None:
+        self._profiles_channel_fill_running = False
+        self._sync_profiles_tab_action_buttons()
+        total = int(ok_n) + int(fail_n)
+        self._profiles_status.setText(
+            f"Заполнение канала завершено: успешно {ok_n}, с ошибкой {fail_n} "
+            f"(всего {total})."
+        )
+        self._append_log(
+            f"[channel_fill] Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}."
+        )
+        if int(fail_n) > 0:
+            failed = getattr(self, "_last_channel_fill_failed_ids", None) or []
+            if failed:
+                self._append_log(
+                    "[channel_fill] Ошибки (ID): " + ", ".join(failed)
+                )
+        QMessageBox.information(
+            self,
+            "Описание и ссылка канала",
             f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
         )
 

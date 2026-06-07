@@ -4,6 +4,7 @@ import os
 import re
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from playwright.sync_api import Error as PlaywrightError
 
@@ -710,11 +711,61 @@ def resolve_latest_zaliver_video_on_disk(*, db_path: Path | None = None) -> str:
     )
 
 
-def _studio_click_create_then_add_video(page, *, login_credentials=None) -> None:
+_CHANNEL_SETTINGS_NAV_RE = re.compile(
+    r"настройка\s+канала|customization|channel\s+customization|customize\s+channel",
+    re.I,
+)
+_CHANNEL_PROFILE_TAB_RE = re.compile(r"^profile$|^профиль$", re.I)
+
+
+def _studio_ensure_channel_profile_tab(page) -> None:
+    """Ссылки канала только на вкладке Profile / Профиль в «Настройка канала»."""
+    links = page.locator(
+        "ytcp-channel-editing-profile-tab ytcp-channel-links, ytcp-channel-links"
+    )
+    try:
+        if links.count() > 0:
+            links.first.wait_for(state="attached", timeout=5_000)
+            _log("Studio: блок «Links» / ссылки уже на экране (вкладка Profile).")
+            return
+    except Exception:
+        pass
+
+    _log("Studio: переключение на вкладку Profile / Профиль…")
+    tab = page.locator("tp-yt-paper-tab").filter(has_text=_CHANNEL_PROFILE_TAB_RE)
+    if tab.count() == 0:
+        tab = page.get_by_role("tab", name=_CHANNEL_PROFILE_TAB_RE)
+    if tab.count() > 0:
+        tab.first.scroll_into_view_if_needed(timeout=10_000)
+        tab.first.click(timeout=15_000)
+        page.wait_for_timeout(600)
+    else:
+        try:
+            page.evaluate(
+                """() => {
+                    const tabs = document.querySelectorAll('tp-yt-paper-tab, ytcp-tab');
+                    for (const t of tabs) {
+                        const text = (t.textContent || '').trim();
+                        if (/^profile$/i.test(text) || /^профиль$/i.test(text)) {
+                            t.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }"""
+            )
+            page.wait_for_timeout(600)
+        except Exception:
+            pass
+
+    links.first.wait_for(state="attached", timeout=30_000)
+    _log("Studio: вкладка Profile — ytcp-channel-links найден.")
+
+
+def _studio_goto_studio_home_ready(page, *, login_credentials=None):
     """
-    studio.youtube.com → кнопка «Создать» (ytcp-button-shape) → меню ytcp-text-menu
-    → пункт «Добавить видео» (test-id=upload).
-    Сессия Google должна уже быть в профиле антидетекта (без логина из Zaliver).
+    studio.youtube.com → логин / онбординг → кнопка «Создать» видна.
+    Возвращает локатор кнопки «Создать».
     """
     _log("Studio: переход на https://studio.youtube.com/ …")
     page.goto(
@@ -734,6 +785,16 @@ def _studio_click_create_then_add_video(page, *, login_credentials=None) -> None
     )
     _log("Studio: ожидание кнопки «Создать»…")
     _studio_wait_create_or_login(page, create, login_credentials=login_credentials)
+    return create
+
+
+def _studio_click_create_then_add_video(page, *, login_credentials=None) -> None:
+    """
+    studio.youtube.com → кнопка «Создать» (ytcp-button-shape) → меню ytcp-text-menu
+    → пункт «Добавить видео» (test-id=upload).
+    Сессия Google должна уже быть в профиле антидетекта (без логина из Zaliver).
+    """
+    create = _studio_goto_studio_home_ready(page, login_credentials=login_credentials)
     create.first.scroll_into_view_if_needed(timeout=15_000)
     _log("Studio: клик по «Создать»…")
     create.first.click(timeout=30_000)
@@ -799,6 +860,967 @@ def _studio_wait_upload_file_picker_visible(
     raise YoutubeStudioError(
         "YouTube Studio: не дождались окна загрузки (ytcp-uploads-file-picker). "
         "Возможны диалог создания канала, приветствие «Далее» или блокировка аккаунта."
+    )
+
+
+def _studio_clear_contenteditable_like_user(page, contenteditable, *, right_slack: int = 8) -> None:
+    """
+    Очистка contenteditable: читаем текст, End + запас вправо, Backspace по числу символов.
+    """
+    try:
+        current = contenteditable.first.evaluate(
+            "(el) => (el && (el.innerText ?? el.textContent) ? String(el.innerText ?? el.textContent) : '')"
+        )
+    except Exception:
+        current = ""
+    n = len(current or "")
+    try:
+        page.keyboard.press("End")
+        for _ in range(right_slack):
+            page.keyboard.press("ArrowRight")
+    except Exception:
+        for _ in range(n + right_slack):
+            page.keyboard.press("ArrowRight")
+    for _ in range(n):
+        page.keyboard.press("Backspace")
+
+
+def _studio_fill_contenteditable_field(
+    page,
+    contenteditable,
+    text: str,
+    *,
+    clear_first: bool = False,
+    right_slack: int = 8,
+) -> None:
+    contenteditable.first.wait_for(state="visible", timeout=60_000)
+    contenteditable.first.click(timeout=30_000)
+    if clear_first:
+        _studio_clear_contenteditable_like_user(
+            page, contenteditable, right_slack=right_slack
+        )
+        page.wait_for_timeout(80)
+    page.keyboard.type(text, delay=0)
+    page.wait_for_timeout(150)
+
+
+def _studio_navigate_to_channel_customization(page, *, login_credentials=None) -> None:
+    """Studio → «Настройка канала» (тот же путь входа, что проверка доступности)."""
+    _studio_goto_studio_home_ready(page, login_credentials=login_credentials)
+    _log("Studio: переход в «Настройка канала» / Customization…")
+    profile_link = page.locator('a.menu-item-link[href*="/editing/profile"]')
+    if profile_link.count() > 0:
+        profile_link.first.click(timeout=30_000)
+    else:
+        nav_item = page.locator("tp-yt-paper-icon-item").filter(
+            has=page.locator(".nav-item-text", has_text=_CHANNEL_SETTINGS_NAV_RE)
+        )
+        nav_item.first.wait_for(state="visible", timeout=30_000)
+        nav_item.first.click(timeout=30_000)
+
+    desc_box = (
+        page.locator('ytcp-social-suggestions-textbox #textbox[contenteditable="true"]')
+        .or_(page.locator('#textbox[aria-label*="канале"]'))
+        .or_(page.locator('#textbox[aria-label*="channel"]'))
+    )
+    desc_box.first.wait_for(state="visible", timeout=120_000)
+    _studio_ensure_channel_profile_tab(page)
+    _log("Studio: раздел «Настройка канала» загружен.")
+
+
+def _studio_read_input_value(inp) -> str:
+    try:
+        return (inp.first.input_value(timeout=2_000) or "").strip()
+    except Exception:
+        try:
+            return (inp.first.evaluate("(n) => String(n.value || '')") or "").strip()
+        except Exception:
+            return ""
+
+
+def _studio_channel_links_root(page):
+    return page.locator(
+        "ytcp-channel-editing-profile-tab ytcp-channel-links, ytcp-channel-links"
+    ).first
+
+
+_LINK_TITLE_PH_RE = re.compile(r"^enter a title$|^укажите название", re.I)
+_LINK_URL_PH_RE = re.compile(r"^enter a url$|^укажите url", re.I)
+
+
+def _studio_channel_link_input_locators(page):
+    """Поля ссылки: item → FormInput, fallback placeholder."""
+    title_inp = (
+        page.locator("ytcp-channel-link-item input.ytcpChannelLinkItemTitleInput")
+        .or_(page.get_by_placeholder(_LINK_TITLE_PH_RE))
+    ).last
+    url_inp = (
+        page.locator(
+            "ytcp-channel-link-item "
+            "input.ytcpChannelLinkItemFormInput:not(.ytcpChannelLinkItemTitleInput)"
+        )
+        .or_(page.get_by_placeholder(_LINK_URL_PH_RE))
+    ).last
+    return title_inp, url_inp
+
+
+def _studio_channel_link_row_locators(page):
+    """ytcp-channel-link-item + поля (последняя строка)."""
+    item = page.locator("ytcp-channel-link-item").last
+    title_inp, url_inp = _studio_channel_link_input_locators(page)
+    return item, title_inp, url_inp
+
+
+_LINKS_ROW_JS = r"""
+function deepQuery(root, sel) {
+  if (!root) return null;
+  try {
+    const hit = root.querySelector(sel);
+    if (hit) return hit;
+  } catch (e) {}
+  const nodes = root.querySelectorAll ? root.querySelectorAll('*') : [];
+  for (const node of nodes) {
+    if (node.shadowRoot) {
+      const found = deepQuery(node.shadowRoot, sel);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+function deepQueryAll(root, sel) {
+  const out = [];
+  if (!root) return out;
+  try {
+    root.querySelectorAll(sel).forEach((n) => out.push(n));
+  } catch (e) {}
+  const nodes = root.querySelectorAll ? root.querySelectorAll('*') : [];
+  for (const node of nodes) {
+    if (node.shadowRoot) {
+      deepQueryAll(node.shadowRoot, sel).forEach((n) => out.push(n));
+    }
+  }
+  return out;
+}
+function lastLinkItem(root) {
+  const items = deepQueryAll(root, 'ytcp-channel-link-item');
+  return items.length ? items[items.length - 1] : null;
+}
+function linkItemCount(root) {
+  return deepQueryAll(root, 'ytcp-channel-link-item').length;
+}
+function findLinkFormInputs(scope) {
+  let titleInp = null;
+  let urlInp = null;
+  const allInputs = deepQueryAll(scope, 'input');
+  for (const inp of allInputs) {
+    if (!inp.classList || !inp.classList.contains('ytcpChannelLinkItemFormInput')) {
+      continue;
+    }
+    if (inp.classList.contains('ytcpChannelLinkItemTitleInput')) {
+      titleInp = inp;
+    } else {
+      urlInp = inp;
+    }
+  }
+  const inputs = deepQueryAll(scope, 'input.ytcpChannelLinkItemFormInput');
+  for (const inp of inputs) {
+    if (inp.classList.contains('ytcpChannelLinkItemTitleInput')) {
+      titleInp = inp;
+    } else {
+      urlInp = inp;
+    }
+  }
+  if (!titleInp) {
+    titleInp =
+      deepQuery(scope, 'input.ytcpChannelLinkItemFormInput.ytcpChannelLinkItemTitleInput') ||
+      deepQuery(scope, 'input.ytcpChannelLinkItemTitleInput') ||
+      deepQuery(scope, 'input[placeholder="Enter a title"]') ||
+      deepQuery(scope, 'input[placeholder*="title"]') ||
+      deepQuery(scope, 'input[placeholder*="Title"]') ||
+      deepQuery(scope, 'input[placeholder*="название"]') ||
+      deepQuery(scope, 'input[placeholder*="Название"]');
+  }
+  if (!urlInp) {
+    urlInp =
+      deepQuery(scope, 'input.ytcpChannelLinkItemFormInput[placeholder="Enter a URL"]') ||
+      deepQuery(scope, 'input.ytcpChannelLinkItemFormInput[placeholder*="URL"]') ||
+      deepQuery(scope, 'input.ytcpChannelLinkItemFormInput[placeholder*="url"]') ||
+      deepQuery(scope, 'input.ytcpChannelLinkItemFormInput:not(.ytcpChannelLinkItemTitleInput)') ||
+      deepQuery(scope, 'input[placeholder="Enter a URL"]') ||
+      deepQuery(scope, 'input[placeholder*="URL"]') ||
+      deepQuery(scope, 'input[placeholder*="url"]') ||
+      deepQuery(scope, 'input[placeholder*="ссылк"]');
+  }
+  return { titleInp, urlInp };
+}
+function linkInputsFromDocument() {
+  const items = document.querySelectorAll('ytcp-channel-link-item');
+  const item = items.length ? items[items.length - 1] : null;
+  let titleInp =
+    document.querySelector('ytcp-channel-link-item input.ytcpChannelLinkItemTitleInput') ||
+    document.querySelector('input.ytcpChannelLinkItemFormInput.ytcpChannelLinkItemTitleInput') ||
+    document.querySelector('input.ytcpChannelLinkItemTitleInput') ||
+    document.querySelector('input[placeholder="Enter a title"]');
+  let urlInp =
+    document.querySelector(
+      'ytcp-channel-link-item input.ytcpChannelLinkItemFormInput:not(.ytcpChannelLinkItemTitleInput)'
+    ) ||
+    document.querySelector('input.ytcpChannelLinkItemFormInput[placeholder="Enter a URL"]') ||
+    document.querySelector('input[placeholder="Enter a URL"]');
+  if (item) {
+    titleInp =
+      titleInp ||
+      item.querySelector('input.ytcpChannelLinkItemTitleInput') ||
+      item.querySelector('input.ytcpChannelLinkItemFormInput.ytcpChannelLinkItemTitleInput') ||
+      item.querySelector('input[placeholder="Enter a title"]');
+    urlInp =
+      urlInp ||
+      item.querySelector('input.ytcpChannelLinkItemFormInput:not(.ytcpChannelLinkItemTitleInput)') ||
+      item.querySelector('input[placeholder="Enter a URL"]');
+    if (!titleInp || !urlInp) {
+      const found = findLinkFormInputs(item);
+      titleInp = titleInp || found.titleInp;
+      urlInp = urlInp || found.urlInp;
+    }
+    if (!titleInp || !urlInp) {
+      const shadowFound = findLinkFormInputs(item.shadowRoot || item);
+      titleInp = titleInp || shadowFound.titleInp;
+      urlInp = urlInp || shadowFound.urlInp;
+    }
+  }
+  if (!titleInp || !urlInp) {
+    const all = document.querySelectorAll('input.ytcpChannelLinkItemFormInput');
+    for (const inp of all) {
+      if (inp.classList.contains('ytcpChannelLinkItemTitleInput')) {
+        titleInp = titleInp || inp;
+      } else {
+        urlInp = urlInp || inp;
+      }
+    }
+  }
+  if (!titleInp || !urlInp) return null;
+  let urlBox = null;
+  if (urlInp.closest) {
+    urlBox = urlInp.closest('.ytcpChannelLinkItemUrlContainer');
+  }
+  return { item, titleInp, urlInp, urlBox };
+}
+function linkInputs(root) {
+  let inp = null;
+  if (root) {
+    const item = lastLinkItem(root);
+    if (item) {
+      ({ titleInp, urlInp } = findLinkFormInputs(item));
+      if (titleInp && urlInp) {
+        let urlBox = deepQuery(item, '.ytcpChannelLinkItemUrlContainer');
+        if (!urlBox && urlInp.closest) {
+          urlBox = urlInp.closest('.ytcpChannelLinkItemUrlContainer');
+        }
+        inp = { item, titleInp, urlInp, urlBox };
+      }
+    }
+    if (!inp) {
+      const fromRoot = findLinkFormInputs(root);
+      if (fromRoot.titleInp && fromRoot.urlInp) {
+        inp = {
+          item: lastLinkItem(root),
+          titleInp: fromRoot.titleInp,
+          urlInp: fromRoot.urlInp,
+          urlBox: null,
+        };
+      }
+    }
+  }
+  return inp || linkInputsFromDocument();
+}
+function setInput(node, value) {
+  if (!node) return false;
+  node.focus();
+  node.click();
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  setter.call(node, value);
+  node.dispatchEvent(new InputEvent('input', {
+    bubbles: true,
+    composed: true,
+    inputType: 'insertFromPaste',
+    data: value,
+  }));
+  node.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+  node.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, composed: true }));
+  return true;
+}
+"""
+
+
+def _studio_links_page_eval(body: str, *, params: str = "") -> str:
+    """Один callback для page.evaluate — helpers внутри функции, не снаружи."""
+    if params:
+        return f"({params}) => {{\n{_LINKS_ROW_JS}\n{body}\n}}"
+    return f"() => {{\n{_LINKS_ROW_JS}\n{body}\n}}"
+
+
+def _studio_page_link_diag(page) -> dict:
+    """Состояние строки ссылки через page.evaluate (не element.handle)."""
+    try:
+        state = page.evaluate(
+            _studio_links_page_eval(
+                """
+  const root =
+    document.querySelector('ytcp-channel-editing-profile-tab ytcp-channel-links') ||
+    document.querySelector('ytcp-channel-links');
+  const itemsAll = document.querySelectorAll('ytcp-channel-link-item').length;
+  const inp = linkInputsFromDocument() || (root ? linkInputs(root) : null);
+  if (!inp) {
+    return {
+      hasRoot: !!root,
+      items: itemsAll,
+      ready: false,
+      title: '',
+      url: '',
+      urlError: false,
+      href: location.href,
+    };
+  }
+  return {
+    hasRoot: !!root,
+    items: itemsAll || linkItemCount(root || document.body),
+    ready: true,
+    title: String(inp.titleInp.value || ''),
+    url: String(inp.urlInp.value || ''),
+    urlError: !!(inp.urlBox && inp.urlBox.getAttribute('label-icon-style') === 'error'),
+    href: location.href,
+  };
+"""
+            )
+        )
+        return state if isinstance(state, dict) else {"error": "bad_result"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def _studio_link_row_state(page) -> dict:
+    return _studio_page_link_diag(page)
+
+
+def _studio_wait_channel_link_row(
+    page,
+    links_root,
+    *,
+    timeout_s: float = 30.0,
+) -> tuple[object, object]:
+    """Ждём ytcp-channel-link-item + FormInput (page JS и/или Playwright)."""
+    title_loc, url_loc = _studio_channel_link_input_locators(page)
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        st = _studio_link_row_state(page)
+        if st.get("ready"):
+            return title_loc, url_loc
+        if st.get("items", 0) > 0 and not st.get("error"):
+            return title_loc, url_loc
+        try:
+            tc = title_loc.count()
+            uc = url_loc.count()
+            if tc > 0 and uc > 0:
+                return title_loc, url_loc
+        except Exception:
+            pass
+        time.sleep(0.2)
+    st = _studio_link_row_state(page)
+    try:
+        tc = title_loc.count()
+        uc = url_loc.count()
+    except Exception:
+        tc, uc = -1, -1
+    raise YoutubeStudioError(
+        "YouTube Studio: не найдены поля ссылки канала после «Add link». "
+        f"Диагностика: js={st!r}, playwright_title={tc}, playwright_url={uc}"
+    )
+
+
+def _studio_scroll_channel_links_into_view(page, links_root) -> None:
+    links_root.wait_for(state="attached", timeout=30_000)
+    links_root.scroll_into_view_if_needed(timeout=15_000)
+    try:
+        links_root.locator(".YtcpChannelLinksSectionLabel").first.scroll_into_view_if_needed(
+            timeout=10_000
+        )
+    except Exception:
+        pass
+    page.wait_for_timeout(200)
+
+
+def _studio_commit_channel_link_form(page, links_root) -> None:
+    """Снять фокус с полей ссылки — Studio включает Publish после blur."""
+    try:
+        page.evaluate(
+            _studio_links_page_eval(
+                """
+  const inp = linkInputsFromDocument();
+  if (inp) {
+    inp.urlInp.blur();
+    inp.titleInp.blur();
+  }
+  if (document.activeElement && document.activeElement.blur) {
+    document.activeElement.blur();
+  }
+  const label = document.querySelector('.YtcpChannelLinksSectionLabel');
+  if (label) label.click();
+"""
+            )
+        )
+    except Exception:
+        pass
+    try:
+        links_root.locator(".YtcpChannelLinksSectionLabel").first.click(timeout=2_000)
+    except Exception:
+        pass
+    page.wait_for_timeout(150)
+
+
+def _studio_link_fields_filled(page) -> bool:
+    st = _studio_link_row_state(page)
+    return bool((st.get("title") or "").strip() and (st.get("url") or "").strip())
+
+
+def _studio_normalize_channel_link_url(raw: str) -> str:
+    u = (raw or "").strip()
+    if not u:
+        return u
+    if not re.match(r"^https?://", u, re.I):
+        u = "https://" + u.lstrip("/")
+    parsed = urlparse(u)
+    if not parsed.netloc:
+        raise YoutubeStudioError(f"Некорректный URL ссылки: {raw!r}")
+    return u
+
+
+def _studio_remove_all_channel_links(page, links_root) -> None:
+    """Удалить все строки ссылок (чтобы не оставаться в состоянии ошибки)."""
+    for _ in range(8):
+        try:
+            removed = page.evaluate(
+                _studio_links_page_eval(
+                    """
+  const items = document.querySelectorAll('ytcp-channel-link-item');
+  if (!items.length) return false;
+  const item = items[items.length - 1];
+  const btn =
+    item.querySelector('ytcp-icon-button.ytcpChannelLinkItemDeleteButton') ||
+    item.querySelector('ytcp-icon-button[aria-label="Remove"]') ||
+    item.querySelector('ytcp-icon-button[aria-label="Delete"]') ||
+    item.querySelector('ytcp-icon-button[aria-label="Удалить"]') ||
+    deepQuery(item, 'ytcp-icon-button.ytcpChannelLinkItemDeleteButton') ||
+    deepQuery(item, 'ytcp-icon-button[aria-label="Remove"]');
+  if (!btn) return false;
+  btn.click();
+  return true;
+"""
+                )
+            )
+            if removed:
+                page.wait_for_timeout(450)
+                continue
+        except Exception:
+            pass
+        delete_btns = links_root.locator(
+            "ytcp-channel-link-item ytcp-icon-button.ytcpChannelLinkItemDeleteButton"
+        ).or_(
+            links_root.locator(
+                'ytcp-channel-link-item ytcp-icon-button[aria-label="Remove"], '
+                'ytcp-channel-link-item ytcp-icon-button[aria-label="Delete"], '
+                'ytcp-channel-link-item ytcp-icon-button[aria-label="Удалить"]'
+            )
+        )
+        try:
+            if delete_btns.count() == 0:
+                break
+            delete_btns.first.scroll_into_view_if_needed(timeout=5_000)
+            delete_btns.first.click(timeout=5_000)
+            page.wait_for_timeout(450)
+        except Exception:
+            break
+        st = _studio_link_row_state(page)
+        if st.get("items", 0) == 0:
+            break
+
+
+def _studio_click_add_channel_link(page, links_root) -> None:
+    """Клик «Add link» только если строки ещё нет."""
+    st = _studio_link_row_state(page)
+    if st.get("items", 0) > 0:
+        _log(
+            "Studio: «Add link» не нужен — ytcp-channel-link-item уже на экране "
+            f"(ready={st.get('ready')}, urlError={st.get('urlError')})."
+        )
+        return
+    try:
+        clicked = page.evaluate(
+            _studio_links_page_eval(
+                """
+  const root =
+    document.querySelector('ytcp-channel-editing-profile-tab ytcp-channel-links') ||
+    document.querySelector('ytcp-channel-links');
+  const btn =
+    (root && deepQuery(root, 'button[aria-label="Add link"]:not([disabled])')) ||
+    (root && deepQuery(root, 'button[aria-label="Добавить ссылку"]:not([disabled])')) ||
+    (root && deepQuery(root, '.YtcpChannelLinksAddLinkButton button:not([disabled])')) ||
+    document.querySelector('button[aria-label="Add link"]:not([disabled])') ||
+    document.querySelector('.YtcpChannelLinksAddLinkButton button:not([disabled])');
+  if (!btn) return false;
+  btn.scrollIntoView({ block: 'center', inline: 'nearest' });
+  btn.click();
+  return true;
+"""
+            )
+        )
+        if clicked:
+            page.wait_for_timeout(800)
+            return
+    except Exception:
+        pass
+    add_link = links_root.locator(
+        'button[aria-label="Add link"]:not([disabled]), '
+        'button[aria-label="Добавить ссылку"]:not([disabled])'
+    )
+    if add_link.count() == 0:
+        add_link = links_root.locator(".YtcpChannelLinksAddLinkButton button:not([disabled])")
+    if add_link.count() == 0:
+        st2 = _studio_link_row_state(page)
+        if st2.get("items", 0) > 0:
+            _log("Studio: «Add link» disabled, но строка ссылки уже есть — продолжаем.")
+            return
+        raise YoutubeStudioError(
+            "YouTube Studio: кнопка «Add link» недоступна и строка ссылки не открыта. "
+            "Возможно, уже есть строка с ошибкой — удалите её вручную (Remove)."
+        )
+    add_link.first.wait_for(state="attached", timeout=30_000)
+    add_link.first.scroll_into_view_if_needed(timeout=10_000)
+    if not add_link.first.is_enabled():
+        st2 = _studio_link_row_state(page)
+        if st2.get("items", 0) > 0 and st2.get("ready"):
+            return
+        raise YoutubeStudioError(
+            "YouTube Studio: кнопка «Add link» / «Добавить ссылку» недоступна."
+        )
+    add_link.first.click(timeout=30_000)
+    page.wait_for_timeout(800)
+
+
+def _studio_fill_channel_link_row_js(
+    page,
+    *,
+    link_title: str,
+    link_url: str,
+) -> dict:
+    lt = (link_title or "").strip()
+    lu = _studio_normalize_channel_link_url(link_url)
+    try:
+        result = page.evaluate(
+            _studio_links_page_eval(
+                """
+  const [titleText, urlText] = args;
+  const root =
+    document.querySelector('ytcp-channel-editing-profile-tab ytcp-channel-links') ||
+    document.querySelector('ytcp-channel-links');
+  const inp = linkInputsFromDocument() || (root ? linkInputs(root) : null);
+  if (!inp) return { ok: false, reason: 'no_inputs' };
+  setInput(inp.urlInp, urlText);
+  inp.urlInp.blur();
+  setInput(inp.titleInp, titleText);
+  inp.titleInp.blur();
+  const label = document.querySelector('.YtcpChannelLinksSectionLabel');
+  if (label) label.click();
+  const urlError = !!(inp.urlBox && inp.urlBox.getAttribute('label-icon-style') === 'error');
+  return {
+    ok: true,
+    title: String(inp.titleInp.value || ''),
+    url: String(inp.urlInp.value || ''),
+    urlError,
+  };
+""",
+                params="args",
+            ),
+            [lt, lu],
+        )
+        return result if isinstance(result, dict) else {"ok": False, "reason": "bad_result"}
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)}
+
+
+def _studio_focus_link_input_for_keyboard(page, field: str) -> bool:
+    try:
+        return bool(
+            page.evaluate(
+                _studio_links_page_eval(
+                    """
+  const inp = linkInputsFromDocument();
+  if (!inp) return false;
+  const node = field === 'url' ? inp.urlInp : inp.titleInp;
+  node.focus();
+  node.click();
+  node.select();
+  return true;
+""",
+                    params="field",
+                ),
+                field,
+            )
+        )
+    except Exception:
+        return False
+
+
+def _studio_keyboard_type_link_field(
+    page,
+    field: str,
+    text: str,
+    *,
+    field_label: str,
+) -> None:
+    t = (text or "").strip()
+    if not t:
+        return
+    if not _studio_focus_link_input_for_keyboard(page, field):
+        raise YoutubeStudioError(f"Studio: не удалось сфокусировать {field_label}.")
+    page.wait_for_timeout(100)
+    page.keyboard.press("Control+A")
+    page.keyboard.press("Backspace")
+    page.keyboard.insert_text(t)
+    page.wait_for_timeout(250)
+    st = _studio_link_row_state(page)
+    actual = (st.get("url") if field == "url" else st.get("title")) or ""
+    if not actual.strip():
+        raise YoutubeStudioError(
+            f"Studio: поле {field_label} пустое после ввода с клавиатуры."
+        )
+    _log(f"Studio: {field_label} = {actual.strip()!r} (keyboard)")
+
+
+def _studio_type_link_input_playwright(
+    page,
+    inp,
+    text: str,
+    *,
+    field_label: str,
+) -> str:
+    """Ввод в input.ytcpChannelLinkItemFormInput через Playwright."""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    el = inp.last if hasattr(inp, "last") else inp
+    el.wait_for(state="attached", timeout=15_000)
+    el.scroll_into_view_if_needed(timeout=10_000)
+    el.click(timeout=10_000, force=True)
+    page.wait_for_timeout(120)
+    try:
+        el.evaluate("(node) => { node.focus(); node.click(); node.select(); }")
+    except Exception:
+        pass
+    page.wait_for_timeout(80)
+    try:
+        el.press("Control+A")
+        el.press("Backspace")
+    except Exception:
+        pass
+    page.wait_for_timeout(50)
+    el.press_sequentially(t, delay=18)
+    page.wait_for_timeout(200)
+    actual = (el.input_value(timeout=3_000) or "").strip()
+    if not actual:
+        try:
+            el.fill(t, force=True, timeout=10_000)
+            page.wait_for_timeout(150)
+            actual = (el.input_value(timeout=3_000) or "").strip()
+        except Exception:
+            pass
+    if not actual:
+        actual = _studio_read_input_value(inp)
+    if not actual:
+        raise YoutubeStudioError(
+            f"Studio: поле {field_label} пустое после ввода (FormInput)."
+        )
+    _log(f"Studio: {field_label} = {actual!r}")
+    return actual
+
+
+def _studio_read_link_fields_playwright(title_loc, url_loc) -> tuple[str, str]:
+    title_val = _studio_read_input_value(title_loc)
+    url_val = _studio_read_input_value(url_loc)
+    return title_val, url_val
+
+
+def _studio_wait_channel_link_row_valid(
+    page,
+    links_root,
+    title_loc,
+    url_loc,
+    *,
+    timeout_s: float = 3.0,
+) -> None:
+    """Краткая проверка: оба поля заполнены."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        st = _studio_link_row_state(page)
+        title_val = (st.get("title") or "").strip()
+        url_val = (st.get("url") or "").strip()
+        if title_val and url_val:
+            return
+        pt, pu = _studio_read_link_fields_playwright(title_loc, url_loc)
+        if pt and pu:
+            return
+        page.wait_for_timeout(100)
+    st = _studio_link_row_state(page)
+    pt, pu = _studio_read_link_fields_playwright(title_loc, url_loc)
+    raise YoutubeStudioError(
+        "YouTube Studio: ссылка не прошла проверку "
+        f"(js_title={st.get('title')!r}, js_url={st.get('url')!r}, "
+        f"pw_title={pt!r}, pw_url={pu!r})."
+    )
+
+
+def _studio_fill_channel_link_fields(
+    page,
+    links_root,
+    title_loc,
+    url_loc,
+    *,
+    link_title: str,
+    link_url: str,
+) -> None:
+    lt = (link_title or "").strip()
+    lu = _studio_normalize_channel_link_url(link_url)
+
+    js_result = _studio_fill_channel_link_row_js(
+        page, link_title=lt, link_url=lu
+    )
+    filled = bool(
+        js_result.get("ok")
+        and (js_result.get("url") or "").strip()
+        and (js_result.get("title") or "").strip()
+    )
+    if not filled:
+        try:
+            _studio_type_link_input_playwright(
+                page, url_loc, lu, field_label="URL ссылки"
+            )
+        except YoutubeStudioError:
+            _studio_keyboard_type_link_field(
+                page, "url", lu, field_label="URL ссылки"
+            )
+        try:
+            _studio_type_link_input_playwright(
+                page, title_loc, lt, field_label="название ссылки"
+            )
+        except YoutubeStudioError:
+            _studio_keyboard_type_link_field(
+                page, "title", lt, field_label="название ссылки"
+            )
+
+    _studio_commit_channel_link_form(page, links_root)
+    if not _studio_link_fields_filled(page):
+        _studio_fill_channel_link_row_js(page, link_title=lt, link_url=lu)
+        _studio_commit_channel_link_form(page, links_root)
+    _studio_wait_channel_link_row_valid(
+        page, links_root, title_loc, url_loc, timeout_s=3.0
+    )
+
+
+def _studio_open_channel_link_row(page, links_root) -> tuple[object, object]:
+    """Открыть пустую строку ссылки или использовать уже открытую."""
+    _studio_ensure_channel_profile_tab(page)
+    _studio_scroll_channel_links_into_view(page, links_root)
+
+    st = _studio_link_row_state(page)
+    if st.get("items", 0) > 0:
+        if st.get("ready"):
+            title_v = (st.get("title") or "").strip()
+            url_v = (st.get("url") or "").strip()
+            if not title_v and not url_v:
+                _log(
+                    "Studio: используем открытую пустую строку ссылки "
+                    f"(urlError={st.get('urlError')} — нормально до ввода URL)."
+                )
+                return _studio_channel_link_input_locators(page)
+            _log(
+                "Studio: удаляем заполненную строку ссылки "
+                f"(title={title_v!r}, url={url_v!r})…"
+            )
+            _studio_remove_all_channel_links(page, links_root)
+            page.wait_for_timeout(300)
+        else:
+            _log(
+                "Studio: ytcp-channel-link-item уже есть "
+                f"(items={st.get('items')}) — заполняем без «Add link»."
+            )
+            return _studio_wait_channel_link_row(page, links_root, timeout_s=15.0)
+
+    _log("Studio: клик «Add link»…")
+    _studio_click_add_channel_link(page, links_root)
+    return _studio_wait_channel_link_row(page, links_root, timeout_s=30.0)
+
+
+def _studio_click_channel_customization_publish(page) -> None:
+    """Publish на странице «Настройка канала» (#publish-button, shadow DOM)."""
+    _studio_handle_interrupt_dialogs_if_present(page)
+    _log("Studio: публикация настроек канала…")
+
+    def _publish_state() -> dict:
+        try:
+            return page.evaluate(
+                """
+() => {
+  const host = document.querySelector('#publish-button');
+  if (!host) return { found: false, enabled: false };
+  let btn = host.querySelector('button');
+  if (!btn && host.shadowRoot) {
+    btn = host.shadowRoot.querySelector('button');
+  }
+  if (!btn) return { found: false, enabled: false };
+  return { found: true, enabled: !btn.disabled };
+}
+"""
+            )
+        except Exception as exc:
+            return {"found": False, "enabled": False, "error": str(exc)}
+
+    def _click_publish() -> bool:
+        try:
+            return bool(
+                page.evaluate(
+                    """
+() => {
+  const host = document.querySelector('#publish-button');
+  if (!host) return false;
+  let btn = host.querySelector('button:not([disabled])');
+  if (!btn && host.shadowRoot) {
+    btn = host.shadowRoot.querySelector('button:not([disabled])');
+  }
+  if (!btn) return false;
+  btn.scrollIntoView({ block: 'center', inline: 'nearest' });
+  btn.click();
+  return true;
+}
+"""
+                )
+            )
+        except Exception:
+            return False
+
+    try:
+        page.evaluate(
+            "() => { document.activeElement && document.activeElement.blur && document.activeElement.blur(); }"
+        )
+    except Exception:
+        pass
+
+    pub = _publish_state()
+    if pub.get("found") and pub.get("enabled") and _click_publish():
+        _log("Studio: ожидание 5 с после «Опубликовать»…")
+        time.sleep(5.0)
+        _log("Studio: настройки канала опубликованы.")
+        return
+
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        pub = _publish_state()
+        if pub.get("found") and pub.get("enabled") and _click_publish():
+            _log("Studio: ожидание 5 с после «Опубликовать»…")
+            time.sleep(5.0)
+            _log("Studio: настройки канала опубликованы.")
+            return
+
+        try:
+            btn = page.locator("#publish-button button").first
+            if btn.is_enabled():
+                btn.scroll_into_view_if_needed(timeout=2_000)
+                btn.click(timeout=10_000)
+                _log("Studio: ожидание 5 с после «Опубликовать»…")
+                time.sleep(5.0)
+                _log("Studio: настройки канала опубликованы.")
+                return
+        except Exception:
+            pass
+
+        page.wait_for_timeout(150)
+
+    pub = _publish_state()
+    st = _studio_link_row_state(page)
+    raise YoutubeStudioError(
+        "YouTube Studio: кнопка Publish недоступна — проверьте ошибки на странице "
+        f"(publish={pub!r}, link urlError={st.get('urlError')}, "
+        f"title={st.get('title')!r}, url={st.get('url')!r})."
+    )
+
+
+def _studio_fill_channel_description_and_link(
+    page,
+    *,
+    description: str | None,
+    link_title: str | None,
+    link_url: str | None,
+) -> None:
+    d = (description or "").strip()
+    lt = (link_title or "").strip()
+    lu = (link_url or "").strip()
+    if not d and not (lt and lu):
+        raise YoutubeStudioError(
+            "Укажите описание канала и/или пару «название ссылки + URL»."
+        )
+    if (lt and not lu) or (lu and not lt):
+        raise YoutubeStudioError("Название ссылки и URL нужно указать оба.")
+
+    _studio_handle_interrupt_dialogs_if_present(page)
+
+    desc_box = (
+        page.locator('ytcp-social-suggestions-textbox #textbox[contenteditable="true"]')
+        .or_(page.locator('#textbox[aria-label*="канале"]'))
+        .or_(page.locator('#textbox[aria-label*="channel"]'))
+    )
+
+    if d:
+        _log("Studio: заполнение «Описание канала»…")
+        _studio_fill_contenteditable_field(page, desc_box, d, clear_first=True)
+        try:
+            links_root_preview = _studio_channel_links_root(page)
+            _studio_scroll_channel_links_into_view(page, links_root_preview)
+        except Exception:
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+        page.wait_for_timeout(250)
+
+    if lt and lu:
+        _log("Studio: добавление ссылки на канал…")
+        links_root = _studio_channel_links_root(page)
+        title_loc, url_loc = _studio_open_channel_link_row(page, links_root)
+        _studio_fill_channel_link_fields(
+            page,
+            links_root,
+            title_loc,
+            url_loc,
+            link_title=lt,
+            link_url=lu,
+        )
+
+    _studio_click_channel_customization_publish(page)
+
+
+def run_studio_channel_description_and_link(
+    page,
+    *,
+    description: str | None = None,
+    link_title: str | None = None,
+    link_url: str | None = None,
+    login_credentials=None,
+) -> None:
+    """Studio → «Настройка канала» → описание, ссылка → «Опубликовать»."""
+    _studio_navigate_to_channel_customization(page, login_credentials=login_credentials)
+    _studio_fill_channel_description_and_link(
+        page,
+        description=description,
+        link_title=link_title,
+        link_url=link_url,
     )
 
 

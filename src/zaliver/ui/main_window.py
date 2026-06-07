@@ -1046,7 +1046,7 @@ class MainWindow(QWidget):
         text_l = QVBoxLayout(text_inner)
         text_l.setSpacing(8)
         self.text_overlay_enabled = ToggleSwitch("Накладывать свой текст на каждое видео")
-        self.text_overlay_enabled.setChecked(False)
+        self.text_overlay_enabled.setChecked(True)
         self.text_overlay_enabled.toggled.connect(self._update_text_overlay_controls)
         self.text_overlay_enabled.toggled.connect(self._save_folder_settings)
         text_l.addWidget(self.text_overlay_enabled)
@@ -2947,7 +2947,7 @@ class MainWindow(QWidget):
         self._update_music_mix_controls()
         if hasattr(self, "text_overlay_enabled"):
             self.text_overlay_enabled.setChecked(
-                bool(self._settings.value("text_overlay_enabled", False, type=bool))
+                bool(self._settings.value("text_overlay_enabled", True, type=bool))
             )
             self.text_overlay_edit.setPlainText(
                 self._settings.value("text_overlay_text", "GAME IN BIO", type=str) or "GAME IN BIO"
@@ -2976,9 +2976,9 @@ class MainWindow(QWidget):
             )
             try:
                 ax = float(self._settings.value("text_overlay_anchor_x", 0.5, type=float))
-                ay = float(self._settings.value("text_overlay_anchor_y", 0.1, type=float))
+                ay = float(self._settings.value("text_overlay_anchor_y", 0.15, type=float))
             except Exception:
-                ax, ay = 0.5, 0.1
+                ax, ay = 0.5, 0.15
             try:
                 waf = float(
                     self._settings.value(

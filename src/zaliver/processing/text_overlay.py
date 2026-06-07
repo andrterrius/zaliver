@@ -21,14 +21,14 @@ NEON_WAVE_FRAME_SPEED = 0.09
 
 @dataclass
 class TextOverlaySettings:
-    enabled: bool = False
+    enabled: bool = True
     text: str = "GAME IN BIO"
     font_size: int = 95
     glow_color: str = "#00FFFF"
     text_color: str = "#FFFFFF"
     preview_orientation: str = "vertical"  # vertical | horizontal
     anchor_x: float = 0.5
-    anchor_y: float = 0.1
+    anchor_y: float = 0.15
     max_width_frac: float = 0.85
     wave_amp_frac: float = NEON_WAVE_AMP_FRAC
     wave_char_phase: float = NEON_WAVE_CHAR_PHASE

@@ -40,7 +40,7 @@ class TextOverlayPreviewWidget(QWidget):
         self._glow_color = QColor("#00FFFF")
         self._text_color = QColor("#FFFFFF")
         self._anchor_x = 0.5
-        self._anchor_y = 0.1
+        self._anchor_y = 0.15
         self._dragging = False
         self._drag_offset = QPointF(0.0, 0.0)
         self._font_path = resolve_font_path()

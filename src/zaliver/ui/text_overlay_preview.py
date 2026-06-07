@@ -34,13 +34,13 @@ class TextOverlayPreviewWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMouseTracking(True)
         self._orientation = "vertical"
-        self._text = ""
-        self._font_size = 48
+        self._text = "GAME IN BIO"
+        self._font_size = 95
         self._max_width_frac = 0.85
         self._glow_color = QColor("#00FFFF")
         self._text_color = QColor("#FFFFFF")
         self._anchor_x = 0.5
-        self._anchor_y = 0.78
+        self._anchor_y = 0.1
         self._dragging = False
         self._drag_offset = QPointF(0.0, 0.0)
         self._font_path = resolve_font_path()

@@ -709,15 +709,13 @@ class _UploadedVideoRow(QWidget):
 
 
 def _default_workers() -> int:
-    from zaliver.processing.fd_limit import cap_process_pool_workers
-
-    return cap_process_pool_workers(max(1, os.cpu_count() or 2))
+    return _max_worker_slider()
 
 
 def _max_worker_slider() -> int:
-    from zaliver.processing.fd_limit import max_process_pool_workers
+    from zaliver.processing.fd_limit import cap_process_pool_workers
 
-    return max_process_pool_workers()
+    return cap_process_pool_workers(max(1, os.cpu_count() or 2))
 
 
 def _apply_thread_slider_fd_cap(slider: "SmoothSlider") -> None:
@@ -979,7 +977,7 @@ class MainWindow(QWidget):
         pg = QGridLayout(proc)
         self.thread_slider = SmoothSlider(Qt.Orientation.Horizontal)
         self.thread_slider.setMinimum(1)
-        # Единственный лимит в UI: количество потоков (до числа логических CPU).
+        # Максимум слайдера — число доступных логических потоков CPU.
         self.thread_slider.setMaximum(_max_worker_slider())
         self.thread_slider.setValue(_default_workers())
         self.thread_label = QLabel()
@@ -1060,6 +1058,7 @@ class MainWindow(QWidget):
 
         self.text_overlay_edit = QPlainTextEdit()
         self.text_overlay_edit.setPlaceholderText("Текст для наложения…")
+        self.text_overlay_edit.setPlainText("GAME IN BIO")
         self.text_overlay_edit.setMaximumHeight(72)
         self.text_overlay_edit.textChanged.connect(self._on_text_overlay_content_changed)
         text_controls_l.addWidget(self.text_overlay_edit)
@@ -1075,7 +1074,7 @@ class MainWindow(QWidget):
         text_opts.setHorizontalSpacing(8)
         self.text_overlay_font_size = QSpinBox()
         self.text_overlay_font_size.setRange(12, 240)
-        self.text_overlay_font_size.setValue(48)
+        self.text_overlay_font_size.setValue(95)
         self.text_overlay_font_size.valueChanged.connect(self._on_text_overlay_font_size_changed)
         self.text_overlay_orientation = QComboBox()
         self.text_overlay_orientation.addItem("Вертикальное 9:16", "vertical")
@@ -2951,7 +2950,7 @@ class MainWindow(QWidget):
                 bool(self._settings.value("text_overlay_enabled", False, type=bool))
             )
             self.text_overlay_edit.setPlainText(
-                self._settings.value("text_overlay_text", "", type=str) or ""
+                self._settings.value("text_overlay_text", "GAME IN BIO", type=str) or "GAME IN BIO"
             )
             self.text_overlay_from_middle.setChecked(
                 bool(
@@ -2959,9 +2958,9 @@ class MainWindow(QWidget):
                 )
             )
             try:
-                fs = int(self._settings.value("text_overlay_font_size", 48, type=int))
+                fs = int(self._settings.value("text_overlay_font_size", 95, type=int))
             except Exception:
-                fs = 48
+                fs = 95
             self.text_overlay_font_size.setValue(max(12, min(240, fs)))
             orient = self._settings.value("text_overlay_orientation", "vertical", type=str) or "vertical"
             idx = self.text_overlay_orientation.findData(
@@ -2977,9 +2976,9 @@ class MainWindow(QWidget):
             )
             try:
                 ax = float(self._settings.value("text_overlay_anchor_x", 0.5, type=float))
-                ay = float(self._settings.value("text_overlay_anchor_y", 0.78, type=float))
+                ay = float(self._settings.value("text_overlay_anchor_y", 0.1, type=float))
             except Exception:
-                ax, ay = 0.5, 0.78
+                ax, ay = 0.5, 0.1
             try:
                 waf = float(
                     self._settings.value(

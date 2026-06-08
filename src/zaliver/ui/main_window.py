@@ -82,6 +82,7 @@ from zaliver.ui.profile_list_helpers import (
     profile_search_tokens,
 )
 from zaliver.ui.profile_account_data_dialog import ProfileAccountDataDialog
+from zaliver.ui.profile_accounts_import_dialog import ProfileAccountsImportDialog
 from zaliver.ui.profiles_list_interaction import ProfilesListInteraction
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
 from zaliver.stats_server_client import notify_uploaded_video
@@ -1613,7 +1614,12 @@ class MainWindow(QWidget):
         self._profiles_hint.setObjectName("hint")
         self._profiles_hint.setWordWrap(True)
 
-        profiles_top = QHBoxLayout()
+        profiles_header = QHBoxLayout()
+        profiles_header.addWidget(self._profiles_title)
+        profiles_header.addStretch()
+
+        profiles_search_row = QHBoxLayout()
+        profiles_search_row.setSpacing(8)
         self._dolphin_query = QLineEdit()
         self._dolphin_query.setPlaceholderText("Поиск по загруженным профилям…")
         self._btn_profiles_refresh = QPushButton("Обновить")
@@ -1621,6 +1627,11 @@ class MainWindow(QWidget):
         self._btn_profiles_refresh.setAutoDefault(False)
         self._btn_profiles_refresh.setDefault(False)
         self._btn_profiles_refresh.clicked.connect(self._refresh_antydetect_profiles)
+        profiles_search_row.addWidget(self._dolphin_query, 1)
+        profiles_search_row.addWidget(self._btn_profiles_refresh)
+
+        profiles_actions_row = QHBoxLayout()
+        profiles_actions_row.setSpacing(8)
         self._btn_profiles_check_availability = QPushButton("Проверить доступность YouTube")
         self._btn_profiles_check_availability.setObjectName("secondary")
         self._btn_profiles_check_availability.setAutoDefault(False)
@@ -1632,6 +1643,17 @@ class MainWindow(QWidget):
         )
         self._btn_profiles_check_availability.clicked.connect(
             self._start_profiles_availability_check
+        )
+        self._btn_profiles_import_accounts = QPushButton("Импортировать данные учёток")
+        self._btn_profiles_import_accounts.setObjectName("secondary")
+        self._btn_profiles_import_accounts.setAutoDefault(False)
+        self._btn_profiles_import_accounts.setDefault(False)
+        self._btn_profiles_import_accounts.setToolTip(
+            "Загрузить логин, пароль и 2FA из .txt в отмеченные профили "
+            "локального антидетекта (сопоставление по порядку строк в файле)."
+        )
+        self._btn_profiles_import_accounts.clicked.connect(
+            self._open_profiles_accounts_import_dialog
         )
         self._btn_profiles_fill_channel = QPushButton("Заполнить описание и ссылку")
         self._btn_profiles_fill_channel.setObjectName("secondary")
@@ -1656,12 +1678,10 @@ class MainWindow(QWidget):
         self._btn_profiles_clear_zaliver_tags.clicked.connect(
             self._start_clear_zaliver_profile_tags
         )
-        profiles_top.addWidget(self._profiles_title)
-        profiles_top.addStretch()
-        profiles_top.addWidget(self._dolphin_query, 1)
-        profiles_top.addWidget(self._btn_profiles_fill_channel)
-        profiles_top.addWidget(self._btn_profiles_check_availability)
-        profiles_top.addWidget(self._btn_profiles_refresh)
+        profiles_actions_row.addWidget(self._btn_profiles_fill_channel)
+        profiles_actions_row.addWidget(self._btn_profiles_check_availability)
+        profiles_actions_row.addWidget(self._btn_profiles_import_accounts)
+        profiles_actions_row.addStretch()
 
         self._profiles_status = QLabel("")
         self._profiles_status.setObjectName("hint")
@@ -1693,7 +1713,9 @@ class MainWindow(QWidget):
             self._on_profiles_checked_selection_changed
         )
 
-        profiles_l.addLayout(profiles_top)
+        profiles_l.addLayout(profiles_header)
+        profiles_l.addLayout(profiles_search_row)
+        profiles_l.addLayout(profiles_actions_row)
         profiles_l.addWidget(self._profiles_hint)
         profiles_l.addLayout(list_sel_row)
         profiles_l.addWidget(self._profiles_status)
@@ -3145,6 +3167,8 @@ class MainWindow(QWidget):
             self._btn_profiles_fill_channel.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_refresh"):
             self._btn_profiles_refresh.setEnabled(not busy)
+        if hasattr(self, "_btn_profiles_import_accounts"):
+            self._btn_profiles_import_accounts.setEnabled(local and not busy)
 
     def _load_antydetect_settings(self) -> None:
         if not hasattr(self, "_dolphin_token"):
@@ -4006,6 +4030,97 @@ class MainWindow(QWidget):
             if isinstance(cd, dict):
                 return credentials_from_custom_data(cd)
         return None
+
+    def _open_profiles_accounts_import_dialog(self) -> None:
+        kind = self._default_browser_combo.currentData()
+        if not isinstance(kind, str) or kind != "local":
+            QMessageBox.information(
+                self,
+                "Импорт данных учёток",
+                "Импорт доступен только для локального антидетекта.",
+            )
+            return
+        if not self._profiles_raw:
+            QMessageBox.information(
+                self,
+                "Импорт данных учёток",
+                "Сначала загрузите список профилей (кнопка «Обновить»).",
+            )
+            return
+        if self._profiles_interaction is None:
+            return
+        profile_ids = self._profiles_interaction.batch_profile_ids()
+        if not profile_ids:
+            QMessageBox.warning(
+                self,
+                "Импорт данных учёток",
+                "Отметьте квадратиками профили, в которые нужно загрузить учётки.",
+            )
+            return
+        by_id = self._profiles_by_id_map(self._profiles_raw)
+        selected_profiles = [by_id[pid] for pid in profile_ids if pid in by_id]
+        if not selected_profiles:
+            QMessageBox.warning(
+                self,
+                "Импорт данных учёток",
+                "Не удалось найти отмеченные профили в загруженном списке.",
+            )
+            return
+
+        dlg = ProfileAccountsImportDialog(
+            selected_profiles=selected_profiles,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        payloads = dlg.save_payloads()
+        if not payloads:
+            return
+
+        base_url = self._local_antidetect_base_url_from_settings()
+        saved = 0
+        errors: list[str] = []
+        try:
+            api = LocalAntidetectHttpAPI(base_url)
+            try:
+                for pid, payload in payloads:
+                    try:
+                        updated = api.merge_profile_custom_data(pid, payload)
+                        cd_upd = updated.get("custom_data")
+                        if self._profiles_raw is not None:
+                            for i, p in enumerate(self._profiles_raw):
+                                if _profile_id(p) != pid:
+                                    continue
+                                merged = dict(p)
+                                if isinstance(cd_upd, dict):
+                                    merged["custom_data"] = dict(cd_upd)
+                                else:
+                                    merged["custom_data"] = dict(payload)
+                                self._profiles_raw[i] = merged
+                                break
+                        saved += 1
+                    except LocalAntidetectError as e:
+                        errors.append(f"{pid}: {e}")
+            finally:
+                api.close()
+        except LocalAntidetectError as e:
+            QMessageBox.warning(
+                self,
+                "Импорт данных учёток",
+                f"Не удалось подключиться к API антидетекта:\n{e}",
+            )
+            return
+
+        self._apply_profiles_filter()
+        msg = f"Сохранено профилей: {saved} из {len(payloads)}."
+        if errors:
+            msg += "\n\nОшибки:\n" + "\n".join(errors[:8])
+            if len(errors) > 8:
+                msg += f"\n… и ещё {len(errors) - 8}."
+            QMessageBox.warning(self, "Импорт данных учёток", msg)
+        else:
+            QMessageBox.information(self, "Импорт данных учёток", msg)
 
     def _open_profile_account_data_dialog(self, profile_id: str) -> None:
         pid = (profile_id or "").strip()

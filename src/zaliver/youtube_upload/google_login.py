@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 import requests
 
+YT_LOGIN_KEY = "yt_login"
 YT_PASSWORD_KEY = "yt_password"
 YT_2FA_KEY = "yt_2fa"
 
@@ -70,6 +71,7 @@ class GoogleLoginPasswordMissingError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class GoogleLoginCredentials:
+    email: str = ""
     password: str = ""
     twofa_token: str = ""
 
@@ -79,11 +81,12 @@ def credentials_from_custom_data(
 ) -> GoogleLoginCredentials | None:
     if not isinstance(custom_data, dict):
         return None
+    email = str(custom_data.get(YT_LOGIN_KEY) or "").strip()
     password = str(custom_data.get(YT_PASSWORD_KEY) or "").strip()
     twofa = str(custom_data.get(YT_2FA_KEY) or "").strip()
-    if not password and not twofa:
+    if not email and not password and not twofa:
         return None
-    return GoogleLoginCredentials(password=password, twofa_token=twofa)
+    return GoogleLoginCredentials(email=email, password=password, twofa_token=twofa)
 
 
 def _log(message: str) -> None:
@@ -102,6 +105,8 @@ def _page_url_lower(page) -> str:
 def google_auth_interaction_visible(page) -> bool:
     """Один из шагов входа Google / выбора канала YouTube."""
     if "accounts.google.com" in _page_url_lower(page):
+        return True
+    if _identifier_step_visible(page):
         return True
     try:
         if page.locator("ytd-channel-switcher-renderer").first.is_visible(timeout=300):
@@ -130,6 +135,23 @@ def google_auth_interaction_visible(page) -> bool:
         pass
     if _passkey_enrollment_visible(page):
         return True
+    return False
+
+
+def _identifier_field_locator(page):
+    """Только видимое поле email на первом шаге (не #hiddenEmail на шаге пароля)."""
+    return page.locator("#identifierId")
+
+
+def _identifier_step_visible(page) -> bool:
+    """Первый шаг входа: «Вход» — поле email/телефона (#identifierId)."""
+    if _password_step_visible(page):
+        return False
+    try:
+        if _identifier_field_locator(page).first.is_visible(timeout=400):
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -261,17 +283,62 @@ def _google_next_button_locator(page):
 def _click_google_next(page) -> None:
     btn = _google_next_button_locator(page)
     btn.first.wait_for(state="visible", timeout=60_000)
-    btn.first.click(timeout=60_000)
+    try:
+        btn.first.click(timeout=15_000)
+    except Exception:
+        btn.first.click(timeout=15_000, force=True)
     page.wait_for_timeout(1000)
+
+
+def _wait_after_identifier_submit(page, *, timeout_s: float = 30.0) -> None:
+    """Ждём переход со шага email на пароль / подтверждение личности."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _password_step_visible(page) or _identity_confirm_visible(page):
+            return
+        try:
+            if not _identifier_field_locator(page).first.is_visible(timeout=200):
+                return
+        except Exception:
+            return
+        page.wait_for_timeout(250)
 
 
 def _fill_input_and_click_next(page, locator, value: str) -> None:
     field = locator.first
     field.wait_for(state="visible", timeout=20_000)
-    field.click(timeout=15_000)
     field.fill(value, timeout=15_000)
     page.wait_for_timeout(200)
-    _click_google_next(page)
+    try:
+        field.press("Enter")
+        page.wait_for_timeout(800)
+    except Exception:
+        _click_google_next(page)
+        return
+    try:
+        if field.is_visible(timeout=400):
+            _click_google_next(page)
+    except Exception:
+        pass
+
+
+def _fill_identifier_and_continue(page, email: str) -> None:
+    field = _identifier_field_locator(page).first
+    field.wait_for(state="visible", timeout=20_000)
+    field.fill(email, timeout=15_000)
+    page.wait_for_timeout(200)
+    try:
+        field.press("Enter")
+    except Exception:
+        _click_google_next(page)
+    else:
+        page.wait_for_timeout(800)
+        try:
+            if field.is_visible(timeout=400):
+                _click_google_next(page)
+        except Exception:
+            pass
+    _wait_after_identifier_submit(page)
 
 
 def _fetch_otp_from_api(twofa_token: str) -> str:
@@ -574,7 +641,7 @@ def attempt_google_login_for_studio(
     max_seconds: float = _GOOGLE_LOGIN_MAX_S,
 ) -> bool:
     """
-    Пройти цепочку Google: личность → пароль → ключ доступа (пропуск) → 2FA → канал.
+    Пройти цепочку Google: email → личность → пароль → ключ доступа (пропуск) → 2FA → канал.
     Возвращает True, если интерактивный вход больше не нужен.
     """
     if credentials is None:
@@ -594,7 +661,8 @@ def attempt_google_login_for_studio(
             continue
 
         if (
-            not _identity_confirm_visible(page)
+            not _identifier_step_visible(page)
+            and not _identity_confirm_visible(page)
             and not _password_step_visible(page)
             and not _passkey_enrollment_visible(page)
             and not _totp_step_visible(page)
@@ -623,6 +691,18 @@ def attempt_google_login_for_studio(
             steps += 1
             _log(f"Google: ввод пароля и «Далее» (шаг {steps})…")
             _fill_input_and_click_next(page, page.locator('input[name="Passwd"]'), pwd)
+            continue
+
+        if _identifier_step_visible(page):
+            email = (credentials.email or "").strip()
+            if not email:
+                raise RuntimeError(
+                    "YouTube Studio: для входа нужен логин (yt_login) в данных учётки "
+                    "локального профиля — email не задан."
+                )
+            steps += 1
+            _log(f"Google: ввод email ({email}) и «Далее» (шаг {steps})…")
+            _fill_identifier_and_continue(page, email)
             continue
 
         if _passkey_enrollment_visible(page):

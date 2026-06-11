@@ -3,9 +3,8 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
-from urllib.parse import quote
 
-import requests
+from zaliver.youtube_upload.totp import get_totp_token
 
 YT_LOGIN_KEY = "yt_login"
 YT_PASSWORD_KEY = "yt_password"
@@ -95,7 +94,6 @@ _BIRTHDAY_DAY = "1"
 _BIRTHDAY_YEAR = "2000"
 
 _GOOGLE_LOGIN_MAX_S = 180.0
-_OTP_API_BASE = "https://2fa.fb.tools/api/otp/"
 
 
 class GoogleLoginPasswordMissingError(RuntimeError):
@@ -851,58 +849,13 @@ def _fill_identifier_and_continue(page, email: str) -> None:
     _wait_after_identifier_submit(page)
 
 
-def _fetch_otp_from_api(twofa_token: str) -> str:
-    token = (twofa_token or "").strip()
-    if not token:
+def _generate_totp_code(twofa_secret: str) -> str:
+    secret = (twofa_secret or "").strip()
+    if not secret:
         raise RuntimeError("YouTube/Google 2FA: не задан yt_2fa в данных учётки профиля.")
-
-    url = _OTP_API_BASE + quote(token, safe="")
-    last_err: str = ""
-    for attempt in range(12):
-        try:
-            resp = requests.get(url, timeout=30)
-            _log(
-                f"Google 2FA API (попытка {attempt + 1}): "
-                f"status={resp.status_code}, ответ={resp.text!r}"
-            )
-            resp.raise_for_status()
-            payload = resp.json()
-        except Exception as e:
-            last_err = repr(e)
-            _log(f"Google 2FA API: ошибка запроса: {last_err}")
-            time.sleep(2.0)
-            continue
-
-        if not payload.get("ok"):
-            last_err = f"API ok=false: {payload!r}"
-            time.sleep(2.0)
-            continue
-
-        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-        otp = str(data.get("otp") or "").strip()
-        try:
-            remaining = int(data.get("timeRemaining") or 0)
-        except (TypeError, ValueError):
-            remaining = 0
-
-        if remaining < 5:
-            _log(
-                f"Google 2FA: OTP expires in {remaining}s — ждём 6 с и повторяем запрос "
-                f"(попытка {attempt + 1})…"
-            )
-            time.sleep(6.0)
-            continue
-
-        if otp:
-            _log(f"Google 2FA: получен OTP (осталось {remaining} с).")
-            return otp
-
-        last_err = f"empty otp in {payload!r}"
-        time.sleep(2.0)
-
-    raise RuntimeError(
-        f"YouTube/Google 2FA: не удалось получить OTP с 2fa.fb.tools. {last_err}"
-    )
+    otp = get_totp_token(secret)
+    _log("Google 2FA: сгенерирован OTP локально.")
+    return otp
 
 
 def _normalize_count_text(text: str) -> str:
@@ -1265,7 +1218,7 @@ def attempt_google_login_for_studio(
                     "YouTube/Google: требуется 2FA, но yt_2fa не задан в данных учётки профиля."
                 )
             steps += 1
-            otp = _fetch_otp_from_api(token)
+            otp = _generate_totp_code(token)
             _log(f"Google: ввод кода 2FA и «Далее» (шаг {steps})…")
             _fill_input_and_click_next(
                 page,

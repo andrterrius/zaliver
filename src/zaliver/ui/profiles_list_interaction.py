@@ -17,7 +17,9 @@ from PyQt6.QtWidgets import (
 
 from zaliver.ui.antic_profile_row import _profile_id
 from zaliver.ui.profile_list_helpers import (
+    profile_has_account_data,
     profile_has_any_status_error,
+    profile_has_yt_oldest_name,
     profile_is_upload_available,
 )
 from zaliver.ui.profile_list_row import ProfileListRow
@@ -123,7 +125,7 @@ class ProfilesListInteraction(QObject):
         self._apply_checkbox_visuals()
 
     def select_checked_by_filter(self, mode: str, profiles_by_id: dict[str, dict[str, object]], last_upload_map: dict[str, str]) -> None:
-        """mode: all | available | no_errors | with_errors"""
+        """mode: all | available | no_errors | with_errors | no_account_data | no_oldest_channel"""
         existing = set(profiles_by_id.keys())
         if mode == "all":
             self.checked_profile_ids = set(existing)
@@ -143,6 +145,18 @@ class ProfilesListInteraction(QObject):
             picked = set()
             for pid, prof in profiles_by_id.items():
                 if profile_has_any_status_error(prof, upload_store=self._upload_store):
+                    picked.add(pid)
+            self.checked_profile_ids = picked
+        elif mode == "no_account_data":
+            picked = set()
+            for pid, prof in profiles_by_id.items():
+                if not profile_has_account_data(prof):
+                    picked.add(pid)
+            self.checked_profile_ids = picked
+        elif mode == "no_oldest_channel":
+            picked = set()
+            for pid, prof in profiles_by_id.items():
+                if not profile_has_yt_oldest_name(prof):
                     picked.add(pid)
             self.checked_profile_ids = picked
         else:

@@ -10,6 +10,7 @@ import requests
 YT_LOGIN_KEY = "yt_login"
 YT_PASSWORD_KEY = "yt_password"
 YT_2FA_KEY = "yt_2fa"
+YT_OLDEST_NAME_KEY = "yt_oldest_name"
 
 _IDENTITY_HEADING_RE = re.compile(
     r"подтвердите\s+свою\s+личность|confirm\s+your\s+identity",
@@ -21,6 +22,10 @@ _2FA_HEADING_RE = re.compile(
 )
 _PASSKEY_ENROLLMENT_HEADING_RE = re.compile(
     r"входите\s+в\s+аккаунт\s+быстрее|sign\s+in\s+faster|faster\s+sign[- ]in",
+    re.I,
+)
+_SELFIE_ENROLLMENT_HEADING_RE = re.compile(
+    r"добавьте\s+селфи|add\s+(a\s+)?selfie|video\s*selfie",
     re.I,
 )
 _NEXT_BTN_RE = re.compile(r"^далее$|^next$", re.I)
@@ -60,6 +65,34 @@ _CHANNEL_PICKER_TITLE_RE = re.compile(
     r"select\s+a\s+channel|выберите\s+канал|choose\s+a\s+channel",
     re.I,
 )
+_ACCOUNT_CHOOSER_HEADING_RE = re.compile(
+    r"выберите\s+аккаунт|choose\s+(an\s+)?account",
+    re.I,
+)
+_USE_ANOTHER_ACCOUNT_RE = re.compile(
+    r"использовать\s+другой\s+аккаунт|use\s+another\s+account",
+    re.I,
+)
+_RECOVERY_INFO_HEADING_RE = re.compile(
+    r"убедитесь,\s*что\s+вы\s+всегда\s+сможете\s+войти|"
+    r"make\s+sure\s+you\s+(can\s+)?always\s+sign\s+in",
+    re.I,
+)
+_RECOVERY_PHONE_HEADING_RE = re.compile(
+    r"укажите\s+номер\s+телефона|add\s+(a\s+)?phone\s+number|enter\s+(your\s+)?phone",
+    re.I,
+)
+_CANCEL_BTN_RE = re.compile(r"^отмена$|^cancel$", re.I)
+_BIRTHDAY_HEADING_RE = re.compile(
+    r"add\s+your\s+birthday|добавьте\s+дату\s+рождения|"
+    r"date\s+of\s+birth\s+is\s+missing|дата\s+рождения\s+не\s+указана|"
+    r"дата\s+рождения",
+    re.I,
+)
+_SAVE_BTN_RE = re.compile(r"^save$|^сохранить$", re.I)
+_BIRTHDAY_MONTH = 1
+_BIRTHDAY_DAY = "1"
+_BIRTHDAY_YEAR = "2000"
 
 _GOOGLE_LOGIN_MAX_S = 180.0
 _OTP_API_BASE = "https://2fa.fb.tools/api/otp/"
@@ -89,6 +122,12 @@ def credentials_from_custom_data(
     return GoogleLoginCredentials(email=email, password=password, twofa_token=twofa)
 
 
+def oldest_name_from_custom_data(custom_data: dict[str, object] | None) -> str:
+    if not isinstance(custom_data, dict):
+        return ""
+    return str(custom_data.get(YT_OLDEST_NAME_KEY) or "").strip()
+
+
 def _log(message: str) -> None:
     from zaliver.youtube_upload import studio as _studio
 
@@ -102,9 +141,43 @@ def _page_url_lower(page) -> str:
         return ""
 
 
+def _scope_url_lower(scope) -> str:
+    try:
+        return (getattr(scope, "url", None) or "").lower()
+    except Exception:
+        return ""
+
+
+def _google_auth_scopes(page):
+    """Страница и фреймы, где может отображаться UI входа Google."""
+    seen: set[int] = set()
+    scopes: list = [page]
+    try:
+        scopes.extend(page.frames)
+    except Exception:
+        pass
+    for scope in scopes:
+        sid = id(scope)
+        if sid in seen:
+            continue
+        seen.add(sid)
+        yield scope
+
+
+def _use_another_account_locator(scope):
+    return (
+        scope.locator('[jsname="rwl3qc"]')
+        .or_(scope.locator("div.riDSKb", has_text=_USE_ANOTHER_ACCOUNT_RE))
+        .or_(scope.get_by_role("link", name=_USE_ANOTHER_ACCOUNT_RE))
+        .or_(scope.get_by_text(_USE_ANOTHER_ACCOUNT_RE))
+    )
+
+
 def google_auth_interaction_visible(page) -> bool:
     """Один из шагов входа Google / выбора канала YouTube."""
     if "accounts.google.com" in _page_url_lower(page):
+        return True
+    if _account_chooser_step_visible(page):
         return True
     if _identifier_step_visible(page):
         return True
@@ -135,6 +208,176 @@ def google_auth_interaction_visible(page) -> bool:
         pass
     if _passkey_enrollment_visible(page):
         return True
+    if _selfie_enrollment_visible(page):
+        return True
+    if _recovery_info_step_visible(page):
+        return True
+    if _birthday_step_visible(page):
+        return True
+    return False
+
+
+def _account_chooser_step_visible(page) -> bool:
+    """Экран «Выберите аккаунт» перед шагом ввода email."""
+    for scope in _google_auth_scopes(page):
+        url = _scope_url_lower(scope)
+        if "accountchooser" in url:
+            return True
+        try:
+            if scope.locator('[data-p*="identity-signin-account-chooser"]').count() > 0:
+                return True
+        except Exception:
+            pass
+        try:
+            h = scope.locator("#headingText").first
+            if h.count() > 0 and h.is_visible(timeout=300):
+                if _ACCOUNT_CHOOSER_HEADING_RE.search(
+                    (h.inner_text(timeout=500) or "").strip()
+                ):
+                    return True
+        except Exception:
+            pass
+        try:
+            if scope.get_by_text(_ACCOUNT_CHOOSER_HEADING_RE).first.is_visible(timeout=300):
+                return True
+        except Exception:
+            pass
+        try:
+            btn = _use_another_account_locator(scope)
+            if btn.count() > 0 and btn.first.is_visible(timeout=300):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _click_use_another_account_js(scope) -> bool:
+    try:
+        return bool(
+            scope.evaluate(
+                """() => {
+                    const labels = [
+                        'Использовать другой аккаунт',
+                        'Use another account',
+                    ];
+                    const matches = (el) => {
+                        const t = (el.innerText || el.textContent || '').trim();
+                        return labels.some((x) => t === x || t.includes(x));
+                    };
+                    const tryClick = (root) => {
+                        if (!root) return false;
+                        const direct = root.querySelector('[jsname="rwl3qc"]');
+                        if (direct) {
+                            direct.click();
+                            return true;
+                        }
+                        for (const el of root.querySelectorAll('[role="link"], button, div, span')) {
+                            if (matches(el)) {
+                                el.click();
+                                return true;
+                            }
+                        }
+                        for (const host of root.querySelectorAll('*')) {
+                            if (host.shadowRoot && tryClick(host.shadowRoot)) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+                    return tryClick(document);
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+def _click_use_another_account(page) -> None:
+    _log("Google: «Выберите аккаунт» — нажимаем «Использовать другой аккаунт»…")
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=8_000)
+    except Exception:
+        pass
+
+    clicked = False
+    last_err: str = ""
+    for scope in _google_auth_scopes(page):
+        btn = _use_another_account_locator(scope)
+        try:
+            if btn.count() == 0:
+                continue
+            target = btn.first
+            target.wait_for(state="visible", timeout=20_000)
+            try:
+                target.scroll_into_view_if_needed(timeout=5_000)
+            except Exception:
+                pass
+            try:
+                target.click(timeout=30_000)
+            except Exception as e:
+                last_err = repr(e)
+                target.click(timeout=30_000, force=True)
+            clicked = True
+            break
+        except Exception as e:
+            last_err = repr(e)
+            continue
+
+    if not clicked:
+        for scope in _google_auth_scopes(page):
+            if _click_use_another_account_js(scope):
+                clicked = True
+                _log("Google: клик «Использовать другой аккаунт» через JS.")
+                break
+
+    if not clicked:
+        raise RuntimeError(
+            "Google: кнопка «Использовать другой аккаунт» не найдена или не видна. "
+            f"URL={page.url!r}. {last_err}"
+        )
+
+    page.wait_for_timeout(900)
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        if _identifier_step_visible(page):
+            return
+        page.wait_for_timeout(250)
+
+
+def _use_another_account_present_js(scope) -> bool:
+    try:
+        return bool(
+            scope.evaluate(
+                """() => {
+                    const has = (root) => {
+                        if (!root) return false;
+                        if (root.querySelector('[jsname="rwl3qc"]')) return true;
+                        for (const host of root.querySelectorAll('*')) {
+                            if (host.shadowRoot && has(host.shadowRoot)) return true;
+                        }
+                        return false;
+                    };
+                    return has(document);
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+def _try_use_another_account_if_present(page) -> bool:
+    """Запасной путь: ищем кнопку напрямую (в т.ч. во фреймах и shadow DOM)."""
+    for scope in _google_auth_scopes(page):
+        try:
+            btn = _use_another_account_locator(scope)
+            if btn.count() > 0 and btn.first.is_visible(timeout=300):
+                _click_use_another_account(page)
+                return True
+        except Exception:
+            continue
+        if _use_another_account_present_js(scope):
+            _click_use_another_account(page)
+            return True
     return False
 
 
@@ -156,6 +399,9 @@ def _identifier_step_visible(page) -> bool:
 
 
 def _identity_confirm_visible(page) -> bool:
+    url = _page_url_lower(page)
+    if "confirmidentifier" in url or "confirm-identifier" in url:
+        return True
     try:
         h = page.locator("#headingText").first
         if h.is_visible(timeout=400):
@@ -227,6 +473,270 @@ def _click_passkey_enrollment_not_now(page) -> None:
     )
     skip_btn.first.wait_for(state="visible", timeout=20_000)
     skip_btn.first.click(timeout=30_000)
+    page.wait_for_timeout(900)
+
+
+def _selfie_enrollment_visible(page) -> bool:
+    """Предложение добавить видеоселфи: «Добавьте селфи для входа в аккаунт»."""
+    url = _page_url_lower(page)
+    if "video-verification" in url or "video_verification" in url:
+        return True
+    for scope in _google_auth_scopes(page):
+        try:
+            h = scope.locator("h1.SgEu9c, h1#headingText, #headingText").first
+            if h.count() > 0 and h.is_visible(timeout=400):
+                if _SELFIE_ENROLLMENT_HEADING_RE.search(
+                    (h.inner_text(timeout=500) or "").strip()
+                ):
+                    return True
+        except Exception:
+            pass
+        try:
+            if scope.get_by_text(_SELFIE_ENROLLMENT_HEADING_RE).first.is_visible(
+                timeout=400
+            ):
+                return True
+        except Exception:
+            pass
+        try:
+            if scope.locator('img[src*="selfie-scene"]').count() > 0:
+                skip = scope.locator('[jsname="gQ2Xie"]').first
+                if skip.is_visible(timeout=400):
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def _click_selfie_enrollment_not_now(page) -> None:
+    _log("Google: окно видеоселфи — нажимаем «Не сейчас»…")
+    skip_btn = (
+        page.locator('[jsname="gQ2Xie"]')
+        .or_(page.locator('[jsname="gQ2Xie"] a[aria-label]'))
+        .or_(page.locator('a[aria-label="Не сейчас"]'))
+        .or_(page.locator('a[aria-label="Not now"]'))
+        .or_(page.get_by_role("button", name=_NOT_NOW_BTN_RE))
+        .or_(page.get_by_role("link", name=_NOT_NOW_BTN_RE))
+    )
+    skip_btn.first.wait_for(state="visible", timeout=20_000)
+    try:
+        skip_btn.first.click(timeout=30_000)
+    except Exception:
+        skip_btn.first.click(timeout=30_000, force=True)
+    page.wait_for_timeout(900)
+
+
+def _recovery_info_cancel_locator(scope):
+    return (
+        scope.locator('[jsname="ZUkOIc"]')
+        .or_(scope.locator('button[aria-label="Отмена"]'))
+        .or_(scope.locator('button[aria-label="Cancel"]'))
+        .or_(scope.get_by_role("button", name=_CANCEL_BTN_RE))
+    )
+
+
+def _recovery_info_step_visible(page) -> bool:
+    """Экран «Убедитесь, что вы всегда сможете войти» — запрос телефона для восстановления."""
+    for scope in _google_auth_scopes(page):
+        has_heading = False
+        has_phone = False
+        try:
+            h = scope.locator(".RY3zi, [role='heading'][aria-level='1']").first
+            if h.count() > 0 and h.is_visible(timeout=300):
+                txt = (h.inner_text(timeout=500) or "").strip()
+                if _RECOVERY_INFO_HEADING_RE.search(txt):
+                    has_heading = True
+        except Exception:
+            pass
+        if not has_heading:
+            try:
+                if scope.get_by_text(_RECOVERY_INFO_HEADING_RE).first.is_visible(timeout=300):
+                    has_heading = True
+            except Exception:
+                pass
+        try:
+            phone_h = scope.locator(".Fo3vmc[role='heading'], div.Fo3vmc").filter(
+                has_text=_RECOVERY_PHONE_HEADING_RE
+            )
+            if phone_h.count() > 0 and phone_h.first.is_visible(timeout=300):
+                has_phone = True
+        except Exception:
+            pass
+        if not has_phone:
+            try:
+                if scope.get_by_text(_RECOVERY_PHONE_HEADING_RE).first.is_visible(timeout=300):
+                    has_phone = True
+            except Exception:
+                pass
+        if not (has_heading or has_phone):
+            continue
+        try:
+            cancel = _recovery_info_cancel_locator(scope)
+            if cancel.count() > 0 and cancel.first.is_visible(timeout=300):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _click_recovery_info_cancel_js(scope) -> bool:
+    try:
+        return bool(
+            scope.evaluate(
+                """() => {
+                    const labels = ['Отмена', 'Cancel'];
+                    const tryClick = (root) => {
+                        if (!root) return false;
+                        const direct = root.querySelector('[jsname="ZUkOIc"]');
+                        if (direct) {
+                            direct.click();
+                            return true;
+                        }
+                        for (const el of root.querySelectorAll('button')) {
+                            const t = (el.innerText || el.textContent || '').trim();
+                            const aria = (el.getAttribute('aria-label') || '').trim();
+                            if (labels.some((x) => t === x || aria === x)) {
+                                el.click();
+                                return true;
+                            }
+                        }
+                        for (const host of root.querySelectorAll('*')) {
+                            if (host.shadowRoot && tryClick(host.shadowRoot)) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+                    return tryClick(document);
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+def _click_recovery_info_cancel(page) -> None:
+    _log("Google: восстановление доступа — нажимаем «Отмена»…")
+    clicked = False
+    last_err = ""
+    for scope in _google_auth_scopes(page):
+        btn = _recovery_info_cancel_locator(scope)
+        try:
+            if btn.count() == 0:
+                continue
+            target = btn.first
+            target.wait_for(state="visible", timeout=20_000)
+            try:
+                target.scroll_into_view_if_needed(timeout=5_000)
+            except Exception:
+                pass
+            try:
+                target.click(timeout=30_000)
+            except Exception as e:
+                last_err = repr(e)
+                target.click(timeout=30_000, force=True)
+            clicked = True
+            break
+        except Exception as e:
+            last_err = repr(e)
+            continue
+    if not clicked:
+        for scope in _google_auth_scopes(page):
+            if _click_recovery_info_cancel_js(scope):
+                clicked = True
+                _log("Google: клик «Отмена» через JS.")
+                break
+    if not clicked:
+        raise RuntimeError(
+            "Google: кнопка «Отмена» на экране восстановления доступа не найдена. "
+            f"URL={page.url!r}. {last_err}"
+        )
+    page.wait_for_timeout(900)
+
+
+def _birthday_step_visible_in_scope(scope) -> bool:
+    try:
+        h = scope.locator("h1.qQnGVb").first
+        if h.count() > 0 and h.is_visible(timeout=300):
+            txt = (h.inner_text(timeout=500) or "").strip()
+            if _BIRTHDAY_HEADING_RE.search(txt):
+                return True
+    except Exception:
+        pass
+    try:
+        if scope.get_by_text(_BIRTHDAY_HEADING_RE).first.is_visible(timeout=300):
+            return True
+    except Exception:
+        pass
+    try:
+        day = scope.locator('input[aria-label*="day" i], input[placeholder="DD"]').first
+        year = scope.locator('input[aria-label*="year" i], input[placeholder="YYYY"]').first
+        if day.count() > 0 and year.count() > 0:
+            if day.is_visible(timeout=300) and year.is_visible(timeout=300):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _birthday_form_scope(page):
+    for scope in _google_auth_scopes(page):
+        if _birthday_step_visible_in_scope(scope):
+            return scope
+    return page
+
+
+def _birthday_step_visible(page) -> bool:
+    """Экран «Add your birthday» — запрос даты рождения."""
+    for scope in _google_auth_scopes(page):
+        if _birthday_step_visible_in_scope(scope):
+            return True
+    return False
+
+
+def _fill_birthday_and_save(page) -> None:
+    _log(
+        f"Google: дата рождения — {_BIRTHDAY_DAY}."
+        f"{_BIRTHDAY_MONTH:02d}.{_BIRTHDAY_YEAR} и «Сохранить»…"
+    )
+    scope = _birthday_form_scope(page)
+
+    month_combo = (
+        scope.locator('div[data-year-required="true"] [role="combobox"]')
+        .or_(scope.locator('[aria-label*="month" i][role="combobox"]'))
+        .or_(scope.locator('[aria-labelledby*="Month" i][role="combobox"]'))
+    ).first
+    month_combo.wait_for(state="visible", timeout=20_000)
+    month_combo.click(timeout=30_000)
+    page.wait_for_timeout(450)
+
+    month_option = (
+        scope.locator(f'li[role="option"][data-value="{_BIRTHDAY_MONTH}"]')
+        .or_(scope.get_by_role("option", name=re.compile(r"^january$|^январ", re.I)))
+    ).first
+    month_option.wait_for(state="visible", timeout=10_000)
+    month_option.click(timeout=30_000)
+    page.wait_for_timeout(350)
+
+    day_input = scope.locator(
+        'input[aria-label*="day" i], input[placeholder="DD"]'
+    ).first
+    day_input.wait_for(state="visible", timeout=10_000)
+    day_input.fill(_BIRTHDAY_DAY)
+
+    year_input = scope.locator(
+        'input[aria-label*="year" i], input[placeholder="YYYY"]'
+    ).first
+    year_input.wait_for(state="visible", timeout=10_000)
+    year_input.fill(_BIRTHDAY_YEAR)
+    page.wait_for_timeout(350)
+
+    save_btn = (
+        scope.locator('[jsname="x8hlje"]')
+        .or_(scope.get_by_role("button", name=_SAVE_BTN_RE))
+    ).first
+    save_btn.wait_for(state="visible", timeout=10_000)
+    save_btn.click(timeout=30_000)
     page.wait_for_timeout(900)
 
 
@@ -351,10 +861,15 @@ def _fetch_otp_from_api(twofa_token: str) -> str:
     for attempt in range(12):
         try:
             resp = requests.get(url, timeout=30)
+            _log(
+                f"Google 2FA API (попытка {attempt + 1}): "
+                f"status={resp.status_code}, ответ={resp.text!r}"
+            )
             resp.raise_for_status()
             payload = resp.json()
         except Exception as e:
             last_err = repr(e)
+            _log(f"Google 2FA API: ошибка запроса: {last_err}")
             time.sleep(2.0)
             continue
 
@@ -641,7 +1156,8 @@ def attempt_google_login_for_studio(
     max_seconds: float = _GOOGLE_LOGIN_MAX_S,
 ) -> bool:
     """
-    Пройти цепочку Google: email → личность → пароль → ключ доступа (пропуск) → 2FA → канал.
+    Пройти цепочку Google: email → личность → пароль → ключ доступа (пропуск) →
+    видеоселфи (пропуск) → 2FA → канал.
     Возвращает True, если интерактивный вход больше не нужен.
     """
     if credentials is None:
@@ -650,8 +1166,10 @@ def attempt_google_login_for_studio(
     from zaliver.youtube_upload.studio import _studio_login_required
 
     _log("Google/YouTube: обнаружен вход — пробуем автоматический сценарий…")
+    _log(f"Google: URL при старте входа: {page.url!r}")
     deadline = time.monotonic() + max_seconds
     steps = 0
+    idle_rounds = 0
 
     while time.monotonic() < deadline:
         if _channel_switcher_visible(page):
@@ -665,7 +1183,11 @@ def attempt_google_login_for_studio(
             and not _identity_confirm_visible(page)
             and not _password_step_visible(page)
             and not _passkey_enrollment_visible(page)
+            and not _selfie_enrollment_visible(page)
+            and not _recovery_info_step_visible(page)
+            and not _birthday_step_visible(page)
             and not _totp_step_visible(page)
+            and not _account_chooser_step_visible(page)
             and not google_auth_interaction_visible(page)
             and not _studio_login_required(page)
         ):
@@ -673,6 +1195,13 @@ def attempt_google_login_for_studio(
             if not _channel_switcher_visible(page) and not _studio_login_required(page):
                 _log("Google/YouTube: вход завершён.")
                 return True
+            continue
+
+        if _account_chooser_step_visible(page):
+            steps += 1
+            idle_rounds = 0
+            _log(f"Google: выбор аккаунта — «Использовать другой аккаунт» (шаг {steps})…")
+            _click_use_another_account(page)
             continue
 
         if _identity_confirm_visible(page):
@@ -710,6 +1239,25 @@ def attempt_google_login_for_studio(
             _click_passkey_enrollment_not_now(page)
             continue
 
+        if _selfie_enrollment_visible(page):
+            steps += 1
+            _click_selfie_enrollment_not_now(page)
+            continue
+
+        if _recovery_info_step_visible(page):
+            steps += 1
+            idle_rounds = 0
+            _log(f"Google: восстановление доступа — «Отмена» (шаг {steps})…")
+            _click_recovery_info_cancel(page)
+            continue
+
+        if _birthday_step_visible(page):
+            steps += 1
+            idle_rounds = 0
+            _log(f"Google: дата рождения (шаг {steps})…")
+            _fill_birthday_and_save(page)
+            continue
+
         if _totp_step_visible(page):
             token = (credentials.twofa_token or "").strip()
             if not token:
@@ -726,6 +1274,22 @@ def attempt_google_login_for_studio(
             )
             continue
 
+        if _studio_login_required(page) or "accounts.google.com" in _page_url_lower(page):
+            if _try_use_another_account_if_present(page):
+                steps += 1
+                idle_rounds = 0
+                continue
+
+        idle_rounds += 1
+        if idle_rounds == 1 or idle_rounds % 10 == 0:
+            _log(
+                f"Google: ожидание шага входа (URL={page.url!r}, "
+                f"chooser={_account_chooser_step_visible(page)}, "
+                f"email={_identifier_step_visible(page)}, "
+                f"recovery={_recovery_info_step_visible(page)}, "
+                f"selfie={_selfie_enrollment_visible(page)}, "
+                f"birthday={_birthday_step_visible(page)})…"
+            )
         page.wait_for_timeout(500)
 
     raise RuntimeError(

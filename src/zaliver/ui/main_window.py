@@ -81,7 +81,10 @@ from zaliver.ui.profile_list_helpers import (
     profile_search_rank,
     profile_search_tokens,
 )
-from zaliver.ui.profile_account_data_dialog import ProfileAccountDataDialog
+from zaliver.ui.profile_account_data_dialog import (
+    ProfileAccountDataDialog,
+    YT_LOGIN_KEY,
+)
 from zaliver.ui.profile_accounts_import_dialog import ProfileAccountsImportDialog
 from zaliver.ui.profiles_list_interaction import ProfilesListInteraction
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
@@ -1649,8 +1652,9 @@ class MainWindow(QWidget):
         self._btn_profiles_import_accounts.setAutoDefault(False)
         self._btn_profiles_import_accounts.setDefault(False)
         self._btn_profiles_import_accounts.setToolTip(
-            "Загрузить логин, пароль и 2FA из .txt в отмеченные профили "
-            "локального антидетекта (сопоставление по порядку строк в файле)."
+            "Загрузить логин, пароль и 2FA из вставленного текста или .txt "
+            "в отмеченные профили локального антидетекта "
+            "(сопоставление по порядку строк)."
         )
         self._btn_profiles_import_accounts.clicked.connect(
             self._open_profiles_accounts_import_dialog
@@ -3422,7 +3426,7 @@ class MainWindow(QWidget):
         btn_select.setAutoDefault(False)
         btn_select.setDefault(False)
         btn_select.setToolTip(
-            "Отметить профили по условию (пауза 3 ч, с ошибками или без ошибок в статусах)"
+            "Отметить профили по условию (пауза 3 ч, ошибки, данные учётки, старейший канал)"
         )
         select_menu = QMenu(parent)
         act_all = select_menu.addAction("Все видимые")
@@ -3444,6 +3448,17 @@ class MainWindow(QWidget):
             "Прокси неактивен, есть теги/флаги с «ошибка» или профиль помечен после сбоев залива"
         )
         act_errors.triggered.connect(lambda: on_select_filter("with_errors"))
+        select_menu.addSeparator()
+        act_no_account = select_menu.addAction("Без данных в учётке")
+        act_no_account.setToolTip(
+            "Профили без логина, пароля и 2FA YouTube в custom_data (локальный антидетект)"
+        )
+        act_no_account.triggered.connect(lambda: on_select_filter("no_account_data"))
+        act_no_oldest = select_menu.addAction("Без определённого старейшего канала")
+        act_no_oldest.setToolTip(
+            "Профили, для которых ещё не сохранён yt_oldest_name после проверки каналов"
+        )
+        act_no_oldest.triggered.connect(lambda: on_select_filter("no_oldest_channel"))
         btn_select.setMenu(select_menu)
 
         row.addWidget(lbl)
@@ -3720,6 +3735,7 @@ class MainWindow(QWidget):
 
         def _check_one(pid: str) -> None:
             creds = self._profile_login_credentials(pid)
+            yt_oldest = self._profile_yt_oldest_name(pid) or None
             if kind_s == "local":
                 u = (base_url or "").strip()
                 if not u:
@@ -3731,6 +3747,7 @@ class MainWindow(QWidget):
                     base_url=u,
                     headless=headless,
                     login_credentials=creds,
+                    yt_oldest_name=yt_oldest,
                 )
             else:
                 check_studio_availability_in_profile(
@@ -3738,6 +3755,7 @@ class MainWindow(QWidget):
                     local_token=token or None,
                     headless=headless,
                     login_credentials=creds,
+                    yt_oldest_name=yt_oldest,
                 )
 
         def _on_profile_done(pid: str, ok: bool, err: str) -> None:
@@ -3965,6 +3983,7 @@ class MainWindow(QWidget):
 
         def _fill_one(pid: str) -> None:
             creds = self._profile_login_credentials(pid)
+            yt_oldest = self._profile_yt_oldest_name(pid) or None
             if kind_s == "local":
                 u = (base_url or "").strip()
                 if not u:
@@ -3979,6 +3998,7 @@ class MainWindow(QWidget):
                     base_url=u,
                     headless=headless,
                     login_credentials=creds,
+                    yt_oldest_name=yt_oldest,
                 )
             else:
                 fill_channel_description_and_link_in_profile(
@@ -3989,6 +4009,7 @@ class MainWindow(QWidget):
                     local_token=token or None,
                     headless=headless,
                     login_credentials=creds,
+                    yt_oldest_name=yt_oldest,
                 )
 
         def _on_progress(done: int, total: int, profile_id: str) -> None:
@@ -4031,6 +4052,18 @@ class MainWindow(QWidget):
                 return credentials_from_custom_data(cd)
         return None
 
+    def _profile_yt_oldest_name(self, profile_id: str) -> str:
+        from zaliver.youtube_upload.google_login import oldest_name_from_custom_data
+
+        pid = (profile_id or "").strip()
+        for p in self._profiles_raw or []:
+            if _profile_id(p) != pid:
+                continue
+            cd = p.get("custom_data")
+            if isinstance(cd, dict):
+                return oldest_name_from_custom_data(cd)
+        return ""
+
     def _open_profiles_accounts_import_dialog(self) -> None:
         kind = self._default_browser_combo.currentData()
         if not isinstance(kind, str) or kind != "local":
@@ -4069,6 +4102,7 @@ class MainWindow(QWidget):
 
         dlg = ProfileAccountsImportDialog(
             selected_profiles=selected_profiles,
+            all_profiles=list(self._profiles_raw or []),
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -4077,9 +4111,11 @@ class MainWindow(QWidget):
         payloads = dlg.save_payloads()
         if not payloads:
             return
+        rename_to_email = dlg.rename_profiles_to_email()
 
         base_url = self._local_antidetect_base_url_from_settings()
         saved = 0
+        renamed = 0
         errors: list[str] = []
         try:
             api = LocalAntidetectHttpAPI(base_url)
@@ -4088,6 +4124,15 @@ class MainWindow(QWidget):
                     try:
                         updated = api.merge_profile_custom_data(pid, payload)
                         cd_upd = updated.get("custom_data")
+                        new_name = ""
+                        if rename_to_email:
+                            new_name = str(payload.get(YT_LOGIN_KEY) or "").strip()
+                            if new_name:
+                                try:
+                                    updated = api.update_profile_name(pid, new_name)
+                                    renamed += 1
+                                except LocalAntidetectError as e:
+                                    errors.append(f"{pid} (имя): {e}")
                         if self._profiles_raw is not None:
                             for i, p in enumerate(self._profiles_raw):
                                 if _profile_id(p) != pid:
@@ -4097,6 +4142,8 @@ class MainWindow(QWidget):
                                     merged["custom_data"] = dict(cd_upd)
                                 else:
                                     merged["custom_data"] = dict(payload)
+                                if new_name:
+                                    merged["name"] = new_name
                                 self._profiles_raw[i] = merged
                                 break
                         saved += 1
@@ -4114,6 +4161,8 @@ class MainWindow(QWidget):
 
         self._apply_profiles_filter()
         msg = f"Сохранено профилей: {saved} из {len(payloads)}."
+        if rename_to_email and renamed:
+            msg += f"\nПереименовано: {renamed}."
         if errors:
             msg += "\n\nОшибки:\n" + "\n".join(errors[:8])
             if len(errors) > 8:
@@ -4169,6 +4218,30 @@ class MainWindow(QWidget):
             return
 
         payload = dlg.account_data_payload()
+        login = str(payload.get(YT_LOGIN_KEY) or "").strip()
+        if login:
+            from zaliver.ui.account_import_parser import (
+                find_profiles_with_login,
+                format_profile_login_conflict,
+            )
+
+            dupes = find_profiles_with_login(
+                login, list(self._profiles_raw or []), exclude_profile_id=pid
+            )
+            if dupes:
+                owners = "\n".join(
+                    f"• {format_profile_login_conflict(p)}" for p in dupes
+                )
+                answer = QMessageBox.warning(
+                    self,
+                    "Данные учетки",
+                    f"Почта {login} уже указана в другом профиле:\n{owners}\n\n"
+                    "Всё равно сохранить?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
         try:
             api = LocalAntidetectHttpAPI(base_url)
             try:
@@ -4490,6 +4563,7 @@ class MainWindow(QWidget):
                 )
 
             creds = self._profile_login_credentials(profile_id)
+            yt_oldest = self._profile_yt_oldest_name(profile_id) or None
             if kind == "local":
                 u = (base_url or "").strip()
                 if not u:
@@ -4504,6 +4578,7 @@ class MainWindow(QWidget):
                     title=upload_title,
                     description=upload_description,
                     login_credentials=creds,
+                    yt_oldest_name=yt_oldest,
                 )
             else:
                 res = open_google_in_profile(
@@ -4514,6 +4589,7 @@ class MainWindow(QWidget):
                     title=upload_title,
                     description=upload_description,
                     login_credentials=creds,
+                    yt_oldest_name=yt_oldest,
                 )
             try:
                 vid = ""
@@ -5246,6 +5322,7 @@ class MainWindow(QWidget):
                     )
 
                 creds = self._profile_login_credentials(profile_id)
+                yt_oldest = self._profile_yt_oldest_name(profile_id) or None
                 if kind == "local":
                     res = open_google_in_local_antidetect_profile(
                         profile_id,
@@ -5255,6 +5332,7 @@ class MainWindow(QWidget):
                         title=task.title,
                         description=task.description,
                         login_credentials=creds,
+                        yt_oldest_name=yt_oldest,
                     )
                 else:
                     res = open_google_in_profile(
@@ -5265,6 +5343,7 @@ class MainWindow(QWidget):
                         title=task.title,
                         description=task.description,
                         login_credentials=creds,
+                        yt_oldest_name=yt_oldest,
                     )
 
                 vid = ""

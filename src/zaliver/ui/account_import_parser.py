@@ -55,6 +55,101 @@ def parse_accounts_text(data_text: str) -> list[dict[str, str]]:
     return accounts
 
 
+def profile_stored_login(profile: dict[str, object]) -> str:
+    """Нормализованный логин из custom_data или имени профиля, если это почта."""
+    custom_data = profile.get("custom_data")
+    if isinstance(custom_data, dict):
+        login = str(custom_data.get(YT_LOGIN_KEY) or "").strip()
+        if login:
+            return login.lower()
+    name = _profile_name(profile).strip()
+    if "@" in name:
+        return name.lower()
+    return ""
+
+
+def find_profiles_with_login(
+    login: str,
+    profiles: list[dict[str, object]],
+    *,
+    exclude_profile_id: str | None = None,
+) -> list[dict[str, object]]:
+    """Профили, у которых уже сохранена такая же почта."""
+    key = (login or "").strip().lower()
+    if not key:
+        return []
+    skip = (exclude_profile_id or "").strip()
+    out: list[dict[str, object]] = []
+    for profile in profiles:
+        pid = _profile_id(profile)
+        if skip and pid == skip:
+            continue
+        if profile_stored_login(profile) == key:
+            out.append(profile)
+    return out
+
+
+def format_profile_login_conflict(profile: dict[str, object]) -> str:
+    return f"{_profile_name(profile)} ({_profile_id(profile)})"
+
+
+def annotate_import_duplicate_warnings(
+    rows: list[dict[str, object]],
+    all_profiles: list[dict[str, object]],
+) -> list[str]:
+    """
+    Помечает строки импорта с конфликтом почты.
+    Возвращает текстовые предупреждения для UI.
+    """
+    warnings: list[str] = []
+    seen_in_batch: dict[str, str] = {}
+
+    for row in rows:
+        if not row.get("can_save"):
+            continue
+        account = row.get("account")
+        if not isinstance(account, dict):
+            continue
+        login = str(account.get(YT_LOGIN_KEY) or "").strip()
+        if not login:
+            continue
+        login_key = login.lower()
+        pid = str(row.get("profile_id") or "").strip()
+        profile_name = str(row.get("profile_name") or "").strip() or pid
+
+        if login_key in seen_in_batch:
+            other_pid = seen_in_batch[login_key]
+            msg = (
+                f"Почта {login} повторяется в импорте "
+                f"(профили {other_pid} и {pid})."
+            )
+            warnings.append(msg)
+            row["status"] = "Дубликат почты в импорте"
+            row["can_save"] = False
+            for prev in rows:
+                if str(prev.get("profile_id") or "").strip() == other_pid:
+                    prev["status"] = "Дубликат почты в импорте"
+                    prev["can_save"] = False
+                    break
+            continue
+        seen_in_batch[login_key] = pid
+
+        dupes = find_profiles_with_login(
+            login, all_profiles, exclude_profile_id=pid
+        )
+        if not dupes:
+            continue
+        owners = ", ".join(format_profile_login_conflict(p) for p in dupes)
+        msg = (
+            f"Почта {login} для профиля «{profile_name}» уже есть у: {owners}."
+        )
+        warnings.append(msg)
+        row["status"] = f"Почта уже в профиле: {format_profile_login_conflict(dupes[0])}"
+        row["can_save"] = False
+
+    return warnings
+
+
 def find_profile_for_account(
     account: dict[str, str],
     profiles: list[dict[str, object]],

@@ -17,6 +17,26 @@ YT_PASSWORD_KEY = "yt_password"
 YT_2FA_KEY = "yt_2fa"
 
 
+def build_account_credentials_payload(
+    *,
+    login: str,
+    password: str,
+    twofa: str,
+    clear_oldest_channel: bool = True,
+) -> dict[str, str]:
+    """Payload для merge custom_data; при импорте сбрасывает yt_oldest_name."""
+    payload = {
+        YT_LOGIN_KEY: (login or "").strip(),
+        YT_PASSWORD_KEY: password or "",
+        YT_2FA_KEY: (twofa or "").strip(),
+    }
+    if clear_oldest_channel:
+        from zaliver.youtube_upload.google_login import YT_OLDEST_NAME_KEY
+
+        payload[YT_OLDEST_NAME_KEY] = ""
+    return payload
+
+
 def _custom_data_str(custom_data: dict[str, object] | None, key: str) -> str:
     if not custom_data:
         return ""
@@ -45,7 +65,8 @@ class ProfileAccountDataDialog(QDialog):
 
         hint = QLabel(
             f"Профиль: {profile_name} ({profile_id})\n"
-            "Данные сохраняются в custom_data локального антидетекта."
+            "Данные сохраняются в custom_data локального антидетекта.\n"
+            "При сохранении сбрасывается yt_oldest_name, если он был задан."
         )
         hint.setWordWrap(True)
         hint.setObjectName("hint")
@@ -91,8 +112,8 @@ class ProfileAccountDataDialog(QDialog):
         self._login.setFocus()
 
     def account_data_payload(self) -> dict[str, str]:
-        return {
-            YT_LOGIN_KEY: (self._login.text() or "").strip(),
-            YT_PASSWORD_KEY: self._password.text() or "",
-            YT_2FA_KEY: (self._twofa.text() or "").strip(),
-        }
+        return build_account_credentials_payload(
+            login=self._login.text(),
+            password=self._password.text(),
+            twofa=self._twofa.text(),
+        )

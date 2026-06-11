@@ -172,6 +172,34 @@ def profile_has_tag_error(profile: dict[str, object]) -> bool:
     return False
 
 
+def _profile_custom_data(profile: dict[str, object]) -> dict[str, object]:
+    cd = profile.get("custom_data")
+    return cd if isinstance(cd, dict) else {}
+
+
+def profile_has_account_data(profile: dict[str, object]) -> bool:
+    """В custom_data есть логин, пароль или 2FA YouTube."""
+    from zaliver.ui.profile_account_data_dialog import (
+        YT_2FA_KEY,
+        YT_LOGIN_KEY,
+        YT_PASSWORD_KEY,
+    )
+
+    cd = _profile_custom_data(profile)
+    login = str(cd.get(YT_LOGIN_KEY) or "").strip()
+    password = str(cd.get(YT_PASSWORD_KEY) or "").strip()
+    twofa = str(cd.get(YT_2FA_KEY) or "").strip()
+    return bool(login or password or twofa)
+
+
+def profile_has_yt_oldest_name(profile: dict[str, object]) -> bool:
+    """В custom_data сохранено имя самого старого канала (yt_oldest_name)."""
+    from zaliver.youtube_upload.google_login import YT_OLDEST_NAME_KEY
+
+    cd = _profile_custom_data(profile)
+    return bool(str(cd.get(YT_OLDEST_NAME_KEY) or "").strip())
+
+
 def profile_has_any_status_error(
     profile: dict[str, object],
     *,

@@ -96,6 +96,22 @@ class LocalAntidetectHttpAPI:
             raise LocalAntidetectError(f"Get profile failed: status={resp.status_code}, body={data!r}")
         return data
 
+    def update_profile_name(self, profile_id: str, name: str) -> dict[str, Any]:
+        pid = (profile_id or "").strip()
+        new_name = (name or "").strip()
+        if not pid:
+            raise LocalAntidetectError("profile_id пуст.")
+        if not new_name:
+            raise LocalAntidetectError("name пуст.")
+        url = f"{self._base}/profiles/{quote(pid)}"
+        resp = self._session.patch(url, json={"name": new_name}, timeout=self._timeout_s)
+        body = _json_body(resp)
+        if resp.status_code != 200 or not isinstance(body, dict):
+            raise LocalAntidetectError(
+                f"Update profile name failed: status={resp.status_code}, body={body!r}"
+            )
+        return body
+
     def merge_profile_custom_data(
         self, profile_id: str, data: dict[str, Any]
     ) -> dict[str, Any]:

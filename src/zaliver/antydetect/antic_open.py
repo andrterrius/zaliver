@@ -38,6 +38,43 @@ def _wrap_exc(e: Exception) -> DolphinAntyError:
     return DolphinAntyError(repr(e))
 
 
+def _save_yt_oldest_name_to_profile(api, profile_id: str, name: str) -> None:
+    from zaliver.youtube_upload.google_login import YT_OLDEST_NAME_KEY
+
+    n = (name or "").strip()
+    if not n:
+        return
+    try:
+        api.merge_profile_custom_data(profile_id, {YT_OLDEST_NAME_KEY: n})
+        _log(f"Local antidetect: в custom_data сохранён {YT_OLDEST_NAME_KEY}={n!r}")
+    except Exception as e:
+        _log(
+            f"Local antidetect: не удалось сохранить {YT_OLDEST_NAME_KEY} "
+            f"для profile_id={profile_id!r}: {e!r}"
+        )
+
+
+def _make_save_yt_oldest_name_handler(api, profile_id: str):
+    def save(name: str) -> None:
+        _save_yt_oldest_name_to_profile(api, profile_id, name)
+
+    return save
+
+
+def _local_studio_workflow_kwargs(
+    api,
+    profile_id: str,
+    *,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+) -> dict:
+    return {
+        "login_credentials": login_credentials,
+        "yt_oldest_name": (yt_oldest_name or "").strip() or None,
+        "on_oldest_channel_name": _make_save_yt_oldest_name_handler(api, profile_id),
+    }
+
+
 def _playwright_page_from_cdp(p, endpoint_candidates: tuple[str, ...]):
     """Подключение к браузеру по CDP; возвращает (browser, context, page)."""
     browser = None
@@ -84,6 +121,7 @@ def check_studio_availability_in_profile(
     local_token: str | None = None,
     headless: bool = True,
     login_credentials=None,
+    yt_oldest_name: str | None = None,
 ) -> None:
     """
     Запуск профиля Dolphin → Studio → окно «Добавить видео» (без загрузки файла).
@@ -110,7 +148,9 @@ def check_studio_availability_in_profile(
             )
             try:
                 verify_studio_upload_dialog_available(
-                    page, login_credentials=login_credentials
+                    page,
+                    login_credentials=login_credentials,
+                    yt_oldest_name=yt_oldest_name,
                 )
                 _studio_dismiss_upload_dialog(page)
             finally:
@@ -135,6 +175,7 @@ def check_studio_availability_in_local_antidetect_profile(
     base_url: str,
     headless: bool = True,
     login_credentials=None,
+    yt_oldest_name: str | None = None,
 ) -> None:
     """Локальный антидетект → Studio → окно загрузки (без файла)."""
     _log(
@@ -166,10 +207,18 @@ def check_studio_availability_in_local_antidetect_profile(
         with sync_playwright() as p:
             browser, _context, page = _playwright_page_from_cdp(p, (ws_url,))
             try:
-                verify_studio_upload_dialog_available(
-                    page, login_credentials=login_credentials
+                studio_kw = _local_studio_workflow_kwargs(
+                    api,
+                    profile_id,
+                    login_credentials=login_credentials,
+                    yt_oldest_name=yt_oldest_name,
                 )
-                _studio_dismiss_upload_dialog(page)
+
+                def _run_check() -> None:
+                    verify_studio_upload_dialog_available(page, **studio_kw)
+                    _studio_dismiss_upload_dialog(page)
+
+                _run_check()
             finally:
                 try:
                     browser.close()
@@ -201,6 +250,7 @@ def fill_channel_description_and_link_in_profile(
     local_token: str | None = None,
     headless: bool = True,
     login_credentials=None,
+    yt_oldest_name: str | None = None,
 ) -> None:
     """Dolphin → Studio → «Настройка канала» → описание и ссылка."""
     _log(
@@ -230,6 +280,7 @@ def fill_channel_description_and_link_in_profile(
                     link_title=link_title,
                     link_url=link_url,
                     login_credentials=login_credentials,
+                    yt_oldest_name=yt_oldest_name,
                 )
             finally:
                 try:
@@ -256,6 +307,7 @@ def fill_channel_description_and_link_in_local_antidetect_profile(
     base_url: str,
     headless: bool = True,
     login_credentials=None,
+    yt_oldest_name: str | None = None,
 ) -> None:
     """Локальный антидетект → Studio → «Настройка канала» → описание и ссылка."""
     _log(
@@ -287,12 +339,18 @@ def fill_channel_description_and_link_in_local_antidetect_profile(
         with sync_playwright() as p:
             browser, _context, page = _playwright_page_from_cdp(p, (ws_url,))
             try:
+                studio_kw = _local_studio_workflow_kwargs(
+                    api,
+                    profile_id,
+                    login_credentials=login_credentials,
+                    yt_oldest_name=yt_oldest_name,
+                )
                 run_studio_channel_description_and_link(
                     page,
                     description=description,
                     link_title=link_title,
                     link_url=link_url,
-                    login_credentials=login_credentials,
+                    **studio_kw,
                 )
             finally:
                 try:
@@ -332,6 +390,7 @@ def open_google_in_profile(
     title: str | None = None,
     description: str | None = None,
     login_credentials=None,
+    yt_oldest_name: str | None = None,
 ) -> dict | None:
     """
     Запуск профиля через Dolphin Local API + Playwright CDP.
@@ -372,6 +431,7 @@ def open_google_in_profile(
                     title=title,
                     description=description,
                     login_credentials=login_credentials,
+                    yt_oldest_name=yt_oldest_name,
                 )
                 return res
             else:
@@ -406,6 +466,7 @@ def open_google_in_local_antidetect_profile(
     title: str | None = None,
     description: str | None = None,
     login_credentials=None,
+    yt_oldest_name: str | None = None,
 ) -> dict | None:
     """
     Запуск профиля через локальный HTTP API (см. OpenAPI антидетекта: launch + опрос сессии на cdp_ws_url),
@@ -458,15 +519,26 @@ def open_google_in_local_antidetect_profile(
                         f"video_path={video_path!r}, title={'<set>' if title else None}, "
                         f"description={'<set>' if description else None}"
                     )
-                    res = run_upload_latest_ready_video(
-                        page=page,
-                        browser=browser,
-                        zaliver_db_path=zaliver_db_path,
-                        video_path=video_path,
-                        title=title,
-                        description=description,
+
+                    studio_kw = _local_studio_workflow_kwargs(
+                        api,
+                        profile_id,
                         login_credentials=login_credentials,
+                        yt_oldest_name=yt_oldest_name,
                     )
+
+                    def _run_upload():
+                        return run_upload_latest_ready_video(
+                            page=page,
+                            browser=browser,
+                            zaliver_db_path=zaliver_db_path,
+                            video_path=video_path,
+                            title=title,
+                            description=description,
+                            **studio_kw,
+                        )
+
+                    res = _run_upload()
                     _log("Studio upload: сценарий завершён.")
                     return res
                 else:

@@ -8,6 +8,7 @@ from patchright.sync_api import sync_playwright
 
 from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI
 from zaliver.youtube_upload.studio import (
+    YoutubeAllChannelsRemovedError,
     YoutubeStudioError,
     run_studio_channel_description_and_link,
     run_upload_latest_ready_video,
@@ -25,15 +26,23 @@ def _log(message: str) -> None:
     _studio._log(f"[antic_open] {message}")
 
 
+def _close_playwright_browser(browser) -> None:
+    try:
+        if browser is not None:
+            browser.close()
+    except Exception:
+        pass
+
+
 def _wrap_exc(e: Exception) -> DolphinAntyError:
     # UI в приложении ловит DolphinAntyError и показывает аккуратный текст.
     if isinstance(e, DolphinAntyError):
         return e
     if isinstance(e, YoutubeStudioError):
         return DolphinAntyError(str(e))
-    from zaliver.youtube_upload.google_login import GoogleLoginPasswordMissingError
+    from zaliver.youtube_upload.google_login import GoogleLoginCredentialsMissingError
 
-    if isinstance(e, GoogleLoginPasswordMissingError):
+    if isinstance(e, GoogleLoginCredentialsMissingError):
         return DolphinAntyError(str(e))
     return DolphinAntyError(repr(e))
 
@@ -204,6 +213,7 @@ def check_studio_availability_in_local_antidetect_profile(
         register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
         ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
         _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+
         with sync_playwright() as p:
             browser, _context, page = _playwright_page_from_cdp(p, (ws_url,))
             try:
@@ -213,12 +223,8 @@ def check_studio_availability_in_local_antidetect_profile(
                     login_credentials=login_credentials,
                     yt_oldest_name=yt_oldest_name,
                 )
-
-                def _run_check() -> None:
-                    verify_studio_upload_dialog_available(page, **studio_kw)
-                    _studio_dismiss_upload_dialog(page)
-
-                _run_check()
+                verify_studio_upload_dialog_available(page, **studio_kw)
+                _studio_dismiss_upload_dialog(page)
             finally:
                 try:
                     browser.close()
@@ -422,32 +428,40 @@ def open_google_in_profile(
                 p, (conn.ws_url(), conn.http_url())
             )
 
-            if upload_latest_zaliver_video:
-                res = run_upload_latest_ready_video(
-                    page=page,
-                    browser=browser,
-                    zaliver_db_path=zaliver_db_path,
-                    video_path=video_path,
-                    title=title,
-                    description=description,
-                    login_credentials=login_credentials,
-                    yt_oldest_name=yt_oldest_name,
-                )
-                return res
-            else:
-                # Ничего не делаем — просто открываем Studio, чтобы пользователь мог работать вручную.
-                page.goto(
-                    "https://studio.youtube.com/",
-                    wait_until="domcontentloaded",
-                    timeout=120_000,
-                )
-                time.sleep(1)
-
             try:
-                browser.close()
-            except Exception:
-                pass
+                if upload_latest_zaliver_video:
+                    res = run_upload_latest_ready_video(
+                        page=page,
+                        browser=browser,
+                        zaliver_db_path=zaliver_db_path,
+                        video_path=video_path,
+                        title=title,
+                        description=description,
+                        login_credentials=login_credentials,
+                        yt_oldest_name=yt_oldest_name,
+                    )
+                    return res
+                else:
+                    # Ничего не делаем — просто открываем Studio, чтобы пользователь мог работать вручную.
+                    page.goto(
+                        "https://studio.youtube.com/",
+                        wait_until="domcontentloaded",
+                        timeout=120_000,
+                    )
+                    time.sleep(1)
+            except YoutubeAllChannelsRemovedError as e:
+                _log("Dolphin: все каналы удалены — закрываем профиль.")
+                _close_playwright_browser(browser)
+                try:
+                    api.stop_profile(profile_id)
+                except Exception as se:
+                    _log(f"Dolphin: stop_profile: {se!r}")
+                raise _wrap_exc(e) from e
+
+            _close_playwright_browser(browser)
         return None
+    except YoutubeAllChannelsRemovedError:
+        raise
     except Exception as e:
         _log(f"Ошибка: {type(e).__name__}: {e!r}")
         raise _wrap_exc(e) from e
@@ -512,51 +526,52 @@ def open_google_in_local_antidetect_profile(
             with sync_playwright() as p:
                 browser, context, page = _playwright_page_from_cdp(p, (ws_url,))
 
-                if upload_latest_zaliver_video:
-                    _log(
-                        "Studio upload: запуск сценария загрузки. "
-                        f"zaliver_db_path={str(zaliver_db_path) if zaliver_db_path else None!r}, "
-                        f"video_path={video_path!r}, title={'<set>' if title else None}, "
-                        f"description={'<set>' if description else None}"
-                    )
-
-                    studio_kw = _local_studio_workflow_kwargs(
-                        api,
-                        profile_id,
-                        login_credentials=login_credentials,
-                        yt_oldest_name=yt_oldest_name,
-                    )
-
-                    def _run_upload():
-                        return run_upload_latest_ready_video(
-                            page=page,
-                            browser=browser,
-                            zaliver_db_path=zaliver_db_path,
-                            video_path=video_path,
-                            title=title,
-                            description=description,
-                            **studio_kw,
+                try:
+                    if upload_latest_zaliver_video:
+                        _log(
+                            "Studio upload: запуск сценария загрузки. "
+                            f"zaliver_db_path={str(zaliver_db_path) if zaliver_db_path else None!r}, "
+                            f"video_path={video_path!r}, title={'<set>' if title else None}, "
+                            f"description={'<set>' if description else None}"
                         )
 
-                    res = _run_upload()
-                    _log("Studio upload: сценарий завершён.")
-                    return res
-                else:
-                    _log("Studio: upload_latest_zaliver_video=False → просто открываем Studio…")
-                    page.goto(
-                        "https://studio.youtube.com/",
-                        wait_until="domcontentloaded",
-                        timeout=120_000,
-                    )
-                    time.sleep(1)
-                    _log(f"Studio: открыт URL: {page.url!r}")
+                        studio_kw = _local_studio_workflow_kwargs(
+                            api,
+                            profile_id,
+                            login_credentials=login_credentials,
+                            yt_oldest_name=yt_oldest_name,
+                        )
 
-                try:
-                    _log("Playwright: закрываем browser…")
-                    browser.close()
-                    _log("Playwright: browser закрыт.")
-                except Exception:
-                    pass
+                        def _run_upload():
+                            return run_upload_latest_ready_video(
+                                page=page,
+                                browser=browser,
+                                zaliver_db_path=zaliver_db_path,
+                                video_path=video_path,
+                                title=title,
+                                description=description,
+                                **studio_kw,
+                            )
+
+                        res = _run_upload()
+                        _log("Studio upload: сценарий завершён.")
+                        return res
+                    else:
+                        _log("Studio: upload_latest_zaliver_video=False → просто открываем Studio…")
+                        page.goto(
+                            "https://studio.youtube.com/",
+                            wait_until="domcontentloaded",
+                            timeout=120_000,
+                        )
+                        time.sleep(1)
+                        _log(f"Studio: открыт URL: {page.url!r}")
+                except YoutubeAllChannelsRemovedError as e:
+                    _log("Local antidetect: все каналы удалены — закрываем профиль.")
+                    _close_playwright_browser(browser)
+                    raise LocalAntidetectError(str(e)) from e
+
+                if not upload_latest_zaliver_video:
+                    _close_playwright_browser(browser)
             return None
         finally:
             unregister_local_session(profile_id=profile_id)

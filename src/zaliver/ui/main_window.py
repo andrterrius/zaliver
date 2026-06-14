@@ -1641,7 +1641,7 @@ class MainWindow(QWidget):
         self._btn_profiles_check_availability.setDefault(False)
         self._btn_profiles_check_availability.setToolTip(
             "Только для отмеченных профилей (квадратики): режим Headless из настроек, "
-            "до 5 одновременно (как при заливке), создание канала и «Далее» при "
+            "до 4 одновременно, создание канала и «Далее» при "
             "необходимости, проверка окна загрузки в YouTube Studio без выбора файла."
         )
         self._btn_profiles_check_availability.clicked.connect(
@@ -3693,22 +3693,36 @@ class MainWindow(QWidget):
             f"Проверка доступности Studio: 0 / {len(profile_ids)}…"
         )
         headless_label = "headless" if headless else "с окном браузера"
-        self._append_log(
-            f"[availability] Старт проверки {len(profile_ids)} профилей "
-            f"({headless_label}, до 5 параллельно)…"
+        from zaliver.youtube_upload.multi_availability_checker import (
+            _MAX_CONCURRENT_AVAILABILITY_CHECKS,
         )
 
-        threading.Thread(
-            target=self._profiles_availability_worker,
-            kwargs={
-                "profile_ids": profile_ids,
-                "kind": kind,
-                "token": token,
-                "base_url": base_url,
-                "headless": headless,
-            },
-            daemon=True,
-        ).start()
+        try:
+            self._append_log(
+                f"[availability] Старт проверки {len(profile_ids)} профилей "
+                f"({headless_label}, до {_MAX_CONCURRENT_AVAILABILITY_CHECKS} параллельно)…"
+            )
+
+            threading.Thread(
+                target=self._profiles_availability_worker,
+                kwargs={
+                    "profile_ids": profile_ids,
+                    "kind": kind,
+                    "token": token,
+                    "base_url": base_url,
+                    "headless": headless,
+                },
+                daemon=True,
+            ).start()
+        except Exception as e:
+            self._profiles_availability_running = False
+            self._sync_profiles_tab_action_buttons()
+            self._append_log(f"[availability] Не удалось запустить проверку: {e!r}")
+            QMessageBox.critical(
+                self,
+                "Проверка доступности",
+                f"Не удалось запустить проверку:\n{e}",
+            )
 
     def _profiles_availability_worker(
         self,
@@ -3726,6 +3740,7 @@ class MainWindow(QWidget):
         )
         from zaliver.youtube_upload.multi_availability_checker import (
             MultiProfileAvailabilityChecker,
+            _MAX_CONCURRENT_AVAILABILITY_CHECKS,
         )
         from zaliver.antydetect.profile_tags import STUDIO_AVAILABILITY_ERROR_TAG
 
@@ -3802,10 +3817,16 @@ class MainWindow(QWidget):
             on_profile_done=_on_profile_done,
             on_progress=_on_progress,
             log_sink=self._ui_log_line.emit,
+            max_concurrent=_MAX_CONCURRENT_AVAILABILITY_CHECKS,
         )
-        ok_n, fail_n, failed_ids = mgr.run()
-        self._last_availability_failed_ids = list(failed_ids)
-        self._studio_availability_finished.emit(ok_n, fail_n)
+        try:
+            ok_n, fail_n, failed_ids = mgr.run()
+            self._last_availability_failed_ids = list(failed_ids)
+            self._studio_availability_finished.emit(ok_n, fail_n)
+        except Exception as e:
+            self._ui_log_line.emit(f"[availability] Критическая ошибка воркера: {e!r}")
+            self._last_availability_failed_ids = list(profile_ids)
+            self._studio_availability_finished.emit(0, len(profile_ids))
 
     def _prompt_channel_description_and_link(
         self,

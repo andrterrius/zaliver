@@ -97,6 +97,10 @@ class YoutubeStudioError(RuntimeError):
     pass
 
 
+class YoutubeAllChannelsRemovedError(YoutubeStudioError):
+    """Все каналы в списке помечены как удалённые — закрываем профиль."""
+
+
 _LOG_SINK = None
 
 
@@ -131,7 +135,6 @@ def _studio_finalize_oldest_channel_name(
 
 def _log(message: str) -> None:
     line = f"[youtube_studio] {message}"
-    print(line)
     sink = _LOG_SINK
     if sink is not None:
         try:
@@ -139,6 +142,30 @@ def _log(message: str) -> None:
         except Exception:
             # Logging must not break automation flow.
             pass
+    else:
+        print(line)
+
+
+def _studio_raise_if_auth_without_credentials(page, login_credentials) -> None:
+    """Экран входа Google без yt_login/yt_password/yt_2fa — пропускаем профиль."""
+    from zaliver.youtube_upload.google_login import (
+        GoogleLoginCredentialsMissingError,
+        google_auth_interaction_visible,
+        has_login_credentials,
+    )
+
+    if has_login_credentials(login_credentials):
+        return
+    if not (_studio_login_required(page) or google_auth_interaction_visible(page)):
+        return
+    _log(
+        "Studio: требуется вход в Google, но в данных учётки нет "
+        "yt_login / yt_password / yt_2fa — профиль пропущен."
+    )
+    raise GoogleLoginCredentialsMissingError(
+        "YouTube Studio: требуется вход в Google, но в данных учётки профиля "
+        "нет yt_login, yt_password и yt_2fa — профиль пропущен."
+    )
 
 
 def _studio_try_google_login_if_needed(page, login_credentials) -> bool:
@@ -147,7 +174,7 @@ def _studio_try_google_login_if_needed(page, login_credentials) -> bool:
     Возвращает True, если попытка была и экран входа снят.
     """
     from zaliver.youtube_upload.google_login import (
-        GoogleLoginPasswordMissingError,
+        GoogleLoginCredentialsMissingError,
         attempt_google_login_for_studio,
         google_auth_interaction_visible,
         handle_channel_switcher_if_present,
@@ -155,14 +182,15 @@ def _studio_try_google_login_if_needed(page, login_credentials) -> bool:
 
     if handle_channel_switcher_if_present(page):
         return True
-    if login_credentials is None:
-        return False
 
     if not (_studio_login_required(page) or google_auth_interaction_visible(page)):
         return False
+
+    _studio_raise_if_auth_without_credentials(page, login_credentials)
+
     try:
         attempt_google_login_for_studio(page, login_credentials)
-    except GoogleLoginPasswordMissingError:
+    except GoogleLoginCredentialsMissingError:
         raise
     except RuntimeError as e:
         raise YoutubeStudioError(str(e)) from e
@@ -185,6 +213,7 @@ def _studio_wait_for_google_session(
     from zaliver.youtube_upload.google_login import _GOOGLE_LOGIN_MAX_S
 
     max_s = _GOOGLE_LOGIN_MAX_S if timeout_s is None else timeout_s
+    _studio_raise_if_auth_without_credentials(page, login_credentials)
     _log(
         "Studio: требуется вход в Google — ждём авторизацию "
         "перед проверкой каналов…"
@@ -192,6 +221,7 @@ def _studio_wait_for_google_session(
     deadline = time.monotonic() + max_s
     last_status_log = 0.0
     while time.monotonic() < deadline:
+        _studio_raise_if_auth_without_credentials(page, login_credentials)
         if _studio_try_google_login_if_needed(page, login_credentials):
             if not _studio_on_google_auth_page(page):
                 _log("Studio: вход в Google завершён.")
@@ -208,7 +238,7 @@ def _studio_wait_for_google_session(
             except Exception:
                 url = ""
             _log(f"Studio: ожидание входа в Google… URL={url!r}")
-        time.sleep(0.5)
+        page.wait_for_timeout(500)
 
     raise YoutubeStudioError(
         "YouTube Studio: не дождались входа в Google. "
@@ -342,24 +372,24 @@ def _studio_channel_access_blocked(page) -> bool:
 
 
 def _studio_account_item_removed_label(item) -> str:
+    """Текст статуса «Канал удалён» (может быть не первым secondary — после @handle)."""
     for sel in (
         "yt-formatted-string[secondary]",
         "tp-yt-paper-item-body yt-formatted-string[secondary]",
+        "tp-yt-paper-item-body yt-formatted-string",
     ):
         loc = item.locator(sel)
         try:
-            if loc.count() > 0:
-                label = (loc.first.inner_text(timeout=1_500) or "").strip()
-                if label:
+            for i in range(loc.count()):
+                label = (loc.nth(i).inner_text(timeout=1_500) or "").strip()
+                if label and _CHANNEL_REMOVED_LABEL_RE.search(label):
                     return label
         except Exception:
             continue
     try:
-        body_lines = item.locator("tp-yt-paper-item-body yt-formatted-string")
-        if body_lines.count() >= 3:
-            label = (body_lines.nth(2).inner_text(timeout=1_500) or "").strip()
-            if label:
-                return label
+        text = (item.inner_text(timeout=1_500) or "").strip()
+        if text and _CHANNEL_REMOVED_LABEL_RE.search(text):
+            return text
     except Exception:
         pass
     return ""
@@ -387,8 +417,80 @@ def _studio_account_item_channel_name(item) -> str:
     return ""
 
 
+def _studio_account_item_secondary_texts(item) -> list[str]:
+    texts: list[str] = []
+    for sel in (
+        "yt-formatted-string[secondary]",
+        "tp-yt-paper-item-body yt-formatted-string[secondary]",
+        "tp-yt-paper-item-body yt-formatted-string",
+    ):
+        loc = item.locator(sel)
+        try:
+            for i in range(loc.count()):
+                t = (loc.nth(i).inner_text(timeout=1_500) or "").strip()
+                if t and t not in texts:
+                    texts.append(t)
+        except Exception:
+            continue
+    return texts
+
+
+def _studio_account_item_matches_name(item, expected_name: str) -> bool:
+    """Совпадение с channel-title или @handle в secondary."""
+    expected = (expected_name or "").strip()
+    if not expected:
+        return False
+    title = _studio_account_item_channel_name(item)
+    if title and _studio_channel_names_match(title, expected):
+        return True
+    for text in _studio_account_item_secondary_texts(item):
+        if _CHANNEL_REMOVED_LABEL_RE.search(text):
+            continue
+        if _studio_channel_names_match(text, expected):
+            return True
+    return False
+
+
 def _studio_account_item_is_removed(item) -> bool:
     return bool(_CHANNEL_REMOVED_LABEL_RE.search(_studio_account_item_removed_label(item)))
+
+
+def _studio_account_switcher_all_channels_removed(page) -> bool:
+    """True, если в switcher есть каналы и у всех статус «Канал удалён»."""
+    if not _studio_account_switcher_visible(page):
+        return False
+    try:
+        switcher = _studio_account_switcher_locator(page)
+        items = switcher.first.locator("ytd-account-item-renderer")
+        count = items.count()
+    except Exception:
+        return False
+    if count <= 0:
+        return False
+    for i in range(count):
+        try:
+            if not _studio_account_item_is_removed(items.nth(i)):
+                return False
+        except Exception:
+            return False
+    return True
+
+
+def _studio_abort_all_channels_removed(page, *, browser=None) -> None:
+    _log(
+        "Studio: все каналы в списке помечены как «Канал удалён» — "
+        "закрываем профиль."
+    )
+    if browser is not None:
+        _log("Playwright: закрытие браузера — все каналы удалены.")
+        try:
+            browser.close()
+        except Exception:
+            pass
+    _studio_dismiss_open_menus(page)
+    raise YoutubeAllChannelsRemovedError(
+        "YouTube Studio: все каналы в аккаунте удалены — профиль закрыт."
+    )
 
 
 def _studio_account_item_is_selected(item) -> bool:
@@ -419,10 +521,138 @@ def _studio_collect_available_account_switcher_channels(page) -> list[tuple[int,
         item = items.nth(i)
         name = _studio_account_item_channel_name(item) or f"#{i + 1}"
         if _studio_account_item_is_removed(item):
-            _log(f"Studio: канал «{name}» пропущен — помечен как удалённый.")
+            _log(f"Studio: канал «{name}» пропущен — Channel removed / Канал удален.")
             continue
         available.append((i, name))
+    if not available and count > 0 and _studio_account_switcher_all_channels_removed(page):
+        _studio_abort_all_channels_removed(page)
     return available
+
+
+def _studio_switcher_oldest_list_entry(
+    page, *, menu_open: bool = False
+) -> tuple[int, str, bool] | None:
+    """
+    Последний пункт в «Сменить аккаунт» — самый старый канал в списке.
+    Возвращает (индекс, имя, удалён_ли) или None.
+    """
+    opened = False
+    if not menu_open:
+        try:
+            _studio_open_account_switcher_menu(page)
+            opened = True
+        except Exception:
+            return None
+    try:
+        switcher = _studio_account_switcher_locator(page)
+        switcher.first.wait_for(state="visible", timeout=15_000)
+        items = switcher.first.locator("ytd-account-item-renderer")
+        count = items.count()
+        if count <= 0:
+            return None
+        idx = count - 1
+        item = items.nth(idx)
+        name = _studio_account_item_channel_name(item) or f"#{idx + 1}"
+        return idx, name, _studio_account_item_is_removed(item)
+    except Exception:
+        return None
+    finally:
+        if opened:
+            _studio_dismiss_open_menus(page)
+
+
+def _studio_try_select_oldest_in_switcher_list(
+    page,
+    *,
+    current_idx: int | None = None,
+    on_oldest_channel_name=None,
+) -> str | None:
+    """
+    Если последний канал в списке не удалён — выбираем его без обхода всех каналов.
+    Возвращает имя канала или None (нужен полный скан).
+    """
+    entry = _studio_switcher_oldest_list_entry(page)
+    if entry is None:
+        return None
+    idx, name, removed = entry
+    if removed:
+        _log(
+            f"Studio: самый старый в списке «{name}» (позиция {idx + 1}) удалён — "
+            "полный скан по дате регистрации…"
+        )
+        return None
+
+    _log(
+        f"Studio: самый старый в списке «{name}» (позиция {idx + 1}) не удалён — "
+        "выбираем без полного скана."
+    )
+    if current_idx == idx:
+        _log(f"Studio: уже на канале «{name}».")
+        return _studio_finalize_oldest_channel_name(
+            name, on_oldest_channel_name=on_oldest_channel_name
+        )
+
+    if _studio_try_switch_to_account_by_index(page, idx, name):
+        return _studio_finalize_oldest_channel_name(
+            name, on_oldest_channel_name=on_oldest_channel_name
+        )
+
+    _log(f"Studio: не удалось переключиться на «{name}» — полный скан каналов…")
+    return None
+
+
+def _studio_try_select_only_available_channel(
+    page,
+    accounts: list[tuple[int, str]],
+    *,
+    current_idx: int | None = None,
+    on_oldest_channel_name=None,
+) -> str | None:
+    """
+    Все каналы в списке удалены, кроме одного — переключаемся на него,
+    сохраняем имя в данные учётки (on_oldest_channel_name).
+    """
+    if len(accounts) != 1:
+        return None
+    idx, name = accounts[0]
+    _log(
+        f"Studio: в списке «Сменить аккаунт» один доступный канал «{name}» "
+        f"(позиция {idx + 1}), остальные удалены — выбираем его."
+    )
+    if current_idx == idx:
+        _log(f"Studio: уже на канале «{name}».")
+        return _studio_finalize_oldest_channel_name(
+            name, on_oldest_channel_name=on_oldest_channel_name
+        )
+    if _studio_try_switch_to_account_by_index(page, idx, name):
+        return _studio_finalize_oldest_channel_name(
+            name, on_oldest_channel_name=on_oldest_channel_name
+        )
+    _log(f"Studio: не удалось переключиться на «{name}».")
+    return None
+
+
+def _studio_try_fast_channel_pick(
+    page,
+    accounts: list[tuple[int, str]],
+    *,
+    current_idx: int | None = None,
+    on_oldest_channel_name=None,
+) -> str | None:
+    """Один доступный канал или последний не удалённый в списке — без полного скана."""
+    only = _studio_try_select_only_available_channel(
+        page,
+        accounts,
+        current_idx=current_idx,
+        on_oldest_channel_name=on_oldest_channel_name,
+    )
+    if only:
+        return only
+    return _studio_try_select_oldest_in_switcher_list(
+        page,
+        current_idx=current_idx,
+        on_oldest_channel_name=on_oldest_channel_name,
+    )
 
 
 def _studio_page_url_lower(page) -> str:
@@ -651,10 +881,14 @@ def _studio_collect_account_switcher_channels_with_retry(
             current_idx = _studio_get_selected_account_index(page, menu_open=True)
             if accounts:
                 return accounts, current_idx
+            if _studio_account_switcher_all_channels_removed(page):
+                _studio_abort_all_channels_removed(page)
             _log(
                 f"Studio: switcher пуст (попытка {attempt}/{attempts}) — "
                 "повторяем открытие меню…"
             )
+        except YoutubeAllChannelsRemovedError:
+            raise
         except Exception as e:
             _log(
                 f"Studio: не удалось открыть «Сменить аккаунт» "
@@ -663,6 +897,16 @@ def _studio_collect_account_switcher_channels_with_retry(
         finally:
             _studio_dismiss_open_menus(page)
         page.wait_for_timeout(450)
+    try:
+        _studio_open_account_switcher_menu(page)
+        if _studio_account_switcher_all_channels_removed(page):
+            _studio_abort_all_channels_removed(page)
+    except YoutubeAllChannelsRemovedError:
+        raise
+    except Exception:
+        pass
+    finally:
+        _studio_dismiss_open_menus(page)
     return [], None
 
 
@@ -683,8 +927,10 @@ def _studio_youtube_active_channel_matches(page, expected_name: str) -> bool:
             item = items.nth(i)
             if not _studio_account_item_is_selected(item):
                 continue
-            name = _studio_account_item_channel_name(item) or f"#{i + 1}"
-            return _studio_channel_names_match(expected, name)
+            if _studio_account_item_is_removed(item):
+                _log("Studio: активный канал в switcher помечен как удалённый.")
+                return False
+            return _studio_account_item_matches_name(item, expected)
     except Exception:
         return False
     finally:
@@ -716,7 +962,7 @@ def _studio_click_account_switcher_channel(page, item_index: int, channel_name: 
         )
 
 
-def _studio_wait_after_account_switch(page, *, timeout_s: float = 60.0) -> None:
+def _studio_wait_after_account_switch(page, *, timeout_s: float = 12.0) -> None:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if not _studio_channel_removed_page_visible(page):
@@ -727,7 +973,7 @@ def _studio_wait_after_account_switch(page, *, timeout_s: float = 60.0) -> None:
                 return
         except Exception:
             pass
-        time.sleep(0.5)
+        page.wait_for_timeout(250)
 
 
 def _studio_handle_channel_removed_if_present(page) -> bool:
@@ -740,6 +986,8 @@ def _studio_handle_channel_removed_if_present(page) -> bool:
 
     _log("Studio: канал удалён/заблокирован — пробуем сменить аккаунт…")
     _studio_open_account_switcher_menu(page)
+    if _studio_account_switcher_all_channels_removed(page):
+        _studio_abort_all_channels_removed(page)
     available = _studio_collect_available_account_switcher_channels(page)
     if not available:
         raise YoutubeStudioError(
@@ -765,6 +1013,7 @@ def _studio_handle_channel_removed_if_present(page) -> bool:
     pick_idx, pick_name = pick
     _log(f"Studio: выбираем канал «{pick_name}» (позиция {pick_idx + 1})…")
     _studio_click_account_switcher_channel(page, pick_idx, pick_name)
+    _studio_handle_channel_creation_after_account_pick(page)
     _studio_wait_after_account_switch(page)
 
     try:
@@ -902,7 +1151,7 @@ def _studio_wait_youtube_channel_page(page, *, timeout_s: float = 45.0) -> bool:
             if _studio_channel_access_blocked(page):
                 return False
             return True
-        time.sleep(0.35)
+        page.wait_for_timeout(350)
     return False
 
 
@@ -918,7 +1167,7 @@ def _studio_wait_account_switch_or_oops(page, *, timeout_s: float = 60.0) -> boo
                 return True
         except Exception:
             pass
-        time.sleep(0.45)
+        page.wait_for_timeout(450)
     return False
 
 
@@ -1240,7 +1489,7 @@ def _studio_try_switch_to_account_by_name(
     page,
     channel_name: str,
     *,
-    wait_timeout_s: float = 45.0,
+    wait_timeout_s: float = 20.0,
 ) -> bool:
     """Переключение по имени в switcher; False при ошибке (без исключения)."""
     name = (channel_name or "").strip()
@@ -1255,10 +1504,13 @@ def _studio_try_switch_to_account_by_name(
         for i in range(count):
             item = items.nth(i)
             item_name = _studio_account_item_channel_name(item) or f"#{i + 1}"
-            if not _studio_channel_names_match(item_name, name):
+            if not _studio_account_item_matches_name(item, name):
                 continue
             if _studio_account_item_is_removed(item):
-                _log(f"Studio: канал «{item_name}» помечен как удалённый.")
+                _log(
+                    f"Studio: канал «{item_name}» помечен как удалённый "
+                    "(Channel removed / Канал удален) — пропускаем."
+                )
                 _studio_dismiss_open_menus(page)
                 return False
             return _studio_try_switch_to_account_by_index(
@@ -1572,6 +1824,11 @@ def _studio_wait_for_account_selection(
     deadline = time.monotonic() + timeout_s
     try:
         while time.monotonic() < deadline:
+            if _studio_account_switcher_visible(page):
+                if _studio_account_switcher_all_channels_removed(page):
+                    _studio_abort_all_channels_removed(page)
+            if _studio_handle_channel_creation_after_account_pick(page):
+                return True
             if _studio_channel_access_blocked(page):
                 return False
 
@@ -1580,14 +1837,14 @@ def _studio_wait_for_account_selection(
                     _studio_open_account_switcher_menu(page)
                     opened_here = True
                 except Exception:
-                    time.sleep(0.45)
+                    page.wait_for_timeout(450)
                     continue
 
             selected = _studio_get_selected_account_index(page, menu_open=True)
             if selected == target_index:
                 page.wait_for_timeout(400)
                 return True
-            time.sleep(0.45)
+            page.wait_for_timeout(450)
         return False
     finally:
         if opened_here or _studio_account_switcher_visible(page):
@@ -1625,7 +1882,7 @@ def _studio_resolve_switcher_index_for_record(
             if _studio_account_item_is_removed(item):
                 continue
             name = _studio_account_item_channel_name(item) or f"#{i + 1}"
-            if any(_studio_channel_names_match(name, cand) for cand in candidates):
+            if any(_studio_account_item_matches_name(item, cand) for cand in candidates):
                 return i, name
     except Exception:
         return None
@@ -1642,12 +1899,54 @@ def _studio_recover_on_youtube_after_switch_failure(
     _studio_goto_youtube_home(page, login_credentials=login_credentials)
 
 
+def _studio_confirm_account_switch(
+    page,
+    item_index: int,
+    channel_name: str,
+    *,
+    timeout_s: float = 18.0,
+) -> bool:
+    """
+    Подтверждение смены канала после клика в switcher.
+    Без wait_for('load') и без минутного опроса меню.
+    """
+    deadline = time.monotonic() + timeout_s
+    creation_until = time.monotonic() + 8.0
+    last_avatar_check = 0.0
+    while time.monotonic() < deadline:
+        if _studio_channel_access_blocked(page):
+            return False
+        if time.monotonic() < creation_until:
+            if _studio_handle_channel_creation_dialog_if_present(page):
+                page.wait_for_timeout(500)
+                return True
+            if _studio_channel_creation_dialog_visible(page):
+                page.wait_for_timeout(200)
+                continue
+
+        if not _studio_account_switcher_visible(page):
+            now = time.monotonic()
+            if now - last_avatar_check >= 0.5:
+                last_avatar_check = now
+                avatar_name = _studio_read_avatar_menu_account_name(page)
+                if avatar_name and _studio_channel_names_match(avatar_name, channel_name):
+                    return True
+            page.wait_for_timeout(150)
+            continue
+
+        if _studio_get_selected_account_index(page, menu_open=True) == item_index:
+            _studio_dismiss_open_menus(page)
+            return True
+        page.wait_for_timeout(200)
+    return False
+
+
 def _studio_try_switch_to_account_by_index(
     page,
     item_index: int,
     channel_name: str,
     *,
-    wait_timeout_s: float = 45.0,
+    wait_timeout_s: float = 20.0,
     switcher_already_open: bool = False,
 ) -> bool:
     """Переключение канала; False — oops, удалённый канал или таймаут (без исключения)."""
@@ -1657,6 +1956,15 @@ def _studio_try_switch_to_account_by_index(
             _studio_open_account_switcher_menu(page)
         elif not _studio_account_switcher_visible(page):
             _studio_open_account_switcher_menu(page)
+        switcher = _studio_account_switcher_locator(page)
+        item = switcher.first.locator("ytd-account-item-renderer").nth(item_index)
+        if _studio_account_item_is_removed(item):
+            _log(
+                f"Studio: канал «{channel_name}» (позиция {item_index + 1}) "
+                "помечен как удалённый — пропускаем."
+            )
+            _studio_dismiss_open_menus(page)
+            return False
         _studio_click_account_switcher_channel(page, item_index, channel_name)
     except Exception as e:
         _log(f"Studio: клик по каналу «{channel_name}» не удался: {e!r}")
@@ -1664,27 +1972,27 @@ def _studio_try_switch_to_account_by_index(
         return False
 
     try:
-        page.wait_for_load_state("domcontentloaded", timeout=60_000)
+        page.wait_for_load_state("domcontentloaded", timeout=10_000)
     except Exception:
         pass
-    try:
-        page.wait_for_load_state("load", timeout=30_000)
-    except Exception:
-        pass
-    page.wait_for_timeout(800)
+    page.wait_for_timeout(400)
 
     if _studio_channel_access_blocked(page):
         _studio_dismiss_open_menus(page)
         return False
-    if not _studio_wait_for_account_selection(
-        page,
-        target_index=item_index,
-        timeout_s=wait_timeout_s,
-        switcher_open=True,
+
+    confirm_s = min(float(wait_timeout_s), 18.0)
+    if not _studio_confirm_account_switch(
+        page, item_index, channel_name, timeout_s=confirm_s
     ):
+        _log(
+            f"Studio: не подтвердили переключение на «{channel_name}» "
+            f"за {confirm_s:.0f} с."
+        )
+        _studio_dismiss_open_menus(page)
         return False
-    if _studio_channel_access_blocked(page):
-        return False
+
+    _log(f"Studio: канал «{channel_name}» выбран.")
     _studio_wait_after_account_switch(page)
     return True
 
@@ -1705,7 +2013,7 @@ def _studio_switch_to_account_by_name(page, channel_name: str) -> None:
     for i in range(count):
         item = items.nth(i)
         name = _studio_account_item_channel_name(item) or f"#{i + 1}"
-        if not _studio_channel_names_match(name, channel_name):
+        if not _studio_account_item_matches_name(item, channel_name):
             continue
         if _studio_account_item_is_removed(item):
             _studio_dismiss_open_menus(page)
@@ -1733,10 +2041,10 @@ def _studio_select_oldest_channel_for_upload(
     page, *, login_credentials=None, on_oldest_channel_name=None
 ) -> str:
     """
-    Перед заливом/проверкой: обход всех каналов Google-аккаунта,
-    сбор года регистрации из «Your channel» → «…more», выбор самого старого.
+    Перед заливом/проверкой: самый старый канал в списке «Сменить аккаунт»
+    (последний не удалённый пункт) или полный обход по дате регистрации.
     """
-    _log("Studio: проверка всех каналов — ищем самый старый по дате регистрации…")
+    _log("Studio: выбор самого старого канала…")
     _studio_goto_youtube_home(page, login_credentials=login_credentials)
 
     records: list[_ChannelJoinRecord] = []
@@ -1745,8 +2053,35 @@ def _studio_select_oldest_channel_for_upload(
     current_idx: int | None = None
 
     accounts, current_idx = _studio_collect_account_switcher_channels_with_retry(page)
+
+    fast_pick = _studio_try_fast_channel_pick(
+        page,
+        accounts,
+        current_idx=current_idx,
+        on_oldest_channel_name=on_oldest_channel_name,
+    )
+    if fast_pick:
+        return fast_pick
+
+    _log("Studio: полный скан — ищем самый старый по дате регистрации…")
     if current_idx is not None:
         _log(f"Studio: текущий канал в switcher — позиция {current_idx + 1}.")
+        try:
+            _studio_open_account_switcher_menu(page)
+            switcher = _studio_account_switcher_locator(page)
+            item = switcher.first.locator("ytd-account-item-renderer").nth(current_idx)
+            if _studio_account_item_is_removed(item):
+                rem_name = _studio_account_item_channel_name(item) or f"#{current_idx + 1}"
+                _log(
+                    f"Studio: текущий канал «{rem_name}» удалён — "
+                    "пропускаем, проверяем остальные."
+                )
+                checked_indices.add(current_idx)
+                current_idx = None
+        except Exception:
+            pass
+        finally:
+            _studio_dismiss_open_menus(page)
 
     info = _studio_read_current_channel_join_info(page)
     if _studio_channel_access_blocked(page):
@@ -1795,6 +2130,16 @@ def _studio_select_oldest_channel_for_upload(
                 _studio_record_channel_name(best),
                 on_oldest_channel_name=on_oldest_channel_name,
             )
+        try:
+            _studio_open_account_switcher_menu(page)
+            if _studio_account_switcher_all_channels_removed(page):
+                _studio_abort_all_channels_removed(page)
+        except YoutubeAllChannelsRemovedError:
+            raise
+        except Exception:
+            pass
+        finally:
+            _studio_dismiss_open_menus(page)
         _log("Studio: «Сменить аккаунт» недоступно — продолжаем с текущим каналом.")
         return ""
 
@@ -1887,15 +2232,77 @@ def _studio_navigation_drawer_channel_name_locators(page):
     )
 
 
-def _studio_read_navigation_drawer_channel_name(page) -> str:
+def _studio_read_navigation_drawer_channel_name(
+    page, *, probe_timeout_ms: int = 2_000
+) -> str:
     loc = _studio_first_visible_locator(
         page,
         _studio_navigation_drawer_channel_name_locators(page),
-        probe_timeout_ms=8_000,
+        probe_timeout_ms=probe_timeout_ms,
     )
     if loc is None:
         return ""
     return _studio_read_locator_text(loc)
+
+
+def _studio_page_on_studio_home(page) -> bool:
+    try:
+        return "studio.youtube.com" in (page.url or "").lower()
+    except Exception:
+        return False
+
+
+def _studio_try_match_expected_channel_in_studio(
+    page,
+    expected_name: str,
+    *,
+    login_credentials=None,
+) -> bool:
+    """На studio.youtube.com имя канала уже совпадает с yt_oldest_name."""
+    expected = (expected_name or "").strip()
+    if not expected:
+        return False
+
+    try:
+        on_studio = "studio.youtube.com" in (page.url or "").lower()
+    except Exception:
+        on_studio = False
+
+    if on_studio:
+        _log(
+            f"Studio: уже на studio.youtube.com — проверяем yt_oldest_name «{expected}»…"
+        )
+        _studio_wait_for_google_session(page, login_credentials=login_credentials)
+    else:
+        _studio_wait_for_google_session(page, login_credentials=login_credentials)
+        _log(
+            f"Studio: проверка yt_oldest_name «{expected}» на studio.youtube.com…"
+        )
+        page.goto(
+            "https://studio.youtube.com/",
+            wait_until="domcontentloaded",
+            timeout=120_000,
+        )
+
+    _studio_try_google_login_if_needed(page, login_credentials)
+    _studio_handle_channel_removed_if_present(page)
+    _studio_handle_onboarding_dialogs_if_present(page)
+
+    current = _studio_read_navigation_drawer_channel_name(page)
+    if current and _studio_channel_names_match(expected, current):
+        _log(
+            f"Studio: в Studio активен yt_oldest_name «{expected}» — "
+            "смена аккаунта не нужна."
+        )
+        return True
+
+    if current:
+        _log(
+            f"Studio: в Studio канал «{current}» ≠ yt_oldest_name «{expected}»."
+        )
+    else:
+        _log("Studio: не удалось прочитать имя канала в Studio.")
+    return False
 
 
 def _studio_ensure_correct_studio_channel(
@@ -1907,26 +2314,64 @@ def _studio_ensure_correct_studio_channel(
 ) -> str:
     """
     YouTube → выбор самого старого канала → Studio.
-    Сначала переключаем канал на youtube.com, затем открываем Studio и сверяем #entity-name.
+    Если yt_oldest_name задан и в Studio уже тот же канал — переключение не делаем.
+    Иначе переключаем канал на youtube.com, затем открываем Studio и сверяем #entity-name.
     """
     expected = (yt_oldest_name or "").strip()
+
+    if expected and _studio_try_match_expected_channel_in_studio(
+        page, expected, login_credentials=login_credentials
+    ):
+        return expected
+
     _studio_goto_youtube_home(page, login_credentials=login_credentials)
 
     oldest = ""
+    confirmed_on_youtube = False
     if expected and _studio_youtube_active_channel_matches(page, expected):
         _log(
             f"Studio: на YouTube уже активен yt_oldest_name «{expected}» — "
             "полный скан каналов не нужен."
         )
         oldest = expected
-    else:
-        if expected:
+        confirmed_on_youtube = True
+    elif expected:
+        _log(
+            f"Studio: на YouTube канал ≠ yt_oldest_name «{expected}» — "
+            f"пробуем переключиться на «{expected}»…"
+        )
+        if _studio_try_switch_to_account_by_name(page, expected):
             _log(
-                f"Studio: на YouTube канал ≠ yt_oldest_name «{expected}» — "
-                "ищем самый старый канал…"
+                f"Studio: переключились на yt_oldest_name «{expected}» — "
+                "полный скан каналов не нужен."
             )
+            oldest = expected
+            confirmed_on_youtube = True
         else:
-            _log("Studio: yt_oldest_name не задан — ищем самый старый канал…")
+            _log(
+                f"Studio: yt_oldest_name «{expected}» не найден или удалён — "
+                "ищем доступный канал…"
+            )
+            accounts, current_idx = _studio_collect_account_switcher_channels_with_retry(
+                page
+            )
+            only = _studio_try_select_only_available_channel(
+                page,
+                accounts,
+                current_idx=current_idx,
+                on_oldest_channel_name=on_oldest_channel_name,
+            )
+            if only:
+                oldest = only
+                confirmed_on_youtube = True
+            else:
+                oldest = _studio_select_oldest_channel_for_upload(
+                    page,
+                    login_credentials=login_credentials,
+                    on_oldest_channel_name=on_oldest_channel_name,
+                )
+    else:
+        _log("Studio: yt_oldest_name не задан — ищем самый старый канал…")
         oldest = _studio_select_oldest_channel_for_upload(
             page,
             login_credentials=login_credentials,
@@ -1936,13 +2381,23 @@ def _studio_ensure_correct_studio_channel(
     if not oldest and expected:
         oldest = expected
 
-    _studio_goto_studio_home_ready(page, login_credentials=login_credentials)
+    if confirmed_on_youtube and oldest:
+        return oldest
+
+    _studio_goto_studio_if_needed(page, login_credentials=login_credentials)
     current = _studio_read_navigation_drawer_channel_name(page)
     if oldest and current and _studio_channel_names_match(oldest, current):
         _log(
             f"Studio: канал в Studio «{current}» совпадает с выбранным «{oldest}»."
         )
         return oldest
+
+    if expected and current and _studio_channel_names_match(expected, current):
+        _log(
+            f"Studio: в Studio активен yt_oldest_name «{expected}» — "
+            "повторное переключение не нужно."
+        )
+        return expected
 
     if oldest and current:
         _log(
@@ -1961,7 +2416,7 @@ def _studio_ensure_correct_studio_channel(
             login_credentials=login_credentials,
             on_oldest_channel_name=on_oldest_channel_name,
         ) or oldest
-        _studio_goto_studio_home_ready(page, login_credentials=login_credentials)
+        _studio_goto_studio_if_needed(page, login_credentials=login_credentials)
         current = _studio_read_navigation_drawer_channel_name(page)
         if oldest and current and _studio_channel_names_match(oldest, current):
             _log(
@@ -1978,8 +2433,10 @@ def _studio_ensure_correct_studio_channel(
 
 def _studio_handle_channel_creation_dialog_if_present(page) -> bool:
     """
-    Аккаунт без канала: при входе в Studio — диалог «Основные сведения».
-    Нажимаем «Создать канал» (имя/псевдоним обычно уже предзаполнены Google).
+    Google-аккаунт без канала: диалог ytd-channel-creation-dialog-renderer
+    («How you'll appear» / «Как вас будут видеть») после входа в Studio
+    или после выбора аккаунта в меню «Сменить аккаунт» на youtube.com.
+    Нажимаем «Создать канал» / «Create channel» (имя обычно предзаполнено).
     """
     if not _studio_channel_creation_dialog_visible(page):
         return False
@@ -2028,7 +2485,7 @@ def _studio_handle_channel_creation_dialog_if_present(page) -> bool:
         while time.monotonic() < deadline:
             if not _studio_channel_creation_dialog_visible(page):
                 break
-            time.sleep(0.5)
+            page.wait_for_timeout(500)
         else:
             raise YoutubeStudioError(
                 "YouTube Studio: диалог создания канала не закрылся после «Создать канал»."
@@ -2037,6 +2494,27 @@ def _studio_handle_channel_creation_dialog_if_present(page) -> bool:
     page.wait_for_timeout(800)
     _log("Studio: диалог создания канала закрыт.")
     return True
+
+
+def _studio_handle_channel_creation_after_account_pick(page) -> bool:
+    """
+    После клика по аккаунту в «Сменить аккаунт» канал может ещё не существовать —
+    ждём диалог создания и нажимаем «Создать канал».
+    """
+    deadline = time.monotonic() + 8.0
+    while time.monotonic() < deadline:
+        if _studio_handle_channel_creation_dialog_if_present(page):
+            _log(
+                "Studio: канал создан после выбора в меню «Сменить аккаунт» — "
+                "продолжаем сценарий."
+            )
+            page.wait_for_timeout(500)
+            return True
+        if _studio_channel_creation_dialog_visible(page):
+            page.wait_for_timeout(250)
+            continue
+        page.wait_for_timeout(200)
+    return False
 
 
 def _studio_warm_welcome_dialog_locator(page):
@@ -2167,7 +2645,7 @@ def _studio_handle_aadc_notice_dialog_if_present(page) -> bool:
     while time.monotonic() < deadline:
         if not _studio_aadc_notice_dialog_visible(page):
             break
-        time.sleep(0.3)
+        page.wait_for_timeout(300)
     else:
         raise YoutubeStudioError(
             "YouTube Studio: окно AADC не закрылось после «ОК»."
@@ -2209,31 +2687,45 @@ def _studio_handle_onboarding_dialogs_if_present(page) -> bool:
     return _studio_handle_interrupt_dialogs_if_present(page)
 
 
-def _studio_wait_create_or_login(page, create_locator, *, login_credentials=None) -> None:
+def _studio_wait_create_or_login(
+    page, create_locator, *, login_credentials=None, timeout_s: float | None = None
+) -> None:
     """
     Ждём появления кнопки «Создать», но параллельно проверяем, что нас не выкинуло на логин.
     """
-    deadline = time.monotonic() + (_STUDIO_UI_MS / 1000.0)
+    try:
+        if create_locator.count() > 0 and create_locator.first.is_visible(timeout=800):
+            return
+    except Exception:
+        pass
+
+    max_s = (_STUDIO_UI_MS / 1000.0) if timeout_s is None else float(timeout_s)
+    deadline = time.monotonic() + max_s
+    last_dialog_check = 0.0
     while True:
-        if _studio_try_google_login_if_needed(page, login_credentials):
-            continue
-        if _studio_login_required(page):
-            raise YoutubeStudioError(
-                "YouTube Studio: требуется вход в Google (профиль без активной сессии). "
-                "Останавливаем залив для этого профиля."
-            )
-        if _studio_handle_onboarding_dialogs_if_present(page):
-            continue
+        if _studio_on_google_auth_page(page) or _studio_login_required(page):
+            if _studio_try_google_login_if_needed(page, login_credentials):
+                continue
+            if _studio_login_required(page):
+                _studio_raise_if_auth_without_credentials(page, login_credentials)
+                raise YoutubeStudioError(
+                    "YouTube Studio: требуется вход в Google (профиль без активной сессии). "
+                    "Останавливаем залив для этого профиля."
+                )
+        now = time.monotonic()
+        if now - last_dialog_check >= 1.0:
+            last_dialog_check = now
+            if _studio_handle_onboarding_dialogs_if_present(page):
+                continue
         try:
-            if create_locator.count() > 0 and create_locator.first.is_visible():
+            if create_locator.count() > 0 and create_locator.first.is_visible(timeout=300):
                 return
         except Exception:
-            # transient detach / navigation; continue polling
             pass
 
         if time.monotonic() >= deadline:
             break
-        time.sleep(0.5)
+        page.wait_for_timeout(150)
 
     raise YoutubeStudioError("YouTube Studio: не дождались кнопки «Создать» (таймаут).")
 
@@ -2311,37 +2803,95 @@ def _studio_ensure_channel_profile_tab(page) -> None:
     _log("Studio: вкладка Profile — ytcp-channel-links найден.")
 
 
+def _studio_create_button_locator(page):
+    return (
+        page.locator('ytcp-button-shape button[aria-label="Создать"]')
+        .or_(page.locator('ytcp-button-shape button[aria-label="Create"]'))
+        .or_(page.get_by_role("button", name=re.compile(r"^создать$|^create$", re.I)))
+    )
+
+
+def _studio_create_button_visible(page, *, timeout_ms: int = 1_000) -> bool:
+    if not _studio_page_on_studio_home(page):
+        return False
+    try:
+        create = _studio_create_button_locator(page)
+        return create.count() > 0 and create.first.is_visible(timeout=timeout_ms)
+    except Exception:
+        return False
+
+
+def _studio_prepare_studio_dashboard(page, *, login_credentials=None) -> None:
+    """
+    Studio открыт: сессия Google, диалоги онбординга/удалённого канала.
+    Без ожидания кнопки «Создать» — для настройки канала и пр.
+    """
+    _studio_goto_studio_if_needed(page, login_credentials=login_credentials)
+    _studio_handle_onboarding_dialogs_if_present(page)
+
+
+def _studio_goto_studio_if_needed(page, *, login_credentials=None) -> None:
+    """Открыть studio.youtube.com без ожидания кнопки «Создать»."""
+    if _studio_page_on_studio_home(page) and not _studio_on_google_auth_page(page):
+        return
+    if _studio_on_google_auth_page(page):
+        _studio_wait_for_google_session(page, login_credentials=login_credentials)
+    if not _studio_page_on_studio_home(page):
+        _log("Studio: переход на https://studio.youtube.com/ …")
+        page.goto(
+            "https://studio.youtube.com/",
+            wait_until="domcontentloaded",
+            timeout=90_000,
+        )
+    if _studio_on_google_auth_page(page) or _studio_login_required(page):
+        _studio_try_google_login_if_needed(page, login_credentials)
+    _studio_handle_channel_removed_if_present(page)
+
+
 def _studio_goto_studio_home_ready(page, *, login_credentials=None):
     """
     studio.youtube.com → логин / онбординг → кнопка «Создать» видна.
     Возвращает локатор кнопки «Создать».
     """
-    _studio_wait_for_google_session(page, login_credentials=login_credentials)
-    try:
-        on_studio = "studio.youtube.com" in (page.url or "").lower()
-    except Exception:
-        on_studio = False
-    if not on_studio:
-        _log("Studio: переход на https://studio.youtube.com/ …")
-        page.goto(
-            "https://studio.youtube.com/",
-            wait_until="domcontentloaded",
-            timeout=120_000,
-        )
-    else:
-        _log("Studio: уже на studio.youtube.com …")
-    _log(f"Studio: после загрузки URL: {page.url!r}")
-    _studio_try_google_login_if_needed(page, login_credentials)
-    _studio_handle_channel_removed_if_present(page)
-    _studio_handle_onboarding_dialogs_if_present(page)
+    return _studio_resolve_create_button(page, login_credentials=login_credentials)
 
-    create = (
-        page.locator('ytcp-button-shape button[aria-label="Создать"]')
-        .or_(page.locator('ytcp-button-shape button[aria-label="Create"]'))
-        .or_(page.get_by_role("button", name=re.compile(r"^создать$|^create$", re.I)))
+
+def _studio_resolve_create_button(page, *, login_credentials=None):
+    """
+    Кнопка «Создать» на главной Studio. Один переход в Studio и короткий опрос.
+    """
+    _studio_goto_studio_if_needed(page, login_credentials=login_credentials)
+    create = _studio_create_button_locator(page)
+    _studio_handle_onboarding_dialogs_if_present(page)
+    if _studio_create_button_visible(page, timeout_ms=4_000):
+        return create
+
+    _log("Studio: ждём кнопку «Создать»…")
+    deadline = time.monotonic() + 18.0
+    last_dialog_check = 0.0
+    while time.monotonic() < deadline:
+        if _studio_on_google_auth_page(page) or _studio_login_required(page):
+            _studio_raise_if_auth_without_credentials(page, login_credentials)
+            if _studio_try_google_login_if_needed(page, login_credentials):
+                continue
+            if _studio_login_required(page):
+                raise YoutubeStudioError(
+                    "YouTube Studio: требуется вход в Google (профиль без активной сессии)."
+                )
+        now = time.monotonic()
+        if now - last_dialog_check >= 1.0:
+            last_dialog_check = now
+            if _studio_handle_onboarding_dialogs_if_present(page):
+                if _studio_create_button_visible(page, timeout_ms=400):
+                    return create
+                continue
+        if _studio_create_button_visible(page, timeout_ms=250):
+            return create
+        page.wait_for_timeout(120)
+
+    _studio_wait_create_or_login(
+        page, create, login_credentials=login_credentials, timeout_s=45.0
     )
-    _log("Studio: ожидание кнопки «Создать»…")
-    _studio_wait_create_or_login(page, create, login_credentials=login_credentials)
     return create
 
 
@@ -2363,8 +2913,12 @@ def _studio_click_create_then_add_video(
         login_credentials=login_credentials,
         on_oldest_channel_name=on_oldest_channel_name,
     )
-    create = _studio_goto_studio_home_ready(page, login_credentials=login_credentials)
-    create.first.scroll_into_view_if_needed(timeout=15_000)
+    create = _studio_resolve_create_button(page, login_credentials=login_credentials)
+    if not _studio_page_on_studio_home(page):
+        raise YoutubeStudioError(
+            "YouTube Studio: перед кликом «Создать» страница не studio.youtube.com."
+        )
+    create.first.scroll_into_view_if_needed(timeout=10_000)
     _log("Studio: клик по «Создать»…")
     create.first.click(timeout=30_000)
 
@@ -2414,6 +2968,7 @@ def _studio_wait_upload_file_picker_visible(
         if _studio_try_google_login_if_needed(page, login_credentials):
             continue
         if _studio_login_required(page):
+            _studio_raise_if_auth_without_credentials(page, login_credentials)
             raise YoutubeStudioError(
                 "YouTube Studio: требуется вход в Google (профиль без активной сессии)."
             )
@@ -2425,7 +2980,7 @@ def _studio_wait_upload_file_picker_visible(
                 return
         except Exception:
             pass
-        time.sleep(0.5)
+        page.wait_for_timeout(500)
 
     raise YoutubeStudioError(
         "YouTube Studio: не дождались окна загрузки (ytcp-uploads-file-picker). "
@@ -2488,7 +3043,7 @@ def _studio_navigate_to_channel_customization(
         login_credentials=login_credentials,
         on_oldest_channel_name=on_oldest_channel_name,
     )
-    _studio_goto_studio_home_ready(page, login_credentials=login_credentials)
+    _studio_prepare_studio_dashboard(page, login_credentials=login_credentials)
     _log("Studio: переход в «Настройка канала» / Customization…")
     profile_link = page.locator('a.menu-item-link[href*="/editing/profile"]')
     if profile_link.count() > 0:
@@ -2806,7 +3361,7 @@ def _studio_wait_channel_link_row(
                 return title_loc, url_loc
         except Exception:
             pass
-        time.sleep(0.2)
+        page.wait_for_timeout(200)
     st = _studio_link_row_state(page)
     try:
         tc = title_loc.count()
@@ -3298,7 +3853,7 @@ def _studio_click_channel_customization_publish(page) -> None:
     pub = _publish_state()
     if pub.get("found") and pub.get("enabled") and _click_publish():
         _log("Studio: ожидание 5 с после «Опубликовать»…")
-        time.sleep(5.0)
+        page.wait_for_timeout(5000)
         _log("Studio: настройки канала опубликованы.")
         return
 
@@ -3307,7 +3862,7 @@ def _studio_click_channel_customization_publish(page) -> None:
         pub = _publish_state()
         if pub.get("found") and pub.get("enabled") and _click_publish():
             _log("Studio: ожидание 5 с после «Опубликовать»…")
-            time.sleep(5.0)
+            page.wait_for_timeout(5000)
             _log("Studio: настройки канала опубликованы.")
             return
 
@@ -3317,7 +3872,7 @@ def _studio_click_channel_customization_publish(page) -> None:
                 btn.scroll_into_view_if_needed(timeout=2_000)
                 btn.click(timeout=10_000)
                 _log("Studio: ожидание 5 с после «Опубликовать»…")
-                time.sleep(5.0)
+                page.wait_for_timeout(5000)
                 _log("Studio: настройки канала опубликованы.")
                 return
         except Exception:
@@ -3708,7 +4263,7 @@ def _studio_upload_pick_file(page, video_path: str, *, login_credentials=None) -
                 f"Видеофайл не найден/не доступен: {video_path!r}. "
                 f"expanded={str(p)!r}, last_stat_err={last_stat_err!r}"
             )
-        time.sleep(0.5)
+        page.wait_for_timeout(500)
 
     _studio_wait_upload_file_picker_visible(page, login_credentials=login_credentials)
     picker = _studio_upload_file_picker_locator(page)
@@ -3798,7 +4353,7 @@ def _studio_upload_pick_file(page, video_path: str, *, login_credentials=None) -
                         f"Studio: fallback set_input_files не удался: {e2!r}. "
                         "Ждём 0.5s и повторяем…"
                     )
-                    time.sleep(0.5)
+                    page.wait_for_timeout(500)
         if last_pick_err is not None:
             raise last_pick_err
     try:
@@ -3925,7 +4480,7 @@ def _studio_select_not_for_kids(page) -> None:
                 break
         except Exception:
             pass
-        time.sleep(0.5)
+        page.wait_for_timeout(500)
     else:
         raise YoutubeStudioError(
             "YouTube Studio: не появился выбор «Не для детей» (made-for-kids)."
@@ -4363,7 +4918,9 @@ def _studio_wait_after_upload_studio_outcome(page, browser, max_wait_sec: float)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        time.sleep(min(_POST_UPLOAD_QUOTA_POLL_S, max(0.3, remaining)))
+        page.wait_for_timeout(
+            int(min(_POST_UPLOAD_QUOTA_POLL_S, max(0.3, remaining)) * 1000)
+        )
     raise YoutubeStudioError(
         f"За {max_wait_sec:.0f} с не появился ни блок «Загрузка недоступна», "
         "ни успешное завершение проверок Studio (прогресс / подпись). "
@@ -4407,12 +4964,15 @@ def run_upload_latest_ready_video(
     best_url = ""
     best_vid = ""
 
-    _studio_click_create_then_add_video(
-        page,
-        login_credentials=login_credentials,
-        yt_oldest_name=yt_oldest_name,
-        on_oldest_channel_name=on_oldest_channel_name,
-    )
+    try:
+        _studio_click_create_then_add_video(
+            page,
+            login_credentials=login_credentials,
+            yt_oldest_name=yt_oldest_name,
+            on_oldest_channel_name=on_oldest_channel_name,
+        )
+    except YoutubeAllChannelsRemovedError:
+        _studio_abort_all_channels_removed(page, browser=browser)
     chosen = (video_path or "").strip()
     if not chosen:
         chosen = resolve_latest_zaliver_video_on_disk(db_path=zaliver_db_path)
@@ -4445,7 +5005,7 @@ def run_upload_latest_ready_video(
                 best_vid = vpub
         except Exception:
             pass
-    time.sleep(5.0)
+    page.wait_for_timeout(5000)
     url = ""
     vid = ""
     try:

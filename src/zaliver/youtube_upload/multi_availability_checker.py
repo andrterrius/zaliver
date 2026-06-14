@@ -7,11 +7,15 @@ from typing import Callable
 
 from zaliver.youtube_upload.multi_uploader import _MAX_CONCURRENT_UPLOADS
 
+# Проверка доступности Studio — отдельный лимит параллельных профилей.
+_MAX_CONCURRENT_AVAILABILITY_CHECKS = 4
+
 
 class MultiProfileAvailabilityChecker:
     """
-    Параллельная проверка доступности Studio: до max_concurrent профилей одновременно
-    (тот же лимит, что у MultiProfileUploader).
+    Параллельная проверка доступности Studio: до max_concurrent профилей одновременно.
+    По умолчанию для заливки/прочих сценариев — лимит MultiProfileUploader;
+    для проверки доступности передайте max_concurrent=_MAX_CONCURRENT_AVAILABILITY_CHECKS.
     """
 
     def __init__(
@@ -26,7 +30,7 @@ class MultiProfileAvailabilityChecker:
     ) -> None:
         self._profiles = [p.strip() for p in (profile_ids or []) if (p or "").strip()]
         n_prof = len(self._profiles)
-        cap = max(1, min(int(max_concurrent), _MAX_CONCURRENT_UPLOADS, max(1, n_prof)))
+        cap = max(1, min(int(max_concurrent), max(1, n_prof)))
         self._max_parallel = cap
         self._check_one = check_one
         self._on_profile_done = on_profile_done

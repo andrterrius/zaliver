@@ -89,6 +89,12 @@ _BIRTHDAY_HEADING_RE = re.compile(
     re.I,
 )
 _SAVE_BTN_RE = re.compile(r"^save$|^сохранить$", re.I)
+_BIRTHDAY_CONFIRM_HEADING_RE = re.compile(
+    r"confirm\s+birthday|подтвердите\s+дату\s+рождения|"
+    r"confirm\s+date\s+of\s+birth",
+    re.I,
+)
+_CONFIRM_BTN_RE = re.compile(r"^confirm$|^подтвердить$", re.I)
 _BIRTHDAY_MONTH = 1
 _BIRTHDAY_DAY = "1"
 _BIRTHDAY_YEAR = "2000"
@@ -96,7 +102,11 @@ _BIRTHDAY_YEAR = "2000"
 _GOOGLE_LOGIN_MAX_S = 180.0
 
 
-class GoogleLoginPasswordMissingError(RuntimeError):
+class GoogleLoginCredentialsMissingError(RuntimeError):
+    """В данных учётки нет данных для входа — профиль пропускаем, остальные продолжают."""
+
+
+class GoogleLoginPasswordMissingError(GoogleLoginCredentialsMissingError):
     """В custom_data профиля нет yt_password — профиль пропускаем, остальные продолжают."""
 
 
@@ -105,6 +115,18 @@ class GoogleLoginCredentials:
     email: str = ""
     password: str = ""
     twofa_token: str = ""
+
+
+def has_login_credentials(
+    credentials: GoogleLoginCredentials | None,
+) -> bool:
+    if credentials is None:
+        return False
+    return bool(
+        (credentials.email or "").strip()
+        or (credentials.password or "").strip()
+        or (credentials.twofa_token or "").strip()
+    )
 
 
 def credentials_from_custom_data(
@@ -209,6 +231,8 @@ def google_auth_interaction_visible(page) -> bool:
     if _selfie_enrollment_visible(page):
         return True
     if _recovery_info_step_visible(page):
+        return True
+    if _birthday_confirm_step_visible(page):
         return True
     if _birthday_step_visible(page):
         return True
@@ -684,6 +708,58 @@ def _birthday_form_scope(page):
     return page
 
 
+def _birthday_confirm_step_visible_in_scope(scope) -> bool:
+    try:
+        dlg = scope.locator('[role="dialog"][aria-modal="true"]').filter(
+            has=scope.locator("h2").filter(has_text=_BIRTHDAY_CONFIRM_HEADING_RE)
+        )
+        if dlg.count() > 0 and dlg.first.is_visible(timeout=300):
+            return True
+    except Exception:
+        pass
+    try:
+        h = scope.locator("h2.VfPpkd-k2Wrsb, h2").filter(
+            has_text=_BIRTHDAY_CONFIRM_HEADING_RE
+        )
+        if h.count() > 0 and h.first.is_visible(timeout=300):
+            return True
+    except Exception:
+        pass
+    try:
+        if scope.get_by_text(_BIRTHDAY_CONFIRM_HEADING_RE).first.is_visible(timeout=300):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _birthday_confirm_form_scope(page):
+    for scope in _google_auth_scopes(page):
+        if _birthday_confirm_step_visible_in_scope(scope):
+            return scope
+    return page
+
+
+def _birthday_confirm_step_visible(page) -> bool:
+    """Модальное окно «Confirm birthday» после ввода даты рождения."""
+    for scope in _google_auth_scopes(page):
+        if _birthday_confirm_step_visible_in_scope(scope):
+            return True
+    return False
+
+
+def _click_birthday_confirm(page) -> None:
+    _log("Google: подтверждение даты рождения — «Confirm»…")
+    scope = _birthday_confirm_form_scope(page)
+    confirm_btn = (
+        scope.locator('button[data-mdc-dialog-action="ok"]')
+        .or_(scope.get_by_role("button", name=_CONFIRM_BTN_RE))
+    ).first
+    confirm_btn.wait_for(state="visible", timeout=10_000)
+    confirm_btn.click(timeout=30_000)
+    page.wait_for_timeout(900)
+
+
 def _birthday_step_visible(page) -> bool:
     """Экран «Add your birthday» — запрос даты рождения."""
     for scope in _google_auth_scopes(page):
@@ -736,6 +812,11 @@ def _fill_birthday_and_save(page) -> None:
     save_btn.wait_for(state="visible", timeout=10_000)
     save_btn.click(timeout=30_000)
     page.wait_for_timeout(900)
+    for _ in range(20):
+        if _birthday_confirm_step_visible(page):
+            _click_birthday_confirm(page)
+            return
+        page.wait_for_timeout(250)
 
 
 def _channel_switcher_root(page):
@@ -1075,6 +1156,10 @@ def _handle_channel_switcher(page) -> None:
 
     page.wait_for_timeout(1_500)
 
+    from zaliver.youtube_upload.studio import _studio_handle_channel_creation_after_account_pick
+
+    _studio_handle_channel_creation_after_account_pick(page)
+
     try:
         root.first.wait_for(state="hidden", timeout=60_000)
     except Exception:
@@ -1138,6 +1223,7 @@ def attempt_google_login_for_studio(
             and not _passkey_enrollment_visible(page)
             and not _selfie_enrollment_visible(page)
             and not _recovery_info_step_visible(page)
+            and not _birthday_confirm_step_visible(page)
             and not _birthday_step_visible(page)
             and not _totp_step_visible(page)
             and not _account_chooser_step_visible(page)
@@ -1178,7 +1264,7 @@ def attempt_google_login_for_studio(
         if _identifier_step_visible(page):
             email = (credentials.email or "").strip()
             if not email:
-                raise RuntimeError(
+                raise GoogleLoginCredentialsMissingError(
                     "YouTube Studio: для входа нужен логин (yt_login) в данных учётки "
                     "локального профиля — email не задан."
                 )
@@ -1204,6 +1290,13 @@ def attempt_google_login_for_studio(
             _click_recovery_info_cancel(page)
             continue
 
+        if _birthday_confirm_step_visible(page):
+            steps += 1
+            idle_rounds = 0
+            _log(f"Google: подтверждение даты рождения (шаг {steps})…")
+            _click_birthday_confirm(page)
+            continue
+
         if _birthday_step_visible(page):
             steps += 1
             idle_rounds = 0
@@ -1214,7 +1307,7 @@ def attempt_google_login_for_studio(
         if _totp_step_visible(page):
             token = (credentials.twofa_token or "").strip()
             if not token:
-                raise RuntimeError(
+                raise GoogleLoginCredentialsMissingError(
                     "YouTube/Google: требуется 2FA, но yt_2fa не задан в данных учётки профиля."
                 )
             steps += 1
@@ -1241,6 +1334,7 @@ def attempt_google_login_for_studio(
                 f"email={_identifier_step_visible(page)}, "
                 f"recovery={_recovery_info_step_visible(page)}, "
                 f"selfie={_selfie_enrollment_visible(page)}, "
+                f"birthday_confirm={_birthday_confirm_step_visible(page)}, "
                 f"birthday={_birthday_step_visible(page)})…"
             )
         page.wait_for_timeout(500)

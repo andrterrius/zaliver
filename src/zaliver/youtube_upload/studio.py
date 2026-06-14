@@ -4363,6 +4363,12 @@ def _studio_upload_pick_file(page, video_path: str, *, login_credentials=None) -
     _log(f"Studio: файл передан — {p.name!r}, байт: {sz_log}.")
 
 
+def _studio_normalize_upload_title(title: str | None) -> str:
+    """Название для Studio: без краевых пробелов, в конце всегда один пробел."""
+    t = (title or "").strip()
+    return f"{t} " if t else ""
+
+
 def _studio_set_title_and_description(page, *, title: str | None, description: str | None) -> None:
     """
     Заполнение полей «Название» и «Описание» в диалоге загрузки Studio.
@@ -4370,7 +4376,7 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
     Поля в Studio — contenteditable div#textbox внутри ytcp-social-suggestion-input.
     Для надёжности используем клик → Ctrl+A → ввод текста.
     """
-    t = (title or "").strip()
+    t = _studio_normalize_upload_title(title)
     d = (description or "").strip()
     if not t and not d:
         return

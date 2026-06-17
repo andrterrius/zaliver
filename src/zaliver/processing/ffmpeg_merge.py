@@ -810,19 +810,21 @@ def clamp_target_video_bps(bps: int) -> int:
     return max(_MIN_TARGET_VIDEO_BPS, min(int(bps), _MAX_TARGET_VIDEO_BPS))
 
 
-def libx264_encode_args_for_target(target_video_bps: Optional[int]) -> List[str]:
+def libx264_encode_args_for_target(
+    target_video_bps: Optional[int], *, crf: int = 20
+) -> List[str]:
     """CRF по умолчанию или VBV по целевому битрейту (подгонка размера к исходнику)."""
     if target_video_bps is None or target_video_bps <= 0:
-        return ["-preset", "veryfast", "-crf", "20"]
+        return ["-preset", "veryfast", "-crf", str(crf)]
     b = clamp_target_video_bps(target_video_bps)
     maxr = max(b + 1, int(b * 1.35))
     buf = max(b * 2, int(b * 2))
     return ["-preset", "veryfast", "-b:v", str(b), "-maxrate", str(maxr), "-bufsize", str(buf)]
 
 
-def _h264_nvenc_args(target_video_bps: Optional[int]) -> List[str]:
+def _h264_nvenc_args(target_video_bps: Optional[int], *, gpu_cq: int = 23) -> List[str]:
     if target_video_bps is None or target_video_bps <= 0:
-        return ["-preset", "p4", "-cq", "23", "-b:v", "0"]
+        return ["-preset", "p4", "-cq", str(gpu_cq), "-b:v", "0"]
     b = clamp_target_video_bps(target_video_bps)
     return [
         "-preset",
@@ -838,9 +840,9 @@ def _h264_nvenc_args(target_video_bps: Optional[int]) -> List[str]:
     ]
 
 
-def _h264_qsv_args(target_video_bps: Optional[int]) -> List[str]:
+def _h264_qsv_args(target_video_bps: Optional[int], *, gpu_cq: int = 23) -> List[str]:
     if target_video_bps is None or target_video_bps <= 0:
-        return ["-global_quality", "23", "-look_ahead", "1"]
+        return ["-global_quality", str(gpu_cq), "-look_ahead", "1"]
     b = clamp_target_video_bps(target_video_bps)
     maxr = max(b + 1, int(b * 1.45))
     buf = max(b * 2, int(b * 2))
@@ -856,8 +858,9 @@ def _h264_qsv_args(target_video_bps: Optional[int]) -> List[str]:
     ]
 
 
-def _h264_amf_args(target_video_bps: Optional[int]) -> List[str]:
+def _h264_amf_args(target_video_bps: Optional[int], *, gpu_cq: int = 23) -> List[str]:
     if target_video_bps is None or target_video_bps <= 0:
+        qp = str(gpu_cq)
         return [
             "-usage",
             "transcoding",
@@ -866,11 +869,11 @@ def _h264_amf_args(target_video_bps: Optional[int]) -> List[str]:
             "-rc",
             "cqp",
             "-qp_i",
-            "23",
+            qp,
             "-qp_p",
-            "23",
+            qp,
             "-qp_b",
-            "23",
+            qp,
             "-bf",
             "0",
             "-async_depth",
@@ -894,10 +897,12 @@ def _h264_amf_args(target_video_bps: Optional[int]) -> List[str]:
     ]
 
 
-def _h264_videotoolbox_args(target_video_bps: Optional[int]) -> List[str]:
+def _h264_videotoolbox_args(
+    target_video_bps: Optional[int], *, videotoolbox_q: int = 65
+) -> List[str]:
     """Apple VideoToolbox (macOS): аппаратный H.264."""
     if target_video_bps is None or target_video_bps <= 0:
-        return ["-q:v", "65", "-allow_sw", "1"]
+        return ["-q:v", str(videotoolbox_q), "-allow_sw", "1"]
     b = clamp_target_video_bps(target_video_bps)
     maxr = max(b + 1, int(b * 1.35))
     buf = max(b * 2, int(b * 2))
@@ -915,6 +920,8 @@ def _h264_videotoolbox_args(target_video_bps: Optional[int]) -> List[str]:
 
 def _try_h264_videotoolbox(
     target_video_bps: Optional[int],
+    *,
+    videotoolbox_q: int = 65,
 ) -> Optional[Tuple[str, List[str]]]:
     if sys.platform != "darwin":
         return None
@@ -923,11 +930,19 @@ def _try_h264_videotoolbox(
         return None
     if not _probe_encoder_runtime("h264_videotoolbox"):
         return None
-    return ("h264_videotoolbox", _h264_videotoolbox_args(target_video_bps))
+    return (
+        "h264_videotoolbox",
+        _h264_videotoolbox_args(target_video_bps, videotoolbox_q=videotoolbox_q),
+    )
 
 
 def pick_best_h264_encoder(
-    *, prefer_gpu: bool = False, target_video_bps: Optional[int] = None
+    *,
+    prefer_gpu: bool = False,
+    target_video_bps: Optional[int] = None,
+    crf: int = 20,
+    gpu_cq: int = 23,
+    videotoolbox_q: int = 65,
 ) -> Tuple[str, List[str]]:
     """
     Return (encoder_name, extra_args) preferring GPU encoders if available.
@@ -935,17 +950,17 @@ def pick_best_h264_encoder(
     If target_video_bps is set, args target that video bitrate (VBR) to approximate source file size.
     Otherwise NVENC/QSV/AMF use quality (CQ) presets and libx264 uses CRF 20.
     """
-    vt = _try_h264_videotoolbox(target_video_bps)
+    vt = _try_h264_videotoolbox(target_video_bps, videotoolbox_q=videotoolbox_q)
     if vt is not None:
         return vt
     txt = ffmpeg_encoder_list_text().lower()
     if prefer_gpu and "h264_nvenc" in txt and _probe_encoder_runtime("h264_nvenc"):
-        return ("h264_nvenc", _h264_nvenc_args(target_video_bps))
+        return ("h264_nvenc", _h264_nvenc_args(target_video_bps, gpu_cq=gpu_cq))
     if prefer_gpu and "h264_qsv" in txt and _probe_encoder_runtime("h264_qsv"):
-        return ("h264_qsv", _h264_qsv_args(target_video_bps))
+        return ("h264_qsv", _h264_qsv_args(target_video_bps, gpu_cq=gpu_cq))
     if prefer_gpu and "h264_amf" in txt and _probe_encoder_runtime("h264_amf"):
-        return ("h264_amf", _h264_amf_args(target_video_bps))
-    return ("libx264", libx264_encode_args_for_target(target_video_bps))
+        return ("h264_amf", _h264_amf_args(target_video_bps, gpu_cq=gpu_cq))
+    return ("libx264", libx264_encode_args_for_target(target_video_bps, crf=crf))
 
 
 def video_encoder_for_mux(

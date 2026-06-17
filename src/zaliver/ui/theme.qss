@@ -221,7 +221,7 @@ QListWidget#readyList::item:selected {
     border: 1px solid #6366f1;
 }
 
-/* Фоновые треки (главная) — как списки профилей / готовых */
+/* Фоновые треки (уникализация) — как списки профилей / готовых */
 QListWidget#musicTracksList {
     background-color: #0f1118;
     border: 1px solid #2d3142;

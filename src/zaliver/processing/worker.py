@@ -232,6 +232,7 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
         h_out=h_out,
         text_overlay=text_overlay,
         total_frames=total_frames,
+        fps=float(fps),
     )
 
     attempts: list[tuple[str, Optional[object], list[str]]] = []

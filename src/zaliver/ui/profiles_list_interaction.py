@@ -169,6 +169,7 @@ class ProfilesListInteraction(QObject):
         last_upload_map: dict[str, str],
         *,
         preserve_checked: set[str] | None = None,
+        prune_checked_to_existing: bool = True,
         show_account_data_button: bool = False,
     ) -> None:
         list_scroll = self.lw.verticalScrollBar().value()
@@ -176,7 +177,8 @@ class ProfilesListInteraction(QObject):
         existing_ids.discard("")
 
         preserve = set(preserve_checked or self.checked_profile_ids)
-        preserve.intersection_update(existing_ids)
+        if prune_checked_to_existing:
+            preserve.intersection_update(existing_ids)
         self.checked_profile_ids = preserve
 
         self.lw.blockSignals(True)
@@ -273,8 +275,6 @@ class ProfilesListInteraction(QObject):
         w.update()
 
     def _apply_checkbox_visuals(self) -> None:
-        visible = set(self._profile_id_to_checkbox.keys())
-        self.checked_profile_ids.intersection_update(visible)
         self._syncing_selection_check = True
         try:
             for pid, cb in self._profile_id_to_checkbox.items():

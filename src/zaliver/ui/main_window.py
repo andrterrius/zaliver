@@ -75,6 +75,7 @@ from zaliver.processing.text_overlay import (
     TextOverlaySettings,
 )
 from zaliver.processing.thread_worker import ProcessingController
+from zaliver.processing.slicing_worker import SlicingController
 from zaliver.ui.antic_profile_row import _profile_id, _profile_name
 from zaliver.ui.profile_list_helpers import (
     profile_matches_search,
@@ -97,6 +98,7 @@ from zaliver.ui.widgets import (
     ToggleSwitch,
 )
 from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
+from zaliver.ui.slicing_tab_pane import SlicingTabPane
 
 from zaliver.processing.ffmpeg_merge import (
     MACOS_BREW_FFMPEG_FORMULA,
@@ -751,6 +753,8 @@ class MainWindow(QWidget):
         self.setObjectName("zaliverRoot")
         self._work_thread: QThread | None = None
         self._processor: ProcessingController | None = None
+        self._slice_processor: SlicingController | None = None
+        self._active_work_mode = "uniquify"
         self._ff_thread: QThread | None = None
         self._ff_worker: FfmpegInstallWorker | None = None
         self._ffmpeg_progress_dlg: QProgressDialog | None = None
@@ -781,7 +785,7 @@ class MainWindow(QWidget):
         self._last_channel_fill_failed_ids: list[str] = []
         self._build_ui()
         self._bootstrap_fd_limits()
-        self._ui_log_line.connect(self._append_log)
+        self._ui_log_line.connect(self._route_ui_log_line)
         self._profiles_loaded.connect(self._on_profiles_loaded)
         self._profiles_load_failed.connect(self._on_profiles_load_failed)
         self._dolphin_google_ready.connect(self._on_dolphin_google_ready)
@@ -801,6 +805,7 @@ class MainWindow(QWidget):
         self._upload_cancel_kind = ""
         self._upload_cancel_dolphin_token = ""
         self._upload_cancel_profile_ids: list[str] = []
+        self._upload_log_mode = ""
         self._youtube_upload_phase_finished.connect(self._on_youtube_upload_phase_finished)
         self._studio_availability_progress.connect(self._on_studio_availability_progress)
         self._studio_availability_finished.connect(self._on_studio_availability_finished)
@@ -1388,6 +1393,17 @@ class MainWindow(QWidget):
         splitter.setSizes([420, 580])
         home_l.addWidget(splitter, 1)
 
+        self._slice_tab = SlicingTabPane(
+            self,
+            settings=self._settings,
+            max_workers_fn=_max_worker_slider,
+            default_workers_fn=_default_workers,
+            apply_thread_cap_fn=_apply_thread_slider_fd_cap,
+        )
+        self._slice_tab.start_requested.connect(self._start_slicing)
+        self._slice_tab.cancel_requested.connect(self._cancel)
+        self._slice_tab.install_ffmpeg_requested.connect(self._on_install_ffmpeg)
+
         ready = QWidget()
         ready_l = QVBoxLayout(ready)
         ready_l.setSpacing(10)
@@ -1858,6 +1874,7 @@ class MainWindow(QWidget):
 
         self._stack = QStackedWidget()
         self._stack.addWidget(home)
+        self._stack.addWidget(self._slice_tab)
         self._stack.addWidget(ready)
         self._stack.addWidget(uploaded)
         self._stack.addWidget(profiles)
@@ -1866,7 +1883,16 @@ class MainWindow(QWidget):
         self._nav = QListWidget()
         self._nav.setObjectName("sideNav")
         self._nav.setFixedWidth(210)
-        self._nav.addItems(["Главная", "Готовые видео", "Залитые видео", "Профили", "Настройки"])
+        self._nav.addItems(
+            [
+                "Уникализация",
+                "Нарезка",
+                "Готовые видео",
+                "Залитые видео",
+                "Профили",
+                "Настройки",
+            ]
+        )
         self._nav.setCurrentRow(0)
         self._nav.currentRowChanged.connect(self._on_nav_row_changed)
 
@@ -1878,11 +1904,11 @@ class MainWindow(QWidget):
 
     def _on_nav_row_changed(self, row: int) -> None:
         self._stack.setCurrentIndex(max(0, min(row, self._stack.count() - 1)))
-        if row == 1:
-            self._refresh_ready_list()
         if row == 2:
-            self._refresh_uploaded_list()
+            self._refresh_ready_list()
         if row == 3:
+            self._refresh_uploaded_list()
+        if row == 4:
             self._refresh_antydetect_profiles()
 
     def _sorted_uploaded_videos(
@@ -2614,7 +2640,7 @@ class MainWindow(QWidget):
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _prompt_title_desc_and_profile(self) -> dict[str, str] | None:
+    def _prompt_title_desc_and_profile(self, *, mode: str = "uniquify") -> dict[str, str] | None:
         profiles = self._profiles_raw or []
         if not profiles:
             # Профили ещё не подтянулись — не блокируем уникализацию (раньше return None
@@ -2630,7 +2656,12 @@ class MainWindow(QWidget):
             return {"title": "", "description": "", "profile_ids": ""}
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Загрузка в YouTube после уникализации")
+        dlg_title = (
+            "Загрузка в YouTube после нарезки"
+            if mode == "slicing"
+            else "Загрузка в YouTube после уникализации"
+        )
+        dlg.setWindowTitle(dlg_title)
         dlg.setModal(True)
         dlg.setMinimumSize(QSize(980, 780))
         dlg.resize(1100, 860)
@@ -2706,7 +2737,7 @@ class MainWindow(QWidget):
             pids = [_profile_id(p) for p in visible]
             pids = [x for x in pids if x]
             filtered_last = {k: last_upload_map[k] for k in pids if k in last_upload_map}
-            dlg_interaction.populate(visible, filtered_last)
+            dlg_interaction.populate(visible, filtered_last, prune_checked_to_existing=False)
 
         def _schedule_dlg_profiles_filter() -> None:
             dlg_filter_timer.start(150)
@@ -2727,22 +2758,39 @@ class MainWindow(QWidget):
         except Exception:
             copies_n = 1
         uniquify_planned = n_inputs * copies_n
+        if mode == "slicing" and hasattr(self, "_slice_tab"):
+            try:
+                n_music = len(self._slice_tab.build_options().get("music_files") or [])
+                copies_t = max(1, int(self._slice_tab.copies_per_track.value()))
+            except Exception:
+                n_music, copies_t = 0, 1
+            uniquify_planned = n_music * copies_t
 
         dlg_profile_count_lbl = QLabel("")
         dlg_profile_count_lbl.setObjectName("hint")
         dlg_profile_count_lbl.setWordWrap(True)
 
+        planned_label = (
+            "Будет нарезано видео"
+            if mode == "slicing"
+            else "Будет уникализировано видео"
+        )
+        only_label = (
+            "(только нарезка)."
+            if mode == "slicing"
+            else "(только уникализация)."
+        )
+
         def _update_dlg_upload_profile_count() -> None:
             n = dlg_interaction.checked_count()
             shown = dlg_interaction.lw.count()
             q = dlg_query.text().strip()
-            lines = [f"Будет уникализировано видео: {uniquify_planned}"]
+            lines = [f"{planned_label}: {uniquify_planned}"]
             if q:
                 lines.append(f"Показано профилей: {shown} из {total_dlg_profiles}")
             if n <= 0:
                 lines.append(
-                    "Выбрано профилей для залива: 0 — без залива в YouTube "
-                    "(только уникализация)."
+                    f"Выбрано профилей для залива: 0 — без залива в YouTube {only_label}"
                 )
             else:
                 lines.append(f"Выбрано профилей для залива: {n}")
@@ -2821,8 +2869,11 @@ class MainWindow(QWidget):
         self._sync_ffmpeg_install_row()
 
     def _sync_ffmpeg_install_row(self) -> None:
-        if not needs_ffmpeg_install_prompt():
+        needs = needs_ffmpeg_install_prompt()
+        if not needs:
             self._ffmpeg_row.setVisible(False)
+            if hasattr(self, "_slice_tab"):
+                self._slice_tab.sync_ffmpeg_install_row(visible=False)
             return
         self._ffmpeg_row.setVisible(True)
         if sys.platform == "darwin":
@@ -2840,12 +2891,17 @@ class MainWindow(QWidget):
                     f"Кнопка справа: Homebrew (brew install {MACOS_BREW_FFMPEG_FORMULA})."
                 )
         else:
-            self.btn_install_ffmpeg.setText("Установить ffmpeg")
+            btn = "Установить ffmpeg"
+            self.btn_install_ffmpeg.setText(btn)
             hint = (
                 "ffmpeg/ffprobe не найдены — без них обработка недоступна. "
                 "Нажмите кнопку справа (winget или pip, нужен интернет)."
             )
         self.ffmpeg_hint.setText(hint)
+        if hasattr(self, "_slice_tab"):
+            self._slice_tab.sync_ffmpeg_install_row(
+                visible=True, hint=hint, button_text=self.btn_install_ffmpeg.text()
+            )
 
     def _on_ff_install_progress(self, value: int, text: str) -> None:
         dlg = self._ffmpeg_progress_dlg
@@ -3486,6 +3542,7 @@ class MainWindow(QWidget):
         self._profiles_interaction.populate(
             visible,
             last_upload_map,
+            prune_checked_to_existing=False,
             show_account_data_button=show_account,
         )
         self._profiles_list_render_gen += 1
@@ -3637,6 +3694,10 @@ class MainWindow(QWidget):
         profiles = profiles_obj if isinstance(profiles_obj, list) else []
         cleaned: list[dict[str, object]] = [p for p in profiles if isinstance(p, dict)]
         self._profiles_raw = cleaned
+        if self._profiles_interaction is not None:
+            existing = {_profile_id(p) for p in cleaned}
+            existing.discard("")
+            self._profiles_interaction.checked_profile_ids.intersection_update(existing)
         self._apply_profiles_filter()
 
     def _start_profiles_availability_check(self) -> None:
@@ -5037,6 +5098,7 @@ class MainWindow(QWidget):
         }
 
     def _start(self) -> None:
+        self._active_work_mode = "uniquify"
         self._save_folder_settings()
         if not self._prompt_stats_server_username_if_empty():
             return
@@ -5129,13 +5191,101 @@ class MainWindow(QWidget):
         self._work_thread.finished.connect(self._thread_cleanup)
         self._work_thread.start()
 
+    def _start_slicing(self) -> None:
+        self._active_work_mode = "slicing"
+        self._slice_tab.save_settings()
+        if not self._prompt_stats_server_username_if_empty():
+            return
+        pending = self._prompt_title_desc_and_profile(mode="slicing")
+        if pending is None:
+            return
+        self._pending_upload = pending
+        self._just_saved_outputs = []
+
+        opts = self._slice_tab.build_options()
+        if not opts["output_dir"]:
+            QMessageBox.warning(self, "Zaliver", "Укажите выходную папку.")
+            return
+        if not opts.get("clip_files"):
+            QMessageBox.warning(
+                self,
+                "Zaliver",
+                "Выберите хотя бы один видеоклип (кнопка «Выбрать клипы…»).",
+            )
+            return
+        if not opts.get("music_files"):
+            QMessageBox.warning(
+                self,
+                "Zaliver",
+                "Добавьте хотя бы один аудиотрек для нарезки.",
+            )
+            return
+        toc = opts.get("text_overlay") or {}
+        if bool(toc.get("enabled")) and not str(toc.get("text") or "").strip():
+            QMessageBox.warning(
+                self,
+                "Zaliver",
+                "Включён текст на видео, но поле текста пустое.\n"
+                "Введите текст или выключите опцию.",
+            )
+            return
+        scene_err = self._slice_tab.validate_scene_options()
+        if scene_err:
+            QMessageBox.warning(self, "Zaliver", scene_err)
+            return
+        if self._work_thread and self._work_thread.isRunning():
+            return
+
+        raw_prof = (pending.get("profile_ids") or "").strip()
+        opts["youtube_upload_after_processing"] = bool(raw_prof)
+        self._progress_hold_youtube = bool(raw_prof)
+        self._upload_cancel_profile_ids = []
+        self._upload_cancel_kind = ""
+        self._upload_cancel_dolphin_token = ""
+
+        try:
+            planned = len(list(opts.get("music_files") or [])) * max(
+                1, int(opts.get("copies_per_track") or 1)
+            )
+        except Exception:
+            planned = 0
+        try:
+            self._upload_session = self._upload_store.start_session(planned_videos=planned)
+        except Exception:
+            self._upload_session = None
+        self._upload_session_processing_done = False
+        self._upload_session_upload_done = False
+        self._upload_session_upload_expected = True
+
+        self._slice_tab.log.clear()
+        self._slice_tab.progress.setRange(0, 1)
+        self._slice_tab.progress.setValueImmediate(0)
+        self._slice_tab.progress_label.setText("Подготовка…")
+        self._slice_tab.set_running(running=True)
+
+        self._work_thread = QThread()
+        self._slice_processor = SlicingController()
+        self._slice_processor.moveToThread(self._work_thread)
+        self._work_thread.started.connect(partial(self._slice_processor.run, opts))
+        self._slice_processor.progress.connect(self._on_slice_progress)
+        self._slice_processor.finished.connect(self._on_finished)
+        self._slice_processor.output_saved.connect(self._on_output_saved)
+        self._slice_processor.log_line.connect(self._append_slice_log)
+        self._slice_processor.finished.connect(self._work_thread.quit)
+        self._slice_processor.finished.connect(self._slice_processor.deleteLater)
+        self._work_thread.finished.connect(self._thread_cleanup)
+        self._work_thread.start()
+
     def _thread_cleanup(self) -> None:
         self._work_thread = None
         self._processor = None
+        self._slice_processor = None
 
     def _cancel(self) -> None:
         if self._processor is not None:
             self._processor.cancel()
+        if self._slice_processor is not None:
+            self._slice_processor.cancel()
         mgr = getattr(self, "_upload_manager", None)
         try:
             if mgr is not None:
@@ -5210,8 +5360,45 @@ class MainWindow(QWidget):
     def _finalize_idle_toolbar(self) -> None:
         self.btn_start.setEnabled(True)
         self.btn_cancel.setEnabled(False)
+        if hasattr(self, "_slice_tab"):
+            self._slice_tab.set_idle()
+
+    def _sync_toolbar_for_upload_phase(self) -> None:
+        """Во время залива на YouTube: отмена доступна, старт выключен."""
+        self.btn_cancel.setEnabled(True)
+        self.btn_start.setEnabled(False)
+        if self._active_work_mode == "slicing" and hasattr(self, "_slice_tab"):
+            self._slice_tab.set_busy()
+            self._slice_tab.progress_label.setText("YouTube: загрузка…")
+
+    def _finish_slice_tab_after_upload(self, status: str) -> None:
+        if self._active_work_mode != "slicing" or not hasattr(self, "_slice_tab"):
+            return
+        st = self._slice_tab
+        st.set_idle()
+        mx = max(1, int(st.progress.maximum()))
+        st.progress.setRange(0, mx)
+        st.progress.setValueImmediate(mx)
+        if status == "cancelled":
+            st.progress_label.setText("Загрузка на YouTube отменена.")
+        elif status == "upload_failed":
+            st.progress_label.setText("Готово (ошибки загрузки на YouTube).")
+        else:
+            st.progress_label.setText("Готово")
+
+    def _on_slice_progress(self, cur: int, total: int, msg: str) -> None:
+        if not hasattr(self, "_slice_tab"):
+            return
+        self._slice_tab.progress.setRange(0, max(1, total))
+        self._slice_tab.progress.setValue(cur)
+        if msg:
+            self._slice_tab.progress_label.setText(msg)
 
     def _on_youtube_upload_phase_finished(self, status: str) -> None:
+        upload_mode = (
+            (getattr(self, "_upload_log_mode", "") or "").strip() or self._active_work_mode
+        )
+        self._upload_log_mode = ""
         self._upload_manager = None
         self._upload_cancel_profile_ids = []
         self._upload_cancel_kind = ""
@@ -5221,16 +5408,30 @@ class MainWindow(QWidget):
         self.progress.setRange(0, mx)
         self.progress.setValueImmediate(mx)
         self._finalize_idle_toolbar()
+        self._finish_slice_tab_after_upload(status)
         if status == "cancelled":
-            self.progress_label.setText("Загрузка на YouTube отменена.")
-            self._append_log("YouTube: загрузка отменена пользователем.")
+            if upload_mode == "slicing":
+                self._append_slice_log("YouTube: загрузка отменена пользователем.")
+            else:
+                self.progress_label.setText("Загрузка на YouTube отменена.")
+                self._append_log("YouTube: загрузка отменена пользователем.")
             QMessageBox.information(self, "Zaliver", "Загрузка на YouTube отменена.")
         elif status == "upload_failed":
-            self.progress_label.setText("Готово (есть ошибки загрузки на YouTube).")
-            self._append_log("YouTube: очередь завершена, часть загрузок завершилась с ошибками.")
+            if upload_mode == "slicing":
+                self._append_slice_log(
+                    "YouTube: очередь завершена, залив не удался (см. лог выше)."
+                )
+            else:
+                self.progress_label.setText("Готово (есть ошибки загрузки на YouTube).")
+                self._append_log(
+                    "YouTube: очередь завершена, часть загрузок завершилась с ошибками."
+                )
         else:
-            self.progress_label.setText("Готово")
-            self._append_log("YouTube: очередь загрузок завершена.")
+            if upload_mode == "slicing":
+                self._append_slice_log("YouTube: очередь загрузок завершена.")
+            else:
+                self.progress_label.setText("Готово")
+                self._append_log("YouTube: очередь загрузок завершена.")
 
     def _on_progress(self, cur: int, total: int, msg: str) -> None:
         self.progress.setRange(0, max(1, total))
@@ -5244,7 +5445,11 @@ class MainWindow(QWidget):
         if not ok:
             self._finalize_idle_toolbar()
             self._release_youtube_progress_hold_if_any()
-            self._append_log(f"Ошибка: {msg}")
+            err_line = f"Ошибка: {msg}"
+            if self._active_work_mode == "slicing":
+                self._append_slice_log(err_line)
+            else:
+                self._append_log(err_line)
             if msg and msg != "Отменено.":
                 self._upload_session_upload_expected = False
                 self._upload_session_upload_done = True
@@ -5257,19 +5462,24 @@ class MainWindow(QWidget):
                 QMessageBox.information(self, "Zaliver", "Обработка отменена.")
             return
 
-        self._append_log("Уникализация завершена.")
+        if self._active_work_mode == "slicing":
+            self._append_slice_log("Нарезка завершена.")
+        else:
+            self._append_log("Уникализация завершена.")
         pending = self._pending_upload
         self._pending_upload = None
         if pending is not None:
+            self._upload_log_mode = self._active_work_mode
             video_paths = [
                 p.strip()
                 for p in (self._just_saved_outputs or [])
                 if isinstance(p, str) and p.strip()
             ]
             if not video_paths:
-                self._append_log(
+                self._append_session_log(
                     "Загрузка в YouTube пропущена: не найден путь к сохранённому видео."
                 )
+                self._upload_log_mode = ""
                 self._upload_session_upload_expected = False
                 self._upload_session_upload_done = True
                 self._maybe_finish_upload_session(status="done")
@@ -5300,7 +5510,8 @@ class MainWindow(QWidget):
             raw_ids = (pending.get("profile_ids", "") or "").strip()
             profile_ids = [p.strip() for p in raw_ids.split(",") if p.strip()]
             if not profile_ids:
-                self._append_log("YouTube: профили не выбраны — заливка пропущена.")
+                self._append_session_log("YouTube: профили не выбраны — заливка пропущена.")
+                self._upload_log_mode = ""
                 self._upload_session_upload_expected = False
                 self._upload_session_upload_done = True
                 self._maybe_finish_upload_session(status="done")
@@ -5315,11 +5526,11 @@ class MainWindow(QWidget):
                 profile_ids=profile_ids, kind=kind, base_url=base_url
             )
 
-            self._append_log(
-                f"YouTube: многопоточная заливка стартует. Видео={len(video_paths)}, профили={len(profile_ids)}…"
+            self._append_session_log(
+                f"YouTube: многопоточная заливка стартует. "
+                f"Видео={len(video_paths)}, профили={len(profile_ids)}…"
             )
-            self.btn_cancel.setEnabled(True)
-            self.btn_start.setEnabled(False)
+            self._sync_toolbar_for_upload_phase()
             self._upload_cancel_kind = (kind or "").strip()
             self._upload_cancel_dolphin_token = token
             self._upload_cancel_profile_ids = list(profile_ids)
@@ -5464,10 +5675,25 @@ class MainWindow(QWidget):
             )
 
             def _run_mgr() -> None:
+                upload_watchdog_s = 7200.0
+                deadline = time.monotonic() + upload_watchdog_s
                 try:
                     mgr.start()
                     while not mgr.is_finished() and not mgr.stop_requested():
+                        if time.monotonic() >= deadline:
+                            try:
+                                self._ui_log_line.emit(
+                                    "[upload] Очередь не завершилась вовремя — принудительная остановка."
+                                )
+                            except Exception:
+                                pass
+                            mgr.stop()
+                            break
                         time.sleep(0.5)
+                    try:
+                        mgr.join(timeout_s=120.0)
+                    except Exception:
+                        pass
                 finally:
                     self._upload_session_upload_done = True
                     stopped = False
@@ -5484,6 +5710,13 @@ class MainWindow(QWidget):
                                 status = "upload_failed"
                         except Exception:
                             status = "upload_failed"
+                    try:
+                        self._ui_log_line.emit(
+                            f"[upload] Очередь завершена: status={status}, "
+                            f"ok={mgr.done_ok}, failed={mgr.done_failed}"
+                        )
+                    except Exception:
+                        pass
                     self._maybe_finish_upload_session(status=status)
                     try:
                         self._youtube_upload_phase_finished.emit(status)
@@ -5517,12 +5750,36 @@ class MainWindow(QWidget):
 
         msg = bootstrap_fd_limits()
         _apply_thread_slider_fd_cap(self.thread_slider)
+        if hasattr(self, "_slice_tab"):
+            _apply_thread_slider_fd_cap(self._slice_tab.thread_slider)
         if msg:
             self._append_log(msg)
 
     def _append_log(self, line: str) -> None:
         self.log.appendPlainText(line)
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
+
+    def _append_slice_log(self, line: str) -> None:
+        if not hasattr(self, "_slice_tab"):
+            return
+        self._slice_tab.log.appendPlainText(line)
+        bar = self._slice_tab.log.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _append_session_log(self, line: str) -> None:
+        """Лог текущей сессии залива (нарезка или уникализация — откуда стартовали)."""
+        if (getattr(self, "_upload_log_mode", "") or "").strip() == "slicing":
+            self._append_slice_log(line)
+        else:
+            self._append_log(line)
+
+    def _route_ui_log_line(self, line: str) -> None:
+        """Служебные логи (upload, studio, теги) — в лог той вкладки, откуда запущен залив."""
+        mode = (getattr(self, "_upload_log_mode", "") or "").strip()
+        if mode == "slicing":
+            self._append_slice_log(line)
+        else:
+            self._append_log(line)
 
     def _local_antidetect_api_for_profile_tags(
         self, *, kind: str, base_url: str

@@ -428,19 +428,34 @@ def overlay_enable_expr(
     chunk_start_frame: int,
     chunk_frame_count: int,
     total_frames: int,
+    fps: float = 30.0,
+    total_duration_sec: float | None = None,
 ) -> Optional[str]:
     """None = always on; '__skip__' = no text in this chunk."""
     if not from_middle or total_frames <= 0:
         return None
-    mid = int(total_frames) // 2
-    start = int(chunk_start_frame)
-    count = int(chunk_frame_count)
-    if start + count <= mid:
+    fps_v = max(float(fps), 1e-6)
+    if total_duration_sec is not None and total_duration_sec > 0:
+        total_t = float(total_duration_sec)
+    else:
+        total_t = int(total_frames) / fps_v
+    mid_t = total_t / 2.0
+    chunk_start_t = int(chunk_start_frame) / fps_v
+    chunk_end_t = (int(chunk_start_frame) + int(chunk_frame_count)) / fps_v
+    if (
+        total_duration_sec is not None
+        and total_duration_sec > 0
+        and int(chunk_start_frame) == 0
+        and int(chunk_frame_count) >= int(total_frames)
+    ):
+        chunk_end_t = float(total_duration_sec)
+    if chunk_end_t <= mid_t + 1e-9:
         return "__skip__"
-    local_start = max(0, mid - start)
-    if local_start <= 0:
+    # После trim+setpts в чанке t=0 в начале фрагмента; для целого ролика — абсолютное время.
+    local_mid_t = mid_t - chunk_start_t
+    if local_mid_t <= 1e-9:
         return None
-    return f"gte(n\\,{local_start})"
+    return f"gte(t\\,{local_mid_t:.6f})"
 
 
 def build_text_overlay_filters(
@@ -450,6 +465,8 @@ def build_text_overlay_filters(
     start_frame: int = 0,
     frame_count: int = 0,
     total_frames: int = 0,
+    fps: float = 30.0,
+    total_duration_sec: float | None = None,
 ) -> str:
     """Return filter chain fragment: [input_label]...filters...[outv]"""
     if not overlay.lines or not overlay.char_lines:
@@ -459,6 +476,8 @@ def build_text_overlay_filters(
         chunk_start_frame=start_frame,
         chunk_frame_count=frame_count,
         total_frames=total_frames,
+        fps=fps,
+        total_duration_sec=total_duration_sec,
     )
     if enable == "__skip__":
         return f"[{input_label}]null[outv]"

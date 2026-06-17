@@ -1,0 +1,752 @@
+"""UI for the «Нарезки» tab (audio-peak slicing)."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any, Callable
+
+from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor
+from PyQt6.QtWidgets import (
+    QAbstractSpinBox,
+    QCheckBox,
+    QColorDialog,
+    QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSpinBox,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
+
+from zaliver.processing.slicing import (
+    DEFAULT_MAX_SCENE_DURATION,
+    DEFAULT_MAX_SCENES,
+    DEFAULT_MIN_SCENE_DURATION,
+    DEFAULT_MIN_SCENES,
+)
+from zaliver.processing.text_overlay import (
+    NEON_WAVE_AMP_FRAC,
+    NEON_WAVE_CHAR_PHASE,
+    NEON_WAVE_FRAME_SPEED,
+    TextOverlaySettings,
+)
+from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
+from zaliver.ui.widgets import (
+    AnimatedProgressBar,
+    CollapsibleSection,
+    SmoothSlider,
+    ToggleSwitch,
+)
+
+_INT_MAX = 2_147_483_647
+
+
+class SlicingTabPane(QWidget):
+    start_requested = pyqtSignal()
+    cancel_requested = pyqtSignal()
+    install_ffmpeg_requested = pyqtSignal()
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        settings: QSettings,
+        max_workers_fn: Callable[[], int],
+        default_workers_fn: Callable[[], int],
+        apply_thread_cap_fn: Callable[[SmoothSlider], None],
+    ) -> None:
+        super().__init__(parent)
+        self._settings = settings
+        self._max_workers_fn = max_workers_fn
+        self._default_workers_fn = default_workers_fn
+        self._apply_thread_cap_fn = apply_thread_cap_fn
+        self._clip_files: list[str] = []
+        self._music_files: list[str] = []
+        self._text_glow_color = "#00FFFF"
+        self._text_text_color = "#FFFFFF"
+        self._build_ui()
+        self.load_settings()
+
+    def build_options(self) -> dict[str, Any]:
+        return {
+            "output_dir": self.output_dir_edit.text().strip(),
+            "clip_files": list(self._clip_files),
+            "music_files": list(self._music_files),
+            "num_workers": int(self.thread_slider.value()),
+            "copies_per_track": int(self.copies_per_track.value()),
+            "text_overlay": self.text_overlay_settings().to_dict(),
+            "use_suggested_durations": bool(self.auto_scene_durations.isChecked()),
+            "min_scene_duration": float(self.min_scene_duration.value()),
+            "max_scene_duration": float(self.max_scene_duration.value()),
+            "min_scenes": int(self.min_scenes.value()),
+            "max_scenes": int(self.max_scenes.value()),
+            "use_gpu": bool(self.use_gpu.isChecked()),
+            "use_gpu_finalize": bool(self.use_gpu_finalize.isChecked()),
+        }
+
+    def validate_scene_options(self) -> str | None:
+        if int(self.min_scenes.value()) > int(self.max_scenes.value()):
+            return "Мин. количество сцен не может быть больше максимального."
+        if not self.auto_scene_durations.isChecked():
+            if float(self.min_scene_duration.value()) > float(self.max_scene_duration.value()):
+                return "Мин. длительность сцены не может быть больше максимальной."
+        return None
+
+    def text_overlay_settings(self) -> TextOverlaySettings:
+        orient = self.text_overlay_orientation.currentData()
+        ax, ay = self.text_overlay_preview.anchor()
+        waf = self.text_overlay_wave_amp.value() / 100.0
+        wfs = self.text_overlay_wave_speed.value() / 100.0
+        return TextOverlaySettings(
+            enabled=bool(self.text_overlay_enabled.isChecked()),
+            text=self.text_overlay_edit.toPlainText(),
+            font_size=int(self.text_overlay_font_size.value()),
+            glow_color=self._text_glow_color,
+            text_color=self._text_text_color,
+            preview_orientation=orient if isinstance(orient, str) else "vertical",
+            anchor_x=float(ax),
+            anchor_y=float(ay),
+            wave_amp_frac=float(waf),
+            wave_char_phase=float(NEON_WAVE_CHAR_PHASE),
+            wave_frame_speed=float(wfs),
+            from_middle=bool(self.text_overlay_from_middle.isChecked()),
+        )
+
+    def load_settings(self) -> None:
+        s = self._settings
+        self.output_dir_edit.setText(s.value("slice/output_folder", "", type=str) or "")
+        try:
+            files = s.value("slice/clip_files", [], type=list) or []
+        except Exception:
+            files = []
+        self._clip_files = [str(x) for x in files if str(x).strip()]
+        try:
+            mf = s.value("slice/music_files", [], type=list) or []
+        except Exception:
+            mf = []
+        self._music_files = []
+        for p in mf:
+            try:
+                if Path(str(p)).is_file():
+                    self._music_files.append(str(Path(p).resolve()))
+            except OSError:
+                continue
+        self._sync_clip_hint()
+        self._sync_music_hint()
+        self.text_overlay_enabled.setChecked(
+            bool(s.value("slice/text_overlay_enabled", True, type=bool))
+        )
+        self.text_overlay_edit.setPlainText(
+            s.value("slice/text_overlay_text", "GAME IN BIO", type=str) or "GAME IN BIO"
+        )
+        self.text_overlay_from_middle.setChecked(
+            bool(s.value("slice/text_overlay_from_middle", True, type=bool))
+        )
+        try:
+            fs = int(s.value("slice/text_overlay_font_size", 95, type=int))
+        except Exception:
+            fs = 95
+        self.text_overlay_font_size.setValue(max(12, min(240, fs)))
+        orient = s.value("slice/text_overlay_orientation", "vertical", type=str) or "vertical"
+        idx = self.text_overlay_orientation.findData(
+            "horizontal" if orient == "horizontal" else "vertical"
+        )
+        if idx >= 0:
+            self.text_overlay_orientation.setCurrentIndex(idx)
+        self._text_glow_color = (
+            s.value("slice/text_overlay_glow_color", "#00FFFF", type=str) or "#00FFFF"
+        )
+        self._text_text_color = (
+            s.value("slice/text_overlay_text_color", "#FFFFFF", type=str) or "#FFFFFF"
+        )
+        try:
+            ax = float(s.value("slice/text_overlay_anchor_x", 0.5, type=float))
+            ay = float(s.value("slice/text_overlay_anchor_y", 0.15, type=float))
+        except Exception:
+            ax, ay = 0.5, 0.15
+        self._sync_color_btn(self.text_overlay_glow_btn, self._text_glow_color)
+        self._sync_color_btn(self.text_overlay_text_btn, self._text_text_color)
+        self.text_overlay_wave_amp.setValue(
+            int(round(float(s.value("slice/text_overlay_wave_amp_frac", NEON_WAVE_AMP_FRAC, type=float)) * 100))
+        )
+        self.text_overlay_wave_speed.setValue(
+            int(round(float(s.value("slice/text_overlay_wave_frame_speed", NEON_WAVE_FRAME_SPEED, type=float)) * 100))
+        )
+        self._sync_wave_labels()
+        self._update_text_overlay_controls()
+        self._sync_text_overlay_preview(ax, ay)
+        try:
+            cp = int(s.value("slice/copies_per_track", 1, type=int))
+        except Exception:
+            cp = 1
+        self.copies_per_track.setValue(max(1, cp))
+        self.auto_scene_durations.setChecked(
+            bool(s.value("slice/auto_scene_durations", True, type=bool))
+        )
+        try:
+            min_dur = float(
+                s.value("slice/min_scene_duration", DEFAULT_MIN_SCENE_DURATION, type=float)
+            )
+        except Exception:
+            min_dur = DEFAULT_MIN_SCENE_DURATION
+        try:
+            max_dur = float(
+                s.value("slice/max_scene_duration", DEFAULT_MAX_SCENE_DURATION, type=float)
+            )
+        except Exception:
+            max_dur = DEFAULT_MAX_SCENE_DURATION
+        self.min_scene_duration.setValue(max(0.1, min(60.0, min_dur)))
+        self.max_scene_duration.setValue(max(0.1, min(60.0, max_dur)))
+        try:
+            min_sc = int(s.value("slice/min_scenes", DEFAULT_MIN_SCENES, type=int))
+        except Exception:
+            min_sc = DEFAULT_MIN_SCENES
+        try:
+            max_sc = int(s.value("slice/max_scenes", DEFAULT_MAX_SCENES, type=int))
+        except Exception:
+            max_sc = DEFAULT_MAX_SCENES
+        self.min_scenes.setValue(max(1, min_sc))
+        self.max_scenes.setValue(max(1, max_sc))
+        self._update_scene_duration_controls()
+        if hasattr(self, "use_gpu"):
+            self.use_gpu.setChecked(
+                bool(s.value("use_gpu_enabled", False, type=bool))
+            )
+            self.use_gpu_finalize.setChecked(
+                bool(s.value("use_gpu_finalize_enabled", False, type=bool))
+            )
+
+    def save_settings(self) -> None:
+        s = self._settings
+        s.setValue("slice/output_folder", self.output_dir_edit.text().strip())
+        s.setValue("slice/clip_files", list(self._clip_files))
+        s.setValue("slice/music_files", list(self._music_files))
+        s.setValue("slice/copies_per_track", int(self.copies_per_track.value()))
+        s.setValue("slice/auto_scene_durations", bool(self.auto_scene_durations.isChecked()))
+        s.setValue("slice/min_scene_duration", float(self.min_scene_duration.value()))
+        s.setValue("slice/max_scene_duration", float(self.max_scene_duration.value()))
+        s.setValue("slice/min_scenes", int(self.min_scenes.value()))
+        s.setValue("slice/max_scenes", int(self.max_scenes.value()))
+        if hasattr(self, "use_gpu"):
+            s.setValue("use_gpu_enabled", bool(self.use_gpu.isChecked()))
+            s.setValue("use_gpu_finalize_enabled", bool(self.use_gpu_finalize.isChecked()))
+        s.setValue("slice/text_overlay_enabled", bool(self.text_overlay_enabled.isChecked()))
+        s.setValue("slice/text_overlay_text", self.text_overlay_edit.toPlainText())
+        s.setValue("slice/text_overlay_from_middle", bool(self.text_overlay_from_middle.isChecked()))
+        s.setValue("slice/text_overlay_font_size", int(self.text_overlay_font_size.value()))
+        orient = self.text_overlay_orientation.currentData()
+        s.setValue(
+            "slice/text_overlay_orientation",
+            orient if isinstance(orient, str) else "vertical",
+        )
+        s.setValue("slice/text_overlay_glow_color", self._text_glow_color)
+        s.setValue("slice/text_overlay_text_color", self._text_text_color)
+        ax, ay = self.text_overlay_preview.anchor()
+        s.setValue("slice/text_overlay_anchor_x", float(ax))
+        s.setValue("slice/text_overlay_anchor_y", float(ay))
+        s.setValue("slice/text_overlay_wave_amp_frac", self.text_overlay_wave_amp.value() / 100.0)
+        s.setValue("slice/text_overlay_wave_frame_speed", self.text_overlay_wave_speed.value() / 100.0)
+
+    def set_running(self, *, running: bool) -> None:
+        if running:
+            self.set_busy()
+        else:
+            self.set_idle()
+
+    def set_busy(self) -> None:
+        """Нарезка или залив: Старт выключен, Отмена включена."""
+        self.btn_start.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
+
+    def set_idle(self) -> None:
+        """Готов к новому запуску."""
+        self.btn_start.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setSpacing(12)
+        root.setContentsMargins(12, 8, 12, 12)
+
+        title = QLabel("Zaliver")
+        title.setObjectName("title")
+        sub = QLabel("Клипы + трек → нарезка по пикам аудио · текст поверх видео")
+        sub.setObjectName("hint")
+
+        self.btn_start = QPushButton("Старт")
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.setObjectName("danger")
+        self.btn_cancel.setEnabled(False)
+        self.btn_start.clicked.connect(self.start_requested.emit)
+        self.btn_cancel.clicked.connect(self.cancel_requested.emit)
+
+        self.progress = AnimatedProgressBar()
+        self.progress.setRange(0, 1)
+        self.progress.setValueImmediate(0)
+        self.progress.setMinimumWidth(160)
+        self.progress_label = QLabel("")
+        self.progress_label.setObjectName("hint")
+
+        header = QHBoxLayout()
+        header.addWidget(title)
+        header.addWidget(self.progress, 1)
+        header.addWidget(self.btn_start)
+        header.addWidget(self.btn_cancel)
+        root.addLayout(header)
+        root.addWidget(self.progress_label)
+        root.addWidget(sub)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        io = QGroupBox("Файлы и папка результата")
+        io_grid = QGridLayout(io)
+        btn_clips = QPushButton("Выбрать клипы…")
+        btn_clips.setObjectName("secondary")
+        btn_clips.clicked.connect(self._browse_clips)
+        self._clip_hint = QLabel("")
+        self._clip_hint.setObjectName("hint")
+        self._clip_hint.setWordWrap(True)
+        self.output_dir_edit = QLineEdit()
+        self.output_dir_edit.setPlaceholderText("Папка для нарезанных роликов…")
+        btn_out = QPushButton("Обзор…")
+        btn_out.setObjectName("secondary")
+        btn_out.clicked.connect(self._browse_output_dir)
+        io_grid.addWidget(QLabel("Исходные клипы:"), 0, 0)
+        io_grid.addWidget(self._clip_hint, 0, 1)
+        io_grid.addWidget(btn_clips, 0, 2)
+        io_grid.addWidget(QLabel("Выходная папка:"), 1, 0)
+        io_grid.addWidget(self.output_dir_edit, 1, 1)
+        io_grid.addWidget(btn_out, 1, 2)
+
+        music_gb = QGroupBox("Треки для нарезки")
+        music_grid = QGridLayout(music_gb)
+        btn_music = QPushButton("Выбрать треки…")
+        btn_music.setObjectName("secondary")
+        btn_music.clicked.connect(self._browse_music)
+        self._music_hint = QLabel("")
+        self._music_hint.setObjectName("hint")
+        self._music_hint.setWordWrap(True)
+        self.copies_per_track = QSpinBox()
+        self.copies_per_track.setRange(1, _INT_MAX)
+        self.copies_per_track.setValue(1)
+        music_grid.addWidget(QLabel("Аудиотреки:"), 0, 0)
+        music_grid.addWidget(self._music_hint, 0, 1)
+        music_grid.addWidget(btn_music, 0, 2)
+        music_grid.addWidget(QLabel("Копий на трек:"), 1, 0)
+        music_grid.addWidget(self.copies_per_track, 1, 1)
+        music_desc = QLabel(
+            "Аудио задаёт длительность и моменты смены кадра. "
+            "Для каждого выбранного трека — отдельный ролик (случайный сегмент по пикам)."
+        )
+        music_desc.setObjectName("hint")
+        music_desc.setWordWrap(True)
+        music_grid.addWidget(music_desc, 2, 0, 1, 3)
+
+        scene_gb = QGroupBox("Длительность и число сцен")
+        sg = QGridLayout(scene_gb)
+        sg.setHorizontalSpacing(8)
+        self.auto_scene_durations = QCheckBox(
+            "Автоматически подобрать оптимальную длительность сцены"
+        )
+        self.auto_scene_durations.setChecked(True)
+        self.auto_scene_durations.setToolTip(
+            "Анализ пиков выбранного трека и рекомендация MIN/MAX длительности сцены. "
+            "При включении ручные значения ниже не используются."
+        )
+        self.auto_scene_durations.toggled.connect(self._update_scene_duration_controls)
+        self.auto_scene_durations.toggled.connect(self.save_settings)
+        self.min_scene_duration = QDoubleSpinBox()
+        self.min_scene_duration.setRange(0.1, 60.0)
+        self.min_scene_duration.setSingleStep(0.05)
+        self.min_scene_duration.setDecimals(2)
+        self.min_scene_duration.setValue(DEFAULT_MIN_SCENE_DURATION)
+        self.min_scene_duration.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.min_scene_duration.valueChanged.connect(lambda *_: self.save_settings())
+        self.max_scene_duration = QDoubleSpinBox()
+        self.max_scene_duration.setRange(0.1, 60.0)
+        self.max_scene_duration.setSingleStep(0.05)
+        self.max_scene_duration.setDecimals(2)
+        self.max_scene_duration.setValue(DEFAULT_MAX_SCENE_DURATION)
+        self.max_scene_duration.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.max_scene_duration.valueChanged.connect(lambda *_: self.save_settings())
+        self.min_scenes = QSpinBox()
+        self.min_scenes.setRange(1, 999)
+        self.min_scenes.setValue(DEFAULT_MIN_SCENES)
+        self.min_scenes.valueChanged.connect(lambda *_: self.save_settings())
+        self.max_scenes = QSpinBox()
+        self.max_scenes.setRange(1, 999)
+        self.max_scenes.setValue(DEFAULT_MAX_SCENES)
+        self.max_scenes.valueChanged.connect(lambda *_: self.save_settings())
+        sg.addWidget(self.auto_scene_durations, 0, 0, 1, 2)
+        sg.addWidget(QLabel("Мин. длительность сцены (с):"), 1, 0)
+        sg.addWidget(self.min_scene_duration, 1, 1)
+        sg.addWidget(QLabel("Макс. длительность сцены (с):"), 2, 0)
+        sg.addWidget(self.max_scene_duration, 2, 1)
+        sg.addWidget(QLabel("Мин. количество сцен:"), 3, 0)
+        sg.addWidget(self.min_scenes, 3, 1)
+        sg.addWidget(QLabel("Макс. количество сцен:"), 4, 0)
+        sg.addWidget(self.max_scenes, 4, 1)
+        scene_hint = QLabel(
+            "Смена кадра на пиках аудио. Число сцен выбирается случайно в заданном диапазоне."
+        )
+        scene_hint.setObjectName("hint")
+        scene_hint.setWordWrap(True)
+        sg.addWidget(scene_hint, 5, 0, 1, 2)
+        self._update_scene_duration_controls()
+
+        proc = QGroupBox("Обработка")
+        pg = QGridLayout(proc)
+        self.thread_slider = SmoothSlider(Qt.Orientation.Horizontal)
+        self.thread_slider.setMinimum(1)
+        self.thread_slider.setMaximum(self._max_workers_fn())
+        self.thread_slider.setValue(self._default_workers_fn())
+        self.thread_label = QLabel()
+        self._update_thread_label(self.thread_slider.value())
+        self.thread_slider.valueChanged.connect(self._update_thread_label)
+        proc_hint = QLabel(
+            "Несколько треков обрабатываются параллельно. Нужны ffmpeg и ffprobe в PATH."
+        )
+        proc_hint.setObjectName("hint")
+        proc_hint.setWordWrap(True)
+        pg.addWidget(proc_hint, 0, 0, 1, 2)
+        ff_row_w = QWidget()
+        self._ffmpeg_row = ff_row_w
+        ff_row = QHBoxLayout(ff_row_w)
+        ff_row.setContentsMargins(0, 0, 0, 0)
+        self.ffmpeg_hint = QLabel()
+        self.ffmpeg_hint.setObjectName("hint")
+        self.ffmpeg_hint.setWordWrap(True)
+        self.btn_install_ffmpeg = QPushButton("Установить ffmpeg")
+        self.btn_install_ffmpeg.setObjectName("secondary")
+        self.btn_install_ffmpeg.clicked.connect(self.install_ffmpeg_requested.emit)
+        ff_row.addWidget(self.ffmpeg_hint, 1)
+        ff_row.addWidget(self.btn_install_ffmpeg, 0, Qt.AlignmentFlag.AlignRight)
+        pg.addWidget(ff_row_w, 1, 0, 1, 2)
+        self._ffmpeg_row.setVisible(False)
+
+        self.use_gpu = ToggleSwitch(
+            "GPU при обработке кадров (декод, фильтры, кодирование)"
+        )
+        self.use_gpu.setChecked(
+            bool(self._settings.value("use_gpu_enabled", False, type=bool))
+        )
+        self.use_gpu.toggled.connect(self.save_settings)
+        self.use_gpu_finalize = ToggleSwitch(
+            "GPU при склейке и mux звука (concat, ускорение, текст)"
+        )
+        self.use_gpu_finalize.setChecked(
+            bool(self._settings.value("use_gpu_finalize_enabled", False, type=bool))
+        )
+        self.use_gpu_finalize.toggled.connect(self.save_settings)
+        gpu_hint = QLabel(
+            "Независимо друг от друга. Можно сцены на CPU, а финальный проход на GPU (NVENC/QSV/AMF)."
+        )
+        gpu_hint.setObjectName("hint")
+        gpu_hint.setWordWrap(True)
+        pg.addWidget(self.use_gpu, 2, 0, 1, 2)
+        pg.addWidget(self.use_gpu_finalize, 3, 0, 1, 2)
+        pg.addWidget(gpu_hint, 4, 0, 1, 2)
+
+        pg.addWidget(QLabel("Потоков:"), 5, 0)
+        thr = QHBoxLayout()
+        thr.addWidget(self.thread_slider, 1)
+        thr.addWidget(self.thread_label)
+        tw = QWidget()
+        tw.setLayout(thr)
+        pg.addWidget(tw, 5, 1)
+
+        text_gb = QGroupBox("Текст на видео")
+        text_outer = QVBoxLayout(text_gb)
+        self._text_section = CollapsibleSection("Текст на видео (неон)")
+        text_inner = QWidget()
+        text_l = QVBoxLayout(text_inner)
+        self.text_overlay_enabled = ToggleSwitch("Накладывать текст на каждый ролик")
+        self.text_overlay_enabled.setChecked(True)
+        self.text_overlay_enabled.toggled.connect(self._update_text_overlay_controls)
+        self.text_overlay_enabled.toggled.connect(self.save_settings)
+        text_l.addWidget(self.text_overlay_enabled)
+        self._text_panel = QWidget()
+        tp = QVBoxLayout(self._text_panel)
+        tp.setContentsMargins(0, 0, 0, 0)
+        self.text_overlay_edit = QPlainTextEdit()
+        self.text_overlay_edit.setPlaceholderText("Текст для наложения…")
+        self.text_overlay_edit.setPlainText("GAME IN BIO")
+        self.text_overlay_edit.setMaximumHeight(72)
+        self.text_overlay_edit.textChanged.connect(self._schedule_preview)
+        tp.addWidget(self.text_overlay_edit)
+        self.text_overlay_from_middle = QCheckBox("Текст с середины видео до конца")
+        self.text_overlay_from_middle.setChecked(True)
+        self.text_overlay_from_middle.toggled.connect(self.save_settings)
+        tp.addWidget(self.text_overlay_from_middle)
+        opts = QGridLayout()
+        self.text_overlay_font_size = QSpinBox()
+        self.text_overlay_font_size.setRange(12, 240)
+        self.text_overlay_font_size.setValue(95)
+        self.text_overlay_font_size.valueChanged.connect(self._schedule_preview)
+        self.text_overlay_orientation = QComboBox()
+        self.text_overlay_orientation.addItem("Вертикальное 9:16", "vertical")
+        self.text_overlay_orientation.addItem("Горизонтальное 16:9", "horizontal")
+        self.text_overlay_orientation.currentIndexChanged.connect(self._on_orient_changed)
+        self.text_overlay_glow_btn = QPushButton("Цвет неона…")
+        self.text_overlay_glow_btn.setObjectName("secondary")
+        self.text_overlay_glow_btn.clicked.connect(self._pick_glow)
+        self.text_overlay_text_btn = QPushButton("Цвет текста…")
+        self.text_overlay_text_btn.setObjectName("secondary")
+        self.text_overlay_text_btn.clicked.connect(self._pick_text)
+        opts.addWidget(QLabel("Размер шрифта:"), 0, 0)
+        opts.addWidget(self.text_overlay_font_size, 0, 1)
+        opts.addWidget(QLabel("Пример кадра:"), 1, 0)
+        opts.addWidget(self.text_overlay_orientation, 1, 1)
+        opts.addWidget(QLabel("Свечение:"), 2, 0)
+        opts.addWidget(self.text_overlay_glow_btn, 2, 1)
+        opts.addWidget(QLabel("Текст:"), 3, 0)
+        opts.addWidget(self.text_overlay_text_btn, 3, 1)
+        self.text_overlay_wave_amp = SmoothSlider(Qt.Orientation.Horizontal)
+        self.text_overlay_wave_amp.setRange(0, 35)
+        self.text_overlay_wave_amp.setValue(int(round(NEON_WAVE_AMP_FRAC * 100)))
+        self.text_overlay_wave_amp.valueChanged.connect(self._on_wave_changed)
+        self.text_overlay_wave_amp_label = QLabel()
+        self.text_overlay_wave_speed = SmoothSlider(Qt.Orientation.Horizontal)
+        self.text_overlay_wave_speed.setRange(0, 25)
+        self.text_overlay_wave_speed.setValue(int(round(NEON_WAVE_FRAME_SPEED * 100)))
+        self.text_overlay_wave_speed.valueChanged.connect(self._on_wave_changed)
+        self.text_overlay_wave_speed_label = QLabel()
+        self._sync_wave_labels()
+        wa = QHBoxLayout()
+        wa.addWidget(self.text_overlay_wave_amp, 1)
+        wa.addWidget(self.text_overlay_wave_amp_label)
+        ws = QHBoxLayout()
+        ws.addWidget(self.text_overlay_wave_speed, 1)
+        ws.addWidget(self.text_overlay_wave_speed_label)
+        opts.addWidget(QLabel("Волна — амплитуда:"), 4, 0)
+        waw = QWidget()
+        waw.setLayout(wa)
+        opts.addWidget(waw, 4, 1)
+        opts.addWidget(QLabel("Скорость:"), 5, 0)
+        wsw = QWidget()
+        wsw.setLayout(ws)
+        opts.addWidget(wsw, 5, 1)
+        ow = QWidget()
+        ow.setLayout(opts)
+        tp.addWidget(ow)
+        center_btn = QPushButton("По центру (горизонт.)")
+        center_btn.setObjectName("secondary")
+        center_btn.clicked.connect(self._center_text)
+        cr = QHBoxLayout()
+        cr.addWidget(center_btn)
+        cr.addStretch()
+        cw = QWidget()
+        cw.setLayout(cr)
+        tp.addWidget(cw)
+        self.text_overlay_preview = TextOverlayPreviewWidget()
+        self.text_overlay_preview.setMinimumHeight(240)
+        self.text_overlay_preview.setMaximumHeight(340)
+        self.text_overlay_preview.positionChanged.connect(lambda *_: self.save_settings())
+        tp.addWidget(self.text_overlay_preview)
+        text_l.addWidget(self._text_panel)
+        self._text_section.content_layout().addWidget(text_inner)
+        self._text_section.set_expanded(True)
+        text_outer.addWidget(self._text_section)
+        self._update_text_overlay_controls()
+        self._sync_color_btn(self.text_overlay_glow_btn, self._text_glow_color)
+        self._sync_color_btn(self.text_overlay_text_btn, self._text_text_color)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        inner = QWidget()
+        il = QVBoxLayout(inner)
+        il.addWidget(io)
+        il.addWidget(music_gb)
+        il.addWidget(scene_gb)
+        il.addWidget(proc)
+        il.addWidget(text_gb)
+        il.addStretch()
+        scroll.setWidget(inner)
+
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMinimumHeight(220)
+        self.log.setPlaceholderText("Лог…")
+        rl.addWidget(self.log, 1)
+
+        splitter.addWidget(scroll)
+        splitter.addWidget(right)
+        splitter.setSizes([420, 580])
+        root.addWidget(splitter, 1)
+
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.timeout.connect(self._sync_text_overlay_preview)
+        self._apply_thread_cap_fn(self.thread_slider)
+
+    def _update_scene_duration_controls(self, _checked: bool = False) -> None:
+        auto = bool(self.auto_scene_durations.isChecked())
+        self.min_scene_duration.setEnabled(not auto)
+        self.max_scene_duration.setEnabled(not auto)
+
+    def sync_ffmpeg_install_row(
+        self, *, visible: bool, hint: str = "", button_text: str = "Установить ffmpeg"
+    ) -> None:
+        self._ffmpeg_row.setVisible(bool(visible))
+        if visible:
+            self.ffmpeg_hint.setText(hint)
+            self.btn_install_ffmpeg.setText(button_text)
+        else:
+            self.ffmpeg_hint.clear()
+
+    def sync_ffmpeg_hint(self, text: str) -> None:
+        """Обратная совместимость: только текст, видимость не меняет."""
+        self.ffmpeg_hint.setText(text)
+
+    def _update_thread_label(self, v: int) -> None:
+        mx = self._max_workers_fn()
+        self.thread_label.setText(f"{int(v)} / {mx}")
+
+    def _browse_clips(self) -> None:
+        start = str(Path(self._clip_files[0]).parent) if self._clip_files else str(Path.home())
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Выберите видеоклипы для сцен",
+            start,
+            "Видео (*.mp4 *.mkv *.mov *.avi *.webm *.m4v);;Все файлы (*)",
+        )
+        if files:
+            self._clip_files = [f for f in files if str(f).strip()]
+            self._sync_clip_hint()
+            self.save_settings()
+
+    def _browse_output_dir(self) -> None:
+        start = self.output_dir_edit.text().strip() or (
+            str(Path(self._clip_files[0]).parent) if self._clip_files else str(Path.home())
+        )
+        path = QFileDialog.getExistingDirectory(self, "Папка для нарезанных роликов", start)
+        if path:
+            self.output_dir_edit.setText(path)
+            self.save_settings()
+
+    def _browse_music(self) -> None:
+        start = str(Path(self._music_files[0]).parent) if self._music_files else str(Path.home())
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Выберите аудиотреки для нарезки (можно несколько)",
+            start,
+            "Аудио (*.mp3 *.wav *.m4a *.aac *.flac *.ogg);;Все файлы (*)",
+        )
+        if files:
+            self._music_files = [f for f in files if str(f).strip()]
+            self._sync_music_hint()
+            self.save_settings()
+
+    def _sync_clip_hint(self) -> None:
+        n = len(self._clip_files)
+        if n <= 0:
+            self._clip_hint.setText("Не выбрано — нажмите «Выбрать клипы…»")
+            return
+        names = [Path(p).name for p in self._clip_files]
+        preview = ", ".join(names[:4])
+        if n > 4:
+            preview = f"{preview} и ещё {n - 4}"
+        self._clip_hint.setText(f"Выбрано: {n} ({preview})")
+
+    def _sync_music_hint(self) -> None:
+        n = len(self._music_files)
+        if n <= 0:
+            self._music_hint.setText("Не выбрано — нажмите «Выбрать треки…»")
+            self._music_hint.setToolTip("")
+            return
+        names = [Path(p).name for p in self._music_files]
+        preview = ", ".join(names[:4])
+        if n > 4:
+            preview = f"{preview} и ещё {n - 4}"
+        self._music_hint.setText(f"Выбрано: {n} ({preview})")
+        self._music_hint.setToolTip("\n".join(names))
+
+    def _sync_color_btn(self, btn: QPushButton, hex_color: str) -> None:
+        c = QColor(hex_color)
+        fg = "#0f1117" if c.lightness() > 140 else "#f8fafc"
+        btn.setStyleSheet(f"background-color: {c.name()}; color: {fg}; font-weight: 700;")
+
+    def _sync_wave_labels(self) -> None:
+        self.text_overlay_wave_amp_label.setText(f"{self.text_overlay_wave_amp.value()} %")
+        self.text_overlay_wave_speed_label.setText(
+            f"{self.text_overlay_wave_speed.value() / 100.0:.2f}"
+        )
+
+    def _update_text_overlay_controls(self, _checked: bool = False) -> None:
+        on = bool(self.text_overlay_enabled.isChecked())
+        self._text_panel.setEnabled(on)
+        if on:
+            self._sync_text_overlay_preview()
+
+    def _schedule_preview(self) -> None:
+        self._preview_timer.start(40)
+        self.save_settings()
+
+    def _on_orient_changed(self, _index: int) -> None:
+        self._sync_text_overlay_preview()
+        self.save_settings()
+
+    def _on_wave_changed(self, _v: int) -> None:
+        self._sync_wave_labels()
+        self._sync_text_overlay_preview()
+        self.save_settings()
+
+    def _center_text(self) -> None:
+        _ax, ay = self.text_overlay_preview.anchor()
+        self.text_overlay_preview.set_anchor(0.5, ay)
+        self.save_settings()
+
+    def _pick_glow(self) -> None:
+        picked = QColorDialog.getColor(QColor(self._text_glow_color), self, "Цвет неона")
+        if not picked.isValid():
+            return
+        self._text_glow_color = picked.name().upper()
+        self._sync_color_btn(self.text_overlay_glow_btn, self._text_glow_color)
+        self._sync_text_overlay_preview()
+        self.save_settings()
+
+    def _pick_text(self) -> None:
+        picked = QColorDialog.getColor(QColor(self._text_text_color), self, "Цвет текста")
+        if not picked.isValid():
+            return
+        self._text_text_color = picked.name().upper()
+        self._sync_color_btn(self.text_overlay_text_btn, self._text_text_color)
+        self._sync_text_overlay_preview()
+        self.save_settings()
+
+    def _sync_text_overlay_preview(
+        self, anchor_x: float | None = None, anchor_y: float | None = None
+    ) -> None:
+        if not bool(self.text_overlay_enabled.isChecked()):
+            return
+        orient = self.text_overlay_orientation.currentData()
+        preview = self.text_overlay_preview
+        preview.blockSignals(True)
+        preview.set_orientation(orient if isinstance(orient, str) else "vertical")
+        preview.set_font_size(int(self.text_overlay_font_size.value()))
+        preview.set_glow_color(self._text_glow_color)
+        preview.set_text_color(self._text_text_color)
+        preview.set_wave_settings(
+            self.text_overlay_wave_amp.value() / 100.0,
+            self.text_overlay_wave_speed.value() / 100.0,
+        )
+        preview.set_text(self.text_overlay_edit.toPlainText())
+        if anchor_x is not None and anchor_y is not None:
+            preview.set_anchor(anchor_x, anchor_y)
+        preview.blockSignals(False)

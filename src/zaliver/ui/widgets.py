@@ -16,12 +16,34 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QSizePolicy,
     QSlider,
+    QSplitter,
     QStyle,
     QStyleOptionSlider,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
+
+# Узкая колонка лога: форма слева помещается целиком при старте.
+LOG_PANEL_MAX_WIDTH = 300
+LOG_PANEL_MIN_WIDTH = 200
+FORM_PANEL_MIN_WIDTH = 580
+
+
+def configure_log_splitter(
+    splitter: QSplitter,
+    *,
+    form_panel: QWidget,
+    log_panel: QWidget,
+) -> None:
+    """Лог справа фиксированной ширины; слева — форма с приоритетом на место."""
+    splitter.setChildrenCollapsible(False)
+    form_panel.setMinimumWidth(FORM_PANEL_MIN_WIDTH)
+    log_panel.setMinimumWidth(LOG_PANEL_MIN_WIDTH)
+    log_panel.setMaximumWidth(LOG_PANEL_MAX_WIDTH)
+    splitter.setStretchFactor(0, 1)
+    splitter.setStretchFactor(1, 0)
+    splitter.setSizes([10_000, LOG_PANEL_MAX_WIDTH])
 
 
 class CollapsibleSection(QWidget):

@@ -42,6 +42,7 @@ from zaliver.processing.text_overlay import (
     NEON_WAVE_CHAR_PHASE,
     NEON_WAVE_FRAME_SPEED,
     TextOverlaySettings,
+    list_bundled_overlay_fonts,
 )
 from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
 from zaliver.ui.widgets import (
@@ -49,6 +50,7 @@ from zaliver.ui.widgets import (
     CollapsibleSection,
     SmoothSlider,
     ToggleSwitch,
+    configure_log_splitter,
 )
 
 _INT_MAX = 2_147_483_647
@@ -77,6 +79,7 @@ class SlicingTabPane(QWidget):
         self._music_files: list[str] = []
         self._text_glow_color = "#00FFFF"
         self._text_text_color = "#FFFFFF"
+        self._text_font_path = ""
         self._build_ui()
         self.load_settings()
 
@@ -114,8 +117,12 @@ class SlicingTabPane(QWidget):
             enabled=bool(self.text_overlay_enabled.isChecked()),
             text=self.text_overlay_edit.toPlainText(),
             font_size=int(self.text_overlay_font_size.value()),
+            glow_enabled=bool(self.text_overlay_glow_enabled.isChecked()),
             glow_color=self._text_glow_color,
             text_color=self._text_text_color,
+            letter_spacing=int(self.text_overlay_letter_spacing.value()),
+            custom_font_path=self._text_font_path,
+            font_bold=bool(self.text_overlay_font_bold.isChecked()),
             preview_orientation=orient if isinstance(orient, str) else "vertical",
             anchor_x=float(ax),
             anchor_y=float(ay),
@@ -171,6 +178,21 @@ class SlicingTabPane(QWidget):
         )
         self._text_text_color = (
             s.value("slice/text_overlay_text_color", "#FFFFFF", type=str) or "#FFFFFF"
+        )
+        self.text_overlay_glow_enabled.setChecked(
+            bool(s.value("slice/text_overlay_glow_enabled", True, type=bool))
+        )
+        try:
+            ls = int(s.value("slice/text_overlay_letter_spacing", 0, type=int))
+        except Exception:
+            ls = 0
+        self.text_overlay_letter_spacing.setValue(max(-20, min(80, ls)))
+        self._text_font_path = (
+            s.value("slice/text_overlay_font_path", "", type=str) or ""
+        ).strip()
+        self._populate_text_font_combo()
+        self.text_overlay_font_bold.setChecked(
+            bool(s.value("slice/text_overlay_font_bold", True, type=bool))
         )
         try:
             ax = float(s.value("slice/text_overlay_anchor_x", 0.5, type=float))
@@ -254,6 +276,14 @@ class SlicingTabPane(QWidget):
         )
         s.setValue("slice/text_overlay_glow_color", self._text_glow_color)
         s.setValue("slice/text_overlay_text_color", self._text_text_color)
+        s.setValue(
+            "slice/text_overlay_glow_enabled", bool(self.text_overlay_glow_enabled.isChecked())
+        )
+        s.setValue("slice/text_overlay_letter_spacing", int(self.text_overlay_letter_spacing.value()))
+        s.setValue("slice/text_overlay_font_path", self._text_font_path)
+        s.setValue(
+            "slice/text_overlay_font_bold", bool(self.text_overlay_font_bold.isChecked())
+        )
         ax, ay = self.text_overlay_preview.anchor()
         s.setValue("slice/text_overlay_anchor_x", float(ax))
         s.setValue("slice/text_overlay_anchor_y", float(ay))
@@ -355,11 +385,11 @@ class SlicingTabPane(QWidget):
         music_desc.setWordWrap(True)
         music_grid.addWidget(music_desc, 2, 0, 1, 3)
 
-        scene_gb = QGroupBox("Длительность и число сцен")
-        sg = QGridLayout(scene_gb)
-        sg.setHorizontalSpacing(8)
+        duration_gb = QGroupBox("Длительность сцены")
+        dg = QGridLayout(duration_gb)
+        dg.setHorizontalSpacing(8)
         self.auto_scene_durations = QCheckBox(
-            "Автоматически подобрать оптимальную длительность сцены"
+            "Автоматически подобрать оптимальную длительность"
         )
         self.auto_scene_durations.setChecked(True)
         self.auto_scene_durations.setToolTip(
@@ -382,6 +412,22 @@ class SlicingTabPane(QWidget):
         self.max_scene_duration.setValue(DEFAULT_MAX_SCENE_DURATION)
         self.max_scene_duration.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.max_scene_duration.valueChanged.connect(lambda *_: self.save_settings())
+        dg.addWidget(self.auto_scene_durations, 0, 0, 1, 2)
+        dg.addWidget(QLabel("Мин. (с):"), 1, 0)
+        dg.addWidget(self.min_scene_duration, 1, 1)
+        dg.addWidget(QLabel("Макс. (с):"), 2, 0)
+        dg.addWidget(self.max_scene_duration, 2, 1)
+        duration_hint = QLabel(
+            "Интервал между сменами кадра на пиках аудио."
+        )
+        duration_hint.setObjectName("hint")
+        duration_hint.setWordWrap(True)
+        dg.addWidget(duration_hint, 3, 0, 1, 2)
+        self._update_scene_duration_controls()
+
+        scenes_gb = QGroupBox("Количество сцен")
+        sg = QGridLayout(scenes_gb)
+        sg.setHorizontalSpacing(8)
         self.min_scenes = QSpinBox()
         self.min_scenes.setRange(1, 999)
         self.min_scenes.setValue(DEFAULT_MIN_SCENES)
@@ -390,22 +436,16 @@ class SlicingTabPane(QWidget):
         self.max_scenes.setRange(1, 999)
         self.max_scenes.setValue(DEFAULT_MAX_SCENES)
         self.max_scenes.valueChanged.connect(lambda *_: self.save_settings())
-        sg.addWidget(self.auto_scene_durations, 0, 0, 1, 2)
-        sg.addWidget(QLabel("Мин. длительность сцены (с):"), 1, 0)
-        sg.addWidget(self.min_scene_duration, 1, 1)
-        sg.addWidget(QLabel("Макс. длительность сцены (с):"), 2, 0)
-        sg.addWidget(self.max_scene_duration, 2, 1)
-        sg.addWidget(QLabel("Мин. количество сцен:"), 3, 0)
-        sg.addWidget(self.min_scenes, 3, 1)
-        sg.addWidget(QLabel("Макс. количество сцен:"), 4, 0)
-        sg.addWidget(self.max_scenes, 4, 1)
+        sg.addWidget(QLabel("Мин.:"), 0, 0)
+        sg.addWidget(self.min_scenes, 0, 1)
+        sg.addWidget(QLabel("Макс.:"), 1, 0)
+        sg.addWidget(self.max_scenes, 1, 1)
         scene_hint = QLabel(
-            "Смена кадра на пиках аудио. Число сцен выбирается случайно в заданном диапазоне."
+            "Число сцен выбирается случайно в заданном диапазоне."
         )
         scene_hint.setObjectName("hint")
         scene_hint.setWordWrap(True)
-        sg.addWidget(scene_hint, 5, 0, 1, 2)
-        self._update_scene_duration_controls()
+        sg.addWidget(scene_hint, 2, 0, 1, 2)
 
         proc = QGroupBox("Обработка")
         pg = QGridLayout(proc)
@@ -503,17 +543,50 @@ class SlicingTabPane(QWidget):
         self.text_overlay_glow_btn = QPushButton("Цвет неона…")
         self.text_overlay_glow_btn.setObjectName("secondary")
         self.text_overlay_glow_btn.clicked.connect(self._pick_glow)
+        self.text_overlay_glow_enabled = QCheckBox("Включено")
+        self.text_overlay_glow_enabled.setChecked(True)
+        self.text_overlay_glow_enabled.toggled.connect(self._on_glow_enabled_changed)
+        glow_row = QHBoxLayout()
+        glow_row.addWidget(self.text_overlay_glow_enabled)
+        glow_row.addWidget(self.text_overlay_glow_btn)
+        glow_row.addStretch()
+        glow_row_w = QWidget()
+        glow_row_w.setLayout(glow_row)
         self.text_overlay_text_btn = QPushButton("Цвет текста…")
         self.text_overlay_text_btn.setObjectName("secondary")
         self.text_overlay_text_btn.clicked.connect(self._pick_text)
+        self.text_overlay_letter_spacing = QSpinBox()
+        self.text_overlay_letter_spacing.setRange(-20, 80)
+        self.text_overlay_letter_spacing.setValue(0)
+        self.text_overlay_letter_spacing.setSuffix(" px")
+        self.text_overlay_letter_spacing.valueChanged.connect(self._schedule_preview)
+        self.text_overlay_font_combo = QComboBox()
+        self.text_overlay_font_combo.currentIndexChanged.connect(self._on_font_changed)
+        self.text_overlay_font_browse_btn = QPushButton("Файл…")
+        self.text_overlay_font_browse_btn.setObjectName("secondary")
+        self.text_overlay_font_browse_btn.clicked.connect(self._pick_font_file)
+        self.text_overlay_font_bold = QCheckBox("Жирный")
+        self.text_overlay_font_bold.setChecked(True)
+        self.text_overlay_font_bold.toggled.connect(self._on_font_bold_changed)
+        font_row = QHBoxLayout()
+        font_row.addWidget(self.text_overlay_font_combo, 1)
+        font_row.addWidget(self.text_overlay_font_bold)
+        font_row.addWidget(self.text_overlay_font_browse_btn)
+        font_row_w = QWidget()
+        font_row_w.setLayout(font_row)
+        self._populate_text_font_combo()
         opts.addWidget(QLabel("Размер шрифта:"), 0, 0)
         opts.addWidget(self.text_overlay_font_size, 0, 1)
         opts.addWidget(QLabel("Пример кадра:"), 1, 0)
         opts.addWidget(self.text_overlay_orientation, 1, 1)
         opts.addWidget(QLabel("Свечение:"), 2, 0)
-        opts.addWidget(self.text_overlay_glow_btn, 2, 1)
+        opts.addWidget(glow_row_w, 2, 1)
         opts.addWidget(QLabel("Текст:"), 3, 0)
         opts.addWidget(self.text_overlay_text_btn, 3, 1)
+        opts.addWidget(QLabel("Межбуквенный интервал:"), 4, 0)
+        opts.addWidget(self.text_overlay_letter_spacing, 4, 1)
+        opts.addWidget(QLabel("Шрифт:"), 5, 0)
+        opts.addWidget(font_row_w, 5, 1)
         self.text_overlay_wave_amp = SmoothSlider(Qt.Orientation.Horizontal)
         self.text_overlay_wave_amp.setRange(0, 35)
         self.text_overlay_wave_amp.setValue(int(round(NEON_WAVE_AMP_FRAC * 100)))
@@ -531,22 +604,26 @@ class SlicingTabPane(QWidget):
         ws = QHBoxLayout()
         ws.addWidget(self.text_overlay_wave_speed, 1)
         ws.addWidget(self.text_overlay_wave_speed_label)
-        opts.addWidget(QLabel("Волна — амплитуда:"), 4, 0)
+        opts.addWidget(QLabel("Волна — амплитуда:"), 6, 0)
         waw = QWidget()
         waw.setLayout(wa)
-        opts.addWidget(waw, 4, 1)
-        opts.addWidget(QLabel("Скорость:"), 5, 0)
+        opts.addWidget(waw, 6, 1)
+        opts.addWidget(QLabel("Скорость:"), 7, 0)
         wsw = QWidget()
         wsw.setLayout(ws)
-        opts.addWidget(wsw, 5, 1)
+        opts.addWidget(wsw, 7, 1)
         ow = QWidget()
         ow.setLayout(opts)
         tp.addWidget(ow)
         center_btn = QPushButton("По центру (горизонт.)")
         center_btn.setObjectName("secondary")
         center_btn.clicked.connect(self._center_text)
+        center_v_btn = QPushButton("По центру (вертик.)")
+        center_v_btn.setObjectName("secondary")
+        center_v_btn.clicked.connect(self._center_text_vertically)
         cr = QHBoxLayout()
         cr.addWidget(center_btn)
+        cr.addWidget(center_v_btn)
         cr.addStretch()
         cw = QWidget()
         cw.setLayout(cr)
@@ -571,7 +648,8 @@ class SlicingTabPane(QWidget):
         il = QVBoxLayout(inner)
         il.addWidget(io)
         il.addWidget(music_gb)
-        il.addWidget(scene_gb)
+        il.addWidget(duration_gb)
+        il.addWidget(scenes_gb)
         il.addWidget(proc)
         il.addWidget(text_gb)
         il.addStretch()
@@ -587,7 +665,7 @@ class SlicingTabPane(QWidget):
 
         splitter.addWidget(scroll)
         splitter.addWidget(right)
-        splitter.setSizes([420, 580])
+        configure_log_splitter(splitter, form_panel=scroll, log_panel=right)
         root.addWidget(splitter, 1)
 
         self._preview_timer = QTimer(self)
@@ -691,8 +769,71 @@ class SlicingTabPane(QWidget):
     def _update_text_overlay_controls(self, _checked: bool = False) -> None:
         on = bool(self.text_overlay_enabled.isChecked())
         self._text_panel.setEnabled(on)
+        glow_on = bool(self.text_overlay_glow_enabled.isChecked())
+        self.text_overlay_glow_btn.setEnabled(glow_on)
         if on:
             self._sync_text_overlay_preview()
+
+    def _populate_text_font_combo(self) -> None:
+        if not hasattr(self, "text_overlay_font_combo"):
+            return
+        combo = self.text_overlay_font_combo
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("По умолчанию (Montserrat Bold)", "")
+        for label, path in list_bundled_overlay_fonts():
+            combo.addItem(label, path)
+        custom = (self._text_font_path or "").strip()
+        if custom:
+            try:
+                resolved = str(Path(custom).resolve())
+            except OSError:
+                resolved = custom
+            if combo.findData(resolved) < 0 and combo.findData(custom) < 0:
+                combo.addItem(f"Свой: {Path(custom).name}", resolved)
+                custom = resolved
+        idx = combo.findData(custom)
+        if idx < 0 and custom:
+            idx = combo.findData(self._text_font_path)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        if idx >= 0:
+            data = combo.itemData(idx)
+            self._text_font_path = str(data) if data else ""
+        combo.blockSignals(False)
+
+    def _on_glow_enabled_changed(self, _checked: bool) -> None:
+        self._update_text_overlay_controls()
+        self._sync_text_overlay_preview()
+        self.save_settings()
+
+    def _on_font_bold_changed(self, _checked: bool) -> None:
+        self._sync_text_overlay_preview()
+        self.save_settings()
+
+    def _on_font_changed(self, _index: int) -> None:
+        data = self.text_overlay_font_combo.currentData()
+        self._text_font_path = str(data) if data else ""
+        self._sync_text_overlay_preview()
+        self.save_settings()
+
+    def _pick_font_file(self) -> None:
+        start = (
+            str(Path(self._text_font_path).parent)
+            if self._text_font_path
+            else str(Path.home())
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите файл шрифта",
+            start,
+            "Шрифты (*.ttf *.otf *.ttc);;Все файлы (*)",
+        )
+        if not path:
+            return
+        self._text_font_path = path
+        self._populate_text_font_combo()
+        self._sync_text_overlay_preview()
+        self.save_settings()
 
     def _schedule_preview(self) -> None:
         self._preview_timer.start(40)
@@ -710,6 +851,11 @@ class SlicingTabPane(QWidget):
     def _center_text(self) -> None:
         _ax, ay = self.text_overlay_preview.anchor()
         self.text_overlay_preview.set_anchor(0.5, ay)
+        self.save_settings()
+
+    def _center_text_vertically(self) -> None:
+        ax, _ay = self.text_overlay_preview.anchor()
+        self.text_overlay_preview.set_anchor(ax, 0.5)
         self.save_settings()
 
     def _pick_glow(self) -> None:
@@ -740,8 +886,12 @@ class SlicingTabPane(QWidget):
         preview.blockSignals(True)
         preview.set_orientation(orient if isinstance(orient, str) else "vertical")
         preview.set_font_size(int(self.text_overlay_font_size.value()))
+        preview.set_glow_enabled(bool(self.text_overlay_glow_enabled.isChecked()))
         preview.set_glow_color(self._text_glow_color)
         preview.set_text_color(self._text_text_color)
+        preview.set_letter_spacing(int(self.text_overlay_letter_spacing.value()))
+        preview.set_font_path(self._text_font_path)
+        preview.set_font_bold(bool(self.text_overlay_font_bold.isChecked()))
         preview.set_wave_settings(
             self.text_overlay_wave_amp.value() / 100.0,
             self.text_overlay_wave_speed.value() / 100.0,

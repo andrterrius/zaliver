@@ -73,6 +73,7 @@ from zaliver.processing.text_overlay import (
     NEON_WAVE_CHAR_PHASE,
     NEON_WAVE_FRAME_SPEED,
     TextOverlaySettings,
+    list_bundled_overlay_fonts,
 )
 from zaliver.processing.thread_worker import ProcessingController
 from zaliver.processing.slicing_worker import SlicingController
@@ -96,6 +97,7 @@ from zaliver.ui.widgets import (
     CollapsibleSection,
     SmoothSlider,
     ToggleSwitch,
+    configure_log_splitter,
 )
 from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
 from zaliver.ui.slicing_tab_pane import SlicingTabPane
@@ -1102,19 +1104,59 @@ class MainWindow(QWidget):
         self._text_overlay_glow_color = "#00FFFF"
         self._sync_text_overlay_color_btn(self.text_overlay_glow_btn, self._text_overlay_glow_color)
         self.text_overlay_glow_btn.clicked.connect(self._pick_text_overlay_glow_color)
+        self.text_overlay_glow_enabled = QCheckBox("Включено")
+        self.text_overlay_glow_enabled.setChecked(True)
+        self.text_overlay_glow_enabled.toggled.connect(self._on_text_overlay_glow_enabled_changed)
+        glow_row = QHBoxLayout()
+        glow_row.setContentsMargins(0, 0, 0, 0)
+        glow_row.addWidget(self.text_overlay_glow_enabled)
+        glow_row.addWidget(self.text_overlay_glow_btn)
+        glow_row.addStretch()
+        glow_row_w = QWidget()
+        glow_row_w.setLayout(glow_row)
         self.text_overlay_text_btn = QPushButton("Цвет текста…")
         self.text_overlay_text_btn.setObjectName("secondary")
         self._text_overlay_text_color = "#FFFFFF"
         self._sync_text_overlay_color_btn(self.text_overlay_text_btn, self._text_overlay_text_color)
         self.text_overlay_text_btn.clicked.connect(self._pick_text_overlay_text_color)
+        self.text_overlay_letter_spacing = QSpinBox()
+        self.text_overlay_letter_spacing.setRange(-20, 80)
+        self.text_overlay_letter_spacing.setValue(0)
+        self.text_overlay_letter_spacing.setSuffix(" px")
+        self.text_overlay_letter_spacing.valueChanged.connect(
+            self._on_text_overlay_letter_spacing_changed
+        )
+        self._text_overlay_font_path = ""
+        self.text_overlay_font_combo = QComboBox()
+        self.text_overlay_font_combo.currentIndexChanged.connect(
+            self._on_text_overlay_font_changed
+        )
+        self.text_overlay_font_browse_btn = QPushButton("Файл…")
+        self.text_overlay_font_browse_btn.setObjectName("secondary")
+        self.text_overlay_font_browse_btn.clicked.connect(self._pick_text_overlay_font_file)
+        self.text_overlay_font_bold = QCheckBox("Жирный")
+        self.text_overlay_font_bold.setChecked(True)
+        self.text_overlay_font_bold.toggled.connect(self._on_text_overlay_font_bold_changed)
+        font_row = QHBoxLayout()
+        font_row.setContentsMargins(0, 0, 0, 0)
+        font_row.addWidget(self.text_overlay_font_combo, 1)
+        font_row.addWidget(self.text_overlay_font_bold)
+        font_row.addWidget(self.text_overlay_font_browse_btn)
+        font_row_w = QWidget()
+        font_row_w.setLayout(font_row)
+        self._populate_text_overlay_font_combo()
         text_opts.addWidget(QLabel("Размер шрифта (на примере):"), 0, 0)
         text_opts.addWidget(self.text_overlay_font_size, 0, 1)
         text_opts.addWidget(QLabel("Пример кадра:"), 1, 0)
         text_opts.addWidget(self.text_overlay_orientation, 1, 1)
         text_opts.addWidget(QLabel("Свечение:"), 2, 0)
-        text_opts.addWidget(self.text_overlay_glow_btn, 2, 1)
+        text_opts.addWidget(glow_row_w, 2, 1)
         text_opts.addWidget(QLabel("Текст:"), 3, 0)
         text_opts.addWidget(self.text_overlay_text_btn, 3, 1)
+        text_opts.addWidget(QLabel("Межбуквенный интервал:"), 4, 0)
+        text_opts.addWidget(self.text_overlay_letter_spacing, 4, 1)
+        text_opts.addWidget(QLabel("Шрифт:"), 5, 0)
+        text_opts.addWidget(font_row_w, 5, 1)
 
         self.text_overlay_wave_amp = SmoothSlider(Qt.Orientation.Horizontal)
         self.text_overlay_wave_amp.setMinimum(0)
@@ -1129,22 +1171,22 @@ class MainWindow(QWidget):
         self.text_overlay_wave_speed.valueChanged.connect(self._on_text_overlay_wave_changed)
         self.text_overlay_wave_speed_label = QLabel()
         self._sync_text_overlay_wave_labels()
-        text_opts.addWidget(QLabel("Волна — амплитуда:"), 4, 0)
+        text_opts.addWidget(QLabel("Волна — амплитуда:"), 6, 0)
         wave_amp_row = QHBoxLayout()
         wave_amp_row.setContentsMargins(0, 0, 0, 0)
         wave_amp_row.addWidget(self.text_overlay_wave_amp, 1)
         wave_amp_row.addWidget(self.text_overlay_wave_amp_label)
         wave_amp_w = QWidget()
         wave_amp_w.setLayout(wave_amp_row)
-        text_opts.addWidget(wave_amp_w, 4, 1)
-        text_opts.addWidget(QLabel("Скорость:"), 5, 0)
+        text_opts.addWidget(wave_amp_w, 6, 1)
+        text_opts.addWidget(QLabel("Скорость:"), 7, 0)
         wave_spd_row = QHBoxLayout()
         wave_spd_row.setContentsMargins(0, 0, 0, 0)
         wave_spd_row.addWidget(self.text_overlay_wave_speed, 1)
         wave_spd_row.addWidget(self.text_overlay_wave_speed_label)
         wave_spd_w = QWidget()
         wave_spd_w.setLayout(wave_spd_row)
-        text_opts.addWidget(wave_spd_w, 5, 1)
+        text_opts.addWidget(wave_spd_w, 7, 1)
 
         text_opts_w = QWidget()
         text_opts_w.setLayout(text_opts)
@@ -1157,6 +1199,11 @@ class MainWindow(QWidget):
         self.text_overlay_center_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.text_overlay_center_btn.clicked.connect(self._center_text_overlay_horizontally)
         text_pos_row.addWidget(self.text_overlay_center_btn)
+        self.text_overlay_center_v_btn = QPushButton("По центру (вертик.)")
+        self.text_overlay_center_v_btn.setObjectName("secondary")
+        self.text_overlay_center_v_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.text_overlay_center_v_btn.clicked.connect(self._center_text_overlay_vertically)
+        text_pos_row.addWidget(self.text_overlay_center_v_btn)
         text_pos_row.addStretch()
         text_pos_w = QWidget()
         text_pos_w.setLayout(text_pos_row)
@@ -1390,7 +1437,7 @@ class MainWindow(QWidget):
 
         splitter.addWidget(scroll_left)
         splitter.addWidget(right)
-        splitter.setSizes([420, 580])
+        configure_log_splitter(splitter, form_panel=scroll_left, log_panel=right)
         home_l.addWidget(splitter, 1)
 
         self._slice_tab = SlicingTabPane(
@@ -3075,6 +3122,21 @@ class MainWindow(QWidget):
             self._text_overlay_text_color = (
                 self._settings.value("text_overlay_text_color", "#FFFFFF", type=str) or "#FFFFFF"
             )
+            self.text_overlay_glow_enabled.setChecked(
+                bool(self._settings.value("text_overlay_glow_enabled", True, type=bool))
+            )
+            try:
+                ls = int(self._settings.value("text_overlay_letter_spacing", 0, type=int))
+            except Exception:
+                ls = 0
+            self.text_overlay_letter_spacing.setValue(max(-20, min(80, ls)))
+            self._text_overlay_font_path = (
+                self._settings.value("text_overlay_font_path", "", type=str) or ""
+            ).strip()
+            self._populate_text_overlay_font_combo()
+            self.text_overlay_font_bold.setChecked(
+                bool(self._settings.value("text_overlay_font_bold", True, type=bool))
+            )
             try:
                 ax = float(self._settings.value("text_overlay_anchor_x", 0.5, type=float))
                 ay = float(self._settings.value("text_overlay_anchor_y", 0.15, type=float))
@@ -3158,6 +3220,16 @@ class MainWindow(QWidget):
             )
             self._settings.setValue("text_overlay_glow_color", self._text_overlay_glow_color)
             self._settings.setValue("text_overlay_text_color", self._text_overlay_text_color)
+            self._settings.setValue(
+                "text_overlay_glow_enabled", bool(self.text_overlay_glow_enabled.isChecked())
+            )
+            self._settings.setValue(
+                "text_overlay_letter_spacing", int(self.text_overlay_letter_spacing.value())
+            )
+            self._settings.setValue("text_overlay_font_path", self._text_overlay_font_path)
+            self._settings.setValue(
+                "text_overlay_font_bold", bool(self.text_overlay_font_bold.isChecked())
+            )
             ax, ay = self.text_overlay_preview.anchor()
             self._settings.setValue("text_overlay_anchor_x", float(ax))
             self._settings.setValue("text_overlay_anchor_y", float(ay))
@@ -4925,8 +4997,12 @@ class MainWindow(QWidget):
             enabled=bool(self.text_overlay_enabled.isChecked()),
             text=self.text_overlay_edit.toPlainText(),
             font_size=int(self.text_overlay_font_size.value()),
+            glow_enabled=bool(self.text_overlay_glow_enabled.isChecked()),
             glow_color=self._text_overlay_glow_color,
             text_color=self._text_overlay_text_color,
+            letter_spacing=int(self.text_overlay_letter_spacing.value()),
+            custom_font_path=self._text_overlay_font_path,
+            font_bold=bool(self.text_overlay_font_bold.isChecked()),
             preview_orientation=orient if isinstance(orient, str) else "vertical",
             anchor_x=float(ax),
             anchor_y=float(ay),
@@ -4955,8 +5031,12 @@ class MainWindow(QWidget):
         preview.blockSignals(True)
         preview.set_orientation(orient if isinstance(orient, str) else "vertical")
         preview.set_font_size(int(self.text_overlay_font_size.value()))
+        preview.set_glow_enabled(bool(self.text_overlay_glow_enabled.isChecked()))
         preview.set_glow_color(self._text_overlay_glow_color)
         preview.set_text_color(self._text_overlay_text_color)
+        preview.set_letter_spacing(int(self.text_overlay_letter_spacing.value()))
+        preview.set_font_path(self._text_overlay_font_path)
+        preview.set_font_bold(bool(self.text_overlay_font_bold.isChecked()))
         waf, wfs = self._text_overlay_wave_values()
         preview.set_wave_settings(waf, wfs)
         preview.set_text(self.text_overlay_edit.toPlainText())
@@ -4976,8 +5056,75 @@ class MainWindow(QWidget):
             return
         on = bool(self.text_overlay_enabled.isChecked())
         self._text_overlay_panel.setEnabled(on)
+        glow_on = bool(self.text_overlay_glow_enabled.isChecked())
+        self.text_overlay_glow_btn.setEnabled(glow_on)
         if on:
             self._sync_text_overlay_preview()
+
+    def _populate_text_overlay_font_combo(self) -> None:
+        if not hasattr(self, "text_overlay_font_combo"):
+            return
+        combo = self.text_overlay_font_combo
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("По умолчанию (Montserrat Bold)", "")
+        for label, path in list_bundled_overlay_fonts():
+            combo.addItem(label, path)
+        custom = (self._text_overlay_font_path or "").strip()
+        if custom:
+            try:
+                resolved = str(Path(custom).resolve())
+            except OSError:
+                resolved = custom
+            if combo.findData(resolved) < 0 and combo.findData(custom) < 0:
+                combo.addItem(f"Свой: {Path(custom).name}", resolved)
+                custom = resolved
+        idx = combo.findData(custom)
+        if idx < 0 and custom:
+            idx = combo.findData(self._text_overlay_font_path)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        if idx >= 0:
+            data = combo.itemData(idx)
+            self._text_overlay_font_path = str(data) if data else ""
+        combo.blockSignals(False)
+
+    def _on_text_overlay_glow_enabled_changed(self, _checked: bool) -> None:
+        self._update_text_overlay_controls()
+        self._sync_text_overlay_preview()
+        self._save_folder_settings()
+
+    def _on_text_overlay_letter_spacing_changed(self, _value: int) -> None:
+        self._sync_text_overlay_preview()
+        self._save_folder_settings()
+
+    def _on_text_overlay_font_bold_changed(self, _checked: bool) -> None:
+        self._sync_text_overlay_preview()
+        self._save_folder_settings()
+
+    def _on_text_overlay_font_changed(self, _index: int) -> None:
+        data = self.text_overlay_font_combo.currentData()
+        self._text_overlay_font_path = str(data) if data else ""
+        self._sync_text_overlay_preview()
+        self._save_folder_settings()
+
+    def _pick_text_overlay_font_file(self) -> None:
+        start = (
+            str(Path(self._text_overlay_font_path).parent)
+            if self._text_overlay_font_path
+            else str(Path.home())
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите файл шрифта",
+            start,
+            "Шрифты (*.ttf *.otf *.ttc);;Все файлы (*)",
+        )
+        if not path:
+            return
+        self._text_overlay_font_path = path
+        self._populate_text_overlay_font_combo()
+        self._sync_text_overlay_preview()
+        self._save_folder_settings()
 
     def _on_text_overlay_content_changed(self) -> None:
         self._schedule_text_overlay_preview_sync()
@@ -5001,6 +5148,13 @@ class MainWindow(QWidget):
             return
         _ax, ay = self.text_overlay_preview.anchor()
         self.text_overlay_preview.set_anchor(0.5, ay)
+        self._save_folder_settings()
+
+    def _center_text_overlay_vertically(self) -> None:
+        if not hasattr(self, "text_overlay_preview"):
+            return
+        ax, _ay = self.text_overlay_preview.anchor()
+        self.text_overlay_preview.set_anchor(ax, 0.5)
         self._save_folder_settings()
 
     def _on_text_overlay_position_changed(self, ax: float, ay: float) -> None:
@@ -5297,12 +5451,15 @@ class MainWindow(QWidget):
                     )
                 except Exception:
                     pass
-                mgr.stop()
+                mgr.stop(reason="user")
         except Exception:
             pass
+        self._stop_upload_antidetect_profiles()
+
+    def _stop_upload_antidetect_profiles(self) -> None:
         kind_u = (getattr(self, "_upload_cancel_kind", "") or "").strip()
         ids = [p for p in getattr(self, "_upload_cancel_profile_ids", []) if str(p).strip()]
-        if mgr is not None and kind_u == "local":
+        if kind_u == "local":
             try:
                 from zaliver.antydetect.local_active_sessions import (
                     stop_all_registered_local_sessions_sync,
@@ -5318,7 +5475,7 @@ class MainWindow(QWidget):
                     self._ui_log_line.emit(f"[upload] [STOP] local antidetect batch err={e!r}")
                 except Exception:
                     pass
-        if kind_u != "local" and ids:
+        elif ids:
             threading.Thread(target=self._stop_dolphin_profiles_for_cancel, daemon=True).start()
 
     def _stop_dolphin_profiles_for_cancel(self) -> None:
@@ -5381,6 +5538,8 @@ class MainWindow(QWidget):
         st.progress.setValueImmediate(mx)
         if status == "cancelled":
             st.progress_label.setText("Загрузка на YouTube отменена.")
+        elif status == "timeout":
+            st.progress_label.setText("Загрузка на YouTube остановлена по таймауту.")
         elif status == "upload_failed":
             st.progress_label.setText("Готово (ошибки загрузки на YouTube).")
         else:
@@ -5416,6 +5575,18 @@ class MainWindow(QWidget):
                 self.progress_label.setText("Загрузка на YouTube отменена.")
                 self._append_log("YouTube: загрузка отменена пользователем.")
             QMessageBox.information(self, "Zaliver", "Загрузка на YouTube отменена.")
+        elif status == "timeout":
+            timeout_msg = (
+                "Очередь заливов не завершилась в отведённое время "
+                "(долгие паузы между профилями или большая очередь). "
+                "Часть видео могла не залиться — см. лог."
+            )
+            if upload_mode == "slicing":
+                self._append_slice_log(f"YouTube: {timeout_msg}")
+            else:
+                self.progress_label.setText("Загрузка на YouTube остановлена по таймауту.")
+                self._append_log(f"YouTube: {timeout_msg}")
+            QMessageBox.warning(self, "Zaliver", timeout_msg)
         elif status == "upload_failed":
             if upload_mode == "slicing":
                 self._append_slice_log(
@@ -5519,7 +5690,11 @@ class MainWindow(QWidget):
                 self._finalize_idle_toolbar()
                 return
 
-            from zaliver.youtube_upload.multi_uploader import MultiProfileUploader, VideoTask
+            from zaliver.youtube_upload.multi_uploader import (
+                MultiProfileUploader,
+                VideoTask,
+                _UPLOAD_QUEUE_WATCHDOG_S,
+            )
             from zaliver.youtube_upload.studio import _studio_canonical_watch_url
 
             self._clear_previous_upload_result_tags(
@@ -5675,7 +5850,7 @@ class MainWindow(QWidget):
             )
 
             def _run_mgr() -> None:
-                upload_watchdog_s = 7200.0
+                upload_watchdog_s = float(_UPLOAD_QUEUE_WATCHDOG_S)
                 deadline = time.monotonic() + upload_watchdog_s
                 try:
                     mgr.start()
@@ -5683,11 +5858,13 @@ class MainWindow(QWidget):
                         if time.monotonic() >= deadline:
                             try:
                                 self._ui_log_line.emit(
-                                    "[upload] Очередь не завершилась вовремя — принудительная остановка."
+                                    f"[upload] Очередь не завершилась за "
+                                    f"{upload_watchdog_s / 3600:.1f} ч — принудительная остановка."
                                 )
                             except Exception:
                                 pass
-                            mgr.stop()
+                            mgr.stop(reason="watchdog")
+                            self._stop_upload_antidetect_profiles()
                             break
                         time.sleep(0.5)
                     try:
@@ -5697,13 +5874,16 @@ class MainWindow(QWidget):
                 finally:
                     self._upload_session_upload_done = True
                     stopped = False
+                    stop_reason = ""
                     try:
                         stopped = bool(mgr.stop_requested())
+                        stop_reason = str(mgr.stop_reason or "")
                     except Exception:
                         stopped = False
+                        stop_reason = ""
                     status = "done"
                     if stopped:
-                        status = "cancelled"
+                        status = "timeout" if stop_reason == "watchdog" else "cancelled"
                     else:
                         try:
                             if mgr.done_failed > 0:

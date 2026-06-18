@@ -12,10 +12,10 @@ from zaliver.processing.text_overlay import (
     NEON_WAVE_FRAME_SPEED,
     REF_HORIZONTAL,
     REF_VERTICAL,
+    effective_font_path,
     layout_line_chars,
     measure_text_block,
     neon_glow_layers,
-    resolve_font_path,
     wave_offset_y,
     wrap_text_lines,
     _make_qfont,
@@ -41,9 +41,13 @@ class TextOverlayPreviewWidget(QWidget):
         self._text_color = QColor("#FFFFFF")
         self._anchor_x = 0.5
         self._anchor_y = 0.15
+        self._glow_enabled = True
+        self._letter_spacing = 0
+        self._font_bold = True
+        self._custom_font_path = ""
         self._dragging = False
         self._drag_offset = QPointF(0.0, 0.0)
-        self._font_path = resolve_font_path()
+        self._font_path = effective_font_path("", bold=True)
         self._lines: list[str] = []
         self._char_lines: list[list[tuple[str, int]]] = []
         self._block_w = 0
@@ -126,6 +130,25 @@ class TextOverlayPreviewWidget(QWidget):
         self._relayout()
         self.update()
 
+    def set_glow_enabled(self, enabled: bool) -> None:
+        self._glow_enabled = bool(enabled)
+        self.update()
+
+    def set_letter_spacing(self, spacing_px: int) -> None:
+        self._letter_spacing = max(-50, min(120, int(spacing_px)))
+        self._relayout()
+        self.update()
+
+    def set_font_path(self, custom_path: str = "") -> None:
+        self._custom_font_path = (custom_path or "").strip()
+        self._relayout()
+        self.update()
+
+    def set_font_bold(self, bold: bool) -> None:
+        self._font_bold = bool(bold)
+        self._relayout()
+        self.update()
+
     def set_anchor(self, x: float, y: float) -> None:
         self._anchor_x = max(0.0, min(1.0, float(x)))
         self._anchor_y = max(0.0, min(1.0, float(y)))
@@ -157,17 +180,34 @@ class TextOverlayPreviewWidget(QWidget):
     def _relayout(self) -> None:
         ref_w, _ref_h = self._ref_size()
         max_w = max(20, int(round(self._max_width_frac * ref_w)))
-        self._lines = wrap_text_lines(
-            self._text, self._font_size, max_w, self._font_path
-        )
-        self._char_lines = [
-            layout_line_chars(ln, self._font_size, self._font_path) for ln in self._lines
-        ]
-        self._block_w, self._block_h, self._line_h = measure_text_block(
-            self._lines, self._font_size, self._font_path
-        )
+        self._font_path = effective_font_path(self._custom_font_path, bold=self._font_bold)
         _, _, fw, fh = self._frame_geometry()
         scale = fh / self._ref_size()[1] if fh > 0 else 1.0
+        self._lines = wrap_text_lines(
+            self._text,
+            self._font_size,
+            max_w,
+            self._font_path,
+            self._letter_spacing,
+            bold=self._font_bold,
+        )
+        self._char_lines = [
+            layout_line_chars(
+                ln,
+                self._font_size,
+                self._font_path,
+                self._letter_spacing,
+                bold=self._font_bold,
+            )
+            for ln in self._lines
+        ]
+        self._block_w, self._block_h, self._line_h = measure_text_block(
+            self._lines,
+            self._font_size,
+            self._font_path,
+            self._letter_spacing,
+            bold=self._font_bold,
+        )
         painted_size = max(8, int(round(self._font_size * scale)))
         self._wave_amp = max(0.0, painted_size * self._wave_amp_frac)
         self._block_h += int(self._wave_amp * 2)
@@ -190,6 +230,7 @@ class TextOverlayPreviewWidget(QWidget):
         return _make_qfont(
             self._font_path,
             max(8, int(round(self._font_size * scale))),
+            bold=self._font_bold,
         )
 
     def _paint_neon_char(
@@ -207,11 +248,12 @@ class TextOverlayPreviewWidget(QWidget):
         text_y = cy + fm.ascent()
         glow = self._glow_color
 
-        for dx, dy, alpha in glow_layers:
-            c = QColor(glow)
-            c.setAlpha(max(0, min(255, int(alpha * 255))))
-            painter.setPen(c)
-            painter.drawText(int(cx + dx), int(text_y + dy), ch)
+        if self._glow_enabled:
+            for dx, dy, alpha in glow_layers:
+                c = QColor(glow)
+                c.setAlpha(max(0, min(255, int(alpha * 255))))
+                painter.setPen(c)
+                painter.drawText(int(cx + dx), int(text_y + dy), ch)
 
         core = QColor(self._text_color)
         painter.setPen(core)

@@ -30,6 +30,9 @@ _MAX_CONCURRENT_UPLOADS = 3 if sys.platform == "darwin" else 5
 _RECENT_COMPLETED_MAX = 5
 # Если «свободны» только недавно отработавшие профили — пауза диспетчера перед повторным назначением.
 _RECENT_BATCH_WAIT_S = 10800.0
+# Макс. пауза «Пауза 3 ч» из БД + внутренняя пауза recent batch + запас на активные заливы.
+_UPLOAD_PAUSE_DB_MAX_S = 3 * 3600.0
+_UPLOAD_QUEUE_WATCHDOG_S = _RECENT_BATCH_WAIT_S + _UPLOAD_PAUSE_DB_MAX_S + 3600.0
 
 
 class MultiProfileUploader:
@@ -78,6 +81,7 @@ class MultiProfileUploader:
         self._profile_upload_pause_remaining_s = profile_upload_pause_remaining_s
 
         self._stop = threading.Event()
+        self._stop_reason = ""
 
         self._global_q: Queue[VideoTask] = Queue()
         self._per_profile_q: dict[str, Queue[VideoTask]] = {
@@ -118,6 +122,10 @@ class MultiProfileUploader:
     def stop_requested(self) -> bool:
         return self._stop.is_set()
 
+    @property
+    def stop_reason(self) -> str:
+        return self._stop_reason if self._stop.is_set() else ""
+
     def enqueue_videos(
         self,
         *,
@@ -155,10 +163,11 @@ class MultiProfileUploader:
             f"max_parallel={self._max_parallel}, total={self._total}"
         )
 
-    def stop(self) -> None:
+    def stop(self, *, reason: str = "user") -> None:
+        self._stop_reason = (reason or "user").strip() or "user"
         self._stop.set()
         self._restore_sigint_handler()
-        self._log(f"[{_ts()}] [upload] stop requested")
+        self._log(f"[{_ts()}] [upload] stop requested (reason={self._stop_reason})")
 
     def join(self, timeout_s: float | None = None) -> None:
         deadline = None if timeout_s is None else (time.monotonic() + float(timeout_s))
@@ -183,7 +192,7 @@ class MultiProfileUploader:
 
         def _handler(_sig, _frame) -> None:
             self._log(f"[{_ts()}] [upload] SIGINT received → stopping…")
-            self.stop()
+            self.stop(reason="sigint")
 
         try:
             signal.signal(signal.SIGINT, _handler)

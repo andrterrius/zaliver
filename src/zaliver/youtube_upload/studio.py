@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -2233,7 +2234,7 @@ def _studio_navigation_drawer_channel_name_locators(page):
 
 
 def _studio_read_navigation_drawer_channel_name(
-    page, *, probe_timeout_ms: int = 2_000
+    page, *, probe_timeout_ms: int = 3_000
 ) -> str:
     loc = _studio_first_visible_locator(
         page,
@@ -2243,6 +2244,20 @@ def _studio_read_navigation_drawer_channel_name(
     if loc is None:
         return ""
     return _studio_read_locator_text(loc)
+
+
+def _studio_wait_navigation_drawer_channel_name(
+    page, *, total_timeout_s: float = 12.0, probe_timeout_ms: int = 3_000
+) -> str:
+    deadline = time.monotonic() + total_timeout_s
+    while time.monotonic() < deadline:
+        name = _studio_read_navigation_drawer_channel_name(
+            page, probe_timeout_ms=probe_timeout_ms
+        )
+        if name:
+            return name
+        page.wait_for_timeout(350)
+    return ""
 
 
 def _studio_page_on_studio_home(page) -> bool:
@@ -2288,7 +2303,7 @@ def _studio_try_match_expected_channel_in_studio(
     _studio_handle_channel_removed_if_present(page)
     _studio_handle_onboarding_dialogs_if_present(page)
 
-    current = _studio_read_navigation_drawer_channel_name(page)
+    current = _studio_wait_navigation_drawer_channel_name(page)
     if current and _studio_channel_names_match(expected, current):
         _log(
             f"Studio: в Studio активен yt_oldest_name «{expected}» — "
@@ -2385,7 +2400,7 @@ def _studio_ensure_correct_studio_channel(
         return oldest
 
     _studio_goto_studio_if_needed(page, login_credentials=login_credentials)
-    current = _studio_read_navigation_drawer_channel_name(page)
+    current = _studio_wait_navigation_drawer_channel_name(page)
     if oldest and current and _studio_channel_names_match(oldest, current):
         _log(
             f"Studio: канал в Studio «{current}» совпадает с выбранным «{oldest}»."
@@ -2417,7 +2432,7 @@ def _studio_ensure_correct_studio_channel(
             on_oldest_channel_name=on_oldest_channel_name,
         ) or oldest
         _studio_goto_studio_if_needed(page, login_credentials=login_credentials)
-        current = _studio_read_navigation_drawer_channel_name(page)
+        current = _studio_wait_navigation_drawer_channel_name(page)
         if oldest and current and _studio_channel_names_match(oldest, current):
             _log(
                 f"Studio: после повторного переключения канал «{current}» подтверждён."
@@ -5051,4 +5066,666 @@ def run_upload_latest_ready_video(
     if best_vid:
         _log(f"Studio: итоговый videoId: {best_vid}")
     return UploadedStudioResult(video_id=best_vid, url=best_url)
+
+
+_YOUTUBE_HOME_URL = "https://www.youtube.com/"
+_YOUTUBE_SHORTS_FEED_URL = "https://www.youtube.com/shorts/"
+_HORIZONTAL_WARMUP_DEFAULT_COUNT = 3
+_HORIZONTAL_WARMUP_MIN_WATCH_S = 180.0
+_HORIZONTAL_WARMUP_MAX_WATCH_S = 300.0
+_HORIZONTAL_SEARCH_RESULTS_WAIT_MS = 2_500
+_WATCH_LIKE_BTN_SELECTORS = (
+    "ytd-watch-metadata ytd-menu-renderer #top-level-buttons-computed like-button-view-model button",
+    "ytd-menu-renderer #top-level-buttons-computed like-button-view-model button",
+    "segmented-like-dislike-button-view-model like-button-view-model button",
+    "like-button-view-model button.ytSpecButtonShapeNextHost",
+    "#top-level-buttons-computed like-button-view-model button",
+    "#like-button button",
+)
+_WATCH_LIKE_BTN_RE = re.compile(
+    r"like\s+this\s+video|"
+    r"нравится|"
+    r"лайк|"
+    r"поставить\s+отметку",
+    re.I,
+)
+_WATCH_ALREADY_LIKED_RE = re.compile(
+    r"unlike|remove\s+like|"
+    r"убрать\s+отметку|"
+    r"удалить\s+лайк|"
+    r"убрать.*нравится",
+    re.I,
+)
+_YOUTUBE_SEARCH_INPUT_SELECTORS = (
+    "input.ytSearchboxComponentInput",
+    "input.yt-searchbox-input",
+    'input[name="search_query"]',
+    "#search-input input",
+    'ytd-searchbox input[name="search_query"]',
+)
+_YOUTUBE_SEARCH_BUTTON_SELECTORS = (
+    "button.ytSearchboxComponentSearchButton",
+    "#search-icon-legacy",
+    'button[aria-label="Search"]',
+    'button[aria-label="Поиск"]',
+)
+_SHORTS_WARMUP_DEFAULT_COUNT = 10
+_SHORTS_WARMUP_MIN_WATCH_S = 10.0
+_SHORTS_WARMUP_MAX_WATCH_S = 40.0
+_SHORTS_WARMUP_DEFAULT_LIKE_PROB_PCT = 10.0
+_SHORTS_WARMUP_DEFAULT_SUBSCRIBE_PROB_PCT = 10.0
+_SHORTS_LIKE_BTN_RE = re.compile(
+    r"like\s+this\s+video|"
+    r"лайк|"
+    r"нравится|"
+    r"поставить\s+лайк",
+    re.I,
+)
+_SHORTS_ALREADY_LIKED_RE = re.compile(
+    r"unlike|remove\s+like|убрать|удалить\s+лайк",
+    re.I,
+)
+_SHORTS_SUBSCRIBE_BTN_RE = re.compile(
+    r"subscribe\s+to|"
+    r"^subscribe\b|"
+    r"join\s+.*channel|"
+    r"оформить\s+подписку|"
+    r"подписаться\s+на|"
+    r"^подписаться\b",
+    re.I,
+)
+_SHORTS_ALREADY_SUBSCRIBED_RE = re.compile(
+    r"unsubscribe|"
+    r"отменить\s+подписку|"
+    r"отписаться|"
+    r"^subscribed\b|"
+    r"^подписан\b|"
+    r"^подписаны\b|"
+    r"вы\s+подписаны",
+    re.I,
+)
+_SHORTS_SUBSCRIBE_BTN_SELECTORS = (
+    "yt-subscribe-button-view-model button",
+    ".ytReelChannelBarViewModelReelSubscribeButton button",
+    "yt-reel-channel-bar-view-model yt-subscribe-button-view-model button",
+    "yt-reel-channel-bar-view-model button.ytSpecButtonShapeNextHost",
+    "#subscribe-button button",
+    "ytd-subscribe-button-renderer button",
+    "ytd-reel-player-overlay-renderer #subscribe-button button",
+)
+_SHORTS_AD_SELECTORS = (
+    "reels-ad-card-buttoned-view-model",
+    "yt-ad-metadata-shape",
+    "ad-badge-view-model",
+    "ad-button-view-model",
+    ".ytBadgeShapeAd",
+    "[class*='ReelsAdCard']",
+    "[class*='ytwReelsAdCard']",
+)
+_SHORTS_AD_BADGE_RE = re.compile(
+    r"^ad$|"
+    r"^sponsored$|"
+    r"^реклама$|"
+    r"реклам",
+    re.I,
+)
+
+
+def _studio_is_current_short_an_ad(page) -> bool:
+    """Текущий Short — реклама (reels-ad-card / yt-ad-metadata-shape)."""
+    for sel in _SHORTS_AD_SELECTORS:
+        try:
+            loc = page.locator(sel).first
+            if loc.is_visible(timeout=400):
+                return True
+        except Exception:
+            continue
+    try:
+        badge = page.locator(
+            ".ytBadgeShapeAd .ytBadgeShapeText, "
+            "ad-badge-view-model .ytBadgeShapeText, "
+            "badge-shape.ytBadgeShapeAd .ytBadgeShapeText"
+        ).first
+        if badge.is_visible(timeout=400):
+            text = (badge.inner_text(timeout=500) or "").strip()
+            if text and _SHORTS_AD_BADGE_RE.search(text):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _studio_advance_shorts_feed(
+    page, *, prev_video_id: str = "", log_label: str = ""
+) -> str:
+    """Прокрутка к следующему Short; возвращает id нового ролика или ''."""
+    next_id = _studio_scroll_shorts_to_next(page, prev_video_id=prev_video_id)
+    if next_id:
+        if log_label:
+            _log(f"Shorts: {log_label} ({next_id})")
+        return next_id
+    _log(
+        "Shorts: не удалось перейти к следующему ролику"
+        + (f" ({log_label})" if log_label else "")
+        + " — повторяем прокрутку…"
+    )
+    page.keyboard.press("ArrowDown")
+    page.wait_for_timeout(500)
+    return _studio_read_active_short_video_id(page)
+
+
+def _studio_read_active_short_video_id(page) -> str:
+    url = (page.url or "").strip()
+    m = re.search(r"/shorts/([A-Za-z0-9_-]{6,})", url, re.I)
+    if m:
+        return m.group(1)
+    try:
+        link = page.locator(
+            'a.ytp-title-link[href*="/shorts/"], a[href*="/shorts/"][target="_blank"]'
+        ).first
+        href = (link.get_attribute("href") or "").strip()
+        m = re.search(r"/shorts/([A-Za-z0-9_-]{6,})", href, re.I)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return ""
+
+
+def _studio_dismiss_shorts_player_overlays(page) -> None:
+    for sel in ("button.ytp-unmute", ".ytp-unmute"):
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=400):
+                btn.click(timeout=2_000)
+                page.wait_for_timeout(300)
+                return
+        except Exception:
+            continue
+
+
+def _studio_wait_shorts_feed_ready(page) -> None:
+    _log("Shorts: ожидание ленты…")
+    container = page.locator("#shorts-container")
+    container.first.wait_for(state="visible", timeout=120_000)
+    player = page.locator(
+        "#shorts-player, video.html5-main-video, ytd-reel-video-renderer"
+    )
+    player.first.wait_for(state="visible", timeout=120_000)
+    page.wait_for_timeout(1_500)
+    _studio_dismiss_shorts_player_overlays(page)
+
+
+def _studio_scroll_shorts_to_next(
+    page, *, prev_video_id: str = "", timeout_s: float = 15.0
+) -> str:
+    """Прокрутка к следующему Short; возвращает id нового ролика или ''."""
+    deadline = time.monotonic() + timeout_s
+    container = page.locator("#shorts-container")
+    focus = page.locator(
+        "#shorts-player, #shorts-container, video.html5-main-video"
+    )
+
+    while time.monotonic() < deadline:
+        try:
+            focus.first.click(timeout=2_000)
+        except Exception:
+            try:
+                container.first.click(timeout=2_000)
+            except Exception:
+                pass
+
+        page.keyboard.press("ArrowDown")
+        page.wait_for_timeout(800)
+        vid = _studio_read_active_short_video_id(page)
+        if vid and vid != prev_video_id:
+            return vid
+
+        try:
+            if container.count() > 0:
+                container.first.hover(timeout=2_000)
+            page.mouse.wheel(0, 900)
+        except Exception:
+            pass
+        page.wait_for_timeout(800)
+        vid = _studio_read_active_short_video_id(page)
+        if vid and vid != prev_video_id:
+            return vid
+
+        page.keyboard.press("PageDown")
+        page.wait_for_timeout(800)
+        vid = _studio_read_active_short_video_id(page)
+        if vid and vid != prev_video_id:
+            return vid
+
+    return ""
+
+
+def _studio_try_like_current_short(page) -> bool:
+    """Клик по лайку на текущем Short, если ещё не лайкнут."""
+    like_btn = (
+        page.locator("like-button-view-model button")
+        .or_(page.locator("#like-button button"))
+        .or_(
+            page.locator(
+                "ytd-segmented-like-dislike-button-renderer like-button-view-model button"
+            )
+        )
+        .or_(page.get_by_role("button", name=_SHORTS_LIKE_BTN_RE))
+    )
+    try:
+        btn = like_btn.first
+        if not btn.is_visible(timeout=2_000):
+            return False
+        label = (btn.get_attribute("aria-label") or "").strip()
+        if label and _SHORTS_ALREADY_LIKED_RE.search(label):
+            _log("Shorts: ролик уже с лайком — пропуск.")
+            return False
+        btn.click(timeout=3_000)
+        page.wait_for_timeout(400)
+        _log("Shorts: лайк поставлен.")
+        return True
+    except Exception as e:
+        _log(f"Shorts: не удалось поставить лайк: {type(e).__name__}")
+        return False
+
+
+def _studio_try_subscribe_current_short(page) -> bool:
+    """Подписка на канал текущего Short, если ещё не подписан."""
+    candidates: list = []
+    for sel in _SHORTS_SUBSCRIBE_BTN_SELECTORS:
+        candidates.append(page.locator(sel))
+    candidates.append(page.get_by_role("button", name=_SHORTS_SUBSCRIBE_BTN_RE))
+
+    for loc in candidates:
+        try:
+            btn = loc.first
+            if not btn.is_visible(timeout=1_000):
+                continue
+            label = (
+                btn.get_attribute("aria-label") or btn.inner_text(timeout=500) or ""
+            ).strip()
+            if label and _SHORTS_ALREADY_SUBSCRIBED_RE.search(label):
+                _log("Shorts: уже подписан на канал — пропуск.")
+                return False
+            btn.scroll_into_view_if_needed(timeout=2_000)
+            btn.click(timeout=3_000)
+            page.wait_for_timeout(400)
+            _log("Shorts: подписка оформлена.")
+            return True
+        except Exception:
+            continue
+
+    _log("Shorts: кнопка подписки не найдена.")
+    return False
+
+
+def _studio_browse_youtube_shorts(
+    page,
+    *,
+    count: int = _SHORTS_WARMUP_DEFAULT_COUNT,
+    like_probability_pct: float = _SHORTS_WARMUP_DEFAULT_LIKE_PROB_PCT,
+    subscribe_probability_pct: float = _SHORTS_WARMUP_DEFAULT_SUBSCRIBE_PROB_PCT,
+) -> None:
+    """Просмотр count Shorts со случайной паузой 10–40 с на каждом."""
+    n = max(1, int(count))
+    like_prob = min(100.0, max(0.0, float(like_probability_pct)))
+    subscribe_prob = min(100.0, max(0.0, float(subscribe_probability_pct)))
+
+    log_extra = ""
+    if like_prob > 0:
+        log_extra += f", лайк {like_prob:g}%"
+    if subscribe_prob > 0:
+        log_extra += f", подписка {subscribe_prob:g}%"
+    _log(
+        f"Shorts: просмотр {n} роликов, "
+        f"{_SHORTS_WARMUP_MIN_WATCH_S:.0f}–{_SHORTS_WARMUP_MAX_WATCH_S:.0f} с на каждом"
+        f" (лайк/подписка после просмотра{log_extra})…"
+    )
+    _studio_wait_shorts_feed_ready(page)
+
+    prev_id = _studio_read_active_short_video_id(page)
+    watched = 0
+    skip_attempts = 0
+    max_skip_attempts = max(n * 5, 10)
+
+    while watched < n:
+        _studio_dismiss_shorts_player_overlays(page)
+
+        if _studio_is_current_short_an_ad(page):
+            skip_attempts += 1
+            if skip_attempts > max_skip_attempts:
+                _log("Shorts: слишком много рекламы подряд — остановка.")
+                break
+            _log("Shorts: реклама — пролистываем без просмотра.")
+            next_id = _studio_advance_shorts_feed(
+                page, prev_video_id=prev_id, log_label=""
+            )
+            if next_id:
+                prev_id = next_id
+            continue
+
+        skip_attempts = 0
+        watched += 1
+        _log(
+            f"Shorts: ролик {watched}/{n}"
+            + (f" ({prev_id})" if prev_id else "")
+        )
+
+        watch_s = random.uniform(
+            _SHORTS_WARMUP_MIN_WATCH_S, _SHORTS_WARMUP_MAX_WATCH_S
+        )
+        _log(f"Shorts: смотрим ~{watch_s:.0f} с…")
+        page.wait_for_timeout(int(watch_s * 1000))
+        if like_prob > 0 and random.random() * 100.0 < like_prob:
+            if _studio_try_like_current_short(page):
+                page.wait_for_timeout(2_000)
+        if subscribe_prob > 0 and random.random() * 100.0 < subscribe_prob:
+            _studio_try_subscribe_current_short(page)
+
+        if watched >= n:
+            break
+
+        next_id = _studio_advance_shorts_feed(
+            page,
+            prev_video_id=prev_id,
+            log_label=f"ролик {watched + 1}/{n}",
+        )
+        if next_id:
+            prev_id = next_id
+
+    _log(f"Shorts: прогрев завершён (просмотрено {watched} из {n}).")
+
+
+def _studio_type_youtube_search_input(page, search_input, query: str) -> bool:
+    """Последовательный ввод запроса в строку поиска YouTube."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    try:
+        search_input.click(timeout=3_000)
+        page.wait_for_timeout(120)
+        try:
+            search_input.evaluate("(node) => { node.focus(); node.select(); }")
+        except Exception:
+            pass
+        page.wait_for_timeout(80)
+        try:
+            search_input.press("Control+A")
+            search_input.press("Backspace")
+        except Exception:
+            pass
+        page.wait_for_timeout(50)
+        search_input.press_sequentially(q, delay=18)
+        page.wait_for_timeout(400)
+        actual = (search_input.input_value(timeout=3_000) or "").strip()
+        if not actual:
+            page.keyboard.type(q, delay=0)
+            page.wait_for_timeout(200)
+            actual = (search_input.input_value(timeout=3_000) or "").strip()
+        if not actual:
+            _log("Горизонтальные видео: поле поиска пустое после ввода.")
+            return False
+        _log(f"Горизонтальные видео: запрос введён: {actual!r}")
+        return True
+    except Exception as e:
+        _log(f"Горизонтальные видео: не удалось ввести запрос: {type(e).__name__}")
+        return False
+
+
+def _studio_search_youtube(page, query: str) -> bool:
+    """Главная YouTube → последовательный ввод запроса → клик по лупе."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    _log(f"Горизонтальные видео: переход на {_YOUTUBE_HOME_URL}…")
+    page.goto(
+        _YOUTUBE_HOME_URL,
+        wait_until="domcontentloaded",
+        timeout=120_000,
+    )
+    page.wait_for_timeout(1_000)
+
+    search_input = None
+    for sel in _YOUTUBE_SEARCH_INPUT_SELECTORS:
+        try:
+            loc = page.locator(sel).first
+            if loc.is_visible(timeout=2_000):
+                search_input = loc
+                break
+        except Exception:
+            continue
+    if search_input is None:
+        _log("Горизонтальные видео: поле поиска не найдено.")
+        return False
+
+    if not _studio_type_youtube_search_input(page, search_input, q):
+        return False
+
+    submitted = False
+    for sel in _YOUTUBE_SEARCH_BUTTON_SELECTORS:
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=1_000):
+                btn.click(timeout=3_000)
+                submitted = True
+                break
+        except Exception:
+            continue
+    if not submitted:
+        try:
+            page.keyboard.press("Enter")
+            submitted = True
+        except Exception:
+            pass
+    if not submitted:
+        _log("Горизонтальные видео: не удалось отправить поиск.")
+        return False
+
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=120_000)
+    except Exception:
+        pass
+    try:
+        page.locator("ytd-search, ytd-video-renderer").first.wait_for(
+            state="attached", timeout=15_000
+        )
+    except Exception:
+        pass
+    page.wait_for_timeout(_HORIZONTAL_SEARCH_RESULTS_WAIT_MS)
+    _log(f"Горизонтальные видео: поиск «{q}» выполнен, выдача загружена.")
+    return True
+
+
+def _studio_collect_search_video_links(page) -> list:
+    """Ссылки на ролики только из ytd-video-renderer (не реклама, не каналы)."""
+    renderers = page.locator("ytd-video-renderer")
+    count = renderers.count()
+    links: list = []
+    for i in range(count):
+        renderer = renderers.nth(i)
+        try:
+            link_loc = renderer.locator(
+                'a#video-title, a[href*="/watch?v="], a[href*="/watch/"]'
+            )
+            if link_loc.count() == 0:
+                continue
+            link = link_loc.first
+            if not link.is_visible(timeout=500):
+                continue
+            href = (link.get_attribute("href") or "").strip()
+            if "/watch" not in href:
+                continue
+            links.append(link)
+        except Exception:
+            continue
+    return links
+
+
+def _studio_pick_search_video_index(link_count: int, iteration: int) -> int:
+    """Первое или второе доступное видео; для следующих — сдвиг по выдаче."""
+    if link_count <= 0:
+        return -1
+    if iteration == 0:
+        return random.randint(0, min(1, link_count - 1))
+    return min(iteration + random.randint(0, 1), link_count - 1)
+
+
+def _studio_try_like_current_watch_video(page) -> bool:
+    """Лайк на странице обычного ролика (ytd-menu-renderer / like-button-view-model)."""
+    try:
+        page.locator(
+            "ytd-watch-metadata ytd-menu-renderer, #top-level-buttons-computed"
+        ).first.wait_for(state="attached", timeout=15_000)
+    except Exception:
+        pass
+    page.wait_for_timeout(800)
+
+    candidates: list = [page.locator(sel) for sel in _WATCH_LIKE_BTN_SELECTORS]
+    candidates.append(page.get_by_role("button", name=_WATCH_LIKE_BTN_RE))
+
+    for loc in candidates:
+        try:
+            btn = loc.first
+            if not btn.is_visible(timeout=2_000):
+                continue
+            btn.scroll_into_view_if_needed(timeout=5_000)
+            page.wait_for_timeout(200)
+            pressed = (btn.get_attribute("aria-pressed") or "").strip().lower()
+            if pressed == "true":
+                _log("Горизонтальные видео: ролик уже с лайком — пропуск.")
+                return False
+            label = (btn.get_attribute("aria-label") or "").strip()
+            if label and _WATCH_ALREADY_LIKED_RE.search(label):
+                _log("Горизонтальные видео: ролик уже с лайком — пропуск.")
+                return False
+            btn.click(timeout=5_000)
+            page.wait_for_timeout(500)
+            pressed_after = (btn.get_attribute("aria-pressed") or "").strip().lower()
+            if pressed_after == "true":
+                _log("Горизонтальные видео: лайк поставлен.")
+                return True
+            label_after = (btn.get_attribute("aria-label") or "").strip()
+            if label_after and _WATCH_ALREADY_LIKED_RE.search(label_after):
+                _log("Горизонтальные видео: лайк поставлен.")
+                return True
+            _log("Горизонтальные видео: лайк поставлен.")
+            return True
+        except Exception:
+            continue
+
+    _log("Горизонтальные видео: кнопка лайка не найдена.")
+    return False
+
+
+def _studio_browse_horizontal_videos(
+    page,
+    *,
+    count: int = _HORIZONTAL_WARMUP_DEFAULT_COUNT,
+) -> None:
+    """Просмотр горизонтальных роликов из текущей выдачи поиска."""
+    n = max(1, int(count))
+    _log(
+        f"Горизонтальные видео: просмотр {n} роликов, "
+        f"{_HORIZONTAL_WARMUP_MIN_WATCH_S:.0f}–{_HORIZONTAL_WARMUP_MAX_WATCH_S:.0f} с на каждом…"
+    )
+
+    results_url = (page.url or "").strip()
+    watched = 0
+    for i in range(n):
+        try:
+            links = _studio_collect_search_video_links(page)
+            if not links:
+                _log("Горизонтальные видео: в выдаче нет роликов (ytd-video-renderer).")
+                break
+            idx = _studio_pick_search_video_index(len(links), i)
+            link = links[idx]
+            title = (
+                link.get_attribute("title")
+                or link.get_attribute("aria-label")
+                or link.inner_text(timeout=1_000)
+                or f"#{idx + 1}"
+            ).strip()
+            _log(
+                f"Горизонтальные видео: ролик {i + 1}/{n} "
+                f"(позиция {idx + 1} в выдаче)"
+                + (f" — {title[:100]}" if title else "")
+            )
+            link.click(timeout=5_000)
+            page.wait_for_load_state("domcontentloaded", timeout=120_000)
+            page.wait_for_timeout(1_000)
+            try:
+                page.locator("video.html5-main-video").first.wait_for(
+                    state="visible", timeout=15_000
+                )
+            except Exception:
+                pass
+
+            watch_s = random.uniform(
+                _HORIZONTAL_WARMUP_MIN_WATCH_S, _HORIZONTAL_WARMUP_MAX_WATCH_S
+            )
+            _log(f"Горизонтальные видео: смотрим ~{watch_s:.0f} с…")
+            page.wait_for_timeout(int(watch_s * 1000))
+
+            _studio_try_like_current_watch_video(page)
+            page.wait_for_timeout(2_000)
+
+            watched += 1
+            if i >= n - 1:
+                break
+            page.goto(results_url, wait_until="domcontentloaded", timeout=120_000)
+            page.wait_for_timeout(_HORIZONTAL_SEARCH_RESULTS_WAIT_MS)
+        except Exception as e:
+            _log(
+                f"Горизонтальные видео: ошибка на ролике {i + 1}: "
+                f"{type(e).__name__}"
+            )
+            break
+
+    _log(f"Горизонтальные видео: просмотрено {watched} из {n}.")
+
+
+def run_youtube_shorts_warmup(
+    page,
+    *,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    on_oldest_channel_name=None,
+    shorts_count: int = _SHORTS_WARMUP_DEFAULT_COUNT,
+    like_probability_pct: float = _SHORTS_WARMUP_DEFAULT_LIKE_PROB_PCT,
+    subscribe_probability_pct: float = _SHORTS_WARMUP_DEFAULT_SUBSCRIBE_PROB_PCT,
+    watch_horizontal_videos: bool = False,
+    horizontal_search_query: str | None = None,
+    horizontal_videos_count: int = _HORIZONTAL_WARMUP_DEFAULT_COUNT,
+) -> None:
+    """Авторизация, выбор канала → лента Shorts → просмотр с прокруткой."""
+    _studio_ensure_correct_studio_channel(
+        page,
+        yt_oldest_name=yt_oldest_name,
+        login_credentials=login_credentials,
+        on_oldest_channel_name=on_oldest_channel_name,
+    )
+    _log(f"Shorts: переход на {_YOUTUBE_SHORTS_FEED_URL}…")
+    page.goto(
+        _YOUTUBE_SHORTS_FEED_URL,
+        wait_until="domcontentloaded",
+        timeout=120_000,
+    )
+    _studio_try_google_login_if_needed(page, login_credentials)
+    _studio_browse_youtube_shorts(
+        page,
+        count=shorts_count,
+        like_probability_pct=like_probability_pct,
+        subscribe_probability_pct=subscribe_probability_pct,
+    )
+    if watch_horizontal_videos:
+        query = (horizontal_search_query or "").strip()
+        if not query:
+            _log("Горизонтальные видео: поисковый запрос пуст — пропуск.")
+            return
+        if _studio_search_youtube(page, query):
+            _studio_browse_horizontal_videos(
+                page,
+                count=horizontal_videos_count,
+            )
 

@@ -10,6 +10,7 @@ import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from collections.abc import Callable
+from typing import NamedTuple
 from functools import partial
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QGridLayout,
     QGroupBox,
@@ -734,6 +736,15 @@ def _apply_thread_slider_fd_cap(slider: "SmoothSlider") -> None:
         slider.setValue(cap_max)
 
 
+class ShortsWarmupSettings(NamedTuple):
+    shorts_count: int
+    like_probability_pct: float
+    subscribe_probability_pct: float
+    watch_horizontal_videos: bool
+    horizontal_search_query: str
+    horizontal_videos_count: int
+
+
 class MainWindow(QWidget):
     _after_video_saved = pyqtSignal()
     _profiles_loaded = pyqtSignal(object)
@@ -746,6 +757,8 @@ class MainWindow(QWidget):
     _studio_availability_finished = pyqtSignal(int, int)
     _studio_channel_fill_progress = pyqtSignal(int, int, str)
     _studio_channel_fill_finished = pyqtSignal(int, int)
+    _studio_warmup_progress = pyqtSignal(int, int, str)
+    _studio_warmup_finished = pyqtSignal(int, int)
     _zaliver_profile_tags_clear_progress = pyqtSignal(int, int, str)
     _zaliver_profile_tags_clear_finished = pyqtSignal(int, int)
 
@@ -781,10 +794,12 @@ class MainWindow(QWidget):
         self._profiles_filter_timer.timeout.connect(self._apply_profiles_filter)
         self._profiles_availability_running = False
         self._profiles_channel_fill_running = False
+        self._profiles_warmup_running = False
         self._profiles_tags_clear_running = False
         self._profiles_refresh_running = False
         self._last_availability_failed_ids: list[str] = []
         self._last_channel_fill_failed_ids: list[str] = []
+        self._last_warmup_failed_ids: list[str] = []
         self._build_ui()
         self._bootstrap_fd_limits()
         self._ui_log_line.connect(self._route_ui_log_line)
@@ -813,6 +828,8 @@ class MainWindow(QWidget):
         self._studio_availability_finished.connect(self._on_studio_availability_finished)
         self._studio_channel_fill_progress.connect(self._on_studio_channel_fill_progress)
         self._studio_channel_fill_finished.connect(self._on_studio_channel_fill_finished)
+        self._studio_warmup_progress.connect(self._on_studio_warmup_progress)
+        self._studio_warmup_finished.connect(self._on_studio_warmup_finished)
         self._zaliver_profile_tags_clear_progress.connect(
             self._on_zaliver_profile_tags_clear_progress
         )
@@ -1734,6 +1751,16 @@ class MainWindow(QWidget):
         self._btn_profiles_fill_channel.clicked.connect(
             self._start_profiles_channel_fill
         )
+        self._btn_profiles_warmup = QPushButton("Прогрев")
+        self._btn_profiles_warmup.setObjectName("secondary")
+        self._btn_profiles_warmup.setAutoDefault(False)
+        self._btn_profiles_warmup.setDefault(False)
+        self._btn_profiles_warmup.setToolTip(
+            "Только для отмеченных профилей: авторизация, выбор канала, "
+            "затем просмотр ленты YouTube Shorts (пауза на каждом ролике, "
+            "случайные лайки, подписки и прокрутка вниз). Браузер с окном, до 5 параллельно."
+        )
+        self._btn_profiles_warmup.clicked.connect(self._start_profiles_warmup)
         self._btn_profiles_clear_zaliver_tags = QPushButton("Очистить теги залива")
         self._btn_profiles_clear_zaliver_tags.setObjectName("secondary")
         self._btn_profiles_clear_zaliver_tags.setAutoDefault(False)
@@ -1746,6 +1773,7 @@ class MainWindow(QWidget):
             self._start_clear_zaliver_profile_tags
         )
         profiles_actions_row.addWidget(self._btn_profiles_fill_channel)
+        profiles_actions_row.addWidget(self._btn_profiles_warmup)
         profiles_actions_row.addWidget(self._btn_profiles_check_availability)
         profiles_actions_row.addWidget(self._btn_profiles_import_accounts)
         profiles_actions_row.addStretch()
@@ -3288,6 +3316,7 @@ class MainWindow(QWidget):
         busy = (
             self._profiles_availability_running
             or self._profiles_channel_fill_running
+            or self._profiles_warmup_running
             or self._profiles_tags_clear_running
             or self._profiles_refresh_running
         )
@@ -3297,6 +3326,8 @@ class MainWindow(QWidget):
             self._btn_profiles_check_availability.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_fill_channel"):
             self._btn_profiles_fill_channel.setEnabled(not busy)
+        if hasattr(self, "_btn_profiles_warmup"):
+            self._btn_profiles_warmup.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_refresh"):
             self._btn_profiles_refresh.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_import_accounts"):
@@ -4038,6 +4069,116 @@ class MainWindow(QWidget):
             (link_url_edit.text() or "").strip(),
         )
 
+    def _prompt_shorts_warmup_settings(self) -> ShortsWarmupSettings | None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Прогрев YouTube")
+        dlg.setModal(True)
+        dlg.setMinimumWidth(420)
+        v = QVBoxLayout(dlg)
+
+        hint = QLabel(
+            "Для каждого отмеченного профиля: авторизация, выбор канала и "
+            "просмотр указанного числа Shorts. На каждом ролике с заданной "
+            "вероятностью ставится лайк и/или оформляется подписка."
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("hint")
+        v.addWidget(hint)
+
+        form = QFormLayout()
+        count_spin = QSpinBox()
+        count_spin.setRange(1, 9999)
+        count_spin.setValue(10)
+        form.addRow("Количество просмотренных Shorts:", count_spin)
+
+        like_spin = QDoubleSpinBox()
+        like_spin.setRange(0.0, 100.0)
+        like_spin.setDecimals(1)
+        like_spin.setSingleStep(1.0)
+        like_spin.setSuffix(" %")
+        like_spin.setValue(10.0)
+        form.addRow("Вероятность лайка:", like_spin)
+
+        subscribe_spin = QDoubleSpinBox()
+        subscribe_spin.setRange(0.0, 100.0)
+        subscribe_spin.setDecimals(1)
+        subscribe_spin.setSingleStep(1.0)
+        subscribe_spin.setSuffix(" %")
+        subscribe_spin.setValue(10.0)
+        form.addRow("Вероятность подписки:", subscribe_spin)
+        v.addLayout(form)
+
+        horizontal_group = QGroupBox("Горизонтальные видео")
+        horizontal_form = QFormLayout(horizontal_group)
+        watch_horizontal_cb = QCheckBox("Смотреть после Shorts")
+        horizontal_form.addRow(watch_horizontal_cb)
+
+        search_label = QLabel("Поисковый запрос:")
+        search_edit = QLineEdit()
+        search_edit.setPlaceholderText("Текст для поиска на главной YouTube")
+        horizontal_form.addRow(search_label, search_edit)
+
+        horizontal_count_spin = QSpinBox()
+        horizontal_count_spin.setRange(1, 999)
+        horizontal_count_spin.setValue(3)
+        horizontal_count_label = QLabel("Количество просмотренных видео:")
+        horizontal_form.addRow(horizontal_count_label, horizontal_count_spin)
+
+        horizontal_watch_hint = QLabel("Время просмотра: 3–5 мин на каждое видео (случайно)")
+        horizontal_watch_hint.setObjectName("hint")
+        horizontal_watch_hint.setWordWrap(True)
+
+        def _sync_horizontal_fields(checked: bool) -> None:
+            for w in (
+                search_label,
+                search_edit,
+                horizontal_count_label,
+                horizontal_count_spin,
+                horizontal_watch_hint,
+            ):
+                w.setVisible(checked)
+
+        watch_horizontal_cb.toggled.connect(_sync_horizontal_fields)
+        _sync_horizontal_fields(False)
+        horizontal_form.addRow(horizontal_watch_hint)
+        v.addWidget(horizontal_group)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.setObjectName("danger")
+        btn_start = QPushButton("Старт")
+        btn_start.setDefault(True)
+        btn_start.setAutoDefault(True)
+        btn_cancel.clicked.connect(dlg.reject)
+        row.addWidget(btn_cancel)
+        row.addWidget(btn_start)
+        v.addLayout(row)
+
+        def _try_accept() -> None:
+            if watch_horizontal_cb.isChecked() and not search_edit.text().strip():
+                QMessageBox.warning(
+                    dlg,
+                    "Прогрев YouTube",
+                    "Укажите текст для поиска горизонтальных видео.",
+                )
+                return
+            dlg.accept()
+
+        btn_start.clicked.connect(_try_accept)
+
+        count_spin.setFocus()
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return ShortsWarmupSettings(
+            shorts_count=count_spin.value(),
+            like_probability_pct=like_spin.value(),
+            subscribe_probability_pct=subscribe_spin.value(),
+            watch_horizontal_videos=watch_horizontal_cb.isChecked(),
+            horizontal_search_query=(search_edit.text() or "").strip(),
+            horizontal_videos_count=horizontal_count_spin.value(),
+        )
+
     def _start_profiles_channel_fill(self) -> None:
         if self._profiles_channel_fill_running:
             QMessageBox.information(
@@ -4178,6 +4319,155 @@ class MainWindow(QWidget):
         ok_n, fail_n, failed_ids = mgr.run()
         self._last_channel_fill_failed_ids = list(failed_ids)
         self._studio_channel_fill_finished.emit(ok_n, fail_n)
+
+    def _start_profiles_warmup(self) -> None:
+        if self._profiles_warmup_running:
+            QMessageBox.information(
+                self,
+                "Прогрев Shorts",
+                "Прогрев уже выполняется. Дождитесь завершения.",
+            )
+            return
+        if self._profiles_raw is None:
+            QMessageBox.warning(
+                self,
+                "Прогрев Shorts",
+                "Сначала загрузите список профилей (кнопка «Обновить»).",
+            )
+            return
+        profile_ids = self._collect_checked_profile_ids()
+        if not profile_ids:
+            QMessageBox.warning(
+                self,
+                "Прогрев Shorts",
+                "Отметьте квадратиками профили, для которых нужен прогрев.",
+            )
+            return
+
+        warmup_settings = self._prompt_shorts_warmup_settings()
+        if warmup_settings is None:
+            return
+
+        token = (self._dolphin_token.text() or "").strip()
+        if not token:
+            token = (
+                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
+            ).strip()
+        kind = self._default_browser_combo.currentData()
+        if not isinstance(kind, str) or not kind.strip():
+            kind = "dolphin"
+        base_url = (self._local_api_base_url.text() or "").strip()
+        if not base_url:
+            base_url = (
+                self._settings.value("antydetect/local_api_base_url", "", type=str) or ""
+            ).strip()
+        if not base_url and kind == "local":
+            base_url = DEFAULT_LOCAL_API_BASE_URL
+
+        headless = False
+
+        self._profiles_warmup_running = True
+        self._sync_profiles_tab_action_buttons()
+        self._profiles_status.setText(
+            f"Прогрев Shorts: 0 / {len(profile_ids)}…"
+        )
+        self._append_log(
+            f"[warmup] Старт для {len(profile_ids)} профилей "
+            f"(Shorts: {warmup_settings.shorts_count}, "
+            f"лайк {warmup_settings.like_probability_pct:g}%, "
+            f"подписка {warmup_settings.subscribe_probability_pct:g}%"
+            + (
+                f", горизонтальные: {warmup_settings.horizontal_videos_count}, "
+                f"поиск «{warmup_settings.horizontal_search_query}»"
+                if warmup_settings.watch_horizontal_videos
+                else ""
+            )
+            + ", с окном браузера, до 5 параллельно)…"
+        )
+
+        threading.Thread(
+            target=self._profiles_warmup_worker,
+            kwargs={
+                "profile_ids": profile_ids,
+                "kind": kind,
+                "token": token,
+                "base_url": base_url,
+                "headless": headless,
+                "warmup_settings": warmup_settings,
+            },
+            daemon=True,
+        ).start()
+
+    def _profiles_warmup_worker(
+        self,
+        *,
+        profile_ids: list[str],
+        kind: str,
+        token: str,
+        base_url: str,
+        headless: bool,
+        warmup_settings: ShortsWarmupSettings,
+    ) -> None:
+        from zaliver.antydetect.antic_open import (
+            set_log_sink,
+            warmup_youtube_shorts_in_local_antidetect_profile,
+            warmup_youtube_shorts_in_profile,
+        )
+        from zaliver.antydetect.local_antidetect_api import LocalAntidetectError
+        from zaliver.youtube_upload.multi_availability_checker import (
+            MultiProfileAvailabilityChecker,
+        )
+
+        set_log_sink(self._ui_log_line.emit)
+        kind_s = (kind or "").strip()
+
+        def _warmup_one(pid: str) -> None:
+            creds = self._profile_login_credentials(pid)
+            yt_oldest = self._profile_yt_oldest_name(pid) or None
+            warmup_kw = {
+                "shorts_count": warmup_settings.shorts_count,
+                "like_probability_pct": warmup_settings.like_probability_pct,
+                "subscribe_probability_pct": warmup_settings.subscribe_probability_pct,
+                "watch_horizontal_videos": warmup_settings.watch_horizontal_videos,
+                "horizontal_search_query": warmup_settings.horizontal_search_query or None,
+                "horizontal_videos_count": warmup_settings.horizontal_videos_count,
+            }
+            if kind_s == "local":
+                u = (base_url or "").strip()
+                if not u:
+                    raise LocalAntidetectError(
+                        "Укажите базовый URL локального API в настройках."
+                    )
+                warmup_youtube_shorts_in_local_antidetect_profile(
+                    pid,
+                    base_url=u,
+                    headless=headless,
+                    login_credentials=creds,
+                    yt_oldest_name=yt_oldest,
+                    **warmup_kw,
+                )
+            else:
+                warmup_youtube_shorts_in_profile(
+                    pid,
+                    local_token=token or None,
+                    headless=headless,
+                    login_credentials=creds,
+                    yt_oldest_name=yt_oldest,
+                    **warmup_kw,
+                )
+
+        def _on_progress(done: int, total: int, profile_id: str) -> None:
+            self._studio_warmup_progress.emit(done, total, profile_id)
+
+        mgr = MultiProfileAvailabilityChecker(
+            profile_ids=profile_ids,
+            check_one=_warmup_one,
+            on_progress=_on_progress,
+            log_sink=self._ui_log_line.emit,
+        )
+        ok_n, fail_n, failed_ids = mgr.run()
+        self._last_warmup_failed_ids = list(failed_ids)
+        self._studio_warmup_finished.emit(ok_n, fail_n)
 
     def _collect_checked_profile_ids(self) -> list[str]:
         if self._profiles_interaction is None:
@@ -4612,6 +4902,38 @@ class MainWindow(QWidget):
         QMessageBox.information(
             self,
             "Описание и ссылка канала",
+            f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
+        )
+
+    def _on_studio_warmup_progress(
+        self, current: int, total: int, profile_id: str
+    ) -> None:
+        pid = (profile_id or "").strip()
+        self._profiles_status.setText(
+            f"Прогрев Shorts: {current} / {total}"
+            + (f" — профиль {pid}" if pid else "…")
+        )
+
+    def _on_studio_warmup_finished(self, ok_n: int, fail_n: int) -> None:
+        self._profiles_warmup_running = False
+        self._sync_profiles_tab_action_buttons()
+        total = int(ok_n) + int(fail_n)
+        self._profiles_status.setText(
+            f"Прогрев Shorts завершён: успешно {ok_n}, с ошибкой {fail_n} "
+            f"(всего {total})."
+        )
+        self._append_log(
+            f"[warmup] Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}."
+        )
+        if int(fail_n) > 0:
+            failed = getattr(self, "_last_warmup_failed_ids", None) or []
+            if failed:
+                self._append_log(
+                    "[warmup] Ошибки (ID): " + ", ".join(failed)
+                )
+        QMessageBox.information(
+            self,
+            "Прогрев Shorts",
             f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
         )
 

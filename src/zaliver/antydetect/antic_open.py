@@ -12,6 +12,7 @@ from zaliver.youtube_upload.studio import (
     YoutubeStudioError,
     run_studio_channel_description_and_link,
     run_upload_latest_ready_video,
+    run_youtube_shorts_warmup,
     set_log_sink,
     verify_studio_upload_dialog_available,
     _studio_dismiss_upload_dialog,
@@ -378,6 +379,161 @@ def fill_channel_description_and_link_in_local_antidetect_profile(
         try:
             _log(
                 "Local antidetect: заполнение канала завершено за "
+                f"{time.perf_counter() - started_at:.1f} с."
+            )
+        except Exception:
+            pass
+        api.close()
+
+
+def warmup_youtube_shorts_in_profile(
+    profile_id: str,
+    *,
+    local_token: str | None = None,
+    headless: bool = True,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    shorts_count: int | None = None,
+    like_probability_pct: float | None = None,
+    subscribe_probability_pct: float | None = None,
+    watch_horizontal_videos: bool = False,
+    horizontal_search_query: str | None = None,
+    horizontal_videos_count: int | None = None,
+) -> None:
+    """Dolphin → авторизация/канал → лента YouTube Shorts."""
+    _log(
+        "Dolphin: прогрев Shorts. "
+        f"profile_id={profile_id!r}, headless={headless}"
+    )
+    api = DolphinAntyLocalAPI()
+    try:
+        tok = (local_token or "").strip()
+        if tok:
+            _log("Dolphin: login_with_token…")
+            api.login_with_token(tok)
+        _log("Dolphin: start_profile…")
+        conn = api.start_profile(profile_id, headless=headless)
+        _log(
+            "Dolphin: профиль запущен. "
+            f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+        )
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_cdp(
+                p, (conn.ws_url(), conn.http_url())
+            )
+            try:
+                kw: dict = {
+                    "login_credentials": login_credentials,
+                    "yt_oldest_name": yt_oldest_name,
+                }
+                if shorts_count is not None:
+                    kw["shorts_count"] = shorts_count
+                if like_probability_pct is not None:
+                    kw["like_probability_pct"] = like_probability_pct
+                if subscribe_probability_pct is not None:
+                    kw["subscribe_probability_pct"] = subscribe_probability_pct
+                if watch_horizontal_videos:
+                    kw["watch_horizontal_videos"] = True
+                    kw["horizontal_search_query"] = horizontal_search_query
+                if horizontal_videos_count is not None:
+                    kw["horizontal_videos_count"] = horizontal_videos_count
+                run_youtube_shorts_warmup(page, **kw)
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        _log(f"Ошибка прогрева Shorts: {type(e).__name__}: {e!r}")
+        raise _wrap_exc(e) from e
+    finally:
+        try:
+            api.stop_profile(profile_id)
+        except Exception as e:
+            _log(f"Dolphin: stop_profile: {e!r}")
+        api.close()
+
+
+def warmup_youtube_shorts_in_local_antidetect_profile(
+    profile_id: str,
+    *,
+    base_url: str,
+    headless: bool = True,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    shorts_count: int | None = None,
+    like_probability_pct: float | None = None,
+    subscribe_probability_pct: float | None = None,
+    watch_horizontal_videos: bool = False,
+    horizontal_search_query: str | None = None,
+    horizontal_videos_count: int | None = None,
+) -> None:
+    """Локальный антидетект → авторизация/канал → лента YouTube Shorts."""
+    _log(
+        "Local antidetect: прогрев Shorts. "
+        f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}"
+    )
+    from zaliver.antydetect.local_antidetect_api import (
+        LocalAntidetectError,
+        LocalAntidetectHttpAPI,
+    )
+    from zaliver.antydetect.local_active_sessions import (
+        register_local_session,
+        unregister_local_session,
+    )
+
+    api = LocalAntidetectHttpAPI(base_url)
+    session_id: str | None = None
+    started_at = time.perf_counter()
+    try:
+        acc = api.launch_profile(profile_id, headless=headless, expose_cdp=True)
+        sid = acc.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+        session_id = sid.strip()
+        bu = (base_url or "").strip() or "http://127.0.0.1:18765"
+        register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
+        ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+        _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_cdp(p, (ws_url,))
+            try:
+                studio_kw = _local_studio_workflow_kwargs(
+                    api,
+                    profile_id,
+                    login_credentials=login_credentials,
+                    yt_oldest_name=yt_oldest_name,
+                )
+                if shorts_count is not None:
+                    studio_kw["shorts_count"] = shorts_count
+                if like_probability_pct is not None:
+                    studio_kw["like_probability_pct"] = like_probability_pct
+                if subscribe_probability_pct is not None:
+                    studio_kw["subscribe_probability_pct"] = subscribe_probability_pct
+                if watch_horizontal_videos:
+                    studio_kw["watch_horizontal_videos"] = True
+                    studio_kw["horizontal_search_query"] = horizontal_search_query
+                if horizontal_videos_count is not None:
+                    studio_kw["horizontal_videos_count"] = horizontal_videos_count
+                run_youtube_shorts_warmup(page, **studio_kw)
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        _log(f"Ошибка прогрева Shorts: {type(e).__name__}: {e!r}")
+        raise LocalAntidetectError(f"Ошибка прогрева Shorts: {e}") from e
+    finally:
+        if session_id:
+            unregister_local_session(profile_id=profile_id)
+            try:
+                api.stop_session(session_id)
+            except Exception:
+                pass
+        try:
+            _log(
+                "Local antidetect: прогрев Shorts завершён за "
                 f"{time.perf_counter() - started_at:.1f} с."
             )
         except Exception:

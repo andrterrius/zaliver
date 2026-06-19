@@ -5693,7 +5693,6 @@ class MainWindow(QWidget):
             from zaliver.youtube_upload.multi_uploader import (
                 MultiProfileUploader,
                 VideoTask,
-                _UPLOAD_QUEUE_WATCHDOG_S,
             )
             from zaliver.youtube_upload.studio import _studio_canonical_watch_url
 
@@ -5850,22 +5849,9 @@ class MainWindow(QWidget):
             )
 
             def _run_mgr() -> None:
-                upload_watchdog_s = float(_UPLOAD_QUEUE_WATCHDOG_S)
-                deadline = time.monotonic() + upload_watchdog_s
                 try:
                     mgr.start()
                     while not mgr.is_finished() and not mgr.stop_requested():
-                        if time.monotonic() >= deadline:
-                            try:
-                                self._ui_log_line.emit(
-                                    f"[upload] Очередь не завершилась за "
-                                    f"{upload_watchdog_s / 3600:.1f} ч — принудительная остановка."
-                                )
-                            except Exception:
-                                pass
-                            mgr.stop(reason="watchdog")
-                            self._stop_upload_antidetect_profiles()
-                            break
                         time.sleep(0.5)
                     try:
                         mgr.join(timeout_s=120.0)

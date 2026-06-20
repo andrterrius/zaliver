@@ -4,7 +4,10 @@ import os
 import random
 import re
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse
 
@@ -103,6 +106,7 @@ class YoutubeAllChannelsRemovedError(YoutubeStudioError):
 
 
 _LOG_SINK = None
+_STUDIO_PROFILE_ID: ContextVar[str | None] = ContextVar("studio_profile_id", default=None)
 
 
 def set_log_sink(sink) -> None:
@@ -112,6 +116,41 @@ def set_log_sink(sink) -> None:
     """
     global _LOG_SINK
     _LOG_SINK = sink
+
+
+def set_studio_profile_id(profile_id: str | None) -> Token:
+    pid = (profile_id or "").strip() or None
+    return _STUDIO_PROFILE_ID.set(pid)
+
+
+def reset_studio_profile_id(token: Token) -> None:
+    _STUDIO_PROFILE_ID.reset(token)
+
+
+def get_studio_profile_id() -> str | None:
+    return _STUDIO_PROFILE_ID.get()
+
+
+@contextmanager
+def studio_profile_context(profile_id: str | None):
+    pid = (profile_id or "").strip() or None
+    if not pid:
+        yield
+        return
+    token = set_studio_profile_id(pid)
+    try:
+        yield
+    finally:
+        reset_studio_profile_id(token)
+
+
+def _studio_entrypoint(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with studio_profile_context(kwargs.get("profile_id")):
+            return fn(*args, **kwargs)
+
+    return wrapped
 
 
 def _studio_record_channel_name(rec: _ChannelJoinRecord) -> str:
@@ -135,7 +174,12 @@ def _studio_finalize_oldest_channel_name(
 
 
 def _log(message: str) -> None:
-    line = f"[youtube_studio] {message}"
+    from zaliver.log_format import format_log_line
+
+    line = format_log_line(
+        f"[youtube_studio] {message}",
+        profile_id=get_studio_profile_id(),
+    )
     sink = _LOG_SINK
     if sink is not None:
         try:
@@ -640,17 +684,10 @@ def _studio_try_fast_channel_pick(
     current_idx: int | None = None,
     on_oldest_channel_name=None,
 ) -> str | None:
-    """Один доступный канал или последний не удалённый в списке — без полного скана."""
-    only = _studio_try_select_only_available_channel(
+    """Один доступный канал в switcher — без полного скана по датам."""
+    return _studio_try_select_only_available_channel(
         page,
         accounts,
-        current_idx=current_idx,
-        on_oldest_channel_name=on_oldest_channel_name,
-    )
-    if only:
-        return only
-    return _studio_try_select_oldest_in_switcher_list(
-        page,
         current_idx=current_idx,
         on_oldest_channel_name=on_oldest_channel_name,
     )
@@ -2038,33 +2075,38 @@ def _studio_is_current_account_index(page, item_index: int) -> bool:
     return _studio_get_selected_account_index(page) == item_index
 
 
-def _studio_select_oldest_channel_for_upload(
-    page, *, login_credentials=None, on_oldest_channel_name=None
-) -> str:
+def _studio_resolve_open_channel_switch_index(
+    accounts: list[tuple[int, str]],
+    *,
+    current_idx: int | None,
+    about_name: str,
+) -> tuple[int | None, str]:
+    switch_name = about_name
+    if current_idx is not None:
+        for idx, name in accounts:
+            if idx == current_idx:
+                switch_name = name
+                break
+        return current_idx, switch_name
+    for idx, name in accounts:
+        if _studio_channel_names_match(name, about_name):
+            return idx, name
+    return None, about_name
+
+
+def _studio_probe_current_open_channel_join_info(
+    page,
+    accounts: list[tuple[int, str]],
+    current_idx: int | None,
+    records: list[_ChannelJoinRecord],
+    checked_indices: set[int],
+    *,
+    login_credentials=None,
+) -> int | None:
     """
-    Перед заливом/проверкой: самый старый канал в списке «Сменить аккаунт»
-    (последний не удалённый пункт) или полный обход по дате регистрации.
+    Главная YouTube → страница текущего открытого канала → год регистрации.
+    Без переключения аккаунтов; результат попадает в records / checked_indices.
     """
-    _log("Studio: выбор самого старого канала…")
-    _studio_goto_youtube_home(page, login_credentials=login_credentials)
-
-    records: list[_ChannelJoinRecord] = []
-    checked_indices: set[int] = set()
-    accounts: list[tuple[int, str]] = []
-    current_idx: int | None = None
-
-    accounts, current_idx = _studio_collect_account_switcher_channels_with_retry(page)
-
-    fast_pick = _studio_try_fast_channel_pick(
-        page,
-        accounts,
-        current_idx=current_idx,
-        on_oldest_channel_name=on_oldest_channel_name,
-    )
-    if fast_pick:
-        return fast_pick
-
-    _log("Studio: полный скан — ищем самый старый по дате регистрации…")
     if current_idx is not None:
         _log(f"Studio: текущий канал в switcher — позиция {current_idx + 1}.")
         try:
@@ -2074,16 +2116,15 @@ def _studio_select_oldest_channel_for_upload(
             if _studio_account_item_is_removed(item):
                 rem_name = _studio_account_item_channel_name(item) or f"#{current_idx + 1}"
                 _log(
-                    f"Studio: текущий канал «{rem_name}» удалён — "
-                    "пропускаем, проверяем остальные."
+                    f"Studio: в switcher канал «{rem_name}» помечен как удалённый — "
+                    "всё равно проверяем открытый канал по странице «О канале»."
                 )
-                checked_indices.add(current_idx)
-                current_idx = None
         except Exception:
             pass
         finally:
             _studio_dismiss_open_menus(page)
 
+    _log("Studio: проверяем текущий открытый канал (дата регистрации)…")
     info = _studio_read_current_channel_join_info(page)
     if _studio_channel_access_blocked(page):
         _log(
@@ -2095,28 +2136,72 @@ def _studio_select_oldest_channel_for_upload(
         _studio_recover_on_youtube_after_switch_failure(
             page, login_credentials=login_credentials
         )
-    elif info:
-        about_name, year = info
-        switch_name = about_name
-        if current_idx is not None:
-            checked_indices.add(current_idx)
-            for idx, name in accounts:
-                if idx == current_idx:
-                    switch_name = name
-                    break
-        if year is not None:
-            _studio_add_channel_join_record(
-                records,
-                _ChannelJoinRecord(
-                    switch_index=current_idx if current_idx is not None else 0,
-                    switch_name=switch_name,
-                    about_name=about_name,
-                    join_year=year,
-                ),
-            )
-            _log(f"Studio: канал «{about_name}» — год регистрации {year}.")
-        else:
-            _log(f"Studio: канал «{about_name}» — год регистрации не определён.")
+        return current_idx
+
+    if not info:
+        return current_idx
+
+    about_name, year = info
+    switch_index, switch_name = _studio_resolve_open_channel_switch_index(
+        accounts, current_idx=current_idx, about_name=about_name
+    )
+    if switch_index is not None:
+        checked_indices.add(switch_index)
+    if year is not None and switch_index is not None:
+        _studio_add_channel_join_record(
+            records,
+            _ChannelJoinRecord(
+                switch_index=switch_index,
+                switch_name=switch_name,
+                about_name=about_name,
+                join_year=year,
+            ),
+        )
+        _log(f"Studio: канал «{about_name}» — год регистрации {year}.")
+    elif year is not None:
+        _log(
+            f"Studio: канал «{about_name}» — год регистрации {year}, "
+            "но индекс в switcher не определён."
+        )
+    else:
+        _log(f"Studio: канал «{about_name}» — год регистрации не определён.")
+    return current_idx
+
+
+def _studio_select_oldest_channel_for_upload(
+    page, *, login_credentials=None, on_oldest_channel_name=None
+) -> str:
+    """
+    Перед заливом/проверкой: сначала дата регистрации текущего открытого канала,
+    затем полный обход остальных через «Сменить аккаунт» (или один канал без скана).
+    """
+    _log("Studio: выбор самого старого канала…")
+    _studio_goto_youtube_home(page, login_credentials=login_credentials)
+
+    records: list[_ChannelJoinRecord] = []
+    checked_indices: set[int] = set()
+    accounts: list[tuple[int, str]] = []
+    current_idx: int | None = None
+
+    accounts, current_idx = _studio_collect_account_switcher_channels_with_retry(page)
+
+    current_idx = _studio_probe_current_open_channel_join_info(
+        page,
+        accounts,
+        current_idx,
+        records,
+        checked_indices,
+        login_credentials=login_credentials,
+    )
+
+    fast_pick = _studio_try_fast_channel_pick(
+        page,
+        accounts,
+        current_idx=current_idx,
+        on_oldest_channel_name=on_oldest_channel_name,
+    )
+    if fast_pick:
+        return fast_pick
 
     if not accounts:
         if records:
@@ -2143,6 +2228,23 @@ def _studio_select_oldest_channel_for_upload(
             _studio_dismiss_open_menus(page)
         _log("Studio: «Сменить аккаунт» недоступно — продолжаем с текущим каналом.")
         return ""
+
+    if len(accounts) == 1:
+        if records:
+            best = min(records, key=lambda rec: rec.join_year)
+            _log(
+                f"Studio: один канал — используем «{best.about_name}» ({best.join_year})."
+            )
+            _studio_switch_to_oldest_channel_record(
+                page, best, login_credentials=login_credentials
+            )
+            return _studio_finalize_oldest_channel_name(
+                _studio_record_channel_name(best),
+                on_oldest_channel_name=on_oldest_channel_name,
+            )
+        return ""
+
+    _log("Studio: полный скан — ищем самый старый по дате регистрации…")
 
     for idx, switch_name in accounts:
         if idx in checked_indices:
@@ -3003,16 +3105,44 @@ def _studio_wait_upload_file_picker_visible(
     )
 
 
-def _studio_clear_contenteditable_like_user(page, contenteditable, *, right_slack: int = 8) -> None:
+_STUDIO_CONTENTEDITABLE_TEXT_JS = (
+    "(el) => (el && (el.innerText ?? el.textContent) "
+    "? String(el.innerText ?? el.textContent) : '')"
+)
+
+
+def _studio_read_contenteditable_text(contenteditable) -> str:
+    try:
+        return contenteditable.first.evaluate(_STUDIO_CONTENTEDITABLE_TEXT_JS) or ""
+    except Exception:
+        return ""
+
+
+def _studio_contenteditable_has_old_title_remnants(old_title: str, current: str) -> bool:
+    cur = (current or "").strip()
+    old = (old_title or "").strip()
+    if not cur or not old:
+        return False
+    if cur == old or cur in old or old in cur:
+        return True
+    for i in range(len(old)):
+        for j in range(i + 1, len(old) + 1):
+            if old[i:j] in cur:
+                return True
+    return False
+
+
+def _studio_clear_contenteditable_like_user(
+    page,
+    contenteditable,
+    *,
+    right_slack: int = 8,
+    backspace_extra: int = 0,
+) -> None:
     """
     Очистка contenteditable: читаем текст, End + запас вправо, Backspace по числу символов.
     """
-    try:
-        current = contenteditable.first.evaluate(
-            "(el) => (el && (el.innerText ?? el.textContent) ? String(el.innerText ?? el.textContent) : '')"
-        )
-    except Exception:
-        current = ""
+    current = _studio_read_contenteditable_text(contenteditable)
     n = len(current or "")
     try:
         page.keyboard.press("End")
@@ -3021,8 +3151,53 @@ def _studio_clear_contenteditable_like_user(page, contenteditable, *, right_slac
     except Exception:
         for _ in range(n + right_slack):
             page.keyboard.press("ArrowRight")
-    for _ in range(n):
+    for _ in range(n + backspace_extra):
         page.keyboard.press("Backspace")
+
+
+def _studio_clear_contenteditable_until_old_title_gone(
+    page,
+    contenteditable,
+    *,
+    old_title: str | None = None,
+    right_slack: int = 8,
+    backspace_extra: int = 0,
+    max_attempts: int = 10,
+) -> None:
+    """Очищает поле, пока от старого названия не останется ни символа."""
+    old = (old_title or "").strip()
+    for attempt in range(1, max_attempts + 1):
+        _studio_clear_contenteditable_like_user(
+            page,
+            contenteditable,
+            right_slack=right_slack,
+            backspace_extra=backspace_extra,
+        )
+        page.wait_for_timeout(80)
+        current = _studio_read_contenteditable_text(contenteditable)
+        cur = (current or "").strip()
+        if not cur:
+            break
+        if _studio_contenteditable_has_old_title_remnants(old, current):
+            _log(
+                f"Studio: от старого названия {old!r} осталось {cur!r} "
+                f"— повтор очистки {attempt}/{max_attempts}…"
+            )
+        else:
+            _log(
+                f"Studio: в поле «Название» остался текст {cur!r} "
+                f"— повтор очистки {attempt}/{max_attempts}…"
+            )
+    else:
+        _log(
+            f"Studio: предупреждение — лимит очистки ({max_attempts} попыток) исчерпан."
+        )
+
+    remaining = (_studio_read_contenteditable_text(contenteditable) or "").strip()
+    if remaining:
+        _log(f"Studio: после очистки в поле «Название» осталось: {remaining!r}")
+    else:
+        _log("Studio: после очистки поле «Название» пустое.")
 
 
 def _studio_fill_contenteditable_field(
@@ -3958,6 +4133,7 @@ def _studio_fill_channel_description_and_link(
     _studio_click_channel_customization_publish(page)
 
 
+@_studio_entrypoint
 def run_studio_channel_description_and_link(
     page,
     *,
@@ -3967,6 +4143,7 @@ def run_studio_channel_description_and_link(
     login_credentials=None,
     yt_oldest_name: str | None = None,
     on_oldest_channel_name=None,
+    profile_id: str | None = None,
 ) -> None:
     """Studio → «Настройка канала» → описание, ссылка → «Опубликовать»."""
     _studio_navigate_to_channel_customization(
@@ -3983,23 +4160,32 @@ def run_studio_channel_description_and_link(
     )
 
 
+@_studio_entrypoint
 def verify_studio_upload_dialog_available(
     page,
     *,
     login_credentials=None,
     yt_oldest_name: str | None = None,
     on_oldest_channel_name=None,
+    profile_id: str | None = None,
 ) -> str:
     """
     Проверка доступности YouTube Studio до окна загрузки (без выбора файла).
     Успех — видим ytcp-uploads-file-picker («Выбрать файлы»).
     Перед проверкой обходим все каналы аккаунта, выбираем самый старый по дате
     регистрации (Your channel → …more), затем Studio → Создать → Добавить видео.
+    Сохранённый yt_oldest_name не используется — всегда полный обход каналов.
     """
+    saved = (yt_oldest_name or "").strip()
+    if saved:
+        _log(
+            f"Studio: проверка доступности — сохранённый yt_oldest_name «{saved}» "
+            "игнорируем, обходим все каналы…"
+        )
     oldest = _studio_click_create_then_add_video(
         page,
         login_credentials=login_credentials,
-        yt_oldest_name=yt_oldest_name,
+        yt_oldest_name=None,
         on_oldest_channel_name=on_oldest_channel_name,
     )
     _log("Studio: окно загрузки видео доступно — проверка успешна.")
@@ -4408,32 +4594,6 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
         _log("Studio: метаданные (details) не видны — пропуск заполнения title/description.")
         return
 
-    def _clear_like_user(
-        contenteditable, *, right_slack: int = 8, backspace_extra: int = 0
-    ) -> None:
-        """
-        Очистка: читаем содержимое поля, ставим курсор в конец (End + запас вправо)
-        и нажимаем Backspace по числу символов (+ запас backspace_extra).
-        """
-        try:
-            current = contenteditable.first.evaluate(
-                "(el) => (el && (el.innerText ?? el.textContent) ? String(el.innerText ?? el.textContent) : '')"
-            )
-        except Exception:
-            current = ""
-        n = len(current or "")
-        # Фокус уже должен быть в поле.
-        try:
-            page.keyboard.press("End")
-            for _ in range(right_slack):
-                page.keyboard.press("ArrowRight")
-        except Exception:
-            # Иногда End не отрабатывает (layout/OS), тогда дожимаем стрелкой.
-            for _ in range(n + right_slack):
-                page.keyboard.press("ArrowRight")
-        for _ in range(n + backspace_extra):
-            page.keyboard.press("Backspace")
-
     def _fill(
         contenteditable,
         text: str,
@@ -4445,7 +4605,8 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
         contenteditable.first.wait_for(state="visible", timeout=60_000)
         contenteditable.first.click(timeout=30_000)
         if clear_first:
-            _clear_like_user(
+            _studio_clear_contenteditable_like_user(
+                page,
                 contenteditable,
                 right_slack=right_slack,
                 backspace_extra=backspace_extra,
@@ -4461,7 +4622,22 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
             .or_(editor.first.locator("#title-wrapper #textbox"))
             .or_(page.locator("ytcp-video-title #textbox"))
         )
-        _fill(title_box, t, clear_first=True, right_slack=10, backspace_extra=15)
+        title_box.first.wait_for(state="visible", timeout=60_000)
+        title_box.first.click(timeout=30_000)
+        old_title = _studio_read_contenteditable_text(title_box)
+        if (old_title or "").strip():
+            _log(
+                f"Studio: старое название в поле: {(old_title or '').strip()!r} — очистка…"
+            )
+        _studio_clear_contenteditable_until_old_title_gone(
+            page,
+            title_box,
+            old_title=old_title,
+            right_slack=10,
+            backspace_extra=15,
+        )
+        page.keyboard.type(t, delay=0)
+        page.wait_for_timeout(150)
 
     if d:
         _log("Studio: заполнение поля «Описание»…")
@@ -4974,6 +5150,7 @@ class UploadedStudioResult(dict):
     """
 
 
+@_studio_entrypoint
 def run_upload_latest_ready_video(
     *,
     page,
@@ -4985,6 +5162,7 @@ def run_upload_latest_ready_video(
     login_credentials=None,
     yt_oldest_name: str | None = None,
     on_oldest_channel_name=None,
+    profile_id: str | None = None,
 ) -> None:
     """
     Полный сценарий Studio: Create → Upload → ждать outcome → мастер → Publish.
@@ -5110,8 +5288,8 @@ _YOUTUBE_SEARCH_BUTTON_SELECTORS = (
     'button[aria-label="Поиск"]',
 )
 _SHORTS_WARMUP_DEFAULT_COUNT = 10
-_SHORTS_WARMUP_MIN_WATCH_S = 10.0
-_SHORTS_WARMUP_MAX_WATCH_S = 40.0
+_SHORTS_WARMUP_MIN_WATCH_S = 5.0
+_SHORTS_WARMUP_MAX_WATCH_S = 25.0
 _SHORTS_WARMUP_DEFAULT_LIKE_PROB_PCT = 10.0
 _SHORTS_WARMUP_DEFAULT_SUBSCRIBE_PROB_PCT = 10.0
 _SHORTS_LIKE_BTN_RE = re.compile(
@@ -5366,11 +5544,15 @@ def _studio_browse_youtube_shorts(
     count: int = _SHORTS_WARMUP_DEFAULT_COUNT,
     like_probability_pct: float = _SHORTS_WARMUP_DEFAULT_LIKE_PROB_PCT,
     subscribe_probability_pct: float = _SHORTS_WARMUP_DEFAULT_SUBSCRIBE_PROB_PCT,
+    min_watch_s: float = _SHORTS_WARMUP_MIN_WATCH_S,
+    max_watch_s: float = _SHORTS_WARMUP_MAX_WATCH_S,
 ) -> None:
-    """Просмотр count Shorts со случайной паузой 10–40 с на каждом."""
+    """Просмотр count Shorts со случайной паузой min_watch_s–max_watch_s на каждом."""
     n = max(1, int(count))
     like_prob = min(100.0, max(0.0, float(like_probability_pct)))
     subscribe_prob = min(100.0, max(0.0, float(subscribe_probability_pct)))
+    watch_min = max(0.1, float(min_watch_s))
+    watch_max = max(watch_min, float(max_watch_s))
 
     log_extra = ""
     if like_prob > 0:
@@ -5379,7 +5561,7 @@ def _studio_browse_youtube_shorts(
         log_extra += f", подписка {subscribe_prob:g}%"
     _log(
         f"Shorts: просмотр {n} роликов, "
-        f"{_SHORTS_WARMUP_MIN_WATCH_S:.0f}–{_SHORTS_WARMUP_MAX_WATCH_S:.0f} с на каждом"
+        f"{watch_min:.0f}–{watch_max:.0f} с на каждом"
         f" (лайк/подписка после просмотра{log_extra})…"
     )
     _studio_wait_shorts_feed_ready(page)
@@ -5412,9 +5594,7 @@ def _studio_browse_youtube_shorts(
             + (f" ({prev_id})" if prev_id else "")
         )
 
-        watch_s = random.uniform(
-            _SHORTS_WARMUP_MIN_WATCH_S, _SHORTS_WARMUP_MAX_WATCH_S
-        )
+        watch_s = random.uniform(watch_min, watch_max)
         _log(f"Shorts: смотрим ~{watch_s:.0f} с…")
         page.wait_for_timeout(int(watch_s * 1000))
         if like_prob > 0 and random.random() * 100.0 < like_prob:
@@ -5685,15 +5865,19 @@ def _studio_browse_horizontal_videos(
     _log(f"Горизонтальные видео: просмотрено {watched} из {n}.")
 
 
+@_studio_entrypoint
 def run_youtube_shorts_warmup(
     page,
     *,
     login_credentials=None,
     yt_oldest_name: str | None = None,
     on_oldest_channel_name=None,
+    profile_id: str | None = None,
     shorts_count: int = _SHORTS_WARMUP_DEFAULT_COUNT,
     like_probability_pct: float = _SHORTS_WARMUP_DEFAULT_LIKE_PROB_PCT,
     subscribe_probability_pct: float = _SHORTS_WARMUP_DEFAULT_SUBSCRIBE_PROB_PCT,
+    shorts_watch_min_s: float = _SHORTS_WARMUP_MIN_WATCH_S,
+    shorts_watch_max_s: float = _SHORTS_WARMUP_MAX_WATCH_S,
     watch_horizontal_videos: bool = False,
     horizontal_search_query: str | None = None,
     horizontal_videos_count: int = _HORIZONTAL_WARMUP_DEFAULT_COUNT,
@@ -5717,6 +5901,8 @@ def run_youtube_shorts_warmup(
         count=shorts_count,
         like_probability_pct=like_probability_pct,
         subscribe_probability_pct=subscribe_probability_pct,
+        min_watch_s=shorts_watch_min_s,
+        max_watch_s=shorts_watch_max_s,
     )
     if watch_horizontal_videos:
         query = (horizontal_search_query or "").strip()

@@ -51,6 +51,7 @@ from zaliver.ui.widgets import (
     SmoothSlider,
     ToggleSwitch,
     configure_log_splitter,
+    make_log_export_button,
 )
 
 _INT_MAX = 2_147_483_647
@@ -661,6 +662,16 @@ class SlicingTabPane(QWidget):
         self.log.setReadOnly(True)
         self.log.setMinimumHeight(220)
         self.log.setPlaceholderText("Лог…")
+        log_header = QHBoxLayout()
+        log_header.addStretch()
+        log_header.addWidget(
+            make_log_export_button(
+                self.log,
+                self,
+                default_filename="zaliver_slicing_log.txt",
+            )
+        )
+        rl.addLayout(log_header)
         rl.addWidget(self.log, 1)
 
         splitter.addWidget(scroll)

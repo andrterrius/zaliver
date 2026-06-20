@@ -100,6 +100,7 @@ from zaliver.ui.widgets import (
     SmoothSlider,
     ToggleSwitch,
     configure_log_splitter,
+    make_log_export_button,
 )
 from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
 from zaliver.ui.slicing_tab_pane import SlicingTabPane
@@ -740,6 +741,8 @@ class ShortsWarmupSettings(NamedTuple):
     shorts_count: int
     like_probability_pct: float
     subscribe_probability_pct: float
+    shorts_watch_min_s: int
+    shorts_watch_max_s: int
     watch_horizontal_videos: bool
     horizontal_search_query: str
     horizontal_videos_count: int
@@ -1450,6 +1453,16 @@ class MainWindow(QWidget):
         self.log.setReadOnly(True)
         self.log.setMinimumHeight(220)
         self.log.setPlaceholderText("Лог…")
+        log_header = QHBoxLayout()
+        log_header.addStretch()
+        log_header.addWidget(
+            make_log_export_button(
+                self.log,
+                self,
+                default_filename="zaliver_uniquify_log.txt",
+            )
+        )
+        rl.addLayout(log_header)
         rl.addWidget(self.log, 1)
 
         splitter.addWidget(scroll_left)
@@ -1758,7 +1771,8 @@ class MainWindow(QWidget):
         self._btn_profiles_warmup.setToolTip(
             "Только для отмеченных профилей: авторизация, выбор канала, "
             "затем просмотр ленты YouTube Shorts (пауза на каждом ролике, "
-            "случайные лайки, подписки и прокрутка вниз). Браузер с окном, до 5 параллельно."
+            "случайные лайки, подписки и прокрутка вниз). "
+            "Режим Headless из настроек, до 5 параллельно."
         )
         self._btn_profiles_warmup.clicked.connect(self._start_profiles_warmup)
         self._btn_profiles_clear_zaliver_tags = QPushButton("Очистить теги залива")
@@ -4106,6 +4120,21 @@ class MainWindow(QWidget):
         subscribe_spin.setSuffix(" %")
         subscribe_spin.setValue(10.0)
         form.addRow("Вероятность подписки:", subscribe_spin)
+
+        watch_range_row = QHBoxLayout()
+        watch_min_spin = QSpinBox()
+        watch_min_spin.setRange(1, 9999)
+        watch_min_spin.setValue(5)
+        watch_min_spin.setSuffix(" с")
+        watch_max_spin = QSpinBox()
+        watch_max_spin.setRange(1, 9999)
+        watch_max_spin.setValue(25)
+        watch_max_spin.setSuffix(" с")
+        watch_range_row.addWidget(watch_min_spin)
+        watch_range_row.addWidget(QLabel("—"))
+        watch_range_row.addWidget(watch_max_spin)
+        watch_range_row.addStretch()
+        form.addRow("Длительность просмотра Short:", watch_range_row)
         v.addLayout(form)
 
         horizontal_group = QGroupBox("Горизонтальные видео")
@@ -4156,6 +4185,14 @@ class MainWindow(QWidget):
         v.addLayout(row)
 
         def _try_accept() -> None:
+            if watch_min_spin.value() > watch_max_spin.value():
+                QMessageBox.warning(
+                    dlg,
+                    "Прогрев YouTube",
+                    "Минимальная длительность просмотра Short не может быть "
+                    "больше максимальной.",
+                )
+                return
             if watch_horizontal_cb.isChecked() and not search_edit.text().strip():
                 QMessageBox.warning(
                     dlg,
@@ -4174,6 +4211,8 @@ class MainWindow(QWidget):
             shorts_count=count_spin.value(),
             like_probability_pct=like_spin.value(),
             subscribe_probability_pct=subscribe_spin.value(),
+            shorts_watch_min_s=watch_min_spin.value(),
+            shorts_watch_max_s=watch_max_spin.value(),
             watch_horizontal_videos=watch_horizontal_cb.isChecked(),
             horizontal_search_query=(search_edit.text() or "").strip(),
             horizontal_videos_count=horizontal_count_spin.value(),
@@ -4364,16 +4403,25 @@ class MainWindow(QWidget):
         if not base_url and kind == "local":
             base_url = DEFAULT_LOCAL_API_BASE_URL
 
-        headless = False
+        headless = True
+        if hasattr(self, "_dolphin_headless"):
+            headless = bool(self._dolphin_headless.isChecked())
+        else:
+            headless = bool(
+                self._settings.value("antydetect/dolphin_headless", True, type=bool)
+            )
 
         self._profiles_warmup_running = True
         self._sync_profiles_tab_action_buttons()
         self._profiles_status.setText(
             f"Прогрев Shorts: 0 / {len(profile_ids)}…"
         )
+        headless_label = "headless" if headless else "с окном браузера"
         self._append_log(
             f"[warmup] Старт для {len(profile_ids)} профилей "
             f"(Shorts: {warmup_settings.shorts_count}, "
+            f"просмотр {warmup_settings.shorts_watch_min_s}–"
+            f"{warmup_settings.shorts_watch_max_s} с, "
             f"лайк {warmup_settings.like_probability_pct:g}%, "
             f"подписка {warmup_settings.subscribe_probability_pct:g}%"
             + (
@@ -4382,7 +4430,7 @@ class MainWindow(QWidget):
                 if warmup_settings.watch_horizontal_videos
                 else ""
             )
-            + ", с окном браузера, до 5 параллельно)…"
+            + f", {headless_label}, до 5 параллельно)…"
         )
 
         threading.Thread(
@@ -4428,6 +4476,8 @@ class MainWindow(QWidget):
                 "shorts_count": warmup_settings.shorts_count,
                 "like_probability_pct": warmup_settings.like_probability_pct,
                 "subscribe_probability_pct": warmup_settings.subscribe_probability_pct,
+                "shorts_watch_min_s": warmup_settings.shorts_watch_min_s,
+                "shorts_watch_max_s": warmup_settings.shorts_watch_max_s,
                 "watch_horizontal_videos": warmup_settings.watch_horizontal_videos,
                 "horizontal_search_query": warmup_settings.horizontal_search_query or None,
                 "horizontal_videos_count": warmup_settings.horizontal_videos_count,
@@ -6244,13 +6294,17 @@ class MainWindow(QWidget):
             self._append_log(msg)
 
     def _append_log(self, line: str) -> None:
-        self.log.appendPlainText(line)
+        from zaliver.log_format import format_log_line
+
+        self.log.appendPlainText(format_log_line(line))
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
 
     def _append_slice_log(self, line: str) -> None:
+        from zaliver.log_format import format_log_line
+
         if not hasattr(self, "_slice_tab"):
             return
-        self._slice_tab.log.appendPlainText(line)
+        self._slice_tab.log.appendPlainText(format_log_line(line))
         bar = self._slice_tab.log.verticalScrollBar()
         bar.setValue(bar.maximum())
 

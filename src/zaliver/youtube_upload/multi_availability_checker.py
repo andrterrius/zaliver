@@ -5,6 +5,7 @@ import time
 from queue import Empty, Queue
 from typing import Callable
 
+from zaliver.log_format import log_profile_context
 from zaliver.youtube_upload.multi_uploader import _MAX_CONCURRENT_UPLOADS
 
 # Проверка доступности Studio — отдельный лимит параллельных профилей.
@@ -110,7 +111,8 @@ class MultiProfileAvailabilityChecker:
             ok = False
             try:
                 if not self._stop.is_set():
-                    self._check_one(pid)
+                    with log_profile_context(pid):
+                        self._check_one(pid)
                     ok = True
             except Exception as e:
                 err = str(e).strip() or repr(e)

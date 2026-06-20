@@ -7,6 +7,7 @@ from playwright.sync_api import Error as PlaywrightError
 from patchright.sync_api import sync_playwright
 
 from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI
+from zaliver.log_format import with_log_profile
 from zaliver.youtube_upload.studio import (
     YoutubeAllChannelsRemovedError,
     YoutubeStudioError,
@@ -79,6 +80,7 @@ def _local_studio_workflow_kwargs(
     yt_oldest_name: str | None = None,
 ) -> dict:
     return {
+        "profile_id": profile_id,
         "login_credentials": login_credentials,
         "yt_oldest_name": (yt_oldest_name or "").strip() or None,
         "on_oldest_channel_name": _make_save_yt_oldest_name_handler(api, profile_id),
@@ -125,6 +127,7 @@ def _playwright_page_from_cdp(p, endpoint_candidates: tuple[str, ...]):
     return browser, context, page
 
 
+@with_log_profile
 def check_studio_availability_in_profile(
     profile_id: str,
     *,
@@ -159,6 +162,7 @@ def check_studio_availability_in_profile(
             try:
                 verify_studio_upload_dialog_available(
                     page,
+                    profile_id=profile_id,
                     login_credentials=login_credentials,
                     yt_oldest_name=yt_oldest_name,
                 )
@@ -179,6 +183,7 @@ def check_studio_availability_in_profile(
         api.close()
 
 
+@with_log_profile
 def check_studio_availability_in_local_antidetect_profile(
     profile_id: str,
     *,
@@ -248,6 +253,7 @@ def check_studio_availability_in_local_antidetect_profile(
         api.close()
 
 
+@with_log_profile
 def fill_channel_description_and_link_in_profile(
     profile_id: str,
     *,
@@ -283,6 +289,7 @@ def fill_channel_description_and_link_in_profile(
             try:
                 run_studio_channel_description_and_link(
                     page,
+                    profile_id=profile_id,
                     description=description,
                     link_title=link_title,
                     link_url=link_url,
@@ -305,6 +312,7 @@ def fill_channel_description_and_link_in_profile(
         api.close()
 
 
+@with_log_profile
 def fill_channel_description_and_link_in_local_antidetect_profile(
     profile_id: str,
     *,
@@ -386,6 +394,7 @@ def fill_channel_description_and_link_in_local_antidetect_profile(
         api.close()
 
 
+@with_log_profile
 def warmup_youtube_shorts_in_profile(
     profile_id: str,
     *,
@@ -396,6 +405,8 @@ def warmup_youtube_shorts_in_profile(
     shorts_count: int | None = None,
     like_probability_pct: float | None = None,
     subscribe_probability_pct: float | None = None,
+    shorts_watch_min_s: float | None = None,
+    shorts_watch_max_s: float | None = None,
     watch_horizontal_videos: bool = False,
     horizontal_search_query: str | None = None,
     horizontal_videos_count: int | None = None,
@@ -423,6 +434,7 @@ def warmup_youtube_shorts_in_profile(
             )
             try:
                 kw: dict = {
+                    "profile_id": profile_id,
                     "login_credentials": login_credentials,
                     "yt_oldest_name": yt_oldest_name,
                 }
@@ -432,6 +444,10 @@ def warmup_youtube_shorts_in_profile(
                     kw["like_probability_pct"] = like_probability_pct
                 if subscribe_probability_pct is not None:
                     kw["subscribe_probability_pct"] = subscribe_probability_pct
+                if shorts_watch_min_s is not None:
+                    kw["shorts_watch_min_s"] = shorts_watch_min_s
+                if shorts_watch_max_s is not None:
+                    kw["shorts_watch_max_s"] = shorts_watch_max_s
                 if watch_horizontal_videos:
                     kw["watch_horizontal_videos"] = True
                     kw["horizontal_search_query"] = horizontal_search_query
@@ -454,6 +470,7 @@ def warmup_youtube_shorts_in_profile(
         api.close()
 
 
+@with_log_profile
 def warmup_youtube_shorts_in_local_antidetect_profile(
     profile_id: str,
     *,
@@ -464,6 +481,8 @@ def warmup_youtube_shorts_in_local_antidetect_profile(
     shorts_count: int | None = None,
     like_probability_pct: float | None = None,
     subscribe_probability_pct: float | None = None,
+    shorts_watch_min_s: float | None = None,
+    shorts_watch_max_s: float | None = None,
     watch_horizontal_videos: bool = False,
     horizontal_search_query: str | None = None,
     horizontal_videos_count: int | None = None,
@@ -510,6 +529,10 @@ def warmup_youtube_shorts_in_local_antidetect_profile(
                     studio_kw["like_probability_pct"] = like_probability_pct
                 if subscribe_probability_pct is not None:
                     studio_kw["subscribe_probability_pct"] = subscribe_probability_pct
+                if shorts_watch_min_s is not None:
+                    studio_kw["shorts_watch_min_s"] = shorts_watch_min_s
+                if shorts_watch_max_s is not None:
+                    studio_kw["shorts_watch_max_s"] = shorts_watch_max_s
                 if watch_horizontal_videos:
                     studio_kw["watch_horizontal_videos"] = True
                     studio_kw["horizontal_search_query"] = horizontal_search_query
@@ -541,6 +564,7 @@ def warmup_youtube_shorts_in_local_antidetect_profile(
         api.close()
 
 
+@with_log_profile
 def open_google_in_profile(
     profile_id: str,
     *,
@@ -589,6 +613,7 @@ def open_google_in_profile(
                     res = run_upload_latest_ready_video(
                         page=page,
                         browser=browser,
+                        profile_id=profile_id,
                         zaliver_db_path=zaliver_db_path,
                         video_path=video_path,
                         title=title,
@@ -625,6 +650,7 @@ def open_google_in_profile(
         api.close()
 
 
+@with_log_profile
 def open_google_in_local_antidetect_profile(
     profile_id: str,
     *,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PyQt6.QtCore import (
     QEasingCurve,
     QObject,
@@ -13,7 +15,10 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QColor, QLinearGradient, QPainter, QPen
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QFileDialog,
+    QMessageBox,
     QProgressBar,
+    QPushButton,
     QSizePolicy,
     QSlider,
     QSplitter,
@@ -28,6 +33,39 @@ from PyQt6.QtWidgets import (
 LOG_PANEL_MAX_WIDTH = 300
 LOG_PANEL_MIN_WIDTH = 200
 FORM_PANEL_MIN_WIDTH = 580
+
+
+def make_log_export_button(
+    log_widget: QWidget,
+    parent: QWidget,
+    *,
+    default_filename: str = "zaliver_log.txt",
+) -> QPushButton:
+    """Кнопка «Экспорт логов» — сохраняет plain text из QPlainTextEdit в .txt."""
+
+    def _export() -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            parent,
+            "Экспорт логов",
+            default_filename,
+            "Текстовые файлы (*.txt);;Все файлы (*.*)",
+        )
+        if not path:
+            return
+        try:
+            text = log_widget.toPlainText()  # type: ignore[attr-defined]
+            Path(path).write_text(text, encoding="utf-8")
+        except OSError as e:
+            QMessageBox.warning(
+                parent,
+                "Экспорт логов",
+                f"Не удалось сохранить файл:\n{e}",
+            )
+
+    btn = QPushButton("Экспорт логов")
+    btn.setObjectName("secondary")
+    btn.clicked.connect(_export)
+    return btn
 
 
 def configure_log_splitter(

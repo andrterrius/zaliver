@@ -6,13 +6,15 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
 from queue import Empty, Queue
 from typing import Callable, Dict, Iterable, Optional
 
 
+from zaliver.log_format import log_timestamp
+
+
 def _ts() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return log_timestamp()
 
 
 @dataclass(slots=True)
@@ -312,6 +314,12 @@ class MultiProfileUploader:
                 break
 
     def _worker_loop(self, profile_id: str) -> None:
+        from zaliver.log_format import log_profile_context
+
+        with log_profile_context(profile_id):
+            self._worker_loop_inner(profile_id)
+
+    def _worker_loop_inner(self, profile_id: str) -> None:
         q = self._per_profile_q[profile_id]
         while not self._stop.is_set():
             try:

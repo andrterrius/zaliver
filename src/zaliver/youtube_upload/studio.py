@@ -1076,27 +1076,41 @@ def _studio_handle_channel_removed_if_present(page) -> bool:
     return True
 
 
-def _studio_goto_youtube_home(page, *, login_credentials=None) -> None:
+def _studio_goto_youtube_home(
+    page, *, login_credentials=None, for_channel_scan: bool = True
+) -> None:
     _studio_wait_for_google_session(page, login_credentials=login_credentials)
     try:
         # studio.youtube.com тоже содержит «youtube.com» — нужен именно основной сайт.
         on_youtube = "www.youtube.com" in (page.url or "").lower()
     except Exception:
         on_youtube = False
+    if for_channel_scan:
+        goto_reason = "для проверки каналов"
+        already_reason = "проверка каналов"
+    else:
+        goto_reason = "перед переходом в Studio"
+        already_reason = "переход в Studio"
     if not on_youtube:
-        _log("Studio: переход на https://www.youtube.com/ для проверки каналов…")
+        _log(f"Studio: переход на https://www.youtube.com/ {goto_reason}…")
         page.goto(
             "https://www.youtube.com/",
-            wait_until="domcontentloaded",
-            timeout=120_000,
+            wait_until="domcontentloaded" if for_channel_scan else "commit",
+            timeout=120_000 if for_channel_scan else 45_000,
         )
+        if not for_channel_scan:
+            _log("Studio: главная youtube.com открыта.")
+            return
     else:
-        _log("Studio: уже на youtube.com — проверка каналов…")
+        _log(f"Studio: уже на youtube.com — {already_reason}…")
+        if not for_channel_scan:
+            return
     _studio_try_google_login_if_needed(page, login_credentials)
     if _studio_on_google_auth_page(page):
         _studio_wait_for_google_session(page, login_credentials=login_credentials)
-    avatar = _studio_avatar_locator(page)
-    avatar.first.wait_for(state="visible", timeout=60_000)
+    if for_channel_scan:
+        avatar = _studio_avatar_locator(page)
+        avatar.first.wait_for(state="visible", timeout=60_000)
 
 
 def _studio_normalize_youtube_channel_href(href: str) -> str:
@@ -2422,18 +2436,43 @@ def _studio_try_match_expected_channel_in_studio(
     return False
 
 
+def _studio_ensure_current_channel_in_studio(
+    page, *, login_credentials=None
+) -> str:
+    """Главная YouTube → Studio без переключения канала."""
+    _log(
+        "Studio: поиск старого канала отключён — "
+        "текущий канал без переключения (youtube.com → Studio)…"
+    )
+    _studio_goto_youtube_home(
+        page, login_credentials=login_credentials, for_channel_scan=False
+    )
+    _studio_goto_studio_if_needed(
+        page, login_credentials=login_credentials, quick=True
+    )
+    _log("Studio: Studio открыт — текущий канал без переключения.")
+    return ""
+
+
 def _studio_ensure_correct_studio_channel(
     page,
     *,
     yt_oldest_name: str | None = None,
     login_credentials=None,
     on_oldest_channel_name=None,
+    search_oldest_channel: bool = True,
 ) -> str:
     """
     YouTube → выбор самого старого канала → Studio.
     Если yt_oldest_name задан и в Studio уже тот же канал — переключение не делаем.
     Иначе переключаем канал на youtube.com, затем открываем Studio и сверяем #entity-name.
+    При search_oldest_channel=False — только youtube.com → Studio на текущем канале.
     """
+    if not search_oldest_channel:
+        return _studio_ensure_current_channel_in_studio(
+            page, login_credentials=login_credentials
+        )
+
     expected = (yt_oldest_name or "").strip()
 
     if expected and _studio_try_match_expected_channel_in_studio(
@@ -2947,7 +2986,9 @@ def _studio_prepare_studio_dashboard(page, *, login_credentials=None) -> None:
     _studio_handle_onboarding_dialogs_if_present(page)
 
 
-def _studio_goto_studio_if_needed(page, *, login_credentials=None) -> None:
+def _studio_goto_studio_if_needed(
+    page, *, login_credentials=None, quick: bool = False
+) -> None:
     """Открыть studio.youtube.com без ожидания кнопки «Создать»."""
     if _studio_page_on_studio_home(page) and not _studio_on_google_auth_page(page):
         return
@@ -2957,10 +2998,15 @@ def _studio_goto_studio_if_needed(page, *, login_credentials=None) -> None:
         _log("Studio: переход на https://studio.youtube.com/ …")
         page.goto(
             "https://studio.youtube.com/",
-            wait_until="domcontentloaded",
-            timeout=90_000,
+            wait_until="commit" if quick else "domcontentloaded",
+            timeout=45_000 if quick else 90_000,
         )
-    if _studio_on_google_auth_page(page) or _studio_login_required(page):
+        if quick:
+            _log("Studio: studio.youtube.com открыт.")
+    if quick:
+        if _studio_on_google_auth_page(page):
+            _studio_try_google_login_if_needed(page, login_credentials)
+    elif _studio_on_google_auth_page(page) or _studio_login_required(page):
         _studio_try_google_login_if_needed(page, login_credentials)
     _studio_handle_channel_removed_if_present(page)
 
@@ -3018,6 +3064,7 @@ def _studio_click_create_then_add_video(
     login_credentials=None,
     yt_oldest_name: str | None = None,
     on_oldest_channel_name=None,
+    search_oldest_channel: bool = True,
 ) -> str:
     """
     studio.youtube.com → кнопка «Создать» (ytcp-button-shape) → меню ytcp-text-menu
@@ -3029,6 +3076,7 @@ def _studio_click_create_then_add_video(
         yt_oldest_name=yt_oldest_name,
         login_credentials=login_credentials,
         on_oldest_channel_name=on_oldest_channel_name,
+        search_oldest_channel=search_oldest_channel,
     )
     create = _studio_resolve_create_button(page, login_credentials=login_credentials)
     if not _studio_page_on_studio_home(page):
@@ -3225,6 +3273,7 @@ def _studio_navigate_to_channel_customization(
     login_credentials=None,
     yt_oldest_name: str | None = None,
     on_oldest_channel_name=None,
+    search_oldest_channel: bool = True,
 ) -> None:
     """Studio → «Настройка канала» (тот же путь входа, что проверка доступности)."""
     _studio_ensure_correct_studio_channel(
@@ -3232,6 +3281,7 @@ def _studio_navigate_to_channel_customization(
         yt_oldest_name=yt_oldest_name,
         login_credentials=login_credentials,
         on_oldest_channel_name=on_oldest_channel_name,
+        search_oldest_channel=search_oldest_channel,
     )
     _studio_prepare_studio_dashboard(page, login_credentials=login_credentials)
     _log("Studio: переход в «Настройка канала» / Customization…")
@@ -4143,6 +4193,7 @@ def run_studio_channel_description_and_link(
     login_credentials=None,
     yt_oldest_name: str | None = None,
     on_oldest_channel_name=None,
+    search_oldest_channel: bool = True,
     profile_id: str | None = None,
 ) -> None:
     """Studio → «Настройка канала» → описание, ссылка → «Опубликовать»."""
@@ -4151,6 +4202,7 @@ def run_studio_channel_description_and_link(
         login_credentials=login_credentials,
         yt_oldest_name=yt_oldest_name,
         on_oldest_channel_name=on_oldest_channel_name,
+        search_oldest_channel=search_oldest_channel,
     )
     _studio_fill_channel_description_and_link(
         page,
@@ -4167,17 +4219,17 @@ def verify_studio_upload_dialog_available(
     login_credentials=None,
     yt_oldest_name: str | None = None,
     on_oldest_channel_name=None,
+    search_oldest_channel: bool = True,
     profile_id: str | None = None,
 ) -> str:
     """
     Проверка доступности YouTube Studio до окна загрузки (без выбора файла).
     Успех — видим ytcp-uploads-file-picker («Выбрать файлы»).
-    Перед проверкой обходим все каналы аккаунта, выбираем самый старый по дате
-    регистрации (Your channel → …more), затем Studio → Создать → Добавить видео.
-    Сохранённый yt_oldest_name не используется — всегда полный обход каналов.
+    При search_oldest_channel=True: обход каналов, выбор самого старого.
+    При search_oldest_channel=False: текущий канал без переключения.
     """
     saved = (yt_oldest_name or "").strip()
-    if saved:
+    if search_oldest_channel and saved:
         _log(
             f"Studio: проверка доступности — сохранённый yt_oldest_name «{saved}» "
             "игнорируем, обходим все каналы…"
@@ -4185,8 +4237,9 @@ def verify_studio_upload_dialog_available(
     oldest = _studio_click_create_then_add_video(
         page,
         login_credentials=login_credentials,
-        yt_oldest_name=None,
+        yt_oldest_name=None if search_oldest_channel else yt_oldest_name,
         on_oldest_channel_name=on_oldest_channel_name,
+        search_oldest_channel=search_oldest_channel,
     )
     _log("Studio: окно загрузки видео доступно — проверка успешна.")
     return oldest
@@ -5162,6 +5215,7 @@ def run_upload_latest_ready_video(
     login_credentials=None,
     yt_oldest_name: str | None = None,
     on_oldest_channel_name=None,
+    search_oldest_channel: bool = True,
     profile_id: str | None = None,
 ) -> None:
     """
@@ -5176,6 +5230,7 @@ def run_upload_latest_ready_video(
             login_credentials=login_credentials,
             yt_oldest_name=yt_oldest_name,
             on_oldest_channel_name=on_oldest_channel_name,
+            search_oldest_channel=search_oldest_channel,
         )
     except YoutubeAllChannelsRemovedError:
         _studio_abort_all_channels_removed(page, browser=browser)
@@ -5420,6 +5475,50 @@ def _studio_dismiss_shorts_player_overlays(page) -> None:
                 return
         except Exception:
             continue
+
+
+def _studio_page_on_youtube_shorts(page) -> bool:
+    try:
+        url = (page.url or "").lower()
+        return "www.youtube.com" in url and "/shorts" in url
+    except Exception:
+        return False
+
+
+def _studio_goto_youtube_shorts_feed(page, *, login_credentials=None) -> None:
+    """Открыть ленту YouTube Shorts (не из Studio — иначе goto часто не срабатывает)."""
+    if _studio_page_on_youtube_shorts(page):
+        _log(f"Shorts: уже на ленте — URL={page.url!r}")
+    else:
+        _log(f"Shorts: переход на {_YOUTUBE_SHORTS_FEED_URL}…")
+        last_url = ""
+        for attempt in range(1, 4):
+            try:
+                page.goto(
+                    _YOUTUBE_SHORTS_FEED_URL,
+                    wait_until="commit",
+                    timeout=45_000,
+                )
+            except Exception as e:
+                _log(f"Shorts: goto попытка {attempt}/3: {e!r}")
+            page.wait_for_timeout(600)
+            try:
+                last_url = page.url or ""
+            except Exception:
+                last_url = ""
+            if _studio_page_on_youtube_shorts(page):
+                _log(f"Shorts: лента открыта — URL={last_url!r}")
+                break
+            if attempt < 3:
+                _log(f"Shorts: URL не лента Shorts ({last_url!r}) — повтор…")
+        else:
+            raise YoutubeStudioError(
+                f"Shorts: не удалось открыть ленту Shorts (URL={last_url!r})."
+            )
+    _studio_try_google_login_if_needed(page, login_credentials)
+    if _studio_on_google_auth_page(page):
+        _studio_wait_for_google_session(page, login_credentials=login_credentials)
+    _studio_wait_shorts_feed_ready(page)
 
 
 def _studio_wait_shorts_feed_ready(page) -> None:
@@ -5872,6 +5971,7 @@ def run_youtube_shorts_warmup(
     login_credentials=None,
     yt_oldest_name: str | None = None,
     on_oldest_channel_name=None,
+    search_oldest_channel: bool = True,
     profile_id: str | None = None,
     shorts_count: int = _SHORTS_WARMUP_DEFAULT_COUNT,
     like_probability_pct: float = _SHORTS_WARMUP_DEFAULT_LIKE_PROB_PCT,
@@ -5883,19 +5983,23 @@ def run_youtube_shorts_warmup(
     horizontal_videos_count: int = _HORIZONTAL_WARMUP_DEFAULT_COUNT,
 ) -> None:
     """Авторизация, выбор канала → лента Shorts → просмотр с прокруткой."""
-    _studio_ensure_correct_studio_channel(
-        page,
-        yt_oldest_name=yt_oldest_name,
-        login_credentials=login_credentials,
-        on_oldest_channel_name=on_oldest_channel_name,
-    )
-    _log(f"Shorts: переход на {_YOUTUBE_SHORTS_FEED_URL}…")
-    page.goto(
-        _YOUTUBE_SHORTS_FEED_URL,
-        wait_until="domcontentloaded",
-        timeout=120_000,
-    )
-    _studio_try_google_login_if_needed(page, login_credentials)
+    if search_oldest_channel:
+        _studio_ensure_correct_studio_channel(
+            page,
+            yt_oldest_name=yt_oldest_name,
+            login_credentials=login_credentials,
+            on_oldest_channel_name=on_oldest_channel_name,
+            search_oldest_channel=True,
+        )
+    else:
+        _log(
+            "Shorts: поиск старого канала отключён — "
+            "youtube.com → лента Shorts (без Studio)…"
+        )
+        _studio_goto_youtube_home(
+            page, login_credentials=login_credentials, for_channel_scan=False
+        )
+    _studio_goto_youtube_shorts_feed(page, login_credentials=login_credentials)
     _studio_browse_youtube_shorts(
         page,
         count=shorts_count,

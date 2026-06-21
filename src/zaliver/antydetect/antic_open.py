@@ -78,13 +78,17 @@ def _local_studio_workflow_kwargs(
     *,
     login_credentials=None,
     yt_oldest_name: str | None = None,
+    search_oldest_channel: bool = True,
 ) -> dict:
-    return {
+    kw: dict = {
         "profile_id": profile_id,
         "login_credentials": login_credentials,
         "yt_oldest_name": (yt_oldest_name or "").strip() or None,
-        "on_oldest_channel_name": _make_save_yt_oldest_name_handler(api, profile_id),
+        "search_oldest_channel": search_oldest_channel,
     }
+    if search_oldest_channel:
+        kw["on_oldest_channel_name"] = _make_save_yt_oldest_name_handler(api, profile_id)
+    return kw
 
 
 def _playwright_page_from_cdp(p, endpoint_candidates: tuple[str, ...]):
@@ -135,6 +139,7 @@ def check_studio_availability_in_profile(
     headless: bool = True,
     login_credentials=None,
     yt_oldest_name: str | None = None,
+    search_oldest_channel: bool = True,
 ) -> None:
     """
     Запуск профиля Dolphin → Studio → окно «Добавить видео» (без загрузки файла).
@@ -165,6 +170,7 @@ def check_studio_availability_in_profile(
                     profile_id=profile_id,
                     login_credentials=login_credentials,
                     yt_oldest_name=yt_oldest_name,
+                    search_oldest_channel=search_oldest_channel,
                 )
                 _studio_dismiss_upload_dialog(page)
             finally:
@@ -191,6 +197,7 @@ def check_studio_availability_in_local_antidetect_profile(
     headless: bool = True,
     login_credentials=None,
     yt_oldest_name: str | None = None,
+    search_oldest_channel: bool = True,
 ) -> None:
     """Локальный антидетект → Studio → окно загрузки (без файла)."""
     _log(
@@ -228,6 +235,7 @@ def check_studio_availability_in_local_antidetect_profile(
                     profile_id,
                     login_credentials=login_credentials,
                     yt_oldest_name=yt_oldest_name,
+                    search_oldest_channel=search_oldest_channel,
                 )
                 verify_studio_upload_dialog_available(page, **studio_kw)
                 _studio_dismiss_upload_dialog(page)
@@ -264,6 +272,7 @@ def fill_channel_description_and_link_in_profile(
     headless: bool = True,
     login_credentials=None,
     yt_oldest_name: str | None = None,
+    search_oldest_channel: bool = True,
 ) -> None:
     """Dolphin → Studio → «Настройка канала» → описание и ссылка."""
     _log(
@@ -295,6 +304,7 @@ def fill_channel_description_and_link_in_profile(
                     link_url=link_url,
                     login_credentials=login_credentials,
                     yt_oldest_name=yt_oldest_name,
+                    search_oldest_channel=search_oldest_channel,
                 )
             finally:
                 try:
@@ -323,6 +333,7 @@ def fill_channel_description_and_link_in_local_antidetect_profile(
     headless: bool = True,
     login_credentials=None,
     yt_oldest_name: str | None = None,
+    search_oldest_channel: bool = True,
 ) -> None:
     """Локальный антидетект → Studio → «Настройка канала» → описание и ссылка."""
     _log(
@@ -359,6 +370,7 @@ def fill_channel_description_and_link_in_local_antidetect_profile(
                     profile_id,
                     login_credentials=login_credentials,
                     yt_oldest_name=yt_oldest_name,
+                    search_oldest_channel=search_oldest_channel,
                 )
                 run_studio_channel_description_and_link(
                     page,
@@ -402,6 +414,7 @@ def warmup_youtube_shorts_in_profile(
     headless: bool = True,
     login_credentials=None,
     yt_oldest_name: str | None = None,
+    search_oldest_channel: bool = True,
     shorts_count: int | None = None,
     like_probability_pct: float | None = None,
     subscribe_probability_pct: float | None = None,
@@ -437,6 +450,7 @@ def warmup_youtube_shorts_in_profile(
                     "profile_id": profile_id,
                     "login_credentials": login_credentials,
                     "yt_oldest_name": yt_oldest_name,
+                    "search_oldest_channel": search_oldest_channel,
                 }
                 if shorts_count is not None:
                     kw["shorts_count"] = shorts_count
@@ -478,6 +492,7 @@ def warmup_youtube_shorts_in_local_antidetect_profile(
     headless: bool = True,
     login_credentials=None,
     yt_oldest_name: str | None = None,
+    search_oldest_channel: bool = True,
     shorts_count: int | None = None,
     like_probability_pct: float | None = None,
     subscribe_probability_pct: float | None = None,
@@ -522,6 +537,7 @@ def warmup_youtube_shorts_in_local_antidetect_profile(
                     profile_id,
                     login_credentials=login_credentials,
                     yt_oldest_name=yt_oldest_name,
+                    search_oldest_channel=search_oldest_channel,
                 )
                 if shorts_count is not None:
                     studio_kw["shorts_count"] = shorts_count
@@ -577,6 +593,7 @@ def open_google_in_profile(
     description: str | None = None,
     login_credentials=None,
     yt_oldest_name: str | None = None,
+    search_oldest_channel: bool = True,
 ) -> dict | None:
     """
     Запуск профиля через Dolphin Local API + Playwright CDP.
@@ -620,6 +637,7 @@ def open_google_in_profile(
                         description=description,
                         login_credentials=login_credentials,
                         yt_oldest_name=yt_oldest_name,
+                        search_oldest_channel=search_oldest_channel,
                     )
                     return res
                 else:
@@ -663,6 +681,7 @@ def open_google_in_local_antidetect_profile(
     description: str | None = None,
     login_credentials=None,
     yt_oldest_name: str | None = None,
+    search_oldest_channel: bool = True,
 ) -> dict | None:
     """
     Запуск профиля через локальный HTTP API (см. OpenAPI антидетекта: launch + опрос сессии на cdp_ws_url),
@@ -722,6 +741,7 @@ def open_google_in_local_antidetect_profile(
                             profile_id,
                             login_credentials=login_credentials,
                             yt_oldest_name=yt_oldest_name,
+                            search_oldest_channel=search_oldest_channel,
                         )
 
                         def _run_upload():

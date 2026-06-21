@@ -1932,6 +1932,16 @@ class MainWindow(QWidget):
         )
         self._youtube_show_key = QCheckBox("Показать ключ")
         self._youtube_show_key.stateChanged.connect(self._on_youtube_show_key_changed)
+        self._youtube_search_oldest = QCheckBox("Искать старый канал")
+        self._youtube_search_oldest.setChecked(True)
+        self._youtube_search_oldest.setToolTip(
+            "Если включено — перед заливом и проверкой Studio ищется самый старый канал "
+            "или проверяется, что открыт сохранённый yt_oldest_name.\n"
+            "Если выключено — используется текущий открытый канал без переключения."
+        )
+        self._youtube_search_oldest.stateChanged.connect(
+            self._on_youtube_search_oldest_changed
+        )
         self._btn_save_youtube = QPushButton("Сохранить ключ")
         self._btn_save_youtube.setObjectName("secondary")
         self._btn_save_youtube.clicked.connect(self._save_youtube_settings)
@@ -1942,13 +1952,14 @@ class MainWindow(QWidget):
         gy.addWidget(QLabel("API key (для статистики):"), 0, 0)
         gy.addWidget(self._youtube_api_key, 0, 1)
         gy.addWidget(self._youtube_show_key, 1, 0, 1, 2)
+        gy.addWidget(self._youtube_search_oldest, 2, 0, 1, 2)
         yt_btns = QHBoxLayout()
         yt_btns.addStretch()
         yt_btns.addWidget(self._btn_save_youtube)
         w_yt_btns = QWidget()
         w_yt_btns.setLayout(yt_btns)
-        gy.addWidget(w_yt_btns, 2, 0, 1, 2)
-        gy.addWidget(self._youtube_settings_status, 3, 0, 1, 2)
+        gy.addWidget(w_yt_btns, 3, 0, 1, 2)
+        gy.addWidget(self._youtube_settings_status, 4, 0, 1, 2)
 
         settings_l.addWidget(settings_title)
         settings_l.addWidget(settings_hint)
@@ -3408,6 +3419,13 @@ class MainWindow(QWidget):
         self._youtube_api_key.setText(key)
         if key:
             os.environ["YOUTUBE_API_KEY"] = key
+        if hasattr(self, "_youtube_search_oldest"):
+            search_oldest = self._settings.value(
+                "youtube/search_oldest_channel", True, type=bool
+            )
+            self._youtube_search_oldest.blockSignals(True)
+            self._youtube_search_oldest.setChecked(bool(search_oldest))
+            self._youtube_search_oldest.blockSignals(False)
         if hasattr(self, "_stats_server_username"):
             gu = (
                 self._settings.value("stats_server/username", "", type=str) or ""
@@ -3514,6 +3532,25 @@ class MainWindow(QWidget):
         self._youtube_api_key.setEchoMode(
             QLineEdit.EchoMode.Normal if show else QLineEdit.EchoMode.Password
         )
+
+    def _youtube_search_oldest_channel(self) -> bool:
+        if hasattr(self, "_youtube_search_oldest"):
+            return bool(self._youtube_search_oldest.isChecked())
+        return bool(
+            self._settings.value("youtube/search_oldest_channel", True, type=bool)
+        )
+
+    def _on_youtube_search_oldest_changed(self, _state: int) -> None:
+        if not hasattr(self, "_youtube_search_oldest"):
+            return
+        self._settings.setValue(
+            "youtube/search_oldest_channel",
+            bool(self._youtube_search_oldest.isChecked()),
+        )
+        try:
+            self._settings.sync()
+        except Exception:
+            pass
 
     @staticmethod
     def _profile_search_blob(profile: dict[str, object]) -> str:
@@ -3929,6 +3966,7 @@ class MainWindow(QWidget):
         def _check_one(pid: str) -> None:
             creds = self._profile_login_credentials(pid)
             yt_oldest = self._profile_yt_oldest_name(pid) or None
+            search_oldest = self._youtube_search_oldest_channel()
             if kind_s == "local":
                 u = (base_url or "").strip()
                 if not u:
@@ -3941,6 +3979,7 @@ class MainWindow(QWidget):
                     headless=headless,
                     login_credentials=creds,
                     yt_oldest_name=yt_oldest,
+                    search_oldest_channel=search_oldest,
                 )
             else:
                 check_studio_availability_in_profile(
@@ -3949,6 +3988,7 @@ class MainWindow(QWidget):
                     headless=headless,
                     login_credentials=creds,
                     yt_oldest_name=yt_oldest,
+                    search_oldest_channel=search_oldest,
                 )
 
         def _on_profile_done(pid: str, ok: bool, err: str) -> None:
@@ -4318,6 +4358,7 @@ class MainWindow(QWidget):
         def _fill_one(pid: str) -> None:
             creds = self._profile_login_credentials(pid)
             yt_oldest = self._profile_yt_oldest_name(pid) or None
+            search_oldest = self._youtube_search_oldest_channel()
             if kind_s == "local":
                 u = (base_url or "").strip()
                 if not u:
@@ -4333,6 +4374,7 @@ class MainWindow(QWidget):
                     headless=headless,
                     login_credentials=creds,
                     yt_oldest_name=yt_oldest,
+                    search_oldest_channel=search_oldest,
                 )
             else:
                 fill_channel_description_and_link_in_profile(
@@ -4344,6 +4386,7 @@ class MainWindow(QWidget):
                     headless=headless,
                     login_credentials=creds,
                     yt_oldest_name=yt_oldest,
+                    search_oldest_channel=search_oldest,
                 )
 
         def _on_progress(done: int, total: int, profile_id: str) -> None:
@@ -4472,6 +4515,7 @@ class MainWindow(QWidget):
         def _warmup_one(pid: str) -> None:
             creds = self._profile_login_credentials(pid)
             yt_oldest = self._profile_yt_oldest_name(pid) or None
+            search_oldest = self._youtube_search_oldest_channel()
             warmup_kw = {
                 "shorts_count": warmup_settings.shorts_count,
                 "like_probability_pct": warmup_settings.like_probability_pct,
@@ -4481,6 +4525,7 @@ class MainWindow(QWidget):
                 "watch_horizontal_videos": warmup_settings.watch_horizontal_videos,
                 "horizontal_search_query": warmup_settings.horizontal_search_query or None,
                 "horizontal_videos_count": warmup_settings.horizontal_videos_count,
+                "search_oldest_channel": search_oldest,
             }
             if kind_s == "local":
                 u = (base_url or "").strip()
@@ -5090,6 +5135,7 @@ class MainWindow(QWidget):
 
             creds = self._profile_login_credentials(profile_id)
             yt_oldest = self._profile_yt_oldest_name(profile_id) or None
+            search_oldest = self._youtube_search_oldest_channel()
             if kind == "local":
                 u = (base_url or "").strip()
                 if not u:
@@ -5105,6 +5151,7 @@ class MainWindow(QWidget):
                     description=upload_description,
                     login_credentials=creds,
                     yt_oldest_name=yt_oldest,
+                    search_oldest_channel=search_oldest,
                 )
             else:
                 res = open_google_in_profile(
@@ -5116,6 +5163,7 @@ class MainWindow(QWidget):
                     description=upload_description,
                     login_credentials=creds,
                     yt_oldest_name=yt_oldest,
+                    search_oldest_channel=search_oldest,
                 )
             try:
                 vid = ""
@@ -6101,6 +6149,7 @@ class MainWindow(QWidget):
 
                 creds = self._profile_login_credentials(profile_id)
                 yt_oldest = self._profile_yt_oldest_name(profile_id) or None
+                search_oldest = self._youtube_search_oldest_channel()
                 if kind == "local":
                     res = open_google_in_local_antidetect_profile(
                         profile_id,
@@ -6111,6 +6160,7 @@ class MainWindow(QWidget):
                         description=task.description,
                         login_credentials=creds,
                         yt_oldest_name=yt_oldest,
+                        search_oldest_channel=search_oldest,
                     )
                 else:
                     res = open_google_in_profile(
@@ -6122,6 +6172,7 @@ class MainWindow(QWidget):
                         description=task.description,
                         login_credentials=creds,
                         yt_oldest_name=yt_oldest,
+                        search_oldest_channel=search_oldest,
                     )
 
                 vid = ""

@@ -700,14 +700,14 @@ def build_text_overlay_filters(
             gl = f"tg{step}_{gi}"
             layer = (
                 f"drawtext={font_part}text='{esc}':fontsize={overlay.font_size}:"
-                f"x={cx + dx}:y={_y_expr_with_offset(y_expr, dy)}:fontcolor={col}:borderw=0"
+                f"y_align=font:x={cx + dx}:y={_y_expr_with_offset(y_expr, dy)}:fontcolor={col}:borderw=0"
                 f"{enable_part}"
             )
             parts.append(f"[{label}]{layer}[{gl}]")
             label = gl
         core = (
             f"drawtext={font_part}text='{esc}':fontsize={overlay.font_size}:"
-            f"x={cx}:y={_y_expr_with_offset(y_expr, 0)}:fontcolor={fill}:borderw=0"
+            f"y_align=font:x={cx}:y={_y_expr_with_offset(y_expr, 0)}:fontcolor={fill}:borderw=0"
             f"{enable_part}"
         )
         parts.append(f"[{label}]{core}[{nxt}]")

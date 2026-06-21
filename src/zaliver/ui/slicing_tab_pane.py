@@ -38,9 +38,7 @@ from zaliver.processing.slicing import (
     DEFAULT_MIN_SCENES,
 )
 from zaliver.processing.text_overlay import (
-    NEON_WAVE_AMP_FRAC,
     NEON_WAVE_CHAR_PHASE,
-    NEON_WAVE_FRAME_SPEED,
     TextOverlaySettings,
     list_bundled_overlay_fonts,
 )
@@ -55,6 +53,13 @@ from zaliver.ui.widgets import (
 )
 
 _INT_MAX = 2_147_483_647
+
+DEFAULT_SLICE_TEXT_OVERLAY_TEXT = "5.000.000$ GIVEAWAY IN BIO"
+DEFAULT_SLICE_TEXT_OVERLAY_FONT_SIZE = 58
+DEFAULT_SLICE_WAVE_AMP_FRAC = 0.15
+DEFAULT_SLICE_WAVE_FRAME_SPEED = 0.05
+DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_X = 0.5
+DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_Y = 0.5
 
 
 class SlicingTabPane(QWidget):
@@ -133,6 +138,18 @@ class SlicingTabPane(QWidget):
             from_middle=bool(self.text_overlay_from_middle.isChecked()),
         )
 
+    def _apply_fixed_text_overlay_defaults(self) -> None:
+        self.text_overlay_edit.setPlainText(DEFAULT_SLICE_TEXT_OVERLAY_TEXT)
+        self.text_overlay_font_size.setValue(DEFAULT_SLICE_TEXT_OVERLAY_FONT_SIZE)
+        self.text_overlay_glow_enabled.setChecked(True)
+        self.text_overlay_letter_spacing.setValue(0)
+        self.text_overlay_wave_amp.setValue(int(round(DEFAULT_SLICE_WAVE_AMP_FRAC * 100)))
+        self.text_overlay_wave_speed.setValue(int(round(DEFAULT_SLICE_WAVE_FRAME_SPEED * 100)))
+        self.text_overlay_preview.set_anchor(
+            DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_X,
+            DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_Y,
+        )
+
     def load_settings(self) -> None:
         s = self._settings
         self.output_dir_edit.setText(s.value("slice/output_folder", "", type=str) or "")
@@ -157,17 +174,10 @@ class SlicingTabPane(QWidget):
         self.text_overlay_enabled.setChecked(
             bool(s.value("slice/text_overlay_enabled", True, type=bool))
         )
-        self.text_overlay_edit.setPlainText(
-            s.value("slice/text_overlay_text", "GAME IN BIO", type=str) or "GAME IN BIO"
-        )
+        self._apply_fixed_text_overlay_defaults()
         self.text_overlay_from_middle.setChecked(
             bool(s.value("slice/text_overlay_from_middle", True, type=bool))
         )
-        try:
-            fs = int(s.value("slice/text_overlay_font_size", 95, type=int))
-        except Exception:
-            fs = 95
-        self.text_overlay_font_size.setValue(max(12, min(240, fs)))
         orient = s.value("slice/text_overlay_orientation", "vertical", type=str) or "vertical"
         idx = self.text_overlay_orientation.findData(
             "horizontal" if orient == "horizontal" else "vertical"
@@ -180,14 +190,6 @@ class SlicingTabPane(QWidget):
         self._text_text_color = (
             s.value("slice/text_overlay_text_color", "#FFFFFF", type=str) or "#FFFFFF"
         )
-        self.text_overlay_glow_enabled.setChecked(
-            bool(s.value("slice/text_overlay_glow_enabled", True, type=bool))
-        )
-        try:
-            ls = int(s.value("slice/text_overlay_letter_spacing", 0, type=int))
-        except Exception:
-            ls = 0
-        self.text_overlay_letter_spacing.setValue(max(-20, min(80, ls)))
         self._text_font_path = (
             s.value("slice/text_overlay_font_path", "", type=str) or ""
         ).strip()
@@ -195,22 +197,14 @@ class SlicingTabPane(QWidget):
         self.text_overlay_font_bold.setChecked(
             bool(s.value("slice/text_overlay_font_bold", True, type=bool))
         )
-        try:
-            ax = float(s.value("slice/text_overlay_anchor_x", 0.5, type=float))
-            ay = float(s.value("slice/text_overlay_anchor_y", 0.15, type=float))
-        except Exception:
-            ax, ay = 0.5, 0.15
         self._sync_color_btn(self.text_overlay_glow_btn, self._text_glow_color)
         self._sync_color_btn(self.text_overlay_text_btn, self._text_text_color)
-        self.text_overlay_wave_amp.setValue(
-            int(round(float(s.value("slice/text_overlay_wave_amp_frac", NEON_WAVE_AMP_FRAC, type=float)) * 100))
-        )
-        self.text_overlay_wave_speed.setValue(
-            int(round(float(s.value("slice/text_overlay_wave_frame_speed", NEON_WAVE_FRAME_SPEED, type=float)) * 100))
-        )
         self._sync_wave_labels()
         self._update_text_overlay_controls()
-        self._sync_text_overlay_preview(ax, ay)
+        self._sync_text_overlay_preview(
+            DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_X,
+            DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_Y,
+        )
         try:
             cp = int(s.value("slice/copies_per_track", 1, type=int))
         except Exception:
@@ -267,9 +261,7 @@ class SlicingTabPane(QWidget):
             s.setValue("use_gpu_enabled", bool(self.use_gpu.isChecked()))
             s.setValue("use_gpu_finalize_enabled", bool(self.use_gpu_finalize.isChecked()))
         s.setValue("slice/text_overlay_enabled", bool(self.text_overlay_enabled.isChecked()))
-        s.setValue("slice/text_overlay_text", self.text_overlay_edit.toPlainText())
         s.setValue("slice/text_overlay_from_middle", bool(self.text_overlay_from_middle.isChecked()))
-        s.setValue("slice/text_overlay_font_size", int(self.text_overlay_font_size.value()))
         orient = self.text_overlay_orientation.currentData()
         s.setValue(
             "slice/text_overlay_orientation",
@@ -277,19 +269,10 @@ class SlicingTabPane(QWidget):
         )
         s.setValue("slice/text_overlay_glow_color", self._text_glow_color)
         s.setValue("slice/text_overlay_text_color", self._text_text_color)
-        s.setValue(
-            "slice/text_overlay_glow_enabled", bool(self.text_overlay_glow_enabled.isChecked())
-        )
-        s.setValue("slice/text_overlay_letter_spacing", int(self.text_overlay_letter_spacing.value()))
         s.setValue("slice/text_overlay_font_path", self._text_font_path)
         s.setValue(
             "slice/text_overlay_font_bold", bool(self.text_overlay_font_bold.isChecked())
         )
-        ax, ay = self.text_overlay_preview.anchor()
-        s.setValue("slice/text_overlay_anchor_x", float(ax))
-        s.setValue("slice/text_overlay_anchor_y", float(ay))
-        s.setValue("slice/text_overlay_wave_amp_frac", self.text_overlay_wave_amp.value() / 100.0)
-        s.setValue("slice/text_overlay_wave_frame_speed", self.text_overlay_wave_speed.value() / 100.0)
 
     def set_running(self, *, running: bool) -> None:
         if running:
@@ -361,6 +344,12 @@ class SlicingTabPane(QWidget):
         io_grid.addWidget(QLabel("Выходная папка:"), 1, 0)
         io_grid.addWidget(self.output_dir_edit, 1, 1)
         io_grid.addWidget(btn_out, 1, 2)
+        self.copies_per_track = QSpinBox()
+        self.copies_per_track.setRange(1, _INT_MAX)
+        self.copies_per_track.setValue(1)
+        self.copies_per_track.valueChanged.connect(lambda *_: self.save_settings())
+        io_grid.addWidget(QLabel("Количество роликов:"), 2, 0)
+        io_grid.addWidget(self.copies_per_track, 2, 1)
 
         music_gb = QGroupBox("Треки для нарезки")
         music_grid = QGridLayout(music_gb)
@@ -370,21 +359,16 @@ class SlicingTabPane(QWidget):
         self._music_hint = QLabel("")
         self._music_hint.setObjectName("hint")
         self._music_hint.setWordWrap(True)
-        self.copies_per_track = QSpinBox()
-        self.copies_per_track.setRange(1, _INT_MAX)
-        self.copies_per_track.setValue(1)
         music_grid.addWidget(QLabel("Аудиотреки:"), 0, 0)
         music_grid.addWidget(self._music_hint, 0, 1)
         music_grid.addWidget(btn_music, 0, 2)
-        music_grid.addWidget(QLabel("Копий на трек:"), 1, 0)
-        music_grid.addWidget(self.copies_per_track, 1, 1)
         music_desc = QLabel(
             "Аудио задаёт длительность и моменты смены кадра. "
-            "Для каждого выбранного трека — отдельный ролик (случайный сегмент по пикам)."
+            "Треки берутся по очереди и при необходимости повторяются."
         )
         music_desc.setObjectName("hint")
         music_desc.setWordWrap(True)
-        music_grid.addWidget(music_desc, 2, 0, 1, 3)
+        music_grid.addWidget(music_desc, 1, 0, 1, 3)
 
         duration_gb = QGroupBox("Длительность сцены")
         dg = QGridLayout(duration_gb)
@@ -524,7 +508,7 @@ class SlicingTabPane(QWidget):
         tp.setContentsMargins(0, 0, 0, 0)
         self.text_overlay_edit = QPlainTextEdit()
         self.text_overlay_edit.setPlaceholderText("Текст для наложения…")
-        self.text_overlay_edit.setPlainText("GAME IN BIO")
+        self.text_overlay_edit.setPlainText(DEFAULT_SLICE_TEXT_OVERLAY_TEXT)
         self.text_overlay_edit.setMaximumHeight(72)
         self.text_overlay_edit.textChanged.connect(self._schedule_preview)
         tp.addWidget(self.text_overlay_edit)
@@ -535,7 +519,7 @@ class SlicingTabPane(QWidget):
         opts = QGridLayout()
         self.text_overlay_font_size = QSpinBox()
         self.text_overlay_font_size.setRange(12, 240)
-        self.text_overlay_font_size.setValue(95)
+        self.text_overlay_font_size.setValue(DEFAULT_SLICE_TEXT_OVERLAY_FONT_SIZE)
         self.text_overlay_font_size.valueChanged.connect(self._schedule_preview)
         self.text_overlay_orientation = QComboBox()
         self.text_overlay_orientation.addItem("Вертикальное 9:16", "vertical")
@@ -590,12 +574,12 @@ class SlicingTabPane(QWidget):
         opts.addWidget(font_row_w, 5, 1)
         self.text_overlay_wave_amp = SmoothSlider(Qt.Orientation.Horizontal)
         self.text_overlay_wave_amp.setRange(0, 35)
-        self.text_overlay_wave_amp.setValue(int(round(NEON_WAVE_AMP_FRAC * 100)))
+        self.text_overlay_wave_amp.setValue(int(round(DEFAULT_SLICE_WAVE_AMP_FRAC * 100)))
         self.text_overlay_wave_amp.valueChanged.connect(self._on_wave_changed)
         self.text_overlay_wave_amp_label = QLabel()
         self.text_overlay_wave_speed = SmoothSlider(Qt.Orientation.Horizontal)
         self.text_overlay_wave_speed.setRange(0, 25)
-        self.text_overlay_wave_speed.setValue(int(round(NEON_WAVE_FRAME_SPEED * 100)))
+        self.text_overlay_wave_speed.setValue(int(round(DEFAULT_SLICE_WAVE_FRAME_SPEED * 100)))
         self.text_overlay_wave_speed.valueChanged.connect(self._on_wave_changed)
         self.text_overlay_wave_speed_label = QLabel()
         self._sync_wave_labels()

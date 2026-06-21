@@ -45,7 +45,7 @@ class SliceJob:
     job_idx: int
     music_path: Path
     copy_index: int
-    copies_per_track: int
+    track_use_total: int
     output_path: Path
     finished: bool = False
     skip_youtube_upload: bool = False
@@ -53,11 +53,11 @@ class SliceJob:
 
     def tag(self, n_jobs: int) -> str:
         name = self.music_path.name
-        if self.copies_per_track == 1:
+        if self.track_use_total == 1:
             return f"[{self.job_idx}/{n_jobs}] {name}"
         return (
             f"[{self.job_idx}/{n_jobs}] {name} "
-            f"(копия {self.copy_index}/{self.copies_per_track})"
+            f"(повтор {self.copy_index}/{self.track_use_total})"
         )
 
 
@@ -260,7 +260,7 @@ class SlicingController(QObject):
                 self.finished.emit(False, ffmpeg_drawtext_missing_user_message())
                 return
 
-            copies_per_track = max(1, int(options.get("copies_per_track", 1)))
+            output_count = max(1, int(options.get("copies_per_track", 1)))
             num_workers = max(1, int(options.get("num_workers", 1)))
             use_suggested = bool(options.get("use_suggested_durations", True))
             min_scene_duration = float(
@@ -304,32 +304,42 @@ class SlicingController(QObject):
                 )
                 return
 
+            n_tracks = len(music_pool)
             jobs: List[SliceJob] = []
-            idx = 0
-            for music in music_pool:
+            for i in range(output_count):
+                track_index = i % n_tracks
+                music = music_pool[track_index]
+                copy_index = i // n_tracks + 1
+                track_use_total = (output_count - track_index + n_tracks - 1) // n_tracks
                 stem = Path(music).stem
-                for ci in range(1, copies_per_track + 1):
-                    idx += 1
-                    outp = out_dir / _unique_slice_filename(stem)
-                    jobs.append(
-                        SliceJob(
-                            job_idx=idx,
-                            music_path=Path(music),
-                            copy_index=ci,
-                            copies_per_track=copies_per_track,
-                            output_path=outp,
-                        )
+                outp = out_dir / _unique_slice_filename(stem)
+                jobs.append(
+                    SliceJob(
+                        job_idx=i + 1,
+                        music_path=Path(music),
+                        copy_index=copy_index,
+                        track_use_total=track_use_total,
+                        output_path=outp,
                     )
+                )
 
             n_jobs = len(jobs)
             if n_jobs == 0:
                 self.finished.emit(False, "Нет заданий для нарезки.")
                 return
 
-            log(
-                f"Нарезка: {len(music_pool)} треков × {copies_per_track} "
-                f"= {n_jobs} роликов, клипов {len(clip_pool)}, потоков {num_workers}"
-            )
+            repeat_videos = max(0, output_count - n_tracks)
+            if repeat_videos:
+                log(
+                    f"Нарезка: {output_count} роликов из {n_tracks} треков "
+                    f"({repeat_videos} с повторением треков), "
+                    f"клипов {len(clip_pool)}, потоков {num_workers}"
+                )
+            else:
+                log(
+                    f"Нарезка: {output_count} роликов из {n_tracks} треков, "
+                    f"клипов {len(clip_pool)}, потоков {num_workers}"
+                )
             if use_suggested:
                 log(
                     f"Длительность сцены: авто (ручные {min_scene_duration:.2f}–"

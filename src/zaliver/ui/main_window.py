@@ -2860,11 +2860,10 @@ class MainWindow(QWidget):
         uniquify_planned = n_inputs * copies_n
         if mode == "slicing" and hasattr(self, "_slice_tab"):
             try:
-                n_music = len(self._slice_tab.build_options().get("music_files") or [])
                 copies_t = max(1, int(self._slice_tab.copies_per_track.value()))
             except Exception:
-                n_music, copies_t = 0, 1
-            uniquify_planned = n_music * copies_t
+                copies_t = 1
+            uniquify_planned = copies_t
 
         dlg_profile_count_lbl = QLabel("")
         dlg_profile_count_lbl.setObjectName("hint")

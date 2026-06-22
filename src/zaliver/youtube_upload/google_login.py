@@ -81,7 +81,13 @@ _RECOVERY_PHONE_HEADING_RE = re.compile(
     r"укажите\s+номер\s+телефона|add\s+(a\s+)?phone\s+number|enter\s+(your\s+)?phone",
     re.I,
 )
+_HOME_ADDRESS_HEADING_RE = re.compile(
+    r"set\s+a\s+home\s+address|укажите\s+домашний\s+адрес|"
+    r"домашний\s+адрес",
+    re.I,
+)
 _CANCEL_BTN_RE = re.compile(r"^отмена$|^cancel$", re.I)
+_SKIP_BTN_RE = re.compile(r"^skip$|^пропустить$", re.I)
 _BIRTHDAY_HEADING_RE = re.compile(
     r"add\s+your\s+birthday|добавьте\s+дату\s+рождения|"
     r"date\s+of\s+birth\s+is\s+missing|дата\s+рождения\s+не\s+указана|"
@@ -95,6 +101,15 @@ _BIRTHDAY_CONFIRM_HEADING_RE = re.compile(
     re.I,
 )
 _CONFIRM_BTN_RE = re.compile(r"^confirm$|^подтвердить$", re.I)
+_BIRTHDAY_SUCCESS_HEADING_RE = re.compile(r"thank\s+you|спасибо", re.I)
+_BIRTHDAY_SUCCESS_BODY_RE = re.compile(
+    r"your\s+birthday\s+helps\s+confirm|"
+    r"дата\s+рождения\s+помогает|"
+    r"won'?t\s+make\s+your\s+birthday\s+public|"
+    r"не\s+будет\s+общедоступн",
+    re.I,
+)
+_DONE_BTN_RE = re.compile(r"^done$|^готово$", re.I)
 _BIRTHDAY_MONTH = 1
 _BIRTHDAY_DAY = "1"
 _BIRTHDAY_YEAR = "2000"
@@ -232,7 +247,11 @@ def google_auth_interaction_visible(page) -> bool:
         return True
     if _recovery_info_step_visible(page):
         return True
+    if _home_address_step_visible(page):
+        return True
     if _birthday_confirm_step_visible(page):
+        return True
+    if _birthday_success_step_visible(page):
         return True
     if _birthday_step_visible(page):
         return True
@@ -676,6 +695,126 @@ def _click_recovery_info_cancel(page) -> None:
     page.wait_for_timeout(900)
 
 
+def _home_address_skip_locator(scope):
+    return (
+        scope.locator('button[jsname="ZUkOIc"][aria-label="Skip"]')
+        .or_(scope.locator('button[jsname="ZUkOIc"][aria-label="Пропустить"]'))
+        .or_(scope.get_by_role("button", name=_SKIP_BTN_RE))
+    )
+
+
+def _home_address_step_visible_in_scope(scope) -> bool:
+    has_heading = False
+    try:
+        h = scope.locator(".RY3zi, [role='heading'][aria-level='1']").first
+        if h.count() > 0 and h.is_visible(timeout=300):
+            txt = (h.inner_text(timeout=500) or "").strip()
+            if _HOME_ADDRESS_HEADING_RE.search(txt):
+                has_heading = True
+    except Exception:
+        pass
+    if not has_heading:
+        try:
+            if scope.get_by_text(_HOME_ADDRESS_HEADING_RE).first.is_visible(timeout=300):
+                has_heading = True
+        except Exception:
+            pass
+    if not has_heading:
+        return False
+    try:
+        skip = _home_address_skip_locator(scope).first
+        if skip.count() > 0 and skip.is_visible(timeout=300):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _home_address_form_scope(page):
+    for scope in _google_auth_scopes(page):
+        if _home_address_step_visible_in_scope(scope):
+            return scope
+    return page
+
+
+def _home_address_step_visible(page) -> bool:
+    """Экран «Set a home address» — предложение указать домашний адрес."""
+    for scope in _google_auth_scopes(page):
+        if _home_address_step_visible_in_scope(scope):
+            return True
+    return False
+
+
+def _click_home_address_skip_js(scope) -> bool:
+    try:
+        return bool(
+            scope.evaluate(
+                """() => {
+                    const labels = ['Skip', 'Пропустить'];
+                    const tryClick = (root) => {
+                        if (!root) return false;
+                        for (const el of root.querySelectorAll('button[jsname="ZUkOIc"]')) {
+                            const t = (el.innerText || el.textContent || '').trim();
+                            const aria = (el.getAttribute('aria-label') || '').trim();
+                            if (labels.some((x) => t === x || aria === x)) {
+                                el.click();
+                                return true;
+                            }
+                        }
+                        for (const host of root.querySelectorAll('*')) {
+                            if (host.shadowRoot && tryClick(host.shadowRoot)) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+                    return tryClick(document);
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+def _click_home_address_skip(page) -> None:
+    _log("Google: домашний адрес — нажимаем «Пропустить»…")
+    clicked = False
+    last_err = ""
+    for scope in _google_auth_scopes(page):
+        btn = _home_address_skip_locator(scope)
+        try:
+            if btn.count() == 0:
+                continue
+            target = btn.first
+            target.wait_for(state="visible", timeout=20_000)
+            try:
+                target.scroll_into_view_if_needed(timeout=5_000)
+            except Exception:
+                pass
+            try:
+                target.click(timeout=30_000)
+            except Exception as e:
+                last_err = repr(e)
+                target.click(timeout=30_000, force=True)
+            clicked = True
+            break
+        except Exception as e:
+            last_err = repr(e)
+            continue
+    if not clicked:
+        for scope in _google_auth_scopes(page):
+            if _click_home_address_skip_js(scope):
+                clicked = True
+                _log("Google: клик «Пропустить» через JS.")
+                break
+    if not clicked:
+        raise RuntimeError(
+            "Google: кнопка «Пропустить» на экране домашнего адреса не найдена. "
+            f"URL={page.url!r}. {last_err}"
+        )
+    page.wait_for_timeout(900)
+
+
 def _birthday_step_visible_in_scope(scope) -> bool:
     try:
         h = scope.locator("h1.qQnGVb").first
@@ -760,6 +899,128 @@ def _click_birthday_confirm(page) -> None:
     page.wait_for_timeout(900)
 
 
+def _birthday_success_done_locator(scope):
+    return (
+        scope.locator('div.iSxK8e button[jsname="AHldd"]')
+        .or_(scope.locator('button[jsname="AHldd"]:has(span.VfPpkd-vQzf8d)'))
+        .or_(scope.locator('button[jsname="AHldd"]'))
+        .or_(scope.get_by_role("button", name=_DONE_BTN_RE))
+    )
+
+
+def _birthday_success_step_visible_in_scope(scope) -> bool:
+    try:
+        done_btn = _birthday_success_done_locator(scope).first
+        if done_btn.count() == 0 or not done_btn.is_visible(timeout=300):
+            return False
+    except Exception:
+        return False
+    try:
+        h = scope.locator("h1.qQnGVb").first
+        if h.count() > 0 and h.is_visible(timeout=300):
+            txt = (h.inner_text(timeout=500) or "").strip()
+            if _BIRTHDAY_SUCCESS_HEADING_RE.search(txt):
+                return True
+    except Exception:
+        pass
+    try:
+        if scope.locator('img[src*="add-birthday-success"]').first.is_visible(timeout=300):
+            return True
+    except Exception:
+        pass
+    try:
+        if scope.get_by_text(_BIRTHDAY_SUCCESS_BODY_RE).first.is_visible(timeout=300):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _birthday_success_form_scope(page):
+    for scope in _google_auth_scopes(page):
+        if _birthday_success_step_visible_in_scope(scope):
+            return scope
+    return page
+
+
+def _birthday_success_step_visible(page) -> bool:
+    """Экран «Thank you» после сохранения даты рождения."""
+    for scope in _google_auth_scopes(page):
+        if _birthday_success_step_visible_in_scope(scope):
+            return True
+    return False
+
+
+def _click_birthday_success_done_js(scope) -> bool:
+    try:
+        return bool(
+            scope.evaluate(
+                """() => {
+                    const labels = ['Done', 'Готово'];
+                    const tryClick = (root) => {
+                        if (!root) return false;
+                        for (const el of root.querySelectorAll('button[jsname="AHldd"]')) {
+                            const span = el.querySelector('span.VfPpkd-vQzf8d');
+                            const t = ((span && span.innerText) || el.innerText || el.textContent || '').trim();
+                            if (labels.some((x) => t === x)) {
+                                el.click();
+                                return true;
+                            }
+                        }
+                        for (const host of root.querySelectorAll('*')) {
+                            if (host.shadowRoot && tryClick(host.shadowRoot)) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+                    return tryClick(document);
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+def _click_birthday_success_done(page) -> None:
+    _log("Google: дата рождения сохранена — «Done» / «Готово»…")
+    clicked = False
+    last_err = ""
+    for scope in _google_auth_scopes(page):
+        btn = _birthday_success_done_locator(scope)
+        try:
+            if btn.count() == 0:
+                continue
+            target = btn.first
+            target.wait_for(state="visible", timeout=20_000)
+            try:
+                target.scroll_into_view_if_needed(timeout=5_000)
+            except Exception:
+                pass
+            try:
+                target.click(timeout=30_000)
+            except Exception as e:
+                last_err = repr(e)
+                target.click(timeout=30_000, force=True)
+            clicked = True
+            break
+        except Exception as e:
+            last_err = repr(e)
+            continue
+    if not clicked:
+        for scope in _google_auth_scopes(page):
+            if _click_birthday_success_done_js(scope):
+                clicked = True
+                _log("Google: клик «Done» через JS.")
+                break
+    if not clicked:
+        raise RuntimeError(
+            "Google: кнопка «Done» после сохранения даты рождения не найдена. "
+            f"URL={page.url!r}. {last_err}"
+        )
+    page.wait_for_timeout(900)
+
+
 def _birthday_step_visible(page) -> bool:
     """Экран «Add your birthday» — запрос даты рождения."""
     for scope in _google_auth_scopes(page):
@@ -812,9 +1073,14 @@ def _fill_birthday_and_save(page) -> None:
     save_btn.wait_for(state="visible", timeout=10_000)
     save_btn.click(timeout=30_000)
     page.wait_for_timeout(900)
-    for _ in range(20):
+    for _ in range(40):
         if _birthday_confirm_step_visible(page):
             _click_birthday_confirm(page)
+            break
+        page.wait_for_timeout(250)
+    for _ in range(40):
+        if _birthday_success_step_visible(page):
+            _click_birthday_success_done(page)
             return
         page.wait_for_timeout(250)
 
@@ -1223,7 +1489,9 @@ def attempt_google_login_for_studio(
             and not _passkey_enrollment_visible(page)
             and not _selfie_enrollment_visible(page)
             and not _recovery_info_step_visible(page)
+            and not _home_address_step_visible(page)
             and not _birthday_confirm_step_visible(page)
+            and not _birthday_success_step_visible(page)
             and not _birthday_step_visible(page)
             and not _totp_step_visible(page)
             and not _account_chooser_step_visible(page)
@@ -1290,11 +1558,25 @@ def attempt_google_login_for_studio(
             _click_recovery_info_cancel(page)
             continue
 
+        if _home_address_step_visible(page):
+            steps += 1
+            idle_rounds = 0
+            _log(f"Google: домашний адрес — «Пропустить» (шаг {steps})…")
+            _click_home_address_skip(page)
+            continue
+
         if _birthday_confirm_step_visible(page):
             steps += 1
             idle_rounds = 0
             _log(f"Google: подтверждение даты рождения (шаг {steps})…")
             _click_birthday_confirm(page)
+            continue
+
+        if _birthday_success_step_visible(page):
+            steps += 1
+            idle_rounds = 0
+            _log(f"Google: дата рождения сохранена — «Done» (шаг {steps})…")
+            _click_birthday_success_done(page)
             continue
 
         if _birthday_step_visible(page):
@@ -1333,8 +1615,10 @@ def attempt_google_login_for_studio(
                 f"chooser={_account_chooser_step_visible(page)}, "
                 f"email={_identifier_step_visible(page)}, "
                 f"recovery={_recovery_info_step_visible(page)}, "
+                f"home_address={_home_address_step_visible(page)}, "
                 f"selfie={_selfie_enrollment_visible(page)}, "
                 f"birthday_confirm={_birthday_confirm_step_visible(page)}, "
+                f"birthday_success={_birthday_success_step_visible(page)}, "
                 f"birthday={_birthday_step_visible(page)})…"
             )
         page.wait_for_timeout(500)

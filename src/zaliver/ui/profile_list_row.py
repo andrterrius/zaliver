@@ -44,6 +44,8 @@ class ProfileListRow(QWidget):
         on_upload_pause_click: Callable[[], None] | None = None,
         show_account_data_button: bool = False,
         on_account_data_click: Callable[[], None] | None = None,
+        show_preview_button: bool = False,
+        on_preview_click: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -56,6 +58,7 @@ class ProfileListRow(QWidget):
         self._upload_cooldown_kind = upload_kind
         self._upload_pause_cb = on_upload_pause_click
         self._account_data_cb = on_account_data_click
+        self._preview_cb = on_preview_click
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(10, 6, 10, 6)
@@ -144,6 +147,19 @@ class ProfileListRow(QWidget):
             )
             self.account_data_btn.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
             outer.addWidget(self.account_data_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.preview_btn: QPushButton | None = None
+        if show_preview_button and on_preview_click is not None:
+            self.preview_btn = QPushButton("Просмотр")
+            self.preview_btn.setObjectName("secondary")
+            self.preview_btn.setAutoDefault(False)
+            self.preview_btn.setDefault(False)
+            self.preview_btn.setToolTip(
+                "Трансляция кадров уже запущенного профиля через CDP "
+                "(профиль должен быть запущен в антидетекте с expose_cdp)"
+            )
+            self.preview_btn.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            outer.addWidget(self.preview_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         tip_lines = [profile_row_title_text(profile), upload_text]
         if dot_tip:

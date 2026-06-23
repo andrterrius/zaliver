@@ -40,12 +40,14 @@ class ProfilesListInteraction(QObject):
         *,
         on_upload_pause_click: Callable[[str], None] | None = None,
         on_account_data_click: Callable[[str], None] | None = None,
+        on_preview_click: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(list_widget)
         self.lw = list_widget
         self._upload_store = upload_store
         self._on_upload_pause_click = on_upload_pause_click
         self._on_account_data_click = on_account_data_click
+        self._on_preview_click = on_preview_click
 
         self.checked_profile_ids: set[str] = set()
         self._profile_id_to_item: dict[str, QListWidgetItem] = {}
@@ -171,6 +173,7 @@ class ProfilesListInteraction(QObject):
         preserve_checked: set[str] | None = None,
         prune_checked_to_existing: bool = True,
         show_account_data_button: bool = False,
+        show_preview_button: bool = False,
     ) -> None:
         list_scroll = self.lw.verticalScrollBar().value()
         existing_ids = {_profile_id(p) for p in profiles}
@@ -180,6 +183,9 @@ class ProfilesListInteraction(QObject):
         if prune_checked_to_existing:
             preserve.intersection_update(existing_ids)
         self.checked_profile_ids = preserve
+
+        self._account_data_armed_row = None
+        self._copy_id_armed_row = None
 
         self.lw.blockSignals(True)
         self.lw.clear()
@@ -210,6 +216,12 @@ class ProfilesListInteraction(QObject):
                 on_account_data_click=(
                     (lambda pid=pid: self._emit_account_data_click(pid))
                     if show_account_data_button and self._on_account_data_click
+                    else None
+                ),
+                show_preview_button=show_preview_button,
+                on_preview_click=(
+                    (lambda pid=pid: self._emit_preview_click(pid))
+                    if show_preview_button and self._on_preview_click
                     else None
                 ),
             )
@@ -247,6 +259,8 @@ class ProfilesListInteraction(QObject):
         row.upload_label.installEventFilter(self)
         if row.account_data_btn is not None:
             row.account_data_btn.installEventFilter(self)
+        if row.preview_btn is not None:
+            row.preview_btn.installEventFilter(self)
         if row.copy_id_btn is not None:
             row.copy_id_btn.installEventFilter(self)
         for ch in row.findChildren(QWidget):
@@ -254,6 +268,10 @@ class ProfilesListInteraction(QObject):
                 continue
             if row.account_data_btn is not None and (
                 ch is row.account_data_btn or row.account_data_btn.isAncestorOf(ch)
+            ):
+                continue
+            if row.preview_btn is not None and (
+                ch is row.preview_btn or row.preview_btn.isAncestorOf(ch)
             ):
                 continue
             if row.copy_id_btn is not None and (
@@ -478,6 +496,15 @@ class ProfilesListInteraction(QObject):
             return
         QTimer.singleShot(0, lambda p=pid: cb(p))
 
+    def _emit_preview_click(self, profile_id: str) -> None:
+        cb = self._on_preview_click
+        if cb is None:
+            return
+        pid = (profile_id or "").strip()
+        if not pid:
+            return
+        cb(pid)
+
     def _profile_row_for_account_button_hit(
         self, watched: QWidget, vp_pos: QPoint
     ) -> ProfileListRow | None:
@@ -519,6 +546,52 @@ class ProfilesListInteraction(QObject):
             if QRect(top_left, btn.size()).contains(vp_pos):
                 return btn
         return None
+
+    def _invoke_preview_click(self, row: ProfileListRow) -> None:
+        pid = ""
+        for profile_id, row_w in self._profile_id_to_row.items():
+            if row_w is row:
+                pid = profile_id
+                break
+        if pid:
+            self._emit_preview_click(pid)
+            return
+        cb = row._preview_cb
+        if cb is not None:
+            cb()
+
+    def _profile_row_for_preview_button_hit(
+        self, watched: QWidget, vp_pos: QPoint
+    ) -> ProfileListRow | None:
+        widgets_to_check: list[QWidget] = [watched]
+        child = self.lw.viewport().childAt(vp_pos)
+        if child is not None and child is not watched:
+            widgets_to_check.append(child)
+
+        for w in widgets_to_check:
+            cur: QWidget | None = w
+            while cur is not None and cur is not self.lw.viewport():
+                for row in self._profile_id_to_row.values():
+                    btn = row.preview_btn
+                    if btn is not None and (cur is btn or btn.isAncestorOf(cur)):
+                        return row
+                cur = cur.parentWidget()
+
+        for row in self._profile_id_to_row.values():
+            btn = row.preview_btn
+            if btn is None or not btn.isVisible():
+                continue
+            top_left = btn.mapTo(self.lw.viewport(), QPoint(0, 0))
+            if QRect(top_left, btn.size()).contains(vp_pos):
+                return row
+        return None
+
+    def _is_preview_button(self, watched: QWidget) -> bool:
+        for row in self._profile_id_to_row.values():
+            btn = row.preview_btn
+            if btn is not None and (watched is btn or btn.isAncestorOf(watched)):
+                return True
+        return False
 
     def _is_account_data_button(self, watched: QWidget) -> bool:
         for row in self._profile_id_to_row.values():
@@ -604,6 +677,17 @@ class ProfilesListInteraction(QObject):
             if (
                 et == QEvent.Type.MouseButtonRelease
                 and event.button() == Qt.MouseButton.LeftButton
+            ):
+                preview_row = self._profile_row_for_preview_button_hit(watched, vp_pos)
+                if preview_row is not None:
+                    self._cancel_checkbox_click_pending()
+                    self._lmb_select_end()
+                    self._invoke_preview_click(preview_row)
+                    return True
+
+            if (
+                et == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton
                 and self._copy_id_armed_row is not None
             ):
                 row = self._copy_id_armed_row
@@ -684,6 +768,8 @@ class ProfilesListInteraction(QObject):
                 return False
 
             if et == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                if self._is_preview_button(watched) or self._is_account_data_button(watched):
+                    return False
                 row = self._row_index_for_event(watched, event)
                 if row is None:
                     return False

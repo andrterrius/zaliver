@@ -67,6 +67,7 @@ from zaliver.antydetect.local_antidetect_api import (
     DEFAULT_LOCAL_API_BASE_URL,
     LocalAntidetectError,
     LocalAntidetectHttpAPI,
+    RemoteCdpLaunchOptions,
     normalize_local_profile_for_ui,
 )
 from zaliver.processing.pipeline import RandomUniquifyBounds, UniquifySettings
@@ -90,6 +91,7 @@ from zaliver.ui.profile_account_data_dialog import (
     YT_LOGIN_KEY,
 )
 from zaliver.ui.profile_accounts_import_dialog import ProfileAccountsImportDialog
+from zaliver.ui.profile_preview_dialog import ProfileCdpPreviewDialog
 from zaliver.ui.profiles_list_interaction import ProfilesListInteraction
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
 from zaliver.stats_server_client import notify_uploaded_video
@@ -125,6 +127,18 @@ _UPLOADED_ROW_H = 76
 _UPLOADED_RENDER_BATCH = 14
 _UPLOADED_RENDER_TICK_MS = 16
 _UPLOADED_SCROLL_BATCH = 20
+
+_ANTYDETECT_OWN_KINDS = frozenset({"local", "remote"})
+
+
+def _is_own_antidetect_kind(kind: str) -> bool:
+    return (kind or "").strip() in _ANTYDETECT_OWN_KINDS
+
+
+def _own_antidetect_api_label(kind: str) -> str:
+    if (kind or "").strip() == "remote":
+        return "удалённого"
+    return "локального"
 
 
 def _format_upload_combo_datetime(iso_s: str) -> str:
@@ -792,6 +806,7 @@ class MainWindow(QWidget):
         self._profiles_raw: list[dict[str, object]] | None = None
         self._profiles_list_render_gen: int = 0
         self._profiles_interaction: ProfilesListInteraction | None = None
+        self._profile_cdp_previews: dict[str, ProfileCdpPreviewDialog] = {}
         self._profiles_filter_timer = QTimer(self)
         self._profiles_filter_timer.setSingleShot(True)
         self._profiles_filter_timer.timeout.connect(self._apply_profiles_filter)
@@ -1746,7 +1761,7 @@ class MainWindow(QWidget):
         self._btn_profiles_import_accounts.setDefault(False)
         self._btn_profiles_import_accounts.setToolTip(
             "Загрузить логин, пароль и 2FA из вставленного текста или .txt "
-            "в отмеченные профили локального антидетекта "
+            "в отмеченные профили своего антидетекта "
             "(сопоставление по порядку строк)."
         )
         self._btn_profiles_import_accounts.clicked.connect(
@@ -1781,7 +1796,7 @@ class MainWindow(QWidget):
         self._btn_profiles_clear_zaliver_tags.setDefault(False)
         self._btn_profiles_clear_zaliver_tags.setToolTip(
             "С отмеченных профилей снимает служебные теги Zaliver "
-            "(ошибки залива, проверки Studio и т.д.). Только локальный антидетект."
+            "(ошибки залива, проверки Studio и т.д.). Только свой антидетект."
         )
         self._btn_profiles_clear_zaliver_tags.clicked.connect(
             self._start_clear_zaliver_profile_tags
@@ -1810,6 +1825,7 @@ class MainWindow(QWidget):
             self._upload_store,
             on_upload_pause_click=self._ask_reset_upload_cooldown_for_profile,
             on_account_data_click=self._open_profile_account_data_dialog,
+            on_preview_click=self._open_profile_cdp_preview,
         )
         list_sel_row, self._lbl_checked_profiles_count = self._build_profiles_selection_toolbar(
             self,
@@ -1867,6 +1883,7 @@ class MainWindow(QWidget):
         self._default_browser_combo.setObjectName("defaultBrowserCombo")
         self._default_browser_combo.addItem("Dolphin Anty", "dolphin")
         self._default_browser_combo.addItem("Свой (локальный API)", "local")
+        self._default_browser_combo.addItem("Свой (удалённый API)", "remote")
         self._default_browser_combo.currentIndexChanged.connect(
             self._on_default_browser_combo_changed
         )
@@ -1876,7 +1893,7 @@ class MainWindow(QWidget):
         self._dolphin_headless.setChecked(True)
         self._dolphin_headless.setToolTip(
             "Если включено — профиль запускается без окна браузера (headless): "
-            "и Dolphin, и локальный API."
+            "Dolphin и свой антидетект (локальный или удалённый API)."
         )
 
         self._gb_antydetect_dolphin = QGroupBox("Dolphin Anty")
@@ -1901,6 +1918,25 @@ class MainWindow(QWidget):
         )
         gl.addWidget(QLabel("Базовый URL:"), 0, 0)
         gl.addWidget(self._local_api_base_url, 0, 1)
+
+        self._gb_antydetect_remote = QGroupBox("Свой антидетект (удалённый HTTP API)")
+        gr = QGridLayout(self._gb_antydetect_remote)
+        self._remote_api_base_url = QLineEdit()
+        self._remote_api_base_url.setPlaceholderText("https://example.com:18765")
+        self._remote_api_base_url.setToolTip(
+            "Корень HTTP-сервиса на удалённой машине (без завершающего слэша), "
+            "как в OpenAPI: /profiles, /health, …"
+        )
+        gr.addWidget(QLabel("Базовый URL:"), 0, 0)
+        gr.addWidget(self._remote_api_base_url, 0, 1)
+        self._remote_cdp_public_host = QLineEdit()
+        self._remote_cdp_public_host.setPlaceholderText("Публичный IP или хост для CDP")
+        self._remote_cdp_public_host.setToolTip(
+            "Значение cdp_public_host в запросе /launch: адрес, по которому Zaliver "
+            "подключится к CDP удалённого браузера."
+        )
+        gr.addWidget(QLabel("CDP public host:"), 1, 0)
+        gr.addWidget(self._remote_cdp_public_host, 1, 1)
 
         self._btn_save_antydetect = QPushButton("Сохранить")
         self._btn_save_antydetect.setObjectName("secondary")
@@ -1968,6 +2004,7 @@ class MainWindow(QWidget):
         settings_l.addWidget(self._dolphin_headless)
         settings_l.addWidget(self._gb_antydetect_dolphin)
         settings_l.addWidget(self._gb_antydetect_local)
+        settings_l.addWidget(self._gb_antydetect_remote)
         settings_l.addWidget(gb_yt)
         settings_l.addStretch()
         self._sync_antydetect_settings_groups_visibility()
@@ -3304,7 +3341,9 @@ class MainWindow(QWidget):
             kind = "dolphin"
         show_dolphin = kind == "dolphin"
         self._gb_antydetect_dolphin.setVisible(show_dolphin)
-        self._gb_antydetect_local.setVisible(not show_dolphin)
+        self._gb_antydetect_local.setVisible(kind == "local")
+        if hasattr(self, "_gb_antydetect_remote"):
+            self._gb_antydetect_remote.setVisible(kind == "remote")
 
     def _update_profiles_section_header(self) -> None:
         if not hasattr(self, "_profiles_title"):
@@ -3314,6 +3353,16 @@ class MainWindow(QWidget):
             kind = "dolphin"
         if kind == "local":
             self._profiles_title.setText("Профили (локальный антидетект)")
+            self._profiles_hint.setText(
+                "Отметьте квадратиками профили для залива; «Пауза 3 ч» — можно ли снова загружать "
+                "(клик по оранжевой подписи сбрасывает паузу)."
+            )
+            if hasattr(self, "_dolphin_query"):
+                self._dolphin_query.setPlaceholderText(
+                    "Поиск по загруженным профилям (имя, ID, движок)…"
+                )
+        elif kind == "remote":
+            self._profiles_title.setText("Профили (удалённый антидетект)")
             self._profiles_hint.setText(
                 "Отметьте квадратиками профили для залива; «Пауза 3 ч» — можно ли снова загружать "
                 "(клик по оранжевой подписи сбрасывает паузу)."
@@ -3336,7 +3385,7 @@ class MainWindow(QWidget):
         kind = self._default_browser_combo.currentData()
         if not isinstance(kind, str) or not kind:
             kind = "dolphin"
-        local = kind == "local"
+        own = _is_own_antidetect_kind(kind)
         busy = (
             self._profiles_availability_running
             or self._profiles_channel_fill_running
@@ -3345,7 +3394,7 @@ class MainWindow(QWidget):
             or self._profiles_refresh_running
         )
         if hasattr(self, "_btn_profiles_clear_zaliver_tags"):
-            self._btn_profiles_clear_zaliver_tags.setEnabled(local and not busy)
+            self._btn_profiles_clear_zaliver_tags.setEnabled(own and not busy)
         if hasattr(self, "_btn_profiles_check_availability"):
             self._btn_profiles_check_availability.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_fill_channel"):
@@ -3355,7 +3404,7 @@ class MainWindow(QWidget):
         if hasattr(self, "_btn_profiles_refresh"):
             self._btn_profiles_refresh.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_import_accounts"):
-            self._btn_profiles_import_accounts.setEnabled(local and not busy)
+            self._btn_profiles_import_accounts.setEnabled(own and not busy)
 
     def _load_antydetect_settings(self) -> None:
         if not hasattr(self, "_dolphin_token"):
@@ -3384,6 +3433,16 @@ class MainWindow(QWidget):
             else:
                 url = DEFAULT_LOCAL_API_BASE_URL
             self._local_api_base_url.setText(url)
+        if hasattr(self, "_remote_api_base_url"):
+            remote_url = (
+                self._settings.value("antydetect/remote_api_base_url", "", type=str) or ""
+            ).strip()
+            self._remote_api_base_url.setText(remote_url)
+        if hasattr(self, "_remote_cdp_public_host"):
+            remote_host = (
+                self._settings.value("antydetect/remote_cdp_public_host", "", type=str) or ""
+            ).strip()
+            self._remote_cdp_public_host.setText(remote_host)
         self._sync_antydetect_settings_groups_visibility()
 
     def _save_antydetect_settings(self) -> None:
@@ -3403,6 +3462,16 @@ class MainWindow(QWidget):
             self._settings.setValue(
                 "antydetect/local_api_base_url",
                 (self._local_api_base_url.text() or "").strip(),
+            )
+        if hasattr(self, "_remote_api_base_url"):
+            self._settings.setValue(
+                "antydetect/remote_api_base_url",
+                (self._remote_api_base_url.text() or "").strip(),
+            )
+        if hasattr(self, "_remote_cdp_public_host"):
+            self._settings.setValue(
+                "antydetect/remote_cdp_public_host",
+                (self._remote_cdp_public_host.text() or "").strip(),
             )
         try:
             self._settings.sync()
@@ -3660,7 +3729,7 @@ class MainWindow(QWidget):
         select_menu.addSeparator()
         act_no_account = select_menu.addAction("Без данных в учётке")
         act_no_account.setToolTip(
-            "Профили без логина, пароля и 2FA YouTube в custom_data (локальный антидетект)"
+            "Профили без логина, пароля и 2FA YouTube в custom_data (свой антидетект)"
         )
         act_no_account.triggered.connect(lambda: on_select_filter("no_account_data"))
         act_no_oldest = select_menu.addAction("Без определённого старейшего канала")
@@ -3691,12 +3760,14 @@ class MainWindow(QWidget):
             if hasattr(self, "_default_browser_combo")
             else "dolphin"
         )
-        show_account = isinstance(kind, str) and kind.strip() == "local"
+        show_account = _is_own_antidetect_kind(kind if isinstance(kind, str) else "")
+        show_preview = isinstance(kind, str) and kind.strip() == "remote"
         self._profiles_interaction.populate(
             visible,
             last_upload_map,
             prune_checked_to_existing=False,
             show_account_data_button=show_account,
+            show_preview_button=show_preview,
         )
         self._profiles_list_render_gen += 1
         return len(visible)
@@ -3786,13 +3857,7 @@ class MainWindow(QWidget):
         kind = self._default_browser_combo.currentData()
         if not isinstance(kind, str) or not kind.strip():
             kind = "dolphin"
-        base_url = (self._local_api_base_url.text() or "").strip()
-        if not base_url:
-            base_url = (
-                self._settings.value("antydetect/local_api_base_url", "", type=str) or ""
-            ).strip()
-        if not base_url and kind == "local":
-            base_url = DEFAULT_LOCAL_API_BASE_URL
+        base_url = self._own_antidetect_base_url_from_settings(kind)
 
         self._profiles_refresh_running = True
         self._sync_profiles_tab_action_buttons()
@@ -3807,11 +3872,12 @@ class MainWindow(QWidget):
 
     def _profiles_worker(self, *, kind: str, token: str, base_url: str) -> None:
         try:
-            if kind == "local":
+            if _is_own_antidetect_kind(kind):
                 u = (base_url or "").strip()
                 if not u:
                     self._profiles_load_failed.emit(
-                        "Укажите базовый URL локального API в настройках (раздел «Свой антидетект») и сохраните."
+                        f"Укажите базовый URL {_own_antidetect_api_label(kind)} API в настройках "
+                        "(раздел «Свой антидетект») и сохраните."
                     )
                     return
                 api = LocalAntidetectHttpAPI(u)
@@ -3836,7 +3902,8 @@ class MainWindow(QWidget):
             )
         except LocalAntidetectError as e:
             self._profiles_load_failed.emit(
-                "Проверьте, что локальный сервис запущен и базовый URL верен.\n" + str(e)
+                f"Проверьте, что сервис {_own_antidetect_api_label(kind)} антидетекта доступен "
+                f"и базовый URL верен.\n{e}"
             )
         except Exception as e:
             self._profiles_load_failed.emit(repr(e))
@@ -3885,13 +3952,7 @@ class MainWindow(QWidget):
         kind = self._default_browser_combo.currentData()
         if not isinstance(kind, str) or not kind.strip():
             kind = "dolphin"
-        base_url = (self._local_api_base_url.text() or "").strip()
-        if not base_url:
-            base_url = (
-                self._settings.value("antydetect/local_api_base_url", "", type=str) or ""
-            ).strip()
-        if not base_url and kind == "local":
-            base_url = DEFAULT_LOCAL_API_BASE_URL
+        base_url = self._own_antidetect_base_url_from_settings(kind)
 
         headless = True
         if hasattr(self, "_dolphin_headless"):
@@ -3900,6 +3961,12 @@ class MainWindow(QWidget):
             headless = bool(
                 self._settings.value("antydetect/dolphin_headless", True, type=bool)
             )
+
+        try:
+            remote_cdp = self._remote_cdp_launch_options_for_kind(kind)
+        except LocalAntidetectError as e:
+            QMessageBox.warning(self, "Проверка доступности", str(e))
+            return
 
         self._profiles_availability_running = True
         self._sync_profiles_tab_action_buttons()
@@ -3925,6 +3992,7 @@ class MainWindow(QWidget):
                     "token": token,
                     "base_url": base_url,
                     "headless": headless,
+                    "remote_cdp": remote_cdp,
                 },
                 daemon=True,
             ).start()
@@ -3946,6 +4014,7 @@ class MainWindow(QWidget):
         token: str,
         base_url: str,
         headless: bool,
+        remote_cdp: RemoteCdpLaunchOptions | None = None,
     ) -> None:
         from zaliver.antydetect.antic_open import (
             check_studio_availability_in_local_antidetect_profile,
@@ -3966,11 +4035,11 @@ class MainWindow(QWidget):
             creds = self._profile_login_credentials(pid)
             yt_oldest = self._profile_yt_oldest_name(pid) or None
             search_oldest = self._youtube_search_oldest_channel()
-            if kind_s == "local":
+            if _is_own_antidetect_kind(kind_s):
                 u = (base_url or "").strip()
                 if not u:
                     raise LocalAntidetectError(
-                        "Укажите базовый URL локального API в настройках."
+                        f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
                     )
                 check_studio_availability_in_local_antidetect_profile(
                     pid,
@@ -3979,6 +4048,7 @@ class MainWindow(QWidget):
                     login_credentials=creds,
                     yt_oldest_name=yt_oldest,
                     search_oldest_channel=search_oldest,
+                    remote_cdp=remote_cdp,
                 )
             else:
                 check_studio_availability_in_profile(
@@ -3991,12 +4061,12 @@ class MainWindow(QWidget):
                 )
 
         def _on_profile_done(pid: str, ok: bool, err: str) -> None:
-            if kind_s != "local":
+            if not _is_own_antidetect_kind(kind_s):
                 if not ok:
                     self._ui_log_line.emit(
                         f"[availability] profile={pid}: тег "
                         f"{STUDIO_AVAILABILITY_ERROR_TAG!r} доступен только "
-                        "для локального антидетекта."
+                        "для своего антидетекта."
                     )
                 return
             try:
@@ -4294,15 +4364,15 @@ class MainWindow(QWidget):
         kind = self._default_browser_combo.currentData()
         if not isinstance(kind, str) or not kind.strip():
             kind = "dolphin"
-        base_url = (self._local_api_base_url.text() or "").strip()
-        if not base_url:
-            base_url = (
-                self._settings.value("antydetect/local_api_base_url", "", type=str) or ""
-            ).strip()
-        if not base_url and kind == "local":
-            base_url = DEFAULT_LOCAL_API_BASE_URL
+        base_url = self._own_antidetect_base_url_from_settings(kind)
 
         headless = False
+
+        try:
+            remote_cdp = self._remote_cdp_launch_options_for_kind(kind)
+        except LocalAntidetectError as e:
+            QMessageBox.warning(self, "Описание и ссылка канала", str(e))
+            return
 
         self._profiles_channel_fill_running = True
         self._sync_profiles_tab_action_buttons()
@@ -4325,6 +4395,7 @@ class MainWindow(QWidget):
                 "description": description,
                 "link_title": link_title,
                 "link_url": link_url,
+                "remote_cdp": remote_cdp,
             },
             daemon=True,
         ).start()
@@ -4340,6 +4411,7 @@ class MainWindow(QWidget):
         description: str,
         link_title: str,
         link_url: str,
+        remote_cdp: RemoteCdpLaunchOptions | None = None,
     ) -> None:
         from zaliver.antydetect.antic_open import (
             fill_channel_description_and_link_in_local_antidetect_profile,
@@ -4358,11 +4430,11 @@ class MainWindow(QWidget):
             creds = self._profile_login_credentials(pid)
             yt_oldest = self._profile_yt_oldest_name(pid) or None
             search_oldest = self._youtube_search_oldest_channel()
-            if kind_s == "local":
+            if _is_own_antidetect_kind(kind_s):
                 u = (base_url or "").strip()
                 if not u:
                     raise LocalAntidetectError(
-                        "Укажите базовый URL локального API в настройках."
+                        f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
                     )
                 fill_channel_description_and_link_in_local_antidetect_profile(
                     pid,
@@ -4374,6 +4446,7 @@ class MainWindow(QWidget):
                     login_credentials=creds,
                     yt_oldest_name=yt_oldest,
                     search_oldest_channel=search_oldest,
+                    remote_cdp=remote_cdp,
                 )
             else:
                 fill_channel_description_and_link_in_profile(
@@ -4437,13 +4510,7 @@ class MainWindow(QWidget):
         kind = self._default_browser_combo.currentData()
         if not isinstance(kind, str) or not kind.strip():
             kind = "dolphin"
-        base_url = (self._local_api_base_url.text() or "").strip()
-        if not base_url:
-            base_url = (
-                self._settings.value("antydetect/local_api_base_url", "", type=str) or ""
-            ).strip()
-        if not base_url and kind == "local":
-            base_url = DEFAULT_LOCAL_API_BASE_URL
+        base_url = self._own_antidetect_base_url_from_settings(kind)
 
         headless = True
         if hasattr(self, "_dolphin_headless"):
@@ -4452,6 +4519,12 @@ class MainWindow(QWidget):
             headless = bool(
                 self._settings.value("antydetect/dolphin_headless", True, type=bool)
             )
+
+        try:
+            remote_cdp = self._remote_cdp_launch_options_for_kind(kind)
+        except LocalAntidetectError as e:
+            QMessageBox.warning(self, "Прогрев Shorts", str(e))
+            return
 
         self._profiles_warmup_running = True
         self._sync_profiles_tab_action_buttons()
@@ -4484,6 +4557,7 @@ class MainWindow(QWidget):
                 "base_url": base_url,
                 "headless": headless,
                 "warmup_settings": warmup_settings,
+                "remote_cdp": remote_cdp,
             },
             daemon=True,
         ).start()
@@ -4497,6 +4571,7 @@ class MainWindow(QWidget):
         base_url: str,
         headless: bool,
         warmup_settings: ShortsWarmupSettings,
+        remote_cdp: RemoteCdpLaunchOptions | None = None,
     ) -> None:
         from zaliver.antydetect.antic_open import (
             set_log_sink,
@@ -4526,11 +4601,11 @@ class MainWindow(QWidget):
                 "horizontal_videos_count": warmup_settings.horizontal_videos_count,
                 "search_oldest_channel": search_oldest,
             }
-            if kind_s == "local":
+            if _is_own_antidetect_kind(kind_s):
                 u = (base_url or "").strip()
                 if not u:
                     raise LocalAntidetectError(
-                        "Укажите базовый URL локального API в настройках."
+                        f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
                     )
                 warmup_youtube_shorts_in_local_antidetect_profile(
                     pid,
@@ -4538,6 +4613,7 @@ class MainWindow(QWidget):
                     headless=headless,
                     login_credentials=creds,
                     yt_oldest_name=yt_oldest,
+                    remote_cdp=remote_cdp,
                     **warmup_kw,
                 )
             else:
@@ -4568,15 +4644,46 @@ class MainWindow(QWidget):
             return []
         return self._profiles_interaction.batch_profile_ids()
 
-    def _local_antidetect_base_url_from_settings(self) -> str:
-        base_url = (self._local_api_base_url.text() or "").strip()
-        if not base_url:
-            base_url = (
-                self._settings.value("antydetect/local_api_base_url", "", type=str) or ""
+    def _own_antidetect_base_url_from_settings(self, kind: str | None = None) -> str:
+        if kind is None:
+            kind = self._default_browser_combo.currentData()
+        k = (kind or "").strip() if isinstance(kind, str) else "dolphin"
+        if not k:
+            k = "dolphin"
+        if k == "local":
+            base_url = (self._local_api_base_url.text() or "").strip()
+            if not base_url:
+                base_url = (
+                    self._settings.value("antydetect/local_api_base_url", "", type=str) or ""
+                ).strip()
+            if not base_url:
+                base_url = DEFAULT_LOCAL_API_BASE_URL
+            return base_url
+        if k == "remote":
+            base_url = (self._remote_api_base_url.text() or "").strip()
+            if not base_url:
+                base_url = (
+                    self._settings.value("antydetect/remote_api_base_url", "", type=str) or ""
+                ).strip()
+            return base_url
+        return ""
+
+    def _remote_cdp_launch_options_for_kind(self, kind: str) -> RemoteCdpLaunchOptions | None:
+        if (kind or "").strip() != "remote":
+            return None
+        host = (self._remote_cdp_public_host.text() or "").strip()
+        if not host:
+            host = (
+                self._settings.value("antydetect/remote_cdp_public_host", "", type=str) or ""
             ).strip()
-        if not base_url:
-            base_url = DEFAULT_LOCAL_API_BASE_URL
-        return base_url
+        if not host:
+            raise LocalAntidetectError(
+                "Укажите CDP public host (IP) для удалённого антидетекта в настройках."
+            )
+        return RemoteCdpLaunchOptions(cdp_public_host=host)
+
+    def _local_antidetect_base_url_from_settings(self) -> str:
+        return self._own_antidetect_base_url_from_settings("local")
 
     def _profile_login_credentials(self, profile_id: str):
         from zaliver.youtube_upload.google_login import credentials_from_custom_data
@@ -4604,11 +4711,12 @@ class MainWindow(QWidget):
 
     def _open_profiles_accounts_import_dialog(self) -> None:
         kind = self._default_browser_combo.currentData()
-        if not isinstance(kind, str) or kind != "local":
+        if not _is_own_antidetect_kind(kind if isinstance(kind, str) else ""):
             QMessageBox.information(
                 self,
                 "Импорт данных учёток",
-                "Импорт доступен только для локального антидетекта.",
+                "Импорт доступен только для своего антидетекта "
+                "(локальный или удалённый API).",
             )
             return
         if not self._profiles_raw:
@@ -4651,7 +4759,15 @@ class MainWindow(QWidget):
             return
         rename_to_email = dlg.rename_profiles_to_email()
 
-        base_url = self._local_antidetect_base_url_from_settings()
+        base_url = self._own_antidetect_base_url_from_settings()
+        if not (base_url or "").strip():
+            QMessageBox.warning(
+                self,
+                "Импорт данных учёток",
+                f"Укажите базовый URL {_own_antidetect_api_label(kind if isinstance(kind, str) else '')} "
+                "API в настройках и сохраните.",
+            )
+            return
         saved = 0
         renamed = 0
         errors: list[str] = []
@@ -4709,6 +4825,73 @@ class MainWindow(QWidget):
         else:
             QMessageBox.information(self, "Импорт данных учёток", msg)
 
+    def _open_profile_cdp_preview(self, profile_id: str) -> None:
+        pid = (profile_id or "").strip()
+        if not pid:
+            return
+        kind = self._default_browser_combo.currentData()
+        if not isinstance(kind, str) or kind.strip() != "remote":
+            QMessageBox.information(
+                self,
+                "Просмотр",
+                "Просмотр доступен только при выбранном «Свой (удалённый API)» в настройках.",
+            )
+            return
+
+        existing = self._profile_cdp_previews.get(pid)
+        if existing is not None:
+            try:
+                existing.raise_()
+                existing.activateWindow()
+            except Exception:
+                pass
+            return
+
+        self._save_antydetect_settings()
+        base_url = self._own_antidetect_base_url_from_settings("remote")
+        if not (base_url or "").strip():
+            QMessageBox.warning(
+                self,
+                "Просмотр",
+                "Укажите базовый URL удалённого API в настройках и сохраните.",
+            )
+            return
+
+        name = pid
+        for p in self._profiles_raw or []:
+            if _profile_id(p) == pid:
+                name = _profile_name(p)
+                break
+
+        try:
+            api = LocalAntidetectHttpAPI(base_url)
+            try:
+                ws_url, user_msg = api.resolve_running_cdp_ws_url_for_profile(pid)
+            finally:
+                api.close()
+        except LocalAntidetectError as e:
+            QMessageBox.warning(self, "Просмотр", str(e))
+            return
+
+        if not (ws_url or "").strip():
+            QMessageBox.information(
+                self,
+                "Просмотр",
+                (user_msg or "").strip() or "Профиль не запущен.",
+            )
+            return
+
+        dlg = ProfileCdpPreviewDialog(
+            profile_id=pid,
+            profile_name=name,
+            base_url=base_url,
+            cdp_ws_url=ws_url,
+            parent=self,
+        )
+        self._profile_cdp_previews[pid] = dlg
+        dlg.destroyed.connect(lambda _obj=None, p=pid: self._profile_cdp_previews.pop(p, None))
+        dlg.show()
+
     def _open_profile_account_data_dialog(self, profile_id: str) -> None:
         pid = (profile_id or "").strip()
         if not pid:
@@ -4732,7 +4915,7 @@ class MainWindow(QWidget):
             if isinstance(cd, dict):
                 custom_data = dict(cd)
 
-        base_url = self._local_antidetect_base_url_from_settings()
+        base_url = self._own_antidetect_base_url_from_settings()
         load_error: str | None = None
         try:
             api = LocalAntidetectHttpAPI(base_url)
@@ -4824,12 +5007,12 @@ class MainWindow(QWidget):
             )
             return
         kind = self._default_browser_combo.currentData()
-        if not isinstance(kind, str) or kind.strip() != "local":
+        if not _is_own_antidetect_kind(kind if isinstance(kind, str) else ""):
             QMessageBox.warning(
                 self,
                 "Очистка тегов",
-                "Снятие тегов Zaliver доступно только для локального антидетекта. "
-                "Выберите «Свой (локальный API)» в настройках.",
+                "Снятие тегов Zaliver доступно только для своего антидетекта. "
+                "Выберите «Свой (локальный API)» или «Свой (удалённый API)» в настройках.",
             )
             return
         if self._profiles_raw is None:
@@ -4861,7 +5044,15 @@ class MainWindow(QWidget):
         if answer != QMessageBox.StandardButton.Yes:
             return
 
-        base_url = self._local_antidetect_base_url_from_settings()
+        base_url = self._own_antidetect_base_url_from_settings()
+        if not (base_url or "").strip():
+            QMessageBox.warning(
+                self,
+                "Очистка тегов",
+                f"Укажите базовый URL {_own_antidetect_api_label(kind if isinstance(kind, str) else '')} "
+                "API в настройках и сохраните.",
+            )
+            return
         self._profiles_tags_clear_running = True
         self._sync_profiles_tab_action_buttons()
         self._profiles_status.setText(
@@ -4884,7 +5075,7 @@ class MainWindow(QWidget):
             clear_zaliver_tags_on_profile,
         )
 
-        api = LocalAntidetectHttpAPI((base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL)
+        api = LocalAntidetectHttpAPI((base_url or "").strip())
         total = len(profile_ids)
         removed_total = 0
         try:
@@ -4959,7 +5150,7 @@ class MainWindow(QWidget):
                     "[availability] Недоступные профили (ID): " + ", ".join(failed)
                 )
         kind = self._default_browser_combo.currentData()
-        if (kind or "").strip() == "local" and total > 0:
+        if _is_own_antidetect_kind((kind or "").strip()) and total > 0:
             self._refresh_antydetect_profiles()
         QMessageBox.information(
             self,
@@ -5102,6 +5293,7 @@ class MainWindow(QWidget):
         upload_video_path: str | None = None,
         upload_title: str | None = None,
         upload_description: str | None = None,
+        remote_cdp: RemoteCdpLaunchOptions | None = None,
     ) -> None:
         try:
             # Логи антидетекта могут быть критичны для диагностики.
@@ -5135,11 +5327,11 @@ class MainWindow(QWidget):
             creds = self._profile_login_credentials(profile_id)
             yt_oldest = self._profile_yt_oldest_name(profile_id) or None
             search_oldest = self._youtube_search_oldest_channel()
-            if kind == "local":
+            if _is_own_antidetect_kind(kind):
                 u = (base_url or "").strip()
                 if not u:
                     raise LocalAntidetectError(
-                        "Сначала укажите базовый URL локального API в настройках."
+                        f"Сначала укажите базовый URL {_own_antidetect_api_label(kind)} API в настройках."
                     )
                 res = open_google_in_local_antidetect_profile(
                     profile_id,
@@ -5151,6 +5343,7 @@ class MainWindow(QWidget):
                     login_credentials=creds,
                     yt_oldest_name=yt_oldest,
                     search_oldest_channel=search_oldest,
+                    remote_cdp=remote_cdp,
                 )
             else:
                 res = open_google_in_profile(
@@ -5245,9 +5438,10 @@ class MainWindow(QWidget):
         self._upload_session_upload_done = True
         self._maybe_finish_upload_session(status="upload_failed")
         kind = self._default_browser_combo.currentData()
-        if kind == "local":
+        if _is_own_antidetect_kind(kind if isinstance(kind, str) else ""):
             hint = (
-                "Нужны запущенный локальный API антидетекта, Playwright и сессия Studio в профиле. "
+                f"Нужны доступный API {_own_antidetect_api_label(kind if isinstance(kind, str) else '')} "
+                "антидетекта, Playwright и сессия Studio в профиле. "
             )
         else:
             hint = (
@@ -5878,7 +6072,7 @@ class MainWindow(QWidget):
     def _stop_upload_antidetect_profiles(self) -> None:
         kind_u = (getattr(self, "_upload_cancel_kind", "") or "").strip()
         ids = [p for p in getattr(self, "_upload_cancel_profile_ids", []) if str(p).strip()]
-        if kind_u == "local":
+        if _is_own_antidetect_kind(kind_u):
             try:
                 from zaliver.antydetect.local_active_sessions import (
                     stop_all_registered_local_sessions_sync,
@@ -6086,16 +6280,20 @@ class MainWindow(QWidget):
             kind = self._default_browser_combo.currentData()
             if not isinstance(kind, str) or not kind.strip():
                 kind = "dolphin"
-            base_url = (self._local_api_base_url.text() or "").strip()
-            if not base_url:
-                base_url = (
-                    self._settings.value(
-                        "antydetect/local_api_base_url", "", type=str
-                    )
-                    or ""
-                ).strip()
-            if not base_url and kind == "local":
-                base_url = DEFAULT_LOCAL_API_BASE_URL
+            base_url = self._own_antidetect_base_url_from_settings(kind)
+
+            try:
+                remote_cdp = self._remote_cdp_launch_options_for_kind(kind)
+            except LocalAntidetectError as e:
+                self._append_session_log(f"YouTube: заливка пропущена — {e}")
+                self._upload_log_mode = ""
+                self._upload_session_upload_expected = False
+                self._upload_session_upload_done = True
+                self._maybe_finish_upload_session(status="upload_failed")
+                self._release_youtube_progress_hold_if_any()
+                self._finalize_idle_toolbar()
+                QMessageBox.warning(self, "Zaliver", str(e))
+                return
 
             raw_ids = (pending.get("profile_ids", "") or "").strip()
             profile_ids = [p.strip() for p in raw_ids.split(",") if p.strip()]
@@ -6149,7 +6347,7 @@ class MainWindow(QWidget):
                 creds = self._profile_login_credentials(profile_id)
                 yt_oldest = self._profile_yt_oldest_name(profile_id) or None
                 search_oldest = self._youtube_search_oldest_channel()
-                if kind == "local":
+                if _is_own_antidetect_kind(kind):
                     res = open_google_in_local_antidetect_profile(
                         profile_id,
                         base_url=(base_url or "").strip(),
@@ -6160,6 +6358,7 @@ class MainWindow(QWidget):
                         login_credentials=creds,
                         yt_oldest_name=yt_oldest,
                         search_oldest_channel=search_oldest,
+                        remote_cdp=remote_cdp,
                     )
                 else:
                     res = open_google_in_profile(
@@ -6376,11 +6575,15 @@ class MainWindow(QWidget):
     def _local_antidetect_api_for_profile_tags(
         self, *, kind: str, base_url: str
     ) -> LocalAntidetectHttpAPI | None:
-        if (kind or "").strip() != "local":
+        if not _is_own_antidetect_kind(kind):
             return None
-        return LocalAntidetectHttpAPI(
-            (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
-        )
+        u = (base_url or "").strip()
+        if not u:
+            if (kind or "").strip() == "local":
+                u = DEFAULT_LOCAL_API_BASE_URL
+            else:
+                return None
+        return LocalAntidetectHttpAPI(u)
 
     def _clear_previous_upload_result_tags(
         self,
@@ -6398,7 +6601,7 @@ class MainWindow(QWidget):
         if api is None:
             self._ui_log_line.emit(
                 "[upload] Сброс тегов прошлого залива доступен только "
-                "для локального антидетекта."
+                "для своего антидетекта."
             )
             return
         try:
@@ -6436,7 +6639,7 @@ class MainWindow(QWidget):
         if api is None:
             self._ui_log_line.emit(
                 f"[upload] profile={pid}: тег {tag!r} доступен только "
-                "для локального антидетекта."
+                "для своего антидетекта."
             )
             return
         try:
@@ -6479,12 +6682,14 @@ class MainWindow(QWidget):
             f"[upload] [PROFILE] profile={pid} consecutive_errors={int(n)} → flagged"
         )
 
-        # Если используем локальный антидетект — помечаем профиль тегом в его «базе» (profiles.json).
-        if (kind or "").strip() == "local":
+        # Если используем свой антидетект — помечаем профиль тегом в его «базе» (profiles.json).
+        if _is_own_antidetect_kind((kind or "").strip()):
             try:
-                from zaliver.antydetect.local_antidetect_api import LocalAntidetectHttpAPI
-
-                api = LocalAntidetectHttpAPI((base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL)
+                api = self._local_antidetect_api_for_profile_tags(
+                    kind=kind, base_url=base_url
+                )
+                if api is None:
+                    return
                 try:
                     api.add_profile_tag(pid, UPLOAD_ERROR_3X_TAG)
                 finally:

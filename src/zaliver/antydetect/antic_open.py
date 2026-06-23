@@ -198,6 +198,7 @@ def check_studio_availability_in_local_antidetect_profile(
     login_credentials=None,
     yt_oldest_name: str | None = None,
     search_oldest_channel: bool = True,
+    remote_cdp=None,
 ) -> None:
     """Локальный антидетект → Studio → окно загрузки (без файла)."""
     _log(
@@ -217,7 +218,9 @@ def check_studio_availability_in_local_antidetect_profile(
     session_id: str | None = None
     started_at = time.perf_counter()
     try:
-        acc = api.launch_profile(profile_id, headless=headless, expose_cdp=True)
+        acc = api.launch_profile(
+            profile_id, headless=headless, expose_cdp=True, remote_cdp=remote_cdp
+        )
         sid = acc.get("session_id")
         if not isinstance(sid, str) or not sid.strip():
             raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
@@ -334,6 +337,7 @@ def fill_channel_description_and_link_in_local_antidetect_profile(
     login_credentials=None,
     yt_oldest_name: str | None = None,
     search_oldest_channel: bool = True,
+    remote_cdp=None,
 ) -> None:
     """Локальный антидетект → Studio → «Настройка канала» → описание и ссылка."""
     _log(
@@ -353,7 +357,9 @@ def fill_channel_description_and_link_in_local_antidetect_profile(
     session_id: str | None = None
     started_at = time.perf_counter()
     try:
-        acc = api.launch_profile(profile_id, headless=headless, expose_cdp=True)
+        acc = api.launch_profile(
+            profile_id, headless=headless, expose_cdp=True, remote_cdp=remote_cdp
+        )
         sid = acc.get("session_id")
         if not isinstance(sid, str) or not sid.strip():
             raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
@@ -501,6 +507,7 @@ def warmup_youtube_shorts_in_local_antidetect_profile(
     watch_horizontal_videos: bool = False,
     horizontal_search_query: str | None = None,
     horizontal_videos_count: int | None = None,
+    remote_cdp=None,
 ) -> None:
     """Локальный антидетект → авторизация/канал → лента YouTube Shorts."""
     _log(
@@ -520,7 +527,9 @@ def warmup_youtube_shorts_in_local_antidetect_profile(
     session_id: str | None = None
     started_at = time.perf_counter()
     try:
-        acc = api.launch_profile(profile_id, headless=headless, expose_cdp=True)
+        acc = api.launch_profile(
+            profile_id, headless=headless, expose_cdp=True, remote_cdp=remote_cdp
+        )
         sid = acc.get("session_id")
         if not isinstance(sid, str) or not sid.strip():
             raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
@@ -682,6 +691,7 @@ def open_google_in_local_antidetect_profile(
     login_credentials=None,
     yt_oldest_name: str | None = None,
     search_oldest_channel: bool = True,
+    remote_cdp=None,
 ) -> dict | None:
     """
     Запуск профиля через локальный HTTP API (см. OpenAPI антидетекта: launch + опрос сессии на cdp_ws_url),
@@ -706,7 +716,9 @@ def open_google_in_local_antidetect_profile(
     try:
         started_at = time.perf_counter()
         _log("Local antidetect: клиент создан, запускаем профиль…")
-        acc = api.launch_profile(profile_id, headless=headless, expose_cdp=True)
+        acc = api.launch_profile(
+            profile_id, headless=headless, expose_cdp=True, remote_cdp=remote_cdp
+        )
         _log(f"Local antidetect: launch_profile ответ: {acc!r}")
         sid = acc.get("session_id")
         if not isinstance(sid, str) or not sid.strip():

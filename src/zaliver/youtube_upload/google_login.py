@@ -19,6 +19,12 @@ _2FA_HEADING_RE = re.compile(
     r"двухэтапн|two[- ]step|2[- ]step",
     re.I,
 )
+_2FA_AUTHENTICATOR_CHALLENGE_RE = re.compile(
+    r"google\s+authenticator|"
+    r"создайте\s+код\s+в\s+приложении|"
+    r"create\s+code\s+in\s+the(?:\s+\w+){0,4}\s+authenticator",
+    re.I,
+)
 _PASSKEY_ENROLLMENT_HEADING_RE = re.compile(
     r"входите\s+в\s+аккаунт\s+быстрее|sign\s+in\s+faster|faster\s+sign[- ]in",
     re.I,
@@ -255,6 +261,8 @@ def google_auth_interaction_visible(page) -> bool:
         return True
     if _birthday_step_visible(page):
         return True
+    if _2fa_challenge_picker_visible(page):
+        return True
     return False
 
 
@@ -470,6 +478,76 @@ def _totp_step_visible(page) -> bool:
         return page.locator('input[name="totpPin"], #totpPin').first.is_visible(timeout=400)
     except Exception:
         return False
+
+
+def _google_authenticator_challenge_locator(scope):
+    return (
+        scope.locator(
+            '[data-action="selectchallenge"][data-challengetype="6"]'
+            ':not([data-challengeunavailable="true"])'
+        )
+        .or_(
+            scope.locator(
+                '[jsname="EBHGs"][data-challengetype="6"]:not([data-challengeunavailable="true"])'
+            )
+        )
+        .or_(
+            scope.locator('[data-action="selectchallenge"]', has_text=_2FA_AUTHENTICATOR_CHALLENGE_RE)
+        )
+        .or_(scope.get_by_role("link", name=_2FA_AUTHENTICATOR_CHALLENGE_RE))
+    )
+
+
+def _2fa_challenge_picker_visible(page) -> bool:
+    """Экран «Выберите способ входа» перед полем кода Google Authenticator."""
+    if _totp_step_visible(page):
+        return False
+    for scope in _google_auth_scopes(page):
+        try:
+            locator = _google_authenticator_challenge_locator(scope)
+            if locator.count() > 0 and locator.first.is_visible(timeout=400):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _click_google_authenticator_challenge(page) -> None:
+    _log("Google: 2FA — выбираем «Создайте код в Google Authenticator»…")
+    clicked = False
+    last_err = ""
+    for scope in _google_auth_scopes(page):
+        btn = _google_authenticator_challenge_locator(scope)
+        try:
+            if btn.count() == 0:
+                continue
+            target = btn.first
+            target.wait_for(state="visible", timeout=20_000)
+            try:
+                target.scroll_into_view_if_needed(timeout=5_000)
+            except Exception:
+                pass
+            try:
+                target.click(timeout=30_000)
+            except Exception as e:
+                last_err = repr(e)
+                target.click(timeout=30_000, force=True)
+            clicked = True
+            break
+        except Exception as e:
+            last_err = repr(e)
+            continue
+    if not clicked:
+        raise RuntimeError(
+            "Google: пункт «Google Authenticator» на экране 2FA не найден или недоступен. "
+            f"URL={page.url!r}. {last_err}"
+        )
+    page.wait_for_timeout(900)
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        if _totp_step_visible(page):
+            return
+        page.wait_for_timeout(250)
 
 
 def _passkey_enrollment_visible(page) -> bool:
@@ -1461,7 +1539,7 @@ def attempt_google_login_for_studio(
 ) -> bool:
     """
     Пройти цепочку Google: email → личность → пароль → ключ доступа (пропуск) →
-    видеоселфи (пропуск) → 2FA → канал.
+    видеоселфи (пропуск) → выбор 2FA (Authenticator) → 2FA → канал.
     Возвращает True, если интерактивный вход больше не нужен.
     """
     if credentials is None:
@@ -1493,6 +1571,7 @@ def attempt_google_login_for_studio(
             and not _birthday_confirm_step_visible(page)
             and not _birthday_success_step_visible(page)
             and not _birthday_step_visible(page)
+            and not _2fa_challenge_picker_visible(page)
             and not _totp_step_visible(page)
             and not _account_chooser_step_visible(page)
             and not google_auth_interaction_visible(page)
@@ -1586,6 +1665,13 @@ def attempt_google_login_for_studio(
             _fill_birthday_and_save(page)
             continue
 
+        if _2fa_challenge_picker_visible(page):
+            steps += 1
+            idle_rounds = 0
+            _log(f"Google: выбор способа 2FA — Google Authenticator (шаг {steps})…")
+            _click_google_authenticator_challenge(page)
+            continue
+
         if _totp_step_visible(page):
             token = (credentials.twofa_token or "").strip()
             if not token:
@@ -1619,7 +1705,9 @@ def attempt_google_login_for_studio(
                 f"selfie={_selfie_enrollment_visible(page)}, "
                 f"birthday_confirm={_birthday_confirm_step_visible(page)}, "
                 f"birthday_success={_birthday_success_step_visible(page)}, "
-                f"birthday={_birthday_step_visible(page)})…"
+                f"birthday={_birthday_step_visible(page)}, "
+                f"2fa_picker={_2fa_challenge_picker_visible(page)}, "
+                f"totp={_totp_step_visible(page)})…"
             )
         page.wait_for_timeout(500)
 

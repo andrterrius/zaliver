@@ -193,25 +193,28 @@ class LocalAntidetectHttpAPI:
 
     def resolve_running_cdp_ws_url_for_profile(
         self, profile_id: str
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None]:
         """
         Один проход GET /sessions (без ожидания).
-        Возвращает (cdp_ws_url, сообщение для пользователя при отсутствии url).
+        Возвращает (cdp_ws_url, session_id, сообщение для пользователя при отсутствии url).
         """
         pid = (profile_id or "").strip()
         if not pid:
-            return None, "Не указан ID профиля."
+            return None, None, "Не указан ID профиля."
         running_seen = False
+        last_session_id: str | None = None
         for row in self.list_sessions():
             if str(row.get("profile_id") or "").strip() != pid:
                 continue
             if row.get("running") is False:
                 continue
             running_seen = True
+            sid = str(row.get("session_id") or "").strip()
+            if sid:
+                last_session_id = sid
             ws = row.get("cdp_ws_url")
             if isinstance(ws, str) and ws.strip():
-                return ws.strip(), None
-            sid = str(row.get("session_id") or "").strip()
+                return ws.strip(), sid or last_session_id, None
             if not sid:
                 continue
             try:
@@ -220,10 +223,15 @@ class LocalAntidetectHttpAPI:
                 continue
             ws2 = detail.get("cdp_ws_url")
             if isinstance(ws2, str) and ws2.strip():
-                return ws2.strip(), None
+                return ws2.strip(), sid, None
         if running_seen:
-            return None, PROFILE_PREVIEW_CDP_NOT_READY_MSG
-        return None, PROFILE_PREVIEW_NOT_RUNNING_MSG
+            return None, last_session_id, PROFILE_PREVIEW_CDP_NOT_READY_MSG
+        return None, None, PROFILE_PREVIEW_NOT_RUNNING_MSG
+
+    def find_running_session_id_for_profile(self, profile_id: str) -> str | None:
+        """session_id запущенной сессии профиля (один проход GET /sessions)."""
+        _ws, sid, _msg = self.resolve_running_cdp_ws_url_for_profile(profile_id)
+        return sid
 
     def find_running_cdp_ws_url_for_profile(
         self,

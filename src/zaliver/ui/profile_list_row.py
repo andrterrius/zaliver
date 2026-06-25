@@ -159,6 +159,7 @@ class ProfileListRow(QWidget):
                 "(профиль должен быть запущен в антидетекте с expose_cdp)"
             )
             self.preview_btn.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            self.preview_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             outer.addWidget(self.preview_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         tip_lines = [profile_row_title_text(profile), upload_text]

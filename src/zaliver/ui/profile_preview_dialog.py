@@ -6,8 +6,9 @@ import threading
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QImage, QPixmap, QResizeEvent
-from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from zaliver.antydetect.local_antidetect_api import LocalAntidetectError, LocalAntidetectHttpAPI
 from zaliver.ui.profile_cdp_preview import ProfileCdpPreviewBridge, run_profile_cdp_preview_worker
 
 
@@ -21,10 +22,15 @@ class ProfileCdpPreviewDialog(QWidget):
         profile_name: str,
         base_url: str,
         cdp_ws_url: str,
+        session_id: str = "",
         parent=None,
     ) -> None:
         super().__init__(parent, Qt.WindowType.Window)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self._profile_id = (profile_id or "").strip()
+        self._base_url = (base_url or "").strip()
+        self._session_id = (session_id or "").strip()
+        self._stop_in_progress = False
         self.setWindowTitle(f"Просмотр — {profile_name} ({self._profile_id})")
         self.setMinimumSize(720, 480)
         self.resize(960, 600)
@@ -50,16 +56,30 @@ class ProfileCdpPreviewDialog(QWidget):
         self._image.setScaledContents(False)
         root.addWidget(self._image, 1)
 
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        self._stop_remote_btn = QPushButton("Закрыть удалённый браузер")
+        self._stop_remote_btn.setObjectName("secondary")
+        self._stop_remote_btn.setAutoDefault(False)
+        self._stop_remote_btn.setDefault(False)
+        self._stop_remote_btn.setToolTip(
+            "Отправить POST /sessions/{id}/stop в API антидетекта и завершить сессию профиля"
+        )
+        self._stop_remote_btn.clicked.connect(self._on_stop_remote_browser)
+        btn_row.addWidget(self._stop_remote_btn)
+        root.addLayout(btn_row)
+
         self._bridge = ProfileCdpPreviewBridge(self)
         self._bridge.status.connect(self._on_status)
         self._bridge.frame_ready.connect(self._on_frame)
         self._bridge.failed.connect(self._on_failed)
+        self._bridge.remote_stop_done.connect(self._on_remote_stop_done)
 
         self._worker_thread = threading.Thread(
             target=run_profile_cdp_preview_worker,
             kwargs={
                 "profile_id": self._profile_id,
-                "base_url": base_url,
+                "base_url": self._base_url,
                 "cdp_ws_url": cdp_ws_url,
                 "cancel_event": self._cancel_event,
                 "bridge": self._bridge,
@@ -99,13 +119,56 @@ class ProfileCdpPreviewDialog(QWidget):
         self._image.setPixmap(pix)
         self._image.setText("")
 
+    def _on_stop_remote_browser(self) -> None:
+        if self._stop_in_progress:
+            return
+        if not self._base_url:
+            self._status.setText("Ошибка: базовый URL API не задан.")
+            return
+        self._stop_in_progress = True
+        self._stop_remote_btn.setEnabled(False)
+        self._status.setText("Остановка удалённого браузера…")
+        self._cancel_event.set()
+        threading.Thread(
+            target=self._stop_remote_worker,
+            daemon=True,
+            name=f"cdp-preview-stop-{self._profile_id}",
+        ).start()
+
+    def _stop_remote_worker(self) -> None:
+        ok = False
+        message = ""
+        try:
+            api = LocalAntidetectHttpAPI(self._base_url)
+            try:
+                sid = self._session_id
+                if not sid:
+                    sid = api.find_running_session_id_for_profile(self._profile_id) or ""
+                if not sid:
+                    raise LocalAntidetectError(
+                        "Не найдена запущенная сессия для этого профиля."
+                    )
+                api.stop_session(sid)
+            finally:
+                api.close()
+            ok = True
+            message = "Запрос на остановку сессии отправлен. Браузер закрывается…"
+        except Exception as e:
+            message = f"Не удалось остановить сессию: {e}"
+        self._bridge.remote_stop_done.emit(ok, message)
+
+    def _on_remote_stop_done(self, ok: bool, message: str) -> None:
+        self._status.setText((message or "").strip())
+        if ok:
+            self.close()
+            return
+        self._stop_in_progress = False
+        self._stop_remote_btn.setEnabled(True)
+
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._repaint_frame()
 
     def closeEvent(self, event) -> None:
         self._cancel_event.set()
-        th = self._worker_thread
-        if th is not None and th.is_alive():
-            th.join(timeout=8.0)
         super().closeEvent(event)

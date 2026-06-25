@@ -67,6 +67,7 @@ class ProfilesListInteraction(QObject):
         self._checkbox_press_modifiers = Qt.KeyboardModifier.NoModifier
         self._account_data_armed_row: ProfileListRow | None = None
         self._copy_id_armed_row: ProfileListRow | None = None
+        self._preview_armed_row: ProfileListRow | None = None
 
         self.lw.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self.lw.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -184,8 +185,7 @@ class ProfilesListInteraction(QObject):
             preserve.intersection_update(existing_ids)
         self.checked_profile_ids = preserve
 
-        self._account_data_armed_row = None
-        self._copy_id_armed_row = None
+        self._reset_pointer_interaction_state()
 
         self.lw.blockSignals(True)
         self.lw.clear()
@@ -503,7 +503,7 @@ class ProfilesListInteraction(QObject):
         pid = (profile_id or "").strip()
         if not pid:
             return
-        cb(pid)
+        QTimer.singleShot(0, lambda p=pid: cb(p))
 
     def _profile_row_for_account_button_hit(
         self, watched: QWidget, vp_pos: QPoint
@@ -548,21 +548,21 @@ class ProfilesListInteraction(QObject):
         return None
 
     def _invoke_preview_click(self, row: ProfileListRow) -> None:
-        pid = ""
-        for profile_id, row_w in self._profile_id_to_row.items():
-            if row_w is row:
-                pid = profile_id
-                break
-        if pid:
-            self._emit_preview_click(pid)
-            return
         cb = row._preview_cb
         if cb is not None:
             cb()
 
     def _profile_row_for_preview_button_hit(
-        self, watched: QWidget, vp_pos: QPoint
+        self, watched: QWidget, vp_pos: QPoint, *, global_pos: QPoint | None = None
     ) -> ProfileListRow | None:
+        gp = global_pos if global_pos is not None else self.lw.viewport().mapToGlobal(vp_pos)
+        for row in self._profile_id_to_row.values():
+            btn = row.preview_btn
+            if btn is None or not btn.isVisible() or not btn.isEnabled():
+                continue
+            if btn.rect().contains(btn.mapFromGlobal(gp)):
+                return row
+
         widgets_to_check: list[QWidget] = [watched]
         child = self.lw.viewport().childAt(vp_pos)
         if child is not None and child is not watched:
@@ -576,14 +576,6 @@ class ProfilesListInteraction(QObject):
                     if btn is not None and (cur is btn or btn.isAncestorOf(cur)):
                         return row
                 cur = cur.parentWidget()
-
-        for row in self._profile_id_to_row.values():
-            btn = row.preview_btn
-            if btn is None or not btn.isVisible():
-                continue
-            top_left = btn.mapTo(self.lw.viewport(), QPoint(0, 0))
-            if QRect(top_left, btn.size()).contains(vp_pos):
-                return row
         return None
 
     def _is_preview_button(self, watched: QWidget) -> bool:
@@ -632,6 +624,13 @@ class ProfilesListInteraction(QObject):
             return
         btn.click()
 
+    def _reset_pointer_interaction_state(self) -> None:
+        self._account_data_armed_row = None
+        self._copy_id_armed_row = None
+        self._preview_armed_row = None
+        self._lmb_select_end()
+        self._cancel_checkbox_click_pending()
+
     def _cancel_checkbox_click_pending(self) -> None:
         try:
             self.lw.viewport().releaseMouse()
@@ -672,13 +671,28 @@ class ProfilesListInteraction(QObject):
                 return super().eventFilter(watched, event)
 
             vp_pos = self._vp_pos_from_event(self.lw, event)
+            global_pos = event.globalPosition().toPoint()
             et = event.type()
 
             if (
                 et == QEvent.Type.MouseButtonRelease
                 and event.button() == Qt.MouseButton.LeftButton
+                and self._preview_armed_row is not None
             ):
-                preview_row = self._profile_row_for_preview_button_hit(watched, vp_pos)
+                row = self._preview_armed_row
+                self._preview_armed_row = None
+                self._cancel_checkbox_click_pending()
+                self._lmb_select_end()
+                self._invoke_preview_click(row)
+                return True
+
+            if (
+                et == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton
+            ):
+                preview_row = self._profile_row_for_preview_button_hit(
+                    watched, vp_pos, global_pos=global_pos
+                )
                 if preview_row is not None:
                     self._cancel_checkbox_click_pending()
                     self._lmb_select_end()
@@ -714,6 +728,7 @@ class ProfilesListInteraction(QObject):
                 if copy_row is not None:
                     self._copy_id_armed_row = copy_row
                     self._account_data_armed_row = None
+                    self._preview_armed_row = None
                     self._cancel_checkbox_click_pending()
                     return True
                 self._copy_id_armed_row = None
@@ -721,9 +736,21 @@ class ProfilesListInteraction(QObject):
                 account_row = self._profile_row_for_account_button_hit(watched, vp_pos)
                 if account_row is not None:
                     self._account_data_armed_row = account_row
+                    self._preview_armed_row = None
                     self._cancel_checkbox_click_pending()
                     return True
                 self._account_data_armed_row = None
+
+                preview_row = self._profile_row_for_preview_button_hit(
+                    watched, vp_pos, global_pos=global_pos
+                )
+                if preview_row is not None:
+                    self._preview_armed_row = preview_row
+                    self._account_data_armed_row = None
+                    self._copy_id_armed_row = None
+                    self._cancel_checkbox_click_pending()
+                    return True
+                self._preview_armed_row = None
 
             paint_mode = self._lmb_select_active or self._checkbox_row_pending is not None
 
@@ -769,6 +796,10 @@ class ProfilesListInteraction(QObject):
 
             if et == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
                 if self._is_preview_button(watched) or self._is_account_data_button(watched):
+                    return False
+                if self._profile_row_for_preview_button_hit(
+                    watched, vp_pos, global_pos=global_pos
+                ):
                     return False
                 row = self._row_index_for_event(watched, event)
                 if row is None:

@@ -4841,11 +4841,13 @@ class MainWindow(QWidget):
         existing = self._profile_cdp_previews.get(pid)
         if existing is not None:
             try:
-                existing.raise_()
-                existing.activateWindow()
-            except Exception:
-                pass
-            return
+                if existing.isVisible():
+                    existing.raise_()
+                    existing.activateWindow()
+                    return
+            except RuntimeError:
+                existing = None
+            self._profile_cdp_previews.pop(pid, None)
 
         self._save_antydetect_settings()
         base_url = self._own_antidetect_base_url_from_settings("remote")
@@ -4866,7 +4868,7 @@ class MainWindow(QWidget):
         try:
             api = LocalAntidetectHttpAPI(base_url)
             try:
-                ws_url, user_msg = api.resolve_running_cdp_ws_url_for_profile(pid)
+                ws_url, session_id, user_msg = api.resolve_running_cdp_ws_url_for_profile(pid)
             finally:
                 api.close()
         except LocalAntidetectError as e:
@@ -4886,6 +4888,7 @@ class MainWindow(QWidget):
             profile_name=name,
             base_url=base_url,
             cdp_ws_url=ws_url,
+            session_id=session_id or "",
             parent=self,
         )
         self._profile_cdp_previews[pid] = dlg

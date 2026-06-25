@@ -16,6 +16,7 @@ class ProfileCdpPreviewBridge(QObject):
     status = pyqtSignal(str)
     frame_ready = pyqtSignal(bytes)
     failed = pyqtSignal(str)
+    remote_stop_done = pyqtSignal(bool, str)
 
 
 def _pick_page(browser):

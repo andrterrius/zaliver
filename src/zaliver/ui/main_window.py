@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import replace
@@ -91,6 +92,7 @@ from zaliver.ui.profile_account_data_dialog import (
     YT_LOGIN_KEY,
 )
 from zaliver.ui.profile_accounts_import_dialog import ProfileAccountsImportDialog
+from zaliver.ui.profile_avatars_import_dialog import ProfileAvatarsImportDialog
 from zaliver.ui.profile_preview_dialog import ProfileCdpPreviewDialog
 from zaliver.ui.profiles_list_interaction import ProfilesListInteraction
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
@@ -774,6 +776,8 @@ class MainWindow(QWidget):
     _studio_availability_finished = pyqtSignal(int, int)
     _studio_channel_fill_progress = pyqtSignal(int, int, str)
     _studio_channel_fill_finished = pyqtSignal(int, int)
+    _studio_avatar_upload_progress = pyqtSignal(int, int, str)
+    _studio_avatar_upload_finished = pyqtSignal(int, int)
     _studio_warmup_progress = pyqtSignal(int, int, str)
     _studio_warmup_finished = pyqtSignal(int, int)
     _zaliver_profile_tags_clear_progress = pyqtSignal(int, int, str)
@@ -812,11 +816,13 @@ class MainWindow(QWidget):
         self._profiles_filter_timer.timeout.connect(self._apply_profiles_filter)
         self._profiles_availability_running = False
         self._profiles_channel_fill_running = False
+        self._profiles_avatar_upload_running = False
         self._profiles_warmup_running = False
         self._profiles_tags_clear_running = False
         self._profiles_refresh_running = False
         self._last_availability_failed_ids: list[str] = []
         self._last_channel_fill_failed_ids: list[str] = []
+        self._last_avatar_upload_failed_ids: list[str] = []
         self._last_warmup_failed_ids: list[str] = []
         self._build_ui()
         self._bootstrap_fd_limits()
@@ -846,6 +852,8 @@ class MainWindow(QWidget):
         self._studio_availability_finished.connect(self._on_studio_availability_finished)
         self._studio_channel_fill_progress.connect(self._on_studio_channel_fill_progress)
         self._studio_channel_fill_finished.connect(self._on_studio_channel_fill_finished)
+        self._studio_avatar_upload_progress.connect(self._on_studio_avatar_upload_progress)
+        self._studio_avatar_upload_finished.connect(self._on_studio_avatar_upload_finished)
         self._studio_warmup_progress.connect(self._on_studio_warmup_progress)
         self._studio_warmup_finished.connect(self._on_studio_warmup_finished)
         self._zaliver_profile_tags_clear_progress.connect(
@@ -1779,6 +1787,19 @@ class MainWindow(QWidget):
         self._btn_profiles_fill_channel.clicked.connect(
             self._start_profiles_channel_fill
         )
+        self._btn_profiles_add_avatars = QPushButton("Добавить аватарки")
+        self._btn_profiles_add_avatars.setObjectName("secondary")
+        self._btn_profiles_add_avatars.setAutoDefault(False)
+        self._btn_profiles_add_avatars.setDefault(False)
+        self._btn_profiles_add_avatars.setToolTip(
+            "Только для отмеченных профилей: выбрать картинку со спрайтом аватарок, "
+            "автоматически вырезать иконки и загрузить в YouTube Studio "
+            "(«Настройка канала» → Picture, затем «Опубликовать»). "
+            "Браузер всегда с окном (не headless), до 5 параллельно."
+        )
+        self._btn_profiles_add_avatars.clicked.connect(
+            self._open_profiles_avatars_import_dialog
+        )
         self._btn_profiles_warmup = QPushButton("Прогрев")
         self._btn_profiles_warmup.setObjectName("secondary")
         self._btn_profiles_warmup.setAutoDefault(False)
@@ -1802,6 +1823,7 @@ class MainWindow(QWidget):
             self._start_clear_zaliver_profile_tags
         )
         profiles_actions_row.addWidget(self._btn_profiles_fill_channel)
+        profiles_actions_row.addWidget(self._btn_profiles_add_avatars)
         profiles_actions_row.addWidget(self._btn_profiles_warmup)
         profiles_actions_row.addWidget(self._btn_profiles_check_availability)
         profiles_actions_row.addWidget(self._btn_profiles_import_accounts)
@@ -3389,6 +3411,7 @@ class MainWindow(QWidget):
         busy = (
             self._profiles_availability_running
             or self._profiles_channel_fill_running
+            or self._profiles_avatar_upload_running
             or self._profiles_warmup_running
             or self._profiles_tags_clear_running
             or self._profiles_refresh_running
@@ -3399,6 +3422,8 @@ class MainWindow(QWidget):
             self._btn_profiles_check_availability.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_fill_channel"):
             self._btn_profiles_fill_channel.setEnabled(not busy)
+        if hasattr(self, "_btn_profiles_add_avatars"):
+            self._btn_profiles_add_avatars.setEnabled(own and not busy)
         if hasattr(self, "_btn_profiles_warmup"):
             self._btn_profiles_warmup.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_refresh"):
@@ -4825,6 +4850,188 @@ class MainWindow(QWidget):
         else:
             QMessageBox.information(self, "Импорт данных учёток", msg)
 
+    def _open_profiles_avatars_import_dialog(self) -> None:
+        if self._profiles_avatar_upload_running:
+            QMessageBox.information(
+                self,
+                "Добавить аватарки",
+                "Загрузка аватарок уже выполняется. Дождитесь завершения.",
+            )
+            return
+        kind = self._default_browser_combo.currentData()
+        if not _is_own_antidetect_kind(kind if isinstance(kind, str) else ""):
+            QMessageBox.information(
+                self,
+                "Добавить аватарки",
+                "Импорт аватарок доступен только для своего антидетекта "
+                "(локальный или удалённый API).",
+            )
+            return
+        if not self._profiles_raw:
+            QMessageBox.information(
+                self,
+                "Добавить аватарки",
+                "Сначала загрузите список профилей (кнопка «Обновить»).",
+            )
+            return
+        if self._profiles_interaction is None:
+            return
+        profile_ids = self._profiles_interaction.batch_profile_ids()
+        if not profile_ids:
+            QMessageBox.warning(
+                self,
+                "Добавить аватарки",
+                "Отметьте квадратиками профили, которым нужно назначить аватарки.",
+            )
+            return
+        by_id = self._profiles_by_id_map(self._profiles_raw)
+        selected_profiles = [by_id[pid] for pid in profile_ids if pid in by_id]
+        if not selected_profiles:
+            QMessageBox.warning(
+                self,
+                "Добавить аватарки",
+                "Не удалось найти отмеченные профили в загруженном списке.",
+            )
+            return
+
+        dlg = ProfileAvatarsImportDialog(
+            selected_profiles=selected_profiles,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        assignments = dlg.upload_assignments()
+        if not assignments:
+            return
+
+        token = (self._dolphin_token.text() or "").strip()
+        if not token:
+            token = (
+                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
+            ).strip()
+        kind_s = kind if isinstance(kind, str) else "dolphin"
+        base_url = self._own_antidetect_base_url_from_settings(kind_s)
+        if not (base_url or "").strip():
+            QMessageBox.warning(
+                self,
+                "Добавить аватарки",
+                f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} "
+                "API в настройках и сохраните.",
+            )
+            return
+
+        headless = False
+
+        try:
+            remote_cdp = self._remote_cdp_launch_options_for_kind(kind_s)
+        except LocalAntidetectError as e:
+            QMessageBox.warning(self, "Добавить аватарки", str(e))
+            return
+
+        self._profiles_avatar_upload_running = True
+        self._sync_profiles_tab_action_buttons()
+        self._profiles_status.setText(
+            f"Загрузка аватарок в Studio: 0 / {len(assignments)}…"
+        )
+        self._append_log(
+            f"[avatar_upload] Старт для {len(assignments)} профилей "
+            f"(с окном браузера, до 5 параллельно)…"
+        )
+
+        threading.Thread(
+            target=self._profiles_avatar_upload_worker,
+            kwargs={
+                "assignments": assignments,
+                "kind": kind_s,
+                "token": token,
+                "base_url": base_url,
+                "headless": headless,
+                "remote_cdp": remote_cdp,
+            },
+            daemon=True,
+        ).start()
+
+    def _profiles_avatar_upload_worker(
+        self,
+        *,
+        assignments: list[tuple[str, bytes]],
+        kind: str,
+        token: str,
+        base_url: str,
+        headless: bool,
+        remote_cdp: RemoteCdpLaunchOptions | None = None,
+    ) -> None:
+        from zaliver.antydetect.antic_open import (
+            set_log_sink,
+            upload_channel_avatar_in_local_antidetect_profile,
+            upload_channel_avatar_in_profile,
+        )
+        from zaliver.youtube_upload.multi_availability_checker import (
+            MultiProfileAvailabilityChecker,
+        )
+
+        set_log_sink(self._ui_log_line.emit)
+        kind_s = (kind or "").strip()
+        base_u = (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
+        avatar_by_id = {pid: png for pid, png in assignments}
+
+        def _upload_one(pid: str) -> None:
+            png = avatar_by_id.get(pid)
+            if not png:
+                raise LocalAntidetectError(f"Нет аватарки для профиля {pid!r}.")
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                tf.write(png)
+                tmp_path = Path(tf.name)
+            try:
+                creds = self._profile_login_credentials(pid)
+                yt_oldest = self._profile_yt_oldest_name(pid) or None
+                search_oldest = self._youtube_search_oldest_channel()
+                if _is_own_antidetect_kind(kind_s):
+                    u = (base_url or "").strip()
+                    if not u:
+                        raise LocalAntidetectError(
+                            f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
+                        )
+                    upload_channel_avatar_in_local_antidetect_profile(
+                        pid,
+                        avatar_path=tmp_path,
+                        base_url=u,
+                        headless=headless,
+                        login_credentials=creds,
+                        yt_oldest_name=yt_oldest,
+                        search_oldest_channel=search_oldest,
+                        remote_cdp=remote_cdp,
+                    )
+                else:
+                    upload_channel_avatar_in_profile(
+                        pid,
+                        avatar_path=tmp_path,
+                        local_token=token or None,
+                        headless=headless,
+                        login_credentials=creds,
+                        yt_oldest_name=yt_oldest,
+                        search_oldest_channel=search_oldest,
+                    )
+            finally:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+        def _on_progress(done: int, total: int, profile_id: str) -> None:
+            self._studio_avatar_upload_progress.emit(done, total, profile_id)
+
+        mgr = MultiProfileAvailabilityChecker(
+            profile_ids=list(avatar_by_id.keys()),
+            check_one=_upload_one,
+            on_progress=_on_progress,
+            log_sink=self._ui_log_line.emit,
+        )
+        ok_n, fail_n, failed_ids = mgr.run()
+        self._last_avatar_upload_failed_ids = list(failed_ids)
+        self._studio_avatar_upload_finished.emit(ok_n, fail_n)
+
     def _open_profile_cdp_preview(self, profile_id: str) -> None:
         pid = (profile_id or "").strip()
         if not pid:
@@ -5190,6 +5397,38 @@ class MainWindow(QWidget):
         QMessageBox.information(
             self,
             "Описание и ссылка канала",
+            f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
+        )
+
+    def _on_studio_avatar_upload_progress(
+        self, current: int, total: int, profile_id: str
+    ) -> None:
+        pid = (profile_id or "").strip()
+        self._profiles_status.setText(
+            f"Загрузка аватарок в Studio: {current} / {total}"
+            + (f" — профиль {pid}" if pid else "…")
+        )
+
+    def _on_studio_avatar_upload_finished(self, ok_n: int, fail_n: int) -> None:
+        self._profiles_avatar_upload_running = False
+        self._sync_profiles_tab_action_buttons()
+        total = int(ok_n) + int(fail_n)
+        self._profiles_status.setText(
+            f"Загрузка аватарок завершена: успешно {ok_n}, с ошибкой {fail_n} "
+            f"(всего {total})."
+        )
+        self._append_log(
+            f"[avatar_upload] Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}."
+        )
+        if int(fail_n) > 0:
+            failed = getattr(self, "_last_avatar_upload_failed_ids", None) or []
+            if failed:
+                self._append_log(
+                    "[avatar_upload] Ошибки (ID): " + ", ".join(failed)
+                )
+        QMessageBox.information(
+            self,
+            "Добавить аватарки",
             f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
         )
 

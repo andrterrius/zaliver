@@ -12,6 +12,7 @@ from zaliver.youtube_upload.studio import (
     YoutubeAllChannelsRemovedError,
     YoutubeStudioError,
     run_studio_channel_description_and_link,
+    run_studio_channel_profile_picture,
     run_upload_latest_ready_video,
     run_youtube_shorts_warmup,
     set_log_sink,
@@ -405,6 +406,138 @@ def fill_channel_description_and_link_in_local_antidetect_profile(
         try:
             _log(
                 "Local antidetect: заполнение канала завершено за "
+                f"{time.perf_counter() - started_at:.1f} с."
+            )
+        except Exception:
+            pass
+        api.close()
+
+
+@with_log_profile
+def upload_channel_avatar_in_profile(
+    profile_id: str,
+    *,
+    avatar_path: str | Path,
+    local_token: str | None = None,
+    headless: bool = True,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    search_oldest_channel: bool = True,
+) -> None:
+    """Dolphin → Studio → «Настройка канала» → аватарка."""
+    _log(
+        "Dolphin: загрузка аватарки канала. "
+        f"profile_id={profile_id!r}, headless={headless}"
+    )
+    api = DolphinAntyLocalAPI()
+    try:
+        tok = (local_token or "").strip()
+        if tok:
+            _log("Dolphin: login_with_token…")
+            api.login_with_token(tok)
+        _log("Dolphin: start_profile…")
+        conn = api.start_profile(profile_id, headless=headless)
+        _log(
+            "Dolphin: профиль запущен. "
+            f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+        )
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_cdp(
+                p, (conn.ws_url(), conn.http_url())
+            )
+            try:
+                run_studio_channel_profile_picture(
+                    page,
+                    avatar_path=avatar_path,
+                    profile_id=profile_id,
+                    login_credentials=login_credentials,
+                    yt_oldest_name=yt_oldest_name,
+                    search_oldest_channel=search_oldest_channel,
+                )
+            finally:
+                _close_playwright_browser(browser)
+    except Exception as e:
+        _log(f"Ошибка загрузки аватарки: {type(e).__name__}: {e!r}")
+        raise _wrap_exc(e) from e
+    finally:
+        try:
+            api.stop_profile(profile_id)
+        except Exception as e:
+            _log(f"Dolphin: stop_profile: {e!r}")
+        api.close()
+
+
+@with_log_profile
+def upload_channel_avatar_in_local_antidetect_profile(
+    profile_id: str,
+    *,
+    avatar_path: str | Path,
+    base_url: str,
+    headless: bool = True,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    search_oldest_channel: bool = True,
+    remote_cdp=None,
+) -> None:
+    """Локальный антидетект → Studio → «Настройка канала» → аватарка."""
+    _log(
+        "Local antidetect: загрузка аватарки канала. "
+        f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}"
+    )
+    from zaliver.antydetect.local_antidetect_api import (
+        LocalAntidetectError,
+        LocalAntidetectHttpAPI,
+    )
+    from zaliver.antydetect.local_active_sessions import (
+        register_local_session,
+        unregister_local_session,
+    )
+
+    api = LocalAntidetectHttpAPI(base_url)
+    session_id: str | None = None
+    started_at = time.perf_counter()
+    try:
+        acc = api.launch_profile(
+            profile_id, headless=headless, expose_cdp=True, remote_cdp=remote_cdp
+        )
+        sid = acc.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+        session_id = sid.strip()
+        bu = (base_url or "").strip() or "http://127.0.0.1:18765"
+        register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
+        ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+        _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_cdp(p, (ws_url,))
+            try:
+                studio_kw = _local_studio_workflow_kwargs(
+                    api,
+                    profile_id,
+                    login_credentials=login_credentials,
+                    yt_oldest_name=yt_oldest_name,
+                    search_oldest_channel=search_oldest_channel,
+                )
+                run_studio_channel_profile_picture(
+                    page,
+                    avatar_path=avatar_path,
+                    **studio_kw,
+                )
+            finally:
+                _close_playwright_browser(browser)
+    except Exception as e:
+        _log(f"Ошибка загрузки аватарки: {type(e).__name__}: {e!r}")
+        raise LocalAntidetectError(f"Ошибка загрузки аватарки канала: {e}") from e
+    finally:
+        if session_id:
+            unregister_local_session(profile_id=profile_id)
+            try:
+                api.stop_session(session_id)
+            except Exception:
+                pass
+        try:
+            _log(
+                "Local antidetect: загрузка аватарки завершена за "
                 f"{time.perf_counter() - started_at:.1f} с."
             )
         except Exception:

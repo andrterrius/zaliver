@@ -1425,7 +1425,11 @@ def generate_video_from_segment(
             f"с {fragment['start']:.2f}с{loop_note}"
         )
 
-    temp_dir = f"temp_clips_{os.path.splitext(os.path.basename(output_video))[0]}"
+    output_parent = os.path.dirname(os.path.abspath(output_video)) or "."
+    temp_dir = os.path.join(
+        output_parent,
+        f"temp_clips_{os.path.splitext(os.path.basename(output_video))[0]}",
+    )
     os.makedirs(temp_dir, exist_ok=True)
 
     if not scene_clips:

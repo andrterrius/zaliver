@@ -4212,6 +4212,134 @@ def run_studio_channel_description_and_link(
     )
 
 
+def _studio_channel_profile_image_root(page):
+    return page.locator(
+        "ytcp-channel-editing-profile-tab ytcp-profile-image-upload, "
+        "ytcp-profile-image-upload"
+    ).first
+
+
+def _studio_click_profile_image_done(page) -> bool:
+    try:
+        return bool(
+            page.evaluate(
+                """
+() => {
+  const hosts = [
+    document.querySelector('ytcp-profile-image-editor #done-button'),
+    document.querySelector('#done-button'),
+  ].filter(Boolean);
+  for (const host of hosts) {
+    let btn = host.querySelector('button:not([disabled])');
+    if (!btn && host.shadowRoot) {
+      btn = host.shadowRoot.querySelector('button:not([disabled])');
+    }
+    if (btn) {
+      btn.scrollIntoView({ block: 'center', inline: 'nearest' });
+      btn.click();
+      return true;
+    }
+  }
+  return false;
+}
+"""
+            )
+        )
+    except Exception:
+        return False
+
+
+def _studio_upload_channel_profile_picture(page, avatar_path: Path) -> None:
+    """Customization → Picture → Upload/Change → Done → Publish."""
+    path = avatar_path.resolve()
+    if not path.is_file():
+        raise YoutubeStudioError(f"Файл аватарки не найден: {path}")
+
+    _studio_handle_interrupt_dialogs_if_present(page)
+    _log("Studio: загрузка аватарки канала…")
+
+    root = _studio_channel_profile_image_root(page)
+    root.wait_for(state="visible", timeout=60_000)
+    root.scroll_into_view_if_needed(timeout=15_000)
+    page.wait_for_timeout(300)
+
+    file_input = (
+        page.locator("ytcp-profile-image-upload input#file-selector")
+        .or_(page.locator('ytcp-profile-image-upload input[type="file"]'))
+    ).first
+    upload_btn = page.locator(
+        "ytcp-profile-image-upload #upload-button button, "
+        "ytcp-profile-image-upload #replace-button button"
+    ).first
+
+    transferred = False
+    try:
+        file_input.set_input_files(str(path), timeout=30_000)
+        transferred = True
+        _log("Studio: файл аватарки передан в #file-selector.")
+    except Exception as exc:
+        _log(
+            f"Studio: прямой set_input_files не удался ({exc!r}), "
+            "пробуем кнопку Upload/Change…"
+        )
+
+    if not transferred:
+        upload_btn.wait_for(state="visible", timeout=15_000)
+        upload_btn.scroll_into_view_if_needed(timeout=10_000)
+        try:
+            with page.expect_file_chooser(timeout=30_000) as fc_info:
+                upload_btn.click(timeout=15_000)
+            fc_info.value.set_files(str(path))
+            transferred = True
+            _log("Studio: файл аватарки выбран через Upload/Change.")
+        except Exception as exc:
+            raise YoutubeStudioError(
+                f"Не удалось передать файл аватарки в YouTube Studio: {exc}"
+            ) from exc
+
+    done_btn = page.locator(
+        "ytcp-profile-image-editor #done-button button, "
+        "ytcp-button#done-button button"
+    )
+    done_btn.first.wait_for(state="visible", timeout=60_000)
+    page.wait_for_timeout(600)
+
+    _log("Studio: подтверждение аватарки (Done)…")
+    if not _studio_click_profile_image_done(page):
+        done_btn.first.click(timeout=15_000)
+
+    try:
+        page.locator("ytcp-profile-image-editor").first.wait_for(
+            state="hidden", timeout=30_000
+        )
+    except Exception:
+        page.wait_for_timeout(800)
+
+    _studio_click_channel_customization_publish(page)
+
+
+@_studio_entrypoint
+def run_studio_channel_profile_picture(
+    page,
+    *,
+    avatar_path: str | Path,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    on_oldest_channel_name=None,
+    search_oldest_channel: bool = True,
+    profile_id: str | None = None,
+) -> None:
+    """Studio → «Настройка канала» → аватарка → «Опубликовать»."""
+    _studio_navigate_to_channel_customization(
+        page,
+        login_credentials=login_credentials,
+        yt_oldest_name=yt_oldest_name,
+        on_oldest_channel_name=on_oldest_channel_name,
+        search_oldest_channel=search_oldest_channel,
+    )
+    _studio_upload_channel_profile_picture(page, Path(avatar_path))
+
+
 @_studio_entrypoint
 def verify_studio_upload_dialog_available(
     page,

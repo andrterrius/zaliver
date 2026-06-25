@@ -1,6 +1,7 @@
 PyQt6>=6.6.0
 numpy>=1.26.0
 scipy>=1.11.0
+Pillow>=10.0.0
 pyinstaller
 requests>=2.32.0
 patchright>=1.59.1

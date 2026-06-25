@@ -91,8 +91,9 @@ _JOINED_LINE_HINT_RE = re.compile(
 _YEAR_IN_TEXT_RE = re.compile(r"\b(19\d{2}|20[0-3]\d)\b")
 
 # Playwright при connect_over_cdp шлёт тело файла по CDP и режет ~50 MiB.
-# DOM.setFileInputFiles с путями на хосте браузера обходит это (Chromium читает файл сам).
-_PLAYWRIGHT_REMOTE_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
+# DOM.setFileInputFiles с путями на хосте браузера обходит это (Chromium читает файл сам);
+# для загрузки в Studio всегда пробуем CDP первым, set_files — только fallback.
+_PLAYWRIGHT_REMOTE_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024  # лимит Playwright для fallback-пути
 # set_files / set_input_files по CDP для крупных файлов; дефолт Playwright 30 с часто мало.
 _STUDIO_FILE_PICKER_TRANSFER_MS = 600_000
 
@@ -242,17 +243,97 @@ def _studio_try_google_login_if_needed(page, login_credentials) -> bool:
     return True
 
 
-def _studio_on_google_auth_page(page) -> bool:
+def _studio_page_url_lower(page) -> str:
+    try:
+        return (page.url or "").lower()
+    except Exception:
+        return ""
+
+
+def _studio_on_youtube_property(page) -> bool:
+    url = _studio_page_url_lower(page)
+    return "www.youtube.com" in url or "studio.youtube.com" in url
+
+
+def _studio_login_required(page, *, fast: bool = False) -> bool:
+    """
+    Иногда вместо Studio открывается окно логина Google/YouTube.
+    В этом случае на профиле нет активной сессии → залив нужно завершать.
+    """
+    probe_ms = 250 if fast else 800
+    try:
+        url = _studio_page_url_lower(page)
+        if "accounts.google.com" in url or "servicelogin" in url:
+            return True
+    except Exception:
+        pass
+    try:
+        # Пример из репорта пользователя:
+        # <h1 id="headingText"><span>Вход</span></h1>
+        # "Для перехода к YouTube войдите в свой аккаунт Google."
+        login_block = page.locator("div.ObDc3.ZYOIke").first
+        if login_block.count() > 0 and login_block.is_visible(timeout=probe_ms):
+            return True
+    except Exception:
+        pass
+    try:
+        if page.locator(
+            "#headingText",
+            has_text=re.compile(r"вход|sign\s*in|выберите\s+аккаунт|choose\s+an?\s+account", re.I),
+        ).first.is_visible(timeout=probe_ms):
+            return True
+    except Exception:
+        pass
+    try:
+        if page.locator(
+            "[role='heading'][aria-level='1'], .RY3zi, h1.qQnGVb",
+            has_text=re.compile(
+                r"убедитесь,\s*что\s+вы\s+всегда\s+сможете\s+войти|"
+                r"make\s+sure\s+you\s+(can\s+)?always\s+sign\s+in|"
+                r"add\s+your\s+birthday|добавьте\s+дату\s+рождения",
+                re.I,
+            ),
+        ).first.is_visible(timeout=probe_ms):
+            return True
+    except Exception:
+        pass
+    try:
+        if page.get_by_text(
+            re.compile(r"для\s+перехода\s+к\s+youtube\s+войдите", re.I)
+        ).first.is_visible(timeout=probe_ms):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _studio_on_google_auth_page(page, *, fast: bool = False) -> bool:
+    url = _studio_page_url_lower(page)
+    if "accounts.google.com" in url or "servicelogin" in url:
+        return True
+    if _studio_on_youtube_property(page):
+        if _studio_login_required(page, fast=True):
+            return True
+        try:
+            if page.locator("ytd-channel-switcher-renderer").first.is_visible(
+                timeout=200
+            ):
+                return True
+        except Exception:
+            pass
+        return False
+    if fast:
+        return _studio_login_required(page, fast=True)
     from zaliver.youtube_upload.google_login import google_auth_interaction_visible
 
-    return _studio_login_required(page) or google_auth_interaction_visible(page)
+    return _studio_login_required(page, fast=True) or google_auth_interaction_visible(page)
 
 
 def _studio_wait_for_google_session(
-    page, *, login_credentials=None, timeout_s: float | None = None
+    page, *, login_credentials=None, timeout_s: float | None = None, fast: bool = False
 ) -> None:
     """Не уходим со страницы входа Google, пока сессия не восстановлена."""
-    if not _studio_on_google_auth_page(page):
+    if not _studio_on_google_auth_page(page, fast=fast):
         return
 
     from zaliver.youtube_upload.google_login import _GOOGLE_LOGIN_MAX_S
@@ -290,57 +371,6 @@ def _studio_wait_for_google_session(
         "Завершите авторизацию в окне браузера или проверьте "
         "yt_login/yt_password в данных профиля."
     )
-
-
-def _studio_login_required(page) -> bool:
-    """
-    Иногда вместо Studio открывается окно логина Google/YouTube.
-    В этом случае на профиле нет активной сессии → залив нужно завершать.
-    """
-    try:
-        url = (page.url or "").lower()
-        if "accounts.google.com" in url or "servicelogin" in url:
-            return True
-    except Exception:
-        pass
-    try:
-        # Пример из репорта пользователя:
-        # <h1 id="headingText"><span>Вход</span></h1>
-        # "Для перехода к YouTube войдите в свой аккаунт Google."
-        login_block = page.locator("div.ObDc3.ZYOIke").first
-        if login_block.count() > 0 and login_block.is_visible():
-            return True
-    except Exception:
-        pass
-    try:
-        if page.locator(
-            "#headingText",
-            has_text=re.compile(r"вход|sign\s*in|выберите\s+аккаунт|choose\s+an?\s+account", re.I),
-        ).first.is_visible():
-            return True
-    except Exception:
-        pass
-    try:
-        if page.locator(
-            "[role='heading'][aria-level='1'], .RY3zi, h1.qQnGVb",
-            has_text=re.compile(
-                r"убедитесь,\s*что\s+вы\s+всегда\s+сможете\s+войти|"
-                r"make\s+sure\s+you\s+(can\s+)?always\s+sign\s+in|"
-                r"add\s+your\s+birthday|добавьте\s+дату\s+рождения",
-                re.I,
-            ),
-        ).first.is_visible():
-            return True
-    except Exception:
-        pass
-    try:
-        if page.get_by_text(
-            re.compile(r"для\s+перехода\s+к\s+youtube\s+войдите", re.I)
-        ).first.is_visible():
-            return True
-    except Exception:
-        pass
-    return False
 
 
 def _studio_channel_creation_dialog_locator(page):
@@ -1079,12 +1109,11 @@ def _studio_handle_channel_removed_if_present(page) -> bool:
 def _studio_goto_youtube_home(
     page, *, login_credentials=None, for_channel_scan: bool = True
 ) -> None:
-    _studio_wait_for_google_session(page, login_credentials=login_credentials)
-    try:
-        # studio.youtube.com тоже содержит «youtube.com» — нужен именно основной сайт.
-        on_youtube = "www.youtube.com" in (page.url or "").lower()
-    except Exception:
-        on_youtube = False
+    fast = not for_channel_scan
+    _studio_wait_for_google_session(
+        page, login_credentials=login_credentials, fast=fast
+    )
+    on_youtube = "www.youtube.com" in _studio_page_url_lower(page)
     if for_channel_scan:
         goto_reason = "для проверки каналов"
         already_reason = "проверка каналов"
@@ -2394,25 +2423,28 @@ def _studio_try_match_expected_channel_in_studio(
     if not expected:
         return False
 
-    try:
-        on_studio = "studio.youtube.com" in (page.url or "").lower()
-    except Exception:
-        on_studio = False
+    _studio_wait_for_google_session(
+        page, login_credentials=login_credentials, fast=True
+    )
 
-    if on_studio:
+    if _studio_page_on_studio_home(page) and _studio_dashboard_ready(
+        page, timeout_ms=800
+    ):
         _log(
             f"Studio: уже на studio.youtube.com — проверяем yt_oldest_name «{expected}»…"
         )
-        _studio_wait_for_google_session(page, login_credentials=login_credentials)
     else:
-        _studio_wait_for_google_session(page, login_credentials=login_credentials)
-        _log(
-            f"Studio: проверка yt_oldest_name «{expected}» на studio.youtube.com…"
-        )
-        page.goto(
-            "https://studio.youtube.com/",
-            wait_until="domcontentloaded",
-            timeout=120_000,
+        if _studio_page_on_studio_home(page):
+            _log(
+                "Studio: studio.youtube.com в URL, но интерфейс не загружен — "
+                "прогрев через youtube.com…"
+            )
+        else:
+            _log(
+                f"Studio: проверка yt_oldest_name «{expected}» на studio.youtube.com…"
+            )
+        _studio_warmup_youtube_then_studio(
+            page, login_credentials=login_credentials
         )
 
     _studio_try_google_login_if_needed(page, login_credentials)
@@ -2444,9 +2476,19 @@ def _studio_ensure_current_channel_in_studio(
         "Studio: поиск старого канала отключён — "
         "текущий канал без переключения (youtube.com → Studio)…"
     )
-    _studio_goto_youtube_home(
-        page, login_credentials=login_credentials, for_channel_scan=False
-    )
+    if _studio_page_on_studio_home(page) and _studio_dashboard_ready(
+        page, timeout_ms=800
+    ):
+        _log("Studio: Studio уже загружен — переключение канала не нужно.")
+        return ""
+
+    on_youtube = "www.youtube.com" in _studio_page_url_lower(page)
+    if on_youtube:
+        _log("Studio: youtube.com уже открыт — переход в Studio…")
+    else:
+        _studio_goto_youtube_home(
+            page, login_credentials=login_credentials, for_channel_scan=False
+        )
     _studio_goto_studio_if_needed(
         page, login_credentials=login_credentials, quick=True
     )
@@ -2977,6 +3019,34 @@ def _studio_create_button_visible(page, *, timeout_ms: int = 1_000) -> bool:
         return False
 
 
+def _studio_dashboard_ready(page, *, timeout_ms: int = 2_000) -> bool:
+    """True, если Studio загрузилась (не только URL studio.youtube.com в адресной строке)."""
+    if not _studio_page_on_studio_home(page):
+        return False
+    if _studio_on_google_auth_page(page, fast=True):
+        return False
+    if _studio_create_button_visible(page, timeout_ms=timeout_ms):
+        return True
+    probe_ms = min(timeout_ms, 600)
+    return bool(
+        _studio_read_navigation_drawer_channel_name(
+            page, probe_timeout_ms=probe_ms
+        )
+    )
+
+
+def _studio_warmup_youtube_then_studio(
+    page, *, login_credentials=None, quick: bool = False
+) -> None:
+    """Прогрев сессии через youtube.com, затем переход в Studio."""
+    _studio_goto_youtube_home(
+        page, login_credentials=login_credentials, for_channel_scan=False
+    )
+    _studio_goto_studio_if_needed(
+        page, login_credentials=login_credentials, quick=quick
+    )
+
+
 def _studio_prepare_studio_dashboard(page, *, login_credentials=None) -> None:
     """
     Studio открыт: сессия Google, диалоги онбординга/удалённого канала.
@@ -2990,23 +3060,39 @@ def _studio_goto_studio_if_needed(
     page, *, login_credentials=None, quick: bool = False
 ) -> None:
     """Открыть studio.youtube.com без ожидания кнопки «Создать»."""
-    if _studio_page_on_studio_home(page) and not _studio_on_google_auth_page(page):
+    auth_fast = quick
+    on_studio = _studio_page_on_studio_home(page) and not _studio_on_google_auth_page(
+        page, fast=auth_fast
+    )
+    if on_studio and _studio_dashboard_ready(
+        page, timeout_ms=600 if quick else 2_000
+    ):
         return
-    if _studio_on_google_auth_page(page):
-        _studio_wait_for_google_session(page, login_credentials=login_credentials)
+    if on_studio:
+        _log(
+            "Studio: studio.youtube.com в URL, но дашборд не готов — "
+            "прогрев через youtube.com…"
+        )
+        _studio_goto_youtube_home(
+            page, login_credentials=login_credentials, for_channel_scan=False
+        )
+    elif not quick:
+        _studio_wait_for_google_session(
+            page, login_credentials=login_credentials, fast=False
+        )
     if not _studio_page_on_studio_home(page):
         _log("Studio: переход на https://studio.youtube.com/ …")
         page.goto(
             "https://studio.youtube.com/",
             wait_until="commit" if quick else "domcontentloaded",
-            timeout=45_000 if quick else 90_000,
+            timeout=30_000 if quick else 90_000,
         )
         if quick:
             _log("Studio: studio.youtube.com открыт.")
     if quick:
-        if _studio_on_google_auth_page(page):
+        if _studio_on_google_auth_page(page, fast=True):
             _studio_try_google_login_if_needed(page, login_credentials)
-    elif _studio_on_google_auth_page(page) or _studio_login_required(page):
+    elif _studio_on_google_auth_page(page) or _studio_login_required(page, fast=True):
         _studio_try_google_login_if_needed(page, login_credentials)
     _studio_handle_channel_removed_if_present(page)
 
@@ -3065,6 +3151,7 @@ def _studio_click_create_then_add_video(
     yt_oldest_name: str | None = None,
     on_oldest_channel_name=None,
     search_oldest_channel: bool = True,
+    wait_for_upload_picker: bool = True,
 ) -> str:
     """
     studio.youtube.com → кнопка «Создать» (ytcp-button-shape) → меню ytcp-text-menu
@@ -3107,9 +3194,10 @@ def _studio_click_create_then_add_video(
     upload_item.first.click(timeout=30_000)
     page.wait_for_timeout(500)
     _log(f"Studio: после «Добавить видео» URL: {page.url!r}")
-    _studio_wait_upload_file_picker_visible(
-        page, timeout_ms=_STUDIO_UI_MS, login_credentials=login_credentials
-    )
+    if wait_for_upload_picker:
+        _studio_wait_upload_file_picker_visible(
+            page, timeout_ms=_STUDIO_UI_MS, login_credentials=login_credentials
+        )
     return oldest
 
 
@@ -4989,18 +5077,18 @@ def _studio_set_file_input_via_cdp(page, preferred_frame, resolved_local_path: s
     return False
 
 
-def _studio_upload_pick_file(page, video_path: str, *, login_credentials=None) -> None:
-    """Диалог ytcp-uploads-file-picker: «Выбрать файлы» + файл (file chooser или input Filedata)."""
+def _studio_validate_video_file_path(video_path: str | Path) -> Path:
+    """Проверить, что файл существует и доступен для чтения (до открытия диалога загрузки)."""
     p = Path(video_path).expanduser()
-    # На Windows иногда бывает гонка: файл только что "сохранён",
-    # но ещё недоступен для открытия из другого процесса на мгновение.
-    _log(f"Studio: проверка файла перед загрузкой: raw={video_path!r}, expanded={str(p)!r}")
+    _log(
+        f"Studio: проверка файла перед загрузкой: raw={video_path!r}, expanded={str(p)!r}"
+    )
     file_wait_deadline = time.monotonic() + 6.0
     last_stat_err: Exception | None = None
     while True:
         try:
             if p.is_file():
-                break
+                return p
         except Exception as e:
             last_stat_err = e
         if time.monotonic() >= file_wait_deadline:
@@ -5008,8 +5096,22 @@ def _studio_upload_pick_file(page, video_path: str, *, login_credentials=None) -
                 f"Видеофайл не найден/не доступен: {video_path!r}. "
                 f"expanded={str(p)!r}, last_stat_err={last_stat_err!r}"
             )
-        page.wait_for_timeout(500)
+        time.sleep(0.25)
 
+
+def _studio_upload_pick_file(
+    page,
+    video_path: str | Path,
+    *,
+    login_credentials=None,
+    skip_validation: bool = False,
+) -> None:
+    """Диалог ytcp-uploads-file-picker: файл через CDP (локальный путь) или fallback file chooser."""
+    p = (
+        Path(video_path).expanduser()
+        if skip_validation
+        else _studio_validate_video_file_path(video_path)
+    )
     _studio_wait_upload_file_picker_visible(page, login_credentials=login_credentials)
     picker = _studio_upload_file_picker_locator(page)
 
@@ -5040,23 +5142,21 @@ def _studio_upload_pick_file(page, video_path: str, *, login_credentials=None) -
         f"resolved={resolved!r}, exists={p.exists()}, is_file={p.is_file()}, size={sz}"
     )
 
-    if sz >= _PLAYWRIGHT_REMOTE_UPLOAD_LIMIT_BYTES:
+    _log(
+        f"Studio: DOM.setFileInputFiles по локальному пути (байт: {sz}) — "
+        "Chromium читает файл с диска, без передачи тела по CDP…"
+    )
+    frame = _studio_file_input_frame(picker, select_btn, page)
+    try:
+        fu = frame.url
+    except Exception:
+        fu = "(url недоступен)"
+    _log(f"Studio: CDP — фрейм поля Filedata: {fu!r}")
+    if not _studio_set_file_input_via_cdp(page, frame, resolved):
         _log(
-            f"Studio: файл {sz} байт (не меньше лимита Playwright для передачи по CDP) — "
-            "DOM.setFileInputFiles по локальному пути…"
+            "Studio: CDP DOM.setFileInputFiles не удался — "
+            "fallback на file chooser / set_input_files (медленнее: тело файла по CDP)…"
         )
-        frame = _studio_file_input_frame(picker, select_btn, page)
-        try:
-            fu = frame.url
-        except Exception:
-            fu = "(url недоступен)"
-        _log(f"Studio: CDP — фрейм поля Filedata: {fu!r}")
-        if not _studio_set_file_input_via_cdp(page, frame, resolved):
-            raise YoutubeStudioError(
-                "Не удалось привязать большой файл к полю загрузки Studio через CDP. "
-                "Нужен доступ к тому же диску, что и у Chromium (обычно тот же ПК, что и Zaliver)."
-            )
-    else:
         last_pick_err: Exception | None = None
         for attempt in range(1, 4):
             try:
@@ -5083,16 +5183,10 @@ def _studio_upload_pick_file(page, video_path: str, *, login_credentials=None) -
                     last_pick_err = e2
                     err_t = str(e2).lower()
                     if "50" in err_t and "mb" in err_t:
-                        _log(
-                            "Studio: срабатывает обход лимита ~50 MiB — CDP DOM.setFileInputFiles…"
-                        )
-                        frame = _studio_file_input_frame(picker, select_btn, page)
-                        if _studio_set_file_input_via_cdp(page, frame, resolved):
-                            last_pick_err = None
-                            break
                         raise YoutubeStudioError(
                             "Видео слишком велико для передачи в браузер через Playwright по CDP; "
-                            "обход через DOM.setFileInputFiles не удался."
+                            "обход через DOM.setFileInputFiles не удался. "
+                            "Нужен доступ к тому же диску, что и у Chromium (обычно тот же ПК, что и Zaliver)."
                         ) from e2
                     _log(
                         f"Studio: fallback set_input_files не удался: {e2!r}. "
@@ -5241,7 +5335,7 @@ def _studio_select_not_for_kids(page) -> None:
         pass
 
 
-def _studio_click_next_until_visibility(page) -> None:
+def _studio_click_next_until_visibility(page, *, fast_if_upload_done: bool = False) -> None:
     """«Далее» / Next пока не появится выбор доступа (#privacy-radios / PUBLIC)."""
     _log("Studio: «Далее» до экрана доступа…")
     public_radio = (
@@ -5256,13 +5350,22 @@ def _studio_click_next_until_visibility(page) -> None:
         if public_radio.first.is_visible():
             _log(f"Studio: экран доступа виден (шаг {i}).")
             return
+        upload_done = (
+            fast_if_upload_done and _studio_is_upload_file_transfer_complete(page)
+        )
+        if upload_done:
+            status = _studio_read_upload_progress_label(page)
+            if status and _studio_is_upload_past_percent_phase(status):
+                _log(
+                    f"Studio: загрузка завершена ({status!r}) — ускоряем проход мастера…"
+                )
         nxt = page.get_by_role("button", name=re.compile(r"^далее$|^next$", re.I))
         if nxt.count() > 0 and nxt.first.is_visible():
             _log(f"Studio: «Далее» ({i + 1}/{_STUDIO_WIZARD_NEXT_MAX})…")
             nxt.first.click(timeout=15_000)
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(150 if upload_done else 500)
             continue
-        page.wait_for_timeout(400)
+        page.wait_for_timeout(200 if upload_done else 400)
 
     if not public_radio.first.is_visible():
         raise YoutubeStudioError(
@@ -5490,6 +5593,71 @@ def _studio_is_upload_checks_completed(page) -> bool:
     return False
 
 
+def _studio_read_upload_progress_label(page) -> str:
+    label = page.locator(
+        "ytcp-uploads-dialog ytcp-video-upload-progress .progress-label"
+    )
+    try:
+        if label.count() > 0 and label.first.is_visible(timeout=500):
+            return (label.first.inner_text(timeout=1_500) or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _studio_is_upload_past_percent_phase(text: str) -> bool:
+    """Фаза процентов прошла: в статуге есть текст, но нет «%»."""
+    t = (text or "").strip()
+    if not t or "%" in t:
+        return False
+    if re.search(
+        r"starting|preparing|getting ready|начина|подготов|will begin shortly",
+        t,
+        re.I,
+    ):
+        return False
+    return True
+
+
+def _studio_is_upload_file_transfer_complete_text(text: str) -> bool:
+    """
+    Файл передан на сервер YouTube; проверки ещё не завершены.
+    EN: «Upload complete ... Processing will begin shortly»
+    RU: «Загрузка завершена... Скоро начнётся обработка» (и похожие формулировки).
+    """
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    post_upload_markers = (
+        "upload complete",
+        "processing will begin shortly",
+        "загрузка завершена",
+        "загрузка завершена.",
+        "обработка скоро начн",
+        "скоро начнётся обработка",
+        "скоро начнется обработка",
+    )
+    if any(m in t for m in post_upload_markers):
+        return True
+    if re.search(r"(?:загрузк|upload)", t) and re.search(r"\b100\s*%", t):
+        return True
+    if "checks complete" in t:
+        return True
+    if _studio_is_upload_past_percent_phase(text):
+        return True
+    return False
+
+
+def _studio_is_upload_file_transfer_complete(page) -> bool:
+    """Загрузка файла завершена: 100%, «загрузка завершена», проверки или статус без «%»."""
+    t = _studio_read_upload_progress_label(page)
+    if t and _studio_is_upload_file_transfer_complete_text(t):
+        return True
+    if _studio_is_upload_checks_completed(page):
+        return True
+    return False
+
+
 def _studio_try_extract_video_id_from_url(url: str) -> str:
     """
     Пытаемся вытащить videoId из URL/текста ссылки:
@@ -5625,7 +5793,133 @@ def _studio_abort_fatal_error(page, browser, error_text: str) -> None:
     raise YoutubeStudioError(f"YouTube Studio: ошибка загрузки/обработки: {error_text or '—'}")
 
 
-def _studio_wait_after_upload_studio_outcome(page, browser, max_wait_sec: float) -> None:
+def _studio_poll_upload_fatal(page, browser) -> None:
+    """Фатальные ошибки / «Загрузка недоступна» во время залива."""
+    fatal = _studio_fatal_error_text(page)
+    if fatal:
+        _studio_abort_fatal_error(page, browser, fatal)
+    if _studio_is_upload_unavailable_dialog(page):
+        _studio_abort_upload_unavailable(page, browser)
+
+
+def _studio_wait_for_upload_file_transfer_complete(
+    page, browser, max_wait_sec: float
+) -> None:
+    """Ждём 100% передачи файла или «Загрузка завершена… обработка скоро начнётся»."""
+    _log(
+        "Studio: ожидание завершения передачи файла "
+        "(100% / «Загрузка завершена…»)…"
+    )
+    deadline = time.monotonic() + max_wait_sec
+    last_label: str = ""
+    while time.monotonic() < deadline:
+        _studio_handle_interrupt_dialogs_if_present(page)
+        _studio_poll_upload_fatal(page, browser)
+        try:
+            label = page.locator(
+                "ytcp-uploads-dialog ytcp-video-upload-progress .progress-label"
+            )
+            if label.count() > 0 and label.first.is_visible(timeout=300):
+                t = (label.first.inner_text(timeout=1_500) or "").strip()
+                if t and t != last_label:
+                    last_label = t
+                    _log(f"Studio: статус загрузки: {t}")
+        except Exception:
+            pass
+        if _studio_is_upload_file_transfer_complete(page):
+            _studio_try_log_video_id_from_progress_dialog(page)
+            if last_label and _studio_is_upload_past_percent_phase(last_label):
+                _log(
+                    f"Studio: статус без «%» ({last_label!r}) — передача завершена, публикуем."
+                )
+            else:
+                _log("Studio: передача файла завершена.")
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        page.wait_for_timeout(
+            int(min(_POST_UPLOAD_QUOTA_POLL_S, max(0.3, remaining)) * 1000)
+        )
+    raise YoutubeStudioError(
+        f"За {max_wait_sec:.0f} с не завершилась передача файла на YouTube. "
+        "Проверьте диалог загрузки вручную."
+    )
+
+
+def _studio_upload_publish_button(page):
+    return (
+        page.locator("ytcp-uploads-dialog ytcp-button#done-button button")
+        .or_(page.locator('ytcp-uploads-dialog ytcp-button-shape button[aria-label="Опубликовать"]'))
+        .or_(page.locator('ytcp-uploads-dialog ytcp-button-shape button[aria-label="Publish"]'))
+        .or_(page.locator('ytcp-button-shape button[aria-label="Опубликовать"]'))
+        .or_(page.locator('ytcp-button-shape button[aria-label="Publish"]'))
+        .or_(page.get_by_role("button", name=re.compile(r"^опубликовать$|^publish$", re.I)))
+    )
+
+
+def _studio_click_publish_when_enabled(page, max_wait_sec: float) -> None:
+    """«Опубликовать» / Publish — ждём, пока кнопка станет активной."""
+    _log("Studio: ожидание активной кнопки «Опубликовать»…")
+    btn = _studio_upload_publish_button(page)
+    deadline = time.monotonic() + max_wait_sec
+    while time.monotonic() < deadline:
+        _studio_handle_interrupt_dialogs_if_present(page)
+        try:
+            if btn.count() > 0 and btn.first.is_visible(timeout=500):
+                if btn.first.is_enabled():
+                    btn.first.click(timeout=60_000)
+                    _log("Studio: «Опубликовать» нажата.")
+                    return
+        except Exception:
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        page.wait_for_timeout(
+            int(min(_POST_UPLOAD_QUOTA_POLL_S, max(0.3, remaining)) * 1000)
+        )
+    raise YoutubeStudioError(
+        "YouTube Studio: кнопка «Опубликовать» так и не стала активной."
+    )
+
+
+def _studio_publish_flow_before_checks(
+    page, browser, max_wait_sec: float
+) -> str:
+    """
+    Публикация до проверок: сразу после названия — мастер до «Открытый доступ»
+    (пока идёт загрузка), затем «Опубликовать» после 100% / завершения загрузки.
+    """
+    _log(
+        "Studio: публикация до проверок — проходим мастер до «Открытый доступ» "
+        "параллельно загрузке файла…"
+    )
+    _studio_poll_upload_fatal(page, browser)
+    _studio_select_not_for_kids(page)
+    _studio_poll_upload_fatal(page, browser)
+    _studio_click_next_until_visibility(page, fast_if_upload_done=True)
+    _studio_poll_upload_fatal(page, browser)
+    href = _studio_select_public_visibility(page)
+    if _studio_is_upload_file_transfer_complete(page):
+        status = _studio_read_upload_progress_label(page)
+        if status and _studio_is_upload_past_percent_phase(status):
+            _log(
+                f"Studio: загрузка уже завершена ({status!r}) — ждать 100% не нужно."
+            )
+        else:
+            _log("Studio: передача файла уже завершена — ждать 100% не нужно.")
+    else:
+        _studio_wait_for_upload_file_transfer_complete(page, browser, max_wait_sec)
+    _studio_click_publish_when_enabled(page, max_wait_sec)
+    return href
+
+
+def _studio_wait_after_upload_studio_outcome(
+    page,
+    browser,
+    max_wait_sec: float,
+) -> None:
     """
     После передачи файла ждём один из исходов Studio:
     — «Загрузка недоступна» → исключение;
@@ -5708,12 +6002,19 @@ def run_upload_latest_ready_video(
     on_oldest_channel_name=None,
     search_oldest_channel: bool = True,
     profile_id: str | None = None,
+    publish_before_checks: bool = False,
 ) -> None:
     """
     Полный сценарий Studio: Create → Upload → ждать outcome → мастер → Publish.
     """
     best_url = ""
     best_vid = ""
+
+    chosen = (video_path or "").strip()
+    if not chosen:
+        chosen = resolve_latest_zaliver_video_on_disk(db_path=zaliver_db_path)
+    upload_file = _studio_validate_video_file_path(chosen)
+    _log(f"Studio: файл для загрузки: {str(upload_file)!r}")
 
     try:
         _studio_click_create_then_add_video(
@@ -5722,33 +6023,38 @@ def run_upload_latest_ready_video(
             yt_oldest_name=yt_oldest_name,
             on_oldest_channel_name=on_oldest_channel_name,
             search_oldest_channel=search_oldest_channel,
+            wait_for_upload_picker=False,
         )
     except YoutubeAllChannelsRemovedError:
         _studio_abort_all_channels_removed(page, browser=browser)
-    chosen = (video_path or "").strip()
-    if not chosen:
-        chosen = resolve_latest_zaliver_video_on_disk(db_path=zaliver_db_path)
-    _log(f"Studio: файл для загрузки: {chosen!r}")
-    _studio_upload_pick_file(page, chosen, login_credentials=login_credentials)
+    _studio_upload_pick_file(
+        page, upload_file, login_credentials=login_credentials, skip_validation=True
+    )
     _studio_set_title_and_description(page, title=title, description=description)
-    _log(
-        f"Ожидание до {_POST_UPLOAD_STUDIO_OUTCOME_MAX_S:.0f} с исхода Studio "
-        f"(опрос ~каждые {_POST_UPLOAD_QUOTA_POLL_S:.0f} с)…"
-    )
-    _studio_wait_after_upload_studio_outcome(
-        page, browser, _POST_UPLOAD_STUDIO_OUTCOME_MAX_S
-    )
-    # Иногда ссылка/ID доступны уже на этапе прогресса.
-    try:
-        u0 = _studio_try_extract_video_url(page)
-        if u0:
-            best_url = u0
-            v0 = _studio_try_extract_video_id_from_url(u0)
-            if v0:
-                best_vid = v0
-    except Exception:
-        pass
-    href_before_public = _studio_publish_flow_after_upload(page)
+    href_before_public = ""
+    if publish_before_checks:
+        href_before_public = _studio_publish_flow_before_checks(
+            page, browser, _POST_UPLOAD_STUDIO_OUTCOME_MAX_S
+        )
+    else:
+        _log(
+            f"Ожидание до {_POST_UPLOAD_STUDIO_OUTCOME_MAX_S:.0f} с исхода Studio "
+            f"(опрос ~каждые {_POST_UPLOAD_QUOTA_POLL_S:.0f} с)…"
+        )
+        _studio_wait_after_upload_studio_outcome(
+            page, browser, _POST_UPLOAD_STUDIO_OUTCOME_MAX_S
+        )
+        # Иногда ссылка/ID доступны уже на этапе прогресса.
+        try:
+            u0 = _studio_try_extract_video_url(page)
+            if u0:
+                best_url = u0
+                v0 = _studio_try_extract_video_id_from_url(u0)
+                if v0:
+                    best_vid = v0
+        except Exception:
+            pass
+        href_before_public = _studio_publish_flow_after_upload(page)
     if href_before_public:
         best_url = href_before_public
         try:

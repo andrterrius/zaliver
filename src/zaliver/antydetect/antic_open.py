@@ -785,6 +785,7 @@ def open_google_in_profile(
     login_credentials=None,
     yt_oldest_name: str | None = None,
     search_oldest_channel: bool = True,
+    publish_before_checks: bool = False,
 ) -> dict | None:
     """
     Запуск профиля через Dolphin Local API + Playwright CDP.
@@ -829,14 +830,13 @@ def open_google_in_profile(
                         login_credentials=login_credentials,
                         yt_oldest_name=yt_oldest_name,
                         search_oldest_channel=search_oldest_channel,
+                        publish_before_checks=publish_before_checks,
                     )
                     return res
                 else:
-                    # Ничего не делаем — просто открываем Studio, чтобы пользователь мог работать вручную.
-                    page.goto(
-                        "https://studio.youtube.com/",
-                        wait_until="domcontentloaded",
-                        timeout=120_000,
+                    # Ничего не делаем — прогрев через youtube.com, затем Studio.
+                    _studio._studio_warmup_youtube_then_studio(
+                        page, login_credentials=login_credentials
                     )
                     time.sleep(1)
             except YoutubeAllChannelsRemovedError as e:
@@ -874,6 +874,7 @@ def open_google_in_local_antidetect_profile(
     yt_oldest_name: str | None = None,
     search_oldest_channel: bool = True,
     remote_cdp=None,
+    publish_before_checks: bool = False,
 ) -> dict | None:
     """
     Запуск профиля через локальный HTTP API (см. OpenAPI антидетекта: launch + опрос сессии на cdp_ws_url),
@@ -946,6 +947,7 @@ def open_google_in_local_antidetect_profile(
                                 video_path=video_path,
                                 title=title,
                                 description=description,
+                                publish_before_checks=publish_before_checks,
                                 **studio_kw,
                             )
 
@@ -953,11 +955,9 @@ def open_google_in_local_antidetect_profile(
                         _log("Studio upload: сценарий завершён.")
                         return res
                     else:
-                        _log("Studio: upload_latest_zaliver_video=False → просто открываем Studio…")
-                        page.goto(
-                            "https://studio.youtube.com/",
-                            wait_until="domcontentloaded",
-                            timeout=120_000,
+                        _log("Studio: upload_latest_zaliver_video=False → youtube.com → Studio…")
+                        _studio._studio_warmup_youtube_then_studio(
+                            page, login_credentials=login_credentials
                         )
                         time.sleep(1)
                         _log(f"Studio: открыт URL: {page.url!r}")

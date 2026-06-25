@@ -841,6 +841,9 @@ class MainWindow(QWidget):
         self._sync_ffmpeg_install_row()
         self._pending_upload: dict[str, str] | None = None
         self._just_saved_outputs: list[str] = []
+        self._upload_delete_after_enabled = False
+        self._upload_success_video_paths: set[str] = set()
+        self._upload_success_lock = threading.Lock()
         self._upload_manager = None
         self._progress_hold_youtube = False
         self._upload_cancel_kind = ""
@@ -961,7 +964,8 @@ class MainWindow(QWidget):
         self.delete_after_upload = QCheckBox("Удалять после залива")
         self.delete_after_upload.setChecked(False)
         self.delete_after_upload.setToolTip(
-            "После успешной загрузки на YouTube файл удаляется из выходной папки."
+            "После полного завершения очереди залива успешно загруженные файлы "
+            "удаляются из выходной папки."
         )
         self.delete_after_upload.toggled.connect(self._save_folder_settings)
         io_grid.addWidget(self.delete_after_upload, 5, 0, 1, 3)
@@ -2826,6 +2830,32 @@ class MainWindow(QWidget):
         except Exception:
             pass
 
+    def _cleanup_videos_after_upload_queue_finished(self, status: str) -> None:
+        """Удалить успешно залитые файлы, когда очередь полностью завершилась."""
+        if status not in ("done", "upload_failed"):
+            return
+        if not getattr(self, "_upload_delete_after_enabled", False):
+            return
+        with self._upload_success_lock:
+            paths = list(self._upload_success_video_paths)
+            self._upload_success_video_paths.clear()
+        if not paths:
+            return
+        deleted = 0
+        for video_path in paths:
+            p = Path(str(video_path or "").strip()).expanduser()
+            if not p.is_file():
+                continue
+            self._delete_output_video_after_upload(video_path)
+            deleted += 1
+        if deleted:
+            try:
+                self._ui_log_line.emit(
+                    f"[upload] Очередь завершена — удалено после залива: {deleted}"
+                )
+            except Exception:
+                pass
+
     def _on_output_saved(self, path: str, include_in_upload: bool = True) -> None:
         if isinstance(path, str) and path.strip():
             p = path.strip()
@@ -2863,7 +2893,7 @@ class MainWindow(QWidget):
             except Exception:
                 pass
             self._refresh_antydetect_profiles()
-            return {"title": "", "description": "", "profile_ids": ""}
+            return {"title": "", "description": "", "profile_ids": "", "publish_before_checks": True}
 
         dlg = QDialog(self)
         dlg_title = (
@@ -2887,6 +2917,15 @@ class MainWindow(QWidget):
         desc_edit.setMinimumHeight(44)
         desc_edit.setMaximumHeight(72)
         desc_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        publish_before_checks_cb = QCheckBox("Опубликовать до проверок")
+        publish_before_checks_cb.setChecked(True)
+        publish_before_checks_cb.setToolTip(
+            "Если включено — сразу после названия проходим мастер до «Открытый доступ» "
+            "пока идёт загрузка; «Опубликовать» нажимается после 100% загрузки "
+            "или сообщения «Загрузка завершена… обработка скоро начнётся», "
+            "без ожидания проверок YouTube."
+        )
 
         lw = QListWidget()
         lw.setObjectName("uploadProfilesList")
@@ -3035,6 +3074,7 @@ class MainWindow(QWidget):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
         )
         grid.addWidget(desc_edit, 1, 1)
+        grid.addWidget(publish_before_checks_cb, 2, 1)
         profiles_col = QWidget()
         profiles_col_l = QVBoxLayout(profiles_col)
         profiles_col_l.setContentsMargins(0, 0, 0, 0)
@@ -3050,10 +3090,10 @@ class MainWindow(QWidget):
         profiles_col_l.addLayout(dlg_sel_row)
         profiles_col_l.addWidget(lw, 1)
 
-        grid.addWidget(QLabel("Профили:"), 2, 0, Qt.AlignmentFlag.AlignTop)
-        grid.addWidget(profiles_col, 2, 1)
-        grid.addWidget(btns, 3, 0, 1, 2)
-        grid.setRowStretch(2, 1)
+        grid.addWidget(QLabel("Профили:"), 3, 0, Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(profiles_col, 3, 1)
+        grid.addWidget(btns, 4, 0, 1, 2)
+        grid.setRowStretch(3, 1)
 
         title_edit.setFocus()
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -3066,12 +3106,22 @@ class MainWindow(QWidget):
         # Если профили не выбраны, считаем, что пользователь хочет только уникализировать видео,
         # без загрузки в YouTube. В этом случае title не обязателен.
         if not picked:
-            return {"title": title, "description": description, "profile_ids": ""}
+            return {
+                "title": title,
+                "description": description,
+                "profile_ids": "",
+                "publish_before_checks": publish_before_checks_cb.isChecked(),
+            }
         if not title:
             QMessageBox.warning(self, "Zaliver", "Название видео обязательно для загрузки в YouTube.")
             return None
 
-        return {"title": title, "description": description, "profile_ids": ",".join(picked)}
+        return {
+            "title": title,
+            "description": description,
+            "profile_ids": ",".join(picked),
+            "publish_before_checks": publish_before_checks_cb.isChecked(),
+        }
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
@@ -6647,10 +6697,14 @@ class MainWindow(QWidget):
                 f"YouTube: многопоточная заливка стартует. "
                 f"Видео={len(video_paths)}, профили={len(profile_ids)}…"
             )
+            self._upload_delete_after_enabled = self._delete_after_upload_enabled()
+            with self._upload_success_lock:
+                self._upload_success_video_paths.clear()
             self._sync_toolbar_for_upload_phase()
             self._upload_cancel_kind = (kind or "").strip()
             self._upload_cancel_dolphin_token = token
             self._upload_cancel_profile_ids = list(profile_ids)
+            publish_before_checks = bool(pending.get("publish_before_checks", True))
 
             def _upload_one(profile_id: str, task: VideoTask) -> None:
                 from zaliver.antydetect.antic_open import (
@@ -6685,6 +6739,7 @@ class MainWindow(QWidget):
                         yt_oldest_name=yt_oldest,
                         search_oldest_channel=search_oldest,
                         remote_cdp=remote_cdp,
+                        publish_before_checks=publish_before_checks,
                     )
                 else:
                     res = open_google_in_profile(
@@ -6697,6 +6752,7 @@ class MainWindow(QWidget):
                         login_credentials=creds,
                         yt_oldest_name=yt_oldest,
                         search_oldest_channel=search_oldest,
+                        publish_before_checks=publish_before_checks,
                     )
 
                 vid = ""
@@ -6751,8 +6807,8 @@ class MainWindow(QWidget):
                     QTimer.singleShot(0, self._refresh_uploaded_list)
                 except Exception:
                     pass
-                if self._delete_after_upload_enabled():
-                    self._delete_output_video_after_upload(task.video_path)
+                with self._upload_success_lock:
+                    self._upload_success_video_paths.add(task.video_path)
 
             def _on_profile_upload_attempt(pid: str, ok: bool, err: str) -> None:
                 try:
@@ -6832,6 +6888,7 @@ class MainWindow(QWidget):
                         )
                     except Exception:
                         pass
+                    self._cleanup_videos_after_upload_queue_finished(status)
                     self._maybe_finish_upload_session(status=status)
                     try:
                         self._youtube_upload_phase_finished.emit(status)

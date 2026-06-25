@@ -361,7 +361,8 @@ class SlicingTabPane(QWidget):
         self.delete_after_upload = QCheckBox("Удалять после залива")
         self.delete_after_upload.setChecked(False)
         self.delete_after_upload.setToolTip(
-            "После успешной загрузки на YouTube файл удаляется из выходной папки."
+            "После полного завершения очереди залива успешно загруженные файлы "
+            "удаляются из выходной папки."
         )
         self.delete_after_upload.toggled.connect(self.save_settings)
         io_grid.addWidget(self.delete_after_upload, 3, 0, 1, 3)

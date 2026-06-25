@@ -153,7 +153,7 @@ class LocalAntidetectHttpAPI:
         *,
         headless: bool = False,
         expose_cdp: bool = True,
-        start_url: str = "https://studio.youtube.com",
+        start_url: str = "https://www.youtube.com/",
         remote_cdp: RemoteCdpLaunchOptions | None = None,
     ) -> dict[str, Any]:
         url = f"{self._base}/profiles/{profile_id}/launch"

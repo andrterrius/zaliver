@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import calendar
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -116,11 +118,18 @@ _BIRTHDAY_SUCCESS_BODY_RE = re.compile(
     re.I,
 )
 _DONE_BTN_RE = re.compile(r"^done$|^готово$", re.I)
-_BIRTHDAY_MONTH = 1
-_BIRTHDAY_DAY = "1"
-_BIRTHDAY_YEAR = "2000"
+_BIRTHDAY_YEAR_MIN = 1970
+_BIRTHDAY_YEAR_MAX = 1990
 
 _GOOGLE_LOGIN_MAX_S = 180.0
+
+
+def _random_birthday() -> tuple[int, int, int]:
+    year = random.randint(_BIRTHDAY_YEAR_MIN, _BIRTHDAY_YEAR_MAX)
+    month = random.randint(1, 12)
+    _, max_day = calendar.monthrange(year, month)
+    day = random.randint(1, max_day)
+    return day, month, year
 
 
 class GoogleLoginCredentialsMissingError(RuntimeError):
@@ -1108,9 +1117,10 @@ def _birthday_step_visible(page) -> bool:
 
 
 def _fill_birthday_and_save(page) -> None:
+    day, month, year = _random_birthday()
     _log(
-        f"Google: дата рождения — {_BIRTHDAY_DAY}."
-        f"{_BIRTHDAY_MONTH:02d}.{_BIRTHDAY_YEAR} и «Сохранить»…"
+        f"Google: дата рождения — {day:02d}."
+        f"{month:02d}.{year} и «Сохранить»…"
     )
     scope = _birthday_form_scope(page)
 
@@ -1123,9 +1133,14 @@ def _fill_birthday_and_save(page) -> None:
     month_combo.click(timeout=30_000)
     page.wait_for_timeout(450)
 
+    month_name = calendar.month_name[month]
     month_option = (
-        scope.locator(f'li[role="option"][data-value="{_BIRTHDAY_MONTH}"]')
-        .or_(scope.get_by_role("option", name=re.compile(r"^january$|^январ", re.I)))
+        scope.locator(f'li[role="option"][data-value="{month}"]')
+        .or_(
+            scope.get_by_role(
+                "option", name=re.compile(rf"^{re.escape(month_name)}$", re.I)
+            )
+        )
     ).first
     month_option.wait_for(state="visible", timeout=10_000)
     month_option.click(timeout=30_000)
@@ -1135,13 +1150,13 @@ def _fill_birthday_and_save(page) -> None:
         'input[aria-label*="day" i], input[placeholder="DD"]'
     ).first
     day_input.wait_for(state="visible", timeout=10_000)
-    day_input.fill(_BIRTHDAY_DAY)
+    day_input.fill(str(day))
 
     year_input = scope.locator(
         'input[aria-label*="year" i], input[placeholder="YYYY"]'
     ).first
     year_input.wait_for(state="visible", timeout=10_000)
-    year_input.fill(_BIRTHDAY_YEAR)
+    year_input.fill(str(year))
     page.wait_for_timeout(350)
 
     save_btn = (

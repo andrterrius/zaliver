@@ -26,6 +26,10 @@ _STUDIO_UI_MS = 120_000
 _POST_UPLOAD_STUDIO_OUTCOME_MAX_S = 3600.0
 _POST_UPLOAD_QUOTA_POLL_S = 2.0
 _STUDIO_WIZARD_NEXT_MAX = 30
+_STUDIO_WIZARD_NEXT_AFTER_CLICK_MS = 250
+_STUDIO_WIZARD_NEXT_POLL_MS = 40
+_STUDIO_UPLOAD_DETAILS_POLL_MS = 30
+_STUDIO_INTERRUPT_DIALOG_EVERY_N_POLLS = 15
 _STUDIO_WARM_WELCOME_NEXT_MAX = 10
 _WELCOME_TITLE_RE = re.compile(
     r"добро\s+пожаловать|welcome\s+to\s+(the\s+)?youtube\s+studio",
@@ -5106,8 +5110,14 @@ def _studio_upload_pick_file(
     *,
     login_credentials=None,
     skip_validation: bool = False,
-) -> None:
-    """Диалог ytcp-uploads-file-picker: файл через CDP (локальный путь) или fallback file chooser."""
+    title: str | None = None,
+    description: str | None = None,
+) -> tuple[bool, bool, bool]:
+    """Диалог ytcp-uploads-file-picker: файл через CDP (локальный путь) или fallback file chooser.
+
+    Если заданы title/description — сразу после передачи файла начинает заполнять метаданные.
+    Возвращает (title_done, description_done, not_for_kids_done).
+    """
     p = (
         Path(video_path).expanduser()
         if skip_validation
@@ -5153,7 +5163,10 @@ def _studio_upload_pick_file(
     except Exception:
         fu = "(url недоступен)"
     _log(f"Studio: CDP — фрейм поля Filedata: {fu!r}")
-    if not _studio_set_file_input_via_cdp(page, frame, resolved):
+    file_submitted = False
+    if _studio_set_file_input_via_cdp(page, frame, resolved):
+        file_submitted = True
+    else:
         _log(
             "Studio: CDP DOM.setFileInputFiles не удался — "
             "fallback на file chooser / set_input_files (медленнее: тело файла по CDP)…"
@@ -5166,6 +5179,7 @@ def _studio_upload_pick_file(
                     select_btn.first.click(timeout=600_000)
                 fc_info.value.set_files(resolved, timeout=_STUDIO_FILE_PICKER_TRANSFER_MS)
                 last_pick_err = None
+                file_submitted = True
                 break
             except Exception as e:
                 last_pick_err = e
@@ -5179,6 +5193,7 @@ def _studio_upload_pick_file(
                         resolved, timeout=_STUDIO_FILE_PICKER_TRANSFER_MS
                     )
                     last_pick_err = None
+                    file_submitted = True
                     break
                 except Exception as e2:
                     last_pick_err = e2
@@ -5196,11 +5211,21 @@ def _studio_upload_pick_file(
                     page.wait_for_timeout(500)
         if last_pick_err is not None:
             raise last_pick_err
+
+    metadata_state = (True, True, False)
+    if file_submitted and (
+        (title or "").strip() or (description or "").strip()
+    ):
+        metadata_state = _studio_prepare_upload_details_during_transfer(
+            page, title=title, description=description
+        )
+
     try:
         sz_log = p.stat().st_size
     except OSError:
         sz_log = -1
     _log(f"Studio: файл передан — {p.name!r}, байт: {sz_log}.")
+    return metadata_state
 
 
 def _studio_normalize_upload_title(title: str | None) -> str:
@@ -5209,29 +5234,185 @@ def _studio_normalize_upload_title(title: str | None) -> str:
     return f"{t} " if t else ""
 
 
-def _studio_set_title_and_description(page, *, title: str | None, description: str | None) -> None:
-    """
-    Заполнение полей «Название» и «Описание» в диалоге загрузки Studio.
+def _studio_upload_title_box_locator(page):
+    return page.locator("ytcp-uploads-dialog ytcp-video-title #textbox").or_(
+        page.locator("ytcp-uploads-dialog #title-wrapper #textbox")
+    ).or_(
+        page.locator("ytcp-video-metadata-editor ytcp-video-title #textbox")
+    ).or_(
+        page.locator("ytcp-video-metadata-editor #title-wrapper #textbox")
+    ).or_(page.locator("ytcp-video-title #textbox"))
 
-    Поля в Studio — contenteditable div#textbox внутри ytcp-social-suggestion-input.
-    Для надёжности используем клик → Ctrl+A → ввод текста.
+
+def _studio_upload_description_box_locator(page):
+    return page.locator("ytcp-uploads-dialog ytcp-video-description #textbox").or_(
+        page.locator("ytcp-uploads-dialog #description-wrapper #textbox")
+    ).or_(
+        page.locator("ytcp-video-metadata-editor ytcp-video-description #textbox")
+    ).or_(
+        page.locator("ytcp-video-metadata-editor #description-wrapper #textbox")
+    ).or_(page.locator("ytcp-video-description #textbox"))
+
+
+def _studio_not_for_kids_button_locator(page):
+    kids_select = page.locator("ytkc-made-for-kids-select").or_(
+        page.locator(".made-for-kids-rating-container")
+    )
+    return (
+        kids_select.locator(
+            f'tp-yt-paper-radio-button[name="{_NOT_FOR_KIDS_RADIO_NAME}"]'
+        )
+        .or_(
+            page.locator(
+                f'.made-for-kids-group tp-yt-paper-radio-button[name="{_NOT_FOR_KIDS_RADIO_NAME}"]'
+            )
+        )
+        .or_(page.locator(f'tp-yt-paper-radio-button[name="{_NOT_FOR_KIDS_RADIO_NAME}"]'))
+        .or_(
+            kids_select.locator("tp-yt-paper-radio-button").filter(
+                has_text=_NOT_FOR_KIDS_LABEL_RE
+            )
+        )
+        .or_(page.get_by_role("radio", name=_NOT_FOR_KIDS_LABEL_RE))
+    )
+
+
+def _studio_wizard_next_button_locator(page):
+    dialog = page.locator("ytcp-uploads-dialog")
+    return (
+        dialog.locator("ytcp-button#next-button button")
+        .or_(dialog.locator("#next-button button"))
+        .or_(
+            dialog.get_by_role("button", name=re.compile(r"^далее$|^next$", re.I))
+        )
+        .or_(page.get_by_role("button", name=re.compile(r"^далее$|^next$", re.I)))
+    )
+
+
+def _studio_prepare_upload_details_during_transfer(
+    page,
+    *,
+    title: str | None,
+    description: str | None,
+    timeout_sec: float = 180.0,
+) -> tuple[bool, bool, bool]:
+    """
+    Пока идёт загрузка: как только видны поля — сразу очищаем название и вводим метаданные.
+    Возвращает (title_done, description_done, not_for_kids_done).
     """
     t = _studio_normalize_upload_title(title)
     d = (description or "").strip()
     if not t and not d:
-        return
+        return True, True, False
 
-    _studio_handle_interrupt_dialogs_if_present(page)
+    title_done = not t
+    desc_done = not d
+    kids_done = False
+    _log("Studio: ожидание полей метаданных во время загрузки…")
+    deadline = time.monotonic() + timeout_sec
+    poll_n = 0
+    while time.monotonic() < deadline:
+        poll_n += 1
+        if poll_n % _STUDIO_INTERRUPT_DIALOG_EVERY_N_POLLS == 1:
+            _studio_handle_interrupt_dialogs_if_present(page)
+
+        if not title_done:
+            title_box = _studio_upload_title_box_locator(page)
+            try:
+                if title_box.first.is_visible(timeout=0):
+                    title_box.first.click(timeout=5_000)
+                    old_title = _studio_read_contenteditable_text(title_box)
+                    if (old_title or "").strip():
+                        _log(
+                            "Studio: старое название в поле: "
+                            f"{(old_title or '').strip()!r} — очистка…"
+                        )
+                    _studio_clear_contenteditable_until_old_title_gone(
+                        page,
+                        title_box,
+                        old_title=old_title,
+                        right_slack=10,
+                        backspace_extra=15,
+                    )
+                    page.keyboard.type(t, delay=0)
+                    title_done = True
+                    _log("Studio: название введено.")
+            except Exception:
+                pass
+
+        if not desc_done and (title_done or not t):
+            desc_box = _studio_upload_description_box_locator(page)
+            try:
+                if desc_box.first.is_visible(timeout=0):
+                    desc_box.first.click(timeout=5_000)
+                    if d:
+                        _studio_clear_contenteditable_like_user(page, desc_box)
+                        page.wait_for_timeout(80)
+                        page.keyboard.type(d, delay=0)
+                    desc_done = True
+                    _log("Studio: описание введено.")
+            except Exception:
+                pass
+
+        if not kids_done:
+            btn = _studio_not_for_kids_button_locator(page).first
+            try:
+                if btn.is_visible(timeout=0):
+                    btn.click(timeout=5_000)
+                    try:
+                        if (btn.get_attribute("aria-checked") or "").lower() != "true":
+                            btn.locator("#radioContainer").click(timeout=5_000)
+                    except Exception:
+                        pass
+                    kids_done = True
+                    _log("Studio: выбрано «Не для детей».")
+            except Exception:
+                pass
+
+        if title_done and desc_done:
+            return title_done, desc_done, kids_done
+
+        page.wait_for_timeout(_STUDIO_UPLOAD_DETAILS_POLL_MS)
+
+    if not title_done and t:
+        _log("Studio: поле «Название» не появилось вовремя.")
+    if not desc_done and d:
+        _log("Studio: поле «Описание» не появилось вовремя.")
+    return title_done, desc_done, kids_done
+
+
+def _studio_set_title_and_description(
+    page,
+    *,
+    title: str | None,
+    description: str | None,
+    metadata_state: tuple[bool, bool, bool] | None = None,
+) -> bool:
+    """
+    Заполнение полей «Название» и «Описание» в диалоге загрузки Studio.
+
+    Поля в Studio — contenteditable div#textbox внутри ytcp-social-suggestion-input.
+
+    Возвращает True, если «Не для детей» уже выбрано в ходе подготовки метаданных.
+    """
+    t = _studio_normalize_upload_title(title)
+    d = (description or "").strip()
+    if not t and not d:
+        return metadata_state[2] if metadata_state else False
+
+    if metadata_state is None:
+        title_done, desc_done, kids_done = _studio_prepare_upload_details_during_transfer(
+            page, title=title, description=description
+        )
+    else:
+        title_done, desc_done, kids_done = metadata_state
+
+    if title_done and desc_done:
+        return kids_done
 
     editor = page.locator("ytcp-video-metadata-editor#details").or_(
         page.locator("ytcp-video-metadata-editor")
     )
-    try:
-        editor.first.wait_for(state="visible", timeout=180_000)
-    except Exception:
-        # Studio иногда показывает мастера позже; не делаем это фатальным.
-        _log("Studio: метаданные (details) не видны — пропуск заполнения title/description.")
-        return
 
     def _fill(
         contenteditable,
@@ -5254,12 +5435,18 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
         page.keyboard.type(text, delay=0)
         page.wait_for_timeout(150)
 
-    if t:
-        _log("Studio: заполнение поля «Название»…")
+    try:
+        editor.first.wait_for(state="visible", timeout=180_000)
+    except Exception:
+        _log("Studio: метаданные (details) не видны — пропуск заполнения title/description.")
+        return kids_done
+
+    if t and not title_done:
+        _log("Studio: заполнение поля «Название» (fallback)…")
         title_box = (
             editor.first.locator("ytcp-video-title #textbox")
             .or_(editor.first.locator("#title-wrapper #textbox"))
-            .or_(page.locator("ytcp-video-title #textbox"))
+            .or_(_studio_upload_title_box_locator(page))
         )
         title_box.first.wait_for(state="visible", timeout=60_000)
         title_box.first.click(timeout=30_000)
@@ -5278,52 +5465,40 @@ def _studio_set_title_and_description(page, *, title: str | None, description: s
         page.keyboard.type(t, delay=0)
         page.wait_for_timeout(150)
 
-    if d:
-        _log("Studio: заполнение поля «Описание»…")
+    if d and not desc_done:
+        _log("Studio: заполнение поля «Описание» (fallback)…")
         desc_box = (
             editor.first.locator("ytcp-video-description #textbox")
             .or_(editor.first.locator("#description-wrapper #textbox"))
-            .or_(page.locator("ytcp-video-description #textbox"))
+            .or_(_studio_upload_description_box_locator(page))
         )
         _fill(desc_box, d, clear_first=bool(d))
 
+    return kids_done
 
-def _studio_select_not_for_kids(page) -> None:
+
+def _studio_select_not_for_kids(page, *, skip_if_done: bool = False) -> None:
     """«Нет, это видео не для детей» / «No, it's not made for kids»."""
+    if skip_if_done:
+        return
+
     _log(
         "Studio: «Нет, это видео не для детей» / "
         "«No, it's not made for kids»…"
     )
-    kids_select = page.locator("ytkc-made-for-kids-select").or_(
-        page.locator(".made-for-kids-rating-container")
-    )
-    not_kids = (
-        kids_select.locator(
-            f'tp-yt-paper-radio-button[name="{_NOT_FOR_KIDS_RADIO_NAME}"]'
-        )
-        .or_(
-            page.locator(
-                f'.made-for-kids-group tp-yt-paper-radio-button[name="{_NOT_FOR_KIDS_RADIO_NAME}"]'
-            )
-        )
-        .or_(page.locator(f'tp-yt-paper-radio-button[name="{_NOT_FOR_KIDS_RADIO_NAME}"]'))
-        .or_(
-            kids_select.locator("tp-yt-paper-radio-button").filter(
-                has_text=_NOT_FOR_KIDS_LABEL_RE
-            )
-        )
-        .or_(page.get_by_role("radio", name=_NOT_FOR_KIDS_LABEL_RE))
-    )
-    btn = not_kids.first
+    btn = _studio_not_for_kids_button_locator(page).first
     deadline = time.monotonic() + 90.0
+    poll_n = 0
     while time.monotonic() < deadline:
-        _studio_handle_interrupt_dialogs_if_present(page)
+        poll_n += 1
+        if poll_n % _STUDIO_INTERRUPT_DIALOG_EVERY_N_POLLS == 1:
+            _studio_handle_interrupt_dialogs_if_present(page)
         try:
-            if btn.is_visible():
+            if btn.is_visible(timeout=0):
                 break
         except Exception:
             pass
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(100)
     else:
         raise YoutubeStudioError(
             "YouTube Studio: не появился выбор «Не для детей» (made-for-kids)."
@@ -5346,27 +5521,33 @@ def _studio_click_next_until_visibility(page, *, fast_if_upload_done: bool = Fal
         )
         .or_(page.locator('ytcp-video-visibility-select tp-yt-paper-radio-button[name="PUBLIC"]'))
     )
+    nxt = _studio_wizard_next_button_locator(page)
+    poll_n = 0
     for i in range(_STUDIO_WIZARD_NEXT_MAX):
-        _studio_handle_interrupt_dialogs_if_present(page)
-        if public_radio.first.is_visible():
-            _log(f"Studio: экран доступа виден (шаг {i}).")
-            return
-        upload_done = (
-            fast_if_upload_done and _studio_is_upload_file_transfer_complete(page)
-        )
-        if upload_done:
+        poll_n += 1
+        if poll_n % _STUDIO_INTERRUPT_DIALOG_EVERY_N_POLLS == 1:
+            _studio_handle_interrupt_dialogs_if_present(page)
+        try:
+            if public_radio.first.is_visible(timeout=0):
+                _log(f"Studio: экран доступа виден (шаг {i}).")
+                return
+        except Exception:
+            pass
+        if fast_if_upload_done and _studio_is_upload_file_transfer_complete(page):
             status = _studio_read_upload_progress_label(page)
             if status and _studio_is_upload_past_percent_phase(status):
                 _log(
                     f"Studio: загрузка завершена ({status!r}) — ускоряем проход мастера…"
                 )
-        nxt = page.get_by_role("button", name=re.compile(r"^далее$|^next$", re.I))
-        if nxt.count() > 0 and nxt.first.is_visible():
-            _log(f"Studio: «Далее» ({i + 1}/{_STUDIO_WIZARD_NEXT_MAX})…")
-            nxt.first.click(timeout=15_000)
-            page.wait_for_timeout(150 if upload_done else 500)
-            continue
-        page.wait_for_timeout(200 if upload_done else 400)
+        try:
+            if nxt.first.is_visible(timeout=0):
+                _log(f"Studio: «Далее» ({i + 1}/{_STUDIO_WIZARD_NEXT_MAX})…")
+                nxt.first.click(timeout=15_000)
+                page.wait_for_timeout(_STUDIO_WIZARD_NEXT_AFTER_CLICK_MS)
+                continue
+        except Exception:
+            pass
+        page.wait_for_timeout(_STUDIO_WIZARD_NEXT_POLL_MS)
 
     if not public_radio.first.is_visible():
         raise YoutubeStudioError(
@@ -5886,7 +6067,7 @@ def _studio_click_publish_when_enabled(page, max_wait_sec: float) -> None:
 
 
 def _studio_publish_flow_before_checks(
-    page, browser, max_wait_sec: float
+    page, browser, max_wait_sec: float, *, kids_already_selected: bool = False
 ) -> str:
     """
     Публикация до проверок: сразу после названия — мастер до «Открытый доступ»
@@ -5897,7 +6078,7 @@ def _studio_publish_flow_before_checks(
         "параллельно загрузке файла…"
     )
     _studio_poll_upload_fatal(page, browser)
-    _studio_select_not_for_kids(page)
+    _studio_select_not_for_kids(page, skip_if_done=kids_already_selected)
     _studio_poll_upload_fatal(page, browser)
     _studio_click_next_until_visibility(page, fast_if_upload_done=True)
     _studio_poll_upload_fatal(page, browser)
@@ -6028,14 +6209,27 @@ def run_upload_latest_ready_video(
         )
     except YoutubeAllChannelsRemovedError:
         _studio_abort_all_channels_removed(page, browser=browser)
-    _studio_upload_pick_file(
-        page, upload_file, login_credentials=login_credentials, skip_validation=True
+    metadata_state = _studio_upload_pick_file(
+        page,
+        upload_file,
+        login_credentials=login_credentials,
+        skip_validation=True,
+        title=title,
+        description=description,
     )
-    _studio_set_title_and_description(page, title=title, description=description)
+    kids_already_selected = _studio_set_title_and_description(
+        page,
+        title=title,
+        description=description,
+        metadata_state=metadata_state,
+    )
     href_before_public = ""
     if publish_before_checks:
         href_before_public = _studio_publish_flow_before_checks(
-            page, browser, _POST_UPLOAD_STUDIO_OUTCOME_MAX_S
+            page,
+            browser,
+            _POST_UPLOAD_STUDIO_OUTCOME_MAX_S,
+            kids_already_selected=kids_already_selected,
         )
     else:
         _log(

@@ -262,7 +262,7 @@ class SlicingController(QObject):
 
             output_count = max(1, int(options.get("copies_per_track", 1)))
             num_workers = max(1, int(options.get("num_workers", 1)))
-            use_suggested = bool(options.get("use_suggested_durations", True))
+            use_suggested = bool(options.get("use_suggested_durations", False))
             min_scene_duration = float(
                 options.get("min_scene_duration", DEFAULT_MIN_SCENE_DURATION)
             )

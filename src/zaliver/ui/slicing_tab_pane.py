@@ -215,7 +215,7 @@ class SlicingTabPane(QWidget):
                 bool(s.value("slice/delete_after_upload", False, type=bool))
             )
         self.auto_scene_durations.setChecked(
-            bool(s.value("slice/auto_scene_durations", True, type=bool))
+            bool(s.value("slice/auto_scene_durations", False, type=bool))
         )
         try:
             min_dur = float(
@@ -391,7 +391,7 @@ class SlicingTabPane(QWidget):
         self.auto_scene_durations = QCheckBox(
             "Автоматически подобрать оптимальную длительность"
         )
-        self.auto_scene_durations.setChecked(True)
+        self.auto_scene_durations.setChecked(False)
         self.auto_scene_durations.setToolTip(
             "Анализ пиков выбранного трека и рекомендация MIN/MAX длительности сцены. "
             "При включении ручные значения ниже не используются."

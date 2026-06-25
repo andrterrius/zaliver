@@ -290,7 +290,8 @@ def _studio_login_required(page, *, fast: bool = False) -> bool:
             has_text=re.compile(
                 r"убедитесь,\s*что\s+вы\s+всегда\s+сможете\s+войти|"
                 r"make\s+sure\s+you\s+(can\s+)?always\s+sign\s+in|"
-                r"add\s+your\s+birthday|добавьте\s+дату\s+рождения",
+                r"add\s+your\s+birthday|добавьте\s+дату\s+рождения|"
+                r"укажите\s+дату\s+рождения",
                 re.I,
             ),
         ).first.is_visible(timeout=probe_ms):

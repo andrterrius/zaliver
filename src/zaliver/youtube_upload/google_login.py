@@ -98,8 +98,9 @@ _CANCEL_BTN_RE = re.compile(r"^отмена$|^cancel$", re.I)
 _SKIP_BTN_RE = re.compile(r"^skip$|^пропустить$", re.I)
 _BIRTHDAY_HEADING_RE = re.compile(
     r"add\s+your\s+birthday|добавьте\s+дату\s+рождения|"
+    r"укажите\s+дату\s+рождения|"
     r"date\s+of\s+birth\s+is\s+missing|дата\s+рождения\s+не\s+указана|"
-    r"дата\s+рождения",
+    r"дат[ауы]?\s+рождения",
     re.I,
 )
 _SAVE_BTN_RE = re.compile(r"^save$|^сохранить$", re.I)
@@ -120,8 +121,54 @@ _BIRTHDAY_SUCCESS_BODY_RE = re.compile(
 _DONE_BTN_RE = re.compile(r"^done$|^готово$", re.I)
 _BIRTHDAY_YEAR_MIN = 1970
 _BIRTHDAY_YEAR_MAX = 1990
+_BIRTHDAY_MONTH_NAMES_RU = (
+    "",
+    "январь",
+    "февраль",
+    "март",
+    "апрель",
+    "май",
+    "июнь",
+    "июль",
+    "август",
+    "сентябрь",
+    "октябрь",
+    "ноябрь",
+    "декабрь",
+)
 
 _GOOGLE_LOGIN_MAX_S = 180.0
+
+
+def _birthday_form_root(scope):
+    return scope.locator('div[data-year-required="true"]').first
+
+
+def _birthday_day_input(scope):
+    root = _birthday_form_root(scope)
+    return root.locator(
+        'input[placeholder="DD"], input[placeholder="ДД"], '
+        'input[aria-label*="day" i], input[aria-label*="дату" i], '
+        'input[inputmode="numeric"]'
+    ).first
+
+
+def _birthday_year_input(scope):
+    root = _birthday_form_root(scope)
+    return root.locator(
+        'input[placeholder="YYYY"], input[placeholder="ГГГГ"], '
+        'input[aria-label*="year" i], input[aria-label*="год" i], '
+        'input[inputmode="numeric"]'
+    ).last
+
+
+def _birthday_month_combo(scope):
+    root = _birthday_form_root(scope)
+    return root.locator('[role="combobox"]').or_(
+        scope.locator('[aria-label*="month" i][role="combobox"]')
+    ).or_(
+        scope.locator('[aria-label*="месяц" i][role="combobox"]')
+    ).first
 
 
 def _random_birthday() -> tuple[int, int, int]:
@@ -917,8 +964,8 @@ def _birthday_step_visible_in_scope(scope) -> bool:
     except Exception:
         pass
     try:
-        day = scope.locator('input[aria-label*="day" i], input[placeholder="DD"]').first
-        year = scope.locator('input[aria-label*="year" i], input[placeholder="YYYY"]').first
+        day = _birthday_day_input(scope)
+        year = _birthday_year_input(scope)
         if day.count() > 0 and year.count() > 0:
             if day.is_visible(timeout=300) and year.is_visible(timeout=300):
                 return True
@@ -1124,21 +1171,23 @@ def _fill_birthday_and_save(page) -> None:
     )
     scope = _birthday_form_scope(page)
 
-    month_combo = (
-        scope.locator('div[data-year-required="true"] [role="combobox"]')
-        .or_(scope.locator('[aria-label*="month" i][role="combobox"]'))
-        .or_(scope.locator('[aria-labelledby*="Month" i][role="combobox"]'))
-    ).first
+    month_combo = _birthday_month_combo(scope)
     month_combo.wait_for(state="visible", timeout=20_000)
     month_combo.click(timeout=30_000)
     page.wait_for_timeout(450)
 
-    month_name = calendar.month_name[month]
+    month_name_en = calendar.month_name[month]
+    month_name_ru = _BIRTHDAY_MONTH_NAMES_RU[month]
     month_option = (
         scope.locator(f'li[role="option"][data-value="{month}"]')
         .or_(
             scope.get_by_role(
-                "option", name=re.compile(rf"^{re.escape(month_name)}$", re.I)
+                "option", name=re.compile(rf"^{re.escape(month_name_en)}$", re.I)
+            )
+        )
+        .or_(
+            scope.get_by_role(
+                "option", name=re.compile(rf"^{re.escape(month_name_ru)}$", re.I)
             )
         )
     ).first
@@ -1146,15 +1195,11 @@ def _fill_birthday_and_save(page) -> None:
     month_option.click(timeout=30_000)
     page.wait_for_timeout(350)
 
-    day_input = scope.locator(
-        'input[aria-label*="day" i], input[placeholder="DD"]'
-    ).first
+    day_input = _birthday_day_input(scope)
     day_input.wait_for(state="visible", timeout=10_000)
     day_input.fill(str(day))
 
-    year_input = scope.locator(
-        'input[aria-label*="year" i], input[placeholder="YYYY"]'
-    ).first
+    year_input = _birthday_year_input(scope)
     year_input.wait_for(state="visible", timeout=10_000)
     year_input.fill(str(year))
     page.wait_for_timeout(350)

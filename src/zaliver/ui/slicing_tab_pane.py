@@ -210,6 +210,10 @@ class SlicingTabPane(QWidget):
         except Exception:
             cp = 1
         self.copies_per_track.setValue(max(1, cp))
+        if hasattr(self, "delete_after_upload"):
+            self.delete_after_upload.setChecked(
+                bool(s.value("slice/delete_after_upload", False, type=bool))
+            )
         self.auto_scene_durations.setChecked(
             bool(s.value("slice/auto_scene_durations", True, type=bool))
         )
@@ -252,6 +256,10 @@ class SlicingTabPane(QWidget):
         s.setValue("slice/clip_files", list(self._clip_files))
         s.setValue("slice/music_files", list(self._music_files))
         s.setValue("slice/copies_per_track", int(self.copies_per_track.value()))
+        if hasattr(self, "delete_after_upload"):
+            s.setValue(
+                "slice/delete_after_upload", bool(self.delete_after_upload.isChecked())
+            )
         s.setValue("slice/auto_scene_durations", bool(self.auto_scene_durations.isChecked()))
         s.setValue("slice/min_scene_duration", float(self.min_scene_duration.value()))
         s.setValue("slice/max_scene_duration", float(self.max_scene_duration.value()))
@@ -350,6 +358,13 @@ class SlicingTabPane(QWidget):
         self.copies_per_track.valueChanged.connect(lambda *_: self.save_settings())
         io_grid.addWidget(QLabel("Количество роликов:"), 2, 0)
         io_grid.addWidget(self.copies_per_track, 2, 1)
+        self.delete_after_upload = QCheckBox("Удалять после залива")
+        self.delete_after_upload.setChecked(False)
+        self.delete_after_upload.setToolTip(
+            "После успешной загрузки на YouTube файл удаляется из выходной папки."
+        )
+        self.delete_after_upload.toggled.connect(self.save_settings)
+        io_grid.addWidget(self.delete_after_upload, 3, 0, 1, 3)
 
         music_gb = QGroupBox("Треки для нарезки")
         music_grid = QGridLayout(music_gb)

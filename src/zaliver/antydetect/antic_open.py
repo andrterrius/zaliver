@@ -105,6 +105,7 @@ def _local_studio_workflow_kwargs(
     login_credentials=None,
     yt_oldest_name: str | None = None,
     search_oldest_channel: bool = True,
+    include_name_change_cooldown: bool = False,
 ) -> dict:
     kw: dict = {
         "profile_id": profile_id,
@@ -113,9 +114,10 @@ def _local_studio_workflow_kwargs(
         "search_oldest_channel": search_oldest_channel,
         "on_oldest_channel_name": _make_save_yt_oldest_name_handler(api, profile_id),
     }
-    kw["on_name_change_cooldown"] = _make_save_name_change_cooldown_handler(
-        api, profile_id
-    )
+    if include_name_change_cooldown:
+        kw["on_name_change_cooldown"] = _make_save_name_change_cooldown_handler(
+            api, profile_id
+        )
     return kw
 
 
@@ -561,6 +563,7 @@ def upload_channel_avatar_in_local_antidetect_profile(
                     login_credentials=login_credentials,
                     yt_oldest_name=yt_oldest_name,
                     search_oldest_channel=search_oldest_channel,
+                    include_name_change_cooldown=True,
                 )
                 run_studio_channel_profile_customization(
                     page,

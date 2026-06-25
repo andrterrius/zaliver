@@ -958,6 +958,13 @@ class MainWindow(QWidget):
         io_hint.setObjectName("hint")
         io_hint.setWordWrap(True)
         io_grid.addWidget(io_hint, 4, 0, 1, 3)
+        self.delete_after_upload = QCheckBox("Удалять после залива")
+        self.delete_after_upload.setChecked(False)
+        self.delete_after_upload.setToolTip(
+            "После успешной загрузки на YouTube файл удаляется из выходной папки."
+        )
+        self.delete_after_upload.toggled.connect(self._save_folder_settings)
+        io_grid.addWidget(self.delete_after_upload, 5, 0, 1, 3)
 
         bg_tracks = QGroupBox("Фоновые треки")
         bg_tracks_l = QVBoxLayout(bg_tracks)
@@ -2775,6 +2782,50 @@ class MainWindow(QWidget):
             row_w.remove_requested.connect(self._on_ready_remove_requested)
             self._ready_list.setItemWidget(it, row_w)
 
+    def _delete_after_upload_enabled(self) -> bool:
+        mode = (getattr(self, "_upload_log_mode", "") or "").strip()
+        if not mode:
+            mode = (getattr(self, "_active_work_mode", "") or "").strip()
+        if mode == "slicing":
+            tab = getattr(self, "_slice_tab", None)
+            return bool(
+                tab is not None
+                and hasattr(tab, "delete_after_upload")
+                and tab.delete_after_upload.isChecked()
+            )
+        return bool(
+            hasattr(self, "delete_after_upload") and self.delete_after_upload.isChecked()
+        )
+
+    def _delete_output_video_after_upload(self, video_path: str) -> None:
+        p = Path(str(video_path or "").strip()).expanduser()
+        if not str(p):
+            return
+        try:
+            if not p.is_file():
+                return
+            p.unlink()
+        except OSError as e:
+            try:
+                self._ui_log_line.emit(
+                    f"[upload] Не удалось удалить файл после залива: {p.name} ({e!r})"
+                )
+            except Exception:
+                pass
+            return
+        try:
+            self._video_store.prune_missing_files()
+        except Exception:
+            pass
+        try:
+            self._ui_log_line.emit(f"[upload] Удалён после залива: {p.name}")
+        except Exception:
+            pass
+        try:
+            QTimer.singleShot(0, self._refresh_ready_list)
+        except Exception:
+            pass
+
     def _on_output_saved(self, path: str, include_in_upload: bool = True) -> None:
         if isinstance(path, str) and path.strip():
             p = path.strip()
@@ -3175,6 +3226,10 @@ class MainWindow(QWidget):
                 self._settings.sync()
             except Exception:
                 pass
+        if hasattr(self, "delete_after_upload"):
+            self.delete_after_upload.setChecked(
+                bool(self._settings.value("delete_after_upload", False, type=bool))
+            )
         if hasattr(self, "background_music"):
             self.background_music.setChecked(
                 bool(self._settings.value("background_music_enabled", False, type=bool))
@@ -3289,6 +3344,10 @@ class MainWindow(QWidget):
 
     def _save_folder_settings(self) -> None:
         self._settings.setValue("output_folder", self.output_dir_edit.text().strip())
+        if hasattr(self, "delete_after_upload"):
+            self._settings.setValue(
+                "delete_after_upload", bool(self.delete_after_upload.isChecked())
+            )
         self._settings.setValue("input_files", list(self._selected_input_files))
         self._settings.setValue("background_music_files", list(self._background_music_files))
         if hasattr(self, "background_music"):
@@ -6692,6 +6751,8 @@ class MainWindow(QWidget):
                     QTimer.singleShot(0, self._refresh_uploaded_list)
                 except Exception:
                     pass
+                if self._delete_after_upload_enabled():
+                    self._delete_output_video_after_upload(task.video_path)
 
             def _on_profile_upload_attempt(pid: str, ok: bool, err: str) -> None:
                 try:

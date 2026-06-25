@@ -121,24 +121,18 @@ def _local_studio_workflow_kwargs(
     return kw
 
 
-def _playwright_page_from_cdp(p, endpoint_candidates: tuple[str, ...]):
-    """Подключение к браузеру по CDP; возвращает (browser, context, page)."""
-    browser = None
-    last_err: Exception | None = None
-    for endpoint in endpoint_candidates:
-        if not (endpoint or "").strip():
-            continue
-        try:
-            _log(f"Playwright: connect_over_cdp endpoint={endpoint!r}…")
-            browser = p.chromium.connect_over_cdp(endpoint)
-            last_err = None
-            break
-        except PlaywrightError as e:
-            last_err = e
-    if browser is None:
-        raise DolphinAntyError(
-            f"CDP connect failed for all endpoints. Last error: {last_err!r}"
-        )
+_CDP_CONNECT_TIMEOUT_MS = 60_000
+_CDP_CONNECT_ATTEMPTS = 8
+_CDP_CONNECT_RETRY_POLL_S = 0.6
+_CDP_REFRESH_TIMEOUT_S = 15.0
+
+
+def _cdp_connect_is_conn_refused(err: Exception) -> bool:
+    msg = str(err).upper()
+    return "ECONNREFUSED" in msg
+
+
+def _page_objects_from_connected_browser(browser):
     _log(
         "Playwright: CDP подключение успешно. "
         f"contexts={len(browser.contexts)}"
@@ -159,6 +153,77 @@ def _playwright_page_from_cdp(p, endpoint_candidates: tuple[str, ...]):
         f"context_pages={len(context.pages)}, page_url={page.url!r}"
     )
     return browser, context, page
+
+
+def _playwright_page_from_cdp(p, endpoint_candidates: tuple[str, ...]):
+    """Подключение к браузеру по CDP; возвращает (browser, context, page)."""
+    browser = None
+    last_err: Exception | None = None
+    for endpoint in endpoint_candidates:
+        if not (endpoint or "").strip():
+            continue
+        try:
+            _log(f"Playwright: connect_over_cdp endpoint={endpoint!r}…")
+            browser = p.chromium.connect_over_cdp(
+                endpoint, timeout=_CDP_CONNECT_TIMEOUT_MS
+            )
+            last_err = None
+            break
+        except PlaywrightError as e:
+            last_err = e
+    if browser is None:
+        raise DolphinAntyError(
+            f"CDP connect failed for all endpoints. Last error: {last_err!r}"
+        )
+    return _page_objects_from_connected_browser(browser)
+
+
+def _playwright_page_from_local_session_cdp(
+    p,
+    api,
+    session_id: str,
+    ws_url: str,
+    *,
+    connect_attempts: int = _CDP_CONNECT_ATTEMPTS,
+    retry_poll_s: float = _CDP_CONNECT_RETRY_POLL_S,
+) -> tuple:
+    """CDP через локальный антидетект; при ECONNREFUSED — повторный опрос cdp_ws_url."""
+    current_url = (ws_url or "").strip()
+    if not current_url:
+        raise DolphinAntyError("cdp_ws_url пуст.")
+    last_err: Exception | None = None
+    sid = (session_id or "").strip()
+    for attempt in range(1, max(1, int(connect_attempts)) + 1):
+        try:
+            _log(f"Playwright: connect_over_cdp endpoint={current_url!r}…")
+            browser = p.chromium.connect_over_cdp(
+                current_url, timeout=_CDP_CONNECT_TIMEOUT_MS
+            )
+            return _page_objects_from_connected_browser(browser)
+        except PlaywrightError as e:
+            last_err = e
+            if attempt >= connect_attempts or not _cdp_connect_is_conn_refused(e):
+                break
+            _log(
+                "Playwright: ECONNREFUSED — повторный опрос cdp_ws_url "
+                f"(попытка {attempt + 1}/{connect_attempts})…"
+            )
+            time.sleep(retry_poll_s)
+            if not sid:
+                continue
+            try:
+                refreshed = api.refresh_cdp_ws_url(
+                    sid, timeout_s=_CDP_REFRESH_TIMEOUT_S, poll_s=retry_poll_s
+                )
+            except Exception as refresh_err:
+                last_err = refresh_err
+                break
+            if refreshed != current_url:
+                _log(f"Local antidetect: cdp_ws_url обновлён: {refreshed!r}")
+            current_url = refreshed
+    raise DolphinAntyError(
+        f"CDP connect failed after {connect_attempts} attempts. Last error: {last_err!r}"
+    )
 
 
 @with_log_profile
@@ -261,7 +326,9 @@ def check_studio_availability_in_local_antidetect_profile(
         _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
 
         with sync_playwright() as p:
-            browser, _context, page = _playwright_page_from_cdp(p, (ws_url,))
+            browser, _context, page = _playwright_page_from_local_session_cdp(
+                p, api, session_id, ws_url
+            )
             try:
                 studio_kw = _local_studio_workflow_kwargs(
                     api,
@@ -399,7 +466,9 @@ def fill_channel_description_and_link_in_local_antidetect_profile(
         ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
         _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
         with sync_playwright() as p:
-            browser, _context, page = _playwright_page_from_cdp(p, (ws_url,))
+            browser, _context, page = _playwright_page_from_local_session_cdp(
+                p, api, session_id, ws_url
+            )
             try:
                 studio_kw = _local_studio_workflow_kwargs(
                     api,
@@ -555,7 +624,9 @@ def upload_channel_avatar_in_local_antidetect_profile(
         ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
         _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
         with sync_playwright() as p:
-            browser, _context, page = _playwright_page_from_cdp(p, (ws_url,))
+            browser, _context, page = _playwright_page_from_local_session_cdp(
+                p, api, session_id, ws_url
+            )
             try:
                 studio_kw = _local_studio_workflow_kwargs(
                     api,
@@ -721,7 +792,9 @@ def warmup_youtube_shorts_in_local_antidetect_profile(
         ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
         _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
         with sync_playwright() as p:
-            browser, _context, page = _playwright_page_from_cdp(p, (ws_url,))
+            browser, _context, page = _playwright_page_from_local_session_cdp(
+                p, api, session_id, ws_url
+            )
             try:
                 studio_kw = _local_studio_workflow_kwargs(
                     api,
@@ -920,7 +993,9 @@ def open_google_in_local_antidetect_profile(
             _log(f"Local antidetect: получен cdp_ws_url: {ws_url!r}")
 
             with sync_playwright() as p:
-                browser, context, page = _playwright_page_from_cdp(p, (ws_url,))
+                browser, context, page = _playwright_page_from_local_session_cdp(
+                    p, api, session_id, ws_url
+                )
 
                 try:
                     if upload_latest_zaliver_video:

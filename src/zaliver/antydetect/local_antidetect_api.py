@@ -307,6 +307,33 @@ class LocalAntidetectHttpAPI:
             f"Таймаут ожидания cdp_ws_url ({timeout_s:.0f} с). Последнее состояние: {last!r}"
         )
 
+    def refresh_cdp_ws_url(
+        self,
+        session_id: str,
+        *,
+        timeout_s: float = 15.0,
+        poll_s: float = 0.45,
+    ) -> str:
+        """Повторный опрос cdp_ws_url активной сессии (после ECONNREFUSED и т.п.)."""
+        deadline = time.monotonic() + float(timeout_s)
+        last: dict[str, Any] | None = None
+        while time.monotonic() < deadline:
+            last = self.get_session(session_id)
+            if last.get("running") is False:
+                msg = last.get("result_message")
+                raise LocalAntidetectError(
+                    "Сессия завершилась при повторном опросе CDP WebSocket."
+                    + (f" ({msg})" if msg else "")
+                )
+            ws = last.get("cdp_ws_url")
+            if isinstance(ws, str) and ws.strip():
+                return ws.strip()
+            time.sleep(poll_s)
+        raise LocalAntidetectError(
+            "Таймаут повторного опроса cdp_ws_url "
+            f"({timeout_s:.0f} с). Последнее состояние: {last!r}"
+        )
+
 
 def _strip_automation_from_tag_label(s: str) -> str:
     t = (

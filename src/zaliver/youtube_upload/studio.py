@@ -4036,15 +4036,13 @@ def _studio_open_channel_link_row(page, links_root) -> tuple[object, object]:
     return _studio_wait_channel_link_row(page, links_root, timeout_s=30.0)
 
 
-def _studio_click_channel_customization_publish(page) -> None:
-    """Publish на странице «Настройка канала» (#publish-button, shadow DOM)."""
-    _studio_handle_interrupt_dialogs_if_present(page)
-    _log("Studio: публикация настроек канала…")
+_CHANNEL_CUSTOMIZATION_PUBLISH_WAIT_MS = 10_000
 
-    def _publish_state() -> dict:
-        try:
-            return page.evaluate(
-                """
+
+def _studio_channel_customization_publish_state(page) -> dict:
+    try:
+        return page.evaluate(
+            """
 () => {
   const host = document.querySelector('#publish-button');
   if (!host) return { found: false, enabled: false };
@@ -4056,9 +4054,20 @@ def _studio_click_channel_customization_publish(page) -> None:
   return { found: true, enabled: !btn.disabled };
 }
 """
-            )
-        except Exception as exc:
-            return {"found": False, "enabled": False, "error": str(exc)}
+        )
+    except Exception as exc:
+        return {"found": False, "enabled": False, "error": str(exc)}
+
+
+def _studio_channel_customization_publish_still_enabled(page) -> bool:
+    pub = _studio_channel_customization_publish_state(page)
+    return bool(pub.get("found") and pub.get("enabled"))
+
+
+def _studio_click_channel_customization_publish(page) -> bool:
+    """Publish на странице «Настройка канала». Возвращает True, если кнопка стала неактивной."""
+    _studio_handle_interrupt_dialogs_if_present(page)
+    _log("Studio: публикация настроек канала…")
 
     def _click_publish() -> bool:
         try:
@@ -4090,37 +4099,49 @@ def _studio_click_channel_customization_publish(page) -> None:
     except Exception:
         pass
 
-    pub = _publish_state()
+    pub = _studio_channel_customization_publish_state(page)
     if pub.get("found") and pub.get("enabled") and _click_publish():
-        _log("Studio: ожидание 5 с после «Опубликовать»…")
-        page.wait_for_timeout(5000)
-        _log("Studio: настройки канала опубликованы.")
-        return
+        _log("Studio: ожидание 10 с после «Опубликовать»…")
+        page.wait_for_timeout(_CHANNEL_CUSTOMIZATION_PUBLISH_WAIT_MS)
+        still_enabled = _studio_channel_customization_publish_still_enabled(page)
+        if still_enabled:
+            _log("Studio: кнопка «Опубликовать» всё ещё активна.")
+        else:
+            _log("Studio: настройки канала опубликованы.")
+        return not still_enabled
 
     deadline = time.monotonic() + 15.0
     while time.monotonic() < deadline:
-        pub = _publish_state()
+        pub = _studio_channel_customization_publish_state(page)
         if pub.get("found") and pub.get("enabled") and _click_publish():
-            _log("Studio: ожидание 5 с после «Опубликовать»…")
-            page.wait_for_timeout(5000)
-            _log("Studio: настройки канала опубликованы.")
-            return
+            _log("Studio: ожидание 10 с после «Опубликовать»…")
+            page.wait_for_timeout(_CHANNEL_CUSTOMIZATION_PUBLISH_WAIT_MS)
+            still_enabled = _studio_channel_customization_publish_still_enabled(page)
+            if still_enabled:
+                _log("Studio: кнопка «Опубликовать» всё ещё активна.")
+            else:
+                _log("Studio: настройки канала опубликованы.")
+            return not still_enabled
 
         try:
             btn = page.locator("#publish-button button").first
             if btn.is_enabled():
                 btn.scroll_into_view_if_needed(timeout=2_000)
                 btn.click(timeout=10_000)
-                _log("Studio: ожидание 5 с после «Опубликовать»…")
-                page.wait_for_timeout(5000)
-                _log("Studio: настройки канала опубликованы.")
-                return
+                _log("Studio: ожидание 10 с после «Опубликовать»…")
+                page.wait_for_timeout(_CHANNEL_CUSTOMIZATION_PUBLISH_WAIT_MS)
+                still_enabled = _studio_channel_customization_publish_still_enabled(page)
+                if still_enabled:
+                    _log("Studio: кнопка «Опубликовать» всё ещё активна.")
+                else:
+                    _log("Studio: настройки канала опубликованы.")
+                return not still_enabled
         except Exception:
             pass
 
         page.wait_for_timeout(150)
 
-    pub = _publish_state()
+    pub = _studio_channel_customization_publish_state(page)
     st = _studio_link_row_state(page)
     raise YoutubeStudioError(
         "YouTube Studio: кнопка Publish недоступна — проверьте ошибки на странице "
@@ -4212,6 +4233,234 @@ def run_studio_channel_description_and_link(
     )
 
 
+def _studio_channel_name_input(page):
+    return page.locator(
+        "input.ytcpChannelEditingChannelNameBrandNameInput, "
+        "ytcp-channel-editing-channel-name input.ytcpChannelEditingChannelNameFormInput"
+    ).first
+
+
+def _studio_channel_handle_input(page):
+    return page.locator("input.YtcpChannelEditingChannelHandleHandleInput").first
+
+
+def _studio_fill_plain_input(page, inp, text: str, *, label: str) -> None:
+    value = (text or "").strip()
+    if not value:
+        return
+    field = inp.first if hasattr(inp, "first") else inp
+    field.wait_for(state="visible", timeout=60_000)
+    field.scroll_into_view_if_needed(timeout=15_000)
+    field.click(timeout=15_000)
+    page.wait_for_timeout(120)
+    try:
+        field.fill("")
+    except Exception:
+        pass
+    try:
+        field.press("Control+A")
+        field.press("Backspace")
+    except Exception:
+        pass
+    page.wait_for_timeout(80)
+    field.press_sequentially(value, delay=12)
+    page.wait_for_timeout(350)
+    _log(f"Studio: {label} = {value!r}")
+
+
+def _studio_channel_handle_error_text(page) -> str:
+    try:
+        return str(
+            page.evaluate(
+                """
+() => {
+  const host = document.querySelector('ytcp-channel-editing-channel-handle');
+  if (!host) return '';
+  const info = host.querySelector('.YtcpChannelEditingChannelHandleSupplementaryInfo');
+  if (info) {
+    const msg = info.querySelector('ytcp-msg');
+    const msgText = (msg?.textContent || info.textContent || '').trim();
+    if (/isn't available|not available|недоступн/i.test(msgText)) {
+      return msgText;
+    }
+    if (info.querySelector('.YtcpChannelEditingChannelHandleSuggestedHandleAnchor, ytcp-anchor.YtcpChannelEditingChannelHandleSuggestedHandleAnchor')) {
+      return msgText || 'handle unavailable';
+    }
+  }
+  const tips = host.querySelectorAll('ytcp-form-error-tip');
+  for (const tip of tips) {
+    if (tip.hidden) continue;
+    const message = (tip.querySelector('#message')?.textContent || '').trim();
+    if (message) return message;
+  }
+  const indicator = host.querySelector(
+    '.YtcpChannelEditingChannelHandleValidityIndicatorContainer'
+  );
+  if (indicator) {
+    const cls = indicator.className || '';
+    if (/invalid|error/i.test(cls)) {
+      return (indicator.textContent || '').trim() || 'handle invalid';
+    }
+  }
+  return '';
+}
+"""
+            )
+            or ""
+        ).strip()
+    except Exception:
+        return ""
+
+
+def _studio_channel_handle_suggested_locator(page):
+    return page.locator(
+        "ytcp-channel-editing-channel-handle "
+        "ytcp-anchor.YtcpChannelEditingChannelHandleSuggestedHandleAnchor"
+    ).first
+
+
+def _studio_click_suggested_channel_handle_js(page) -> str:
+    return str(
+        page.evaluate(
+            """
+() => {
+  const host = document.querySelector('ytcp-channel-editing-channel-handle');
+  if (!host) return '';
+  const anchorHost = host.querySelector(
+    'ytcp-anchor.YtcpChannelEditingChannelHandleSuggestedHandleAnchor, '
+    + '.YtcpChannelEditingChannelHandleSuggestedHandleAnchor'
+  );
+  if (!anchorHost) return '';
+  const roots = [anchorHost, anchorHost.shadowRoot].filter(Boolean);
+  for (const root of roots) {
+    const link = root.querySelector?.('a#anchor, a');
+    const target = link || anchorHost;
+    const text = (target.textContent || anchorHost.textContent || '').trim();
+    target.scrollIntoView({ block: 'center', inline: 'nearest' });
+    target.click();
+    return text;
+  }
+  anchorHost.click();
+  return (anchorHost.textContent || '').trim();
+}
+"""
+        )
+        or ""
+    ).strip()
+
+
+def _studio_click_suggested_channel_handle(page) -> bool:
+    locator = _studio_channel_handle_suggested_locator(page)
+    try:
+        locator.wait_for(state="visible", timeout=5_000)
+        link = locator.locator("a#anchor").first
+        target = link if link.count() > 0 else locator
+        target.scroll_into_view_if_needed(timeout=5_000)
+        try:
+            target.click(timeout=5_000)
+        except Exception:
+            locator.evaluate(
+                """(node) => {
+                  const roots = [node, node.shadowRoot].filter(Boolean);
+                  for (const root of roots) {
+                    const link = root.querySelector?.('a#anchor, a');
+                    (link || node).click();
+                    return;
+                  }
+                  node.click();
+                }"""
+            )
+        text = ""
+        try:
+            text = (locator.inner_text(timeout=2_000) or "").strip()
+        except Exception:
+            pass
+        if text:
+            _log(f"Studio: выбран предложенный handle {text!r}.")
+        else:
+            _log("Studio: нажата подсказка handle (YtcpChannelEditingChannelHandleSuggestedHandleAnchor).")
+        page.wait_for_timeout(500)
+        return True
+    except Exception as exc:
+        _log(f"Studio: клик по подсказке handle (locator): {exc!r}")
+
+    try:
+        clicked = _studio_click_suggested_channel_handle_js(page)
+    except Exception as exc:
+        _log(f"Studio: клик по подсказке handle (js): {exc!r}")
+        clicked = ""
+    if clicked:
+        _log(f"Studio: выбран предложенный handle {clicked!r}.")
+        page.wait_for_timeout(500)
+        return True
+    return False
+
+
+def _studio_wait_channel_handle_error_text(
+    page,
+    *,
+    timeout_s: float = 5.0,
+    poll_ms: int = 250,
+) -> str:
+    """Ждём появления ошибки handle после ввода (YouTube отвечает не сразу)."""
+    deadline = time.monotonic() + max(0.5, timeout_s)
+    while time.monotonic() < deadline:
+        err = _studio_channel_handle_error_text(page)
+        if err:
+            return err
+        page.wait_for_timeout(poll_ms)
+    return ""
+
+
+def _studio_read_channel_editing_name(page) -> str:
+    """Текущее название на странице «Настройка канала» (до редактирования)."""
+    try:
+        name_input = _studio_channel_name_input(page)
+        name_input.wait_for(state="visible", timeout=60_000)
+        value = _studio_read_input_value(name_input)
+        if value:
+            return value
+    except Exception:
+        pass
+    return _studio_read_navigation_drawer_channel_name(page)
+
+
+def _studio_apply_channel_name_and_handle(page, channel_name: str) -> None:
+    name = (channel_name or "").strip()
+    if not name:
+        return
+    _log(f"Studio: смена названия канала на {name!r}…")
+    name_input = _studio_channel_name_input(page)
+    name_input.wait_for(state="visible", timeout=60_000)
+    _studio_fill_plain_input(page, name_input, name, label="Название канала")
+
+    handle_value = name.lstrip("@")
+    _log(f"Studio: пробуем handle {handle_value!r} (как название канала)…")
+    handle_input = _studio_channel_handle_input(page)
+    handle_input.wait_for(state="visible", timeout=60_000)
+    _studio_fill_plain_input(page, handle_input, handle_value, label="Handle")
+    try:
+        handle_input.press("Tab")
+    except Exception:
+        pass
+    page.wait_for_timeout(200)
+
+    _log("Studio: ожидание ответа по handle (до 5 с)…")
+    err = _studio_wait_channel_handle_error_text(page, timeout_s=5.0)
+    if err:
+        _log(f"Studio: handle недоступен ({err!r}), нажимаем подсказку…")
+        if not _studio_click_suggested_channel_handle(page):
+            raise YoutubeStudioError(
+                f"Handle «{handle_value}» недоступен и подсказка не найдена: {err}"
+            )
+        page.wait_for_timeout(600)
+        err2 = _studio_wait_channel_handle_error_text(page, timeout_s=3.0)
+        if err2:
+            raise YoutubeStudioError(
+                f"Handle не принят после выбора подсказки: {err2}"
+            )
+
+
 def _studio_channel_profile_image_root(page):
     return page.locator(
         "ytcp-channel-editing-profile-tab ytcp-profile-image-upload, "
@@ -4249,8 +4498,8 @@ def _studio_click_profile_image_done(page) -> bool:
         return False
 
 
-def _studio_upload_channel_profile_picture(page, avatar_path: Path) -> None:
-    """Customization → Picture → Upload/Change → Done → Publish."""
+def _studio_transfer_channel_profile_picture_file(page, avatar_path: Path) -> None:
+    """Customization → Picture → Upload/Change → Done (без Publish)."""
     path = avatar_path.resolve()
     if not path.is_file():
         raise YoutubeStudioError(f"Файл аватарки не найден: {path}")
@@ -4315,6 +4564,10 @@ def _studio_upload_channel_profile_picture(page, avatar_path: Path) -> None:
     except Exception:
         page.wait_for_timeout(800)
 
+
+def _studio_upload_channel_profile_picture(page, avatar_path: Path) -> None:
+    """Customization → Picture → Upload/Change → Done → Publish."""
+    _studio_transfer_channel_profile_picture_file(page, avatar_path)
     _studio_click_channel_customization_publish(page)
 
 
@@ -4330,6 +4583,44 @@ def run_studio_channel_profile_picture(
     profile_id: str | None = None,
 ) -> None:
     """Studio → «Настройка канала» → аватарка → «Опубликовать»."""
+    run_studio_channel_profile_customization(
+        page,
+        avatar_path=avatar_path,
+        login_credentials=login_credentials,
+        yt_oldest_name=yt_oldest_name,
+        on_oldest_channel_name=on_oldest_channel_name,
+        search_oldest_channel=search_oldest_channel,
+        profile_id=profile_id,
+    )
+
+
+@_studio_entrypoint
+def run_studio_channel_profile_customization(
+    page,
+    *,
+    avatar_path: str | Path | None = None,
+    channel_name: str | None = None,
+    skip_name_change: bool = False,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    on_oldest_channel_name=None,
+    on_name_change_cooldown=None,
+    search_oldest_channel: bool = True,
+    profile_id: str | None = None,
+) -> None:
+    """
+    Studio → «Настройка канала»: аватарка, название/handle, «Опубликовать».
+    Порядок: аватарка → название → публикация.
+    """
+    has_avatar = bool(avatar_path)
+    name = (channel_name or "").strip()
+    change_name = bool(name) and not skip_name_change
+
+    if not has_avatar and not change_name:
+        raise YoutubeStudioError(
+            "Не заданы ни аватарка, ни название канала для изменения."
+        )
+
     _studio_navigate_to_channel_customization(
         page,
         login_credentials=login_credentials,
@@ -4337,7 +4628,79 @@ def run_studio_channel_profile_picture(
         on_oldest_channel_name=on_oldest_channel_name,
         search_oldest_channel=search_oldest_channel,
     )
-    _studio_upload_channel_profile_picture(page, Path(avatar_path))
+
+    avatar_file = Path(avatar_path) if has_avatar else None
+
+    if has_avatar and avatar_file is not None:
+        _studio_transfer_channel_profile_picture_file(page, avatar_file)
+
+    previous_channel_name = ""
+    should_update_saved_oldest = False
+    saved_oldest_name = (yt_oldest_name or "").strip()
+
+    if change_name:
+        previous_channel_name = _studio_read_channel_editing_name(page)
+        if previous_channel_name:
+            _log(f"Studio: текущее название канала: {previous_channel_name!r}")
+        if saved_oldest_name and previous_channel_name:
+            should_update_saved_oldest = _studio_channel_names_match(
+                previous_channel_name, saved_oldest_name
+            )
+            if should_update_saved_oldest:
+                _log(
+                    f"Studio: канал совпадает с yt_oldest_name «{saved_oldest_name}» — "
+                    "после успешной смены обновим custom_data."
+                )
+            else:
+                _log(
+                    f"Studio: канал «{previous_channel_name}» ≠ yt_oldest_name "
+                    f"«{saved_oldest_name}» — yt_oldest_name в custom_data не меняем."
+                )
+        _studio_apply_channel_name_and_handle(page, name)
+
+    published = _studio_click_channel_customization_publish(page)
+
+    if change_name and published and should_update_saved_oldest:
+        _studio_finalize_oldest_channel_name(
+            name,
+            on_oldest_channel_name=on_oldest_channel_name,
+        )
+        _log(f"Studio: yt_oldest_name в custom_data обновлён на {name!r}.")
+
+    if change_name and not published:
+        _log(
+            "Studio: «Опубликовать» осталась активной — вероятен лимит смены названия "
+            "(раз в 14 дней)."
+        )
+        if on_name_change_cooldown is not None:
+            try:
+                on_name_change_cooldown()
+            except Exception as exc:
+                _log(f"Studio: on_name_change_cooldown: {exc!r}")
+
+        if has_avatar and avatar_file is not None:
+            _log(
+                "Studio: обновление страницы и повторная загрузка только аватарки "
+                "(без смены названия)…"
+            )
+            page.reload(wait_until="domcontentloaded")
+            page.wait_for_timeout(1500)
+            _studio_navigate_to_channel_customization(
+                page,
+                login_credentials=login_credentials,
+                yt_oldest_name=yt_oldest_name,
+                on_oldest_channel_name=on_oldest_channel_name,
+                search_oldest_channel=search_oldest_channel,
+            )
+            _studio_transfer_channel_profile_picture_file(page, avatar_file)
+            if not _studio_click_channel_customization_publish(page):
+                raise YoutubeStudioError(
+                    "Не удалось опубликовать аватарку после повторной попытки."
+                )
+        elif not has_avatar:
+            raise YoutubeStudioError(
+                "Не удалось изменить название канала (лимит 14 дней)."
+            )
 
 
 @_studio_entrypoint

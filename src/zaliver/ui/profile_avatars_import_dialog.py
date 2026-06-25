@@ -1,11 +1,11 @@
-"""Диалог импорта аватарок из спрайт-листа в отмеченные профили."""
+"""Диалог импорта аватарок и названий каналов в отмеченные профили."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread
-from PyQt6.QtGui import QCloseEvent, QPixmap, QResizeEvent
+from PyQt6.QtGui import QCloseEvent, QColor, QPixmap, QResizeEvent, QShowEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -13,12 +13,14 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+    QApplication,
 )
 
 from zaliver.ui.avatar_detection_worker import (
@@ -28,6 +30,8 @@ from zaliver.ui.avatar_detection_worker import (
 from zaliver.ui.avatar_import_parser import (
     assign_avatars_to_selected_profiles,
     build_selected_profile_avatar_rows,
+    parse_channel_names_file,
+    parse_channel_names_text,
 )
 from zaliver.ui.widgets import AnimatedProgressBar
 
@@ -95,7 +99,7 @@ class ProfileAvatarsImportDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Добавить аватарки")
+        self.setWindowTitle("Аватарки и названия")
         self.setModal(True)
         self.setMinimumSize(760, 720)
         self.resize(820, 780)
@@ -105,23 +109,29 @@ class ProfileAvatarsImportDialog(QDialog):
         self._avatar_count = 0
         self._avatar_pngs: list[bytes] = []
         self._source_paths: list[str] = []
+        self._channel_names: list[str] = []
+        self._names_source_label = ""
         self._detect_thread: QThread | None = None
         self._detect_worker: AvatarDetectionWorker | None = None
         self._detect_cancel = AvatarDetectionCancel()
         self._detect_aborted = False
         self._last_preview_png = b""
         self._last_preview_subtitle = ""
+        self._initial_placement_done = False
 
         root = QVBoxLayout(self)
         root.setSpacing(12)
 
         hint = QLabel(
-            "В таблице — отмеченные профили. Выберите один или несколько файлов с аватарками. "
-            "По умолчанию каждый файл обрабатывается как спрайт-лист: программа находит "
-            "и вырезает иконки, объединяет их и сопоставляет с профилями по порядку.\n\n"
-            "Если включить «Не обрезать аватарки», каждый файл целиком назначается одному "
-            "профилю (1 файл = 1 профиль, в порядке выбора).\n\n"
-            "Аватарки загружаются в YouTube Studio (раздел «Настройка канала» → Picture)."
+            "В таблице — отмеченные профили. Можно задать аватарки, названия каналов "
+            "или оба варианта сразу.\n\n"
+            "Аватарки: выберите файлы со спрайт-листом (или целые картинки при "
+            "«Не обрезать аватарки»). Названия: введите список через запятую или "
+            "с новой строки, либо импортируйте из текстового файла.\n\n"
+            "Если указаны только аватарки — меняется только картинка. "
+            "Если только названия — меняется только название и handle. "
+            "Если оба — сначала аватарка, затем название, затем «Опубликовать». "
+            "Смена названия ограничена раз в 14 дней (в предпросмотре отмечается лимит)."
         )
         hint.setWordWrap(True)
         hint.setObjectName("hint")
@@ -156,15 +166,46 @@ class ProfileAvatarsImportDialog(QDialog):
             "Каждый выбранный файл загружается целиком и назначается одному профилю "
             "без поиска и вырезки иконок на спрайт-листе."
         )
+        self._no_crop.toggled.connect(self._on_assignment_options_changed)
         root.addWidget(self._no_crop)
+
+        names_label = QLabel("Названия каналов")
+        root.addWidget(names_label)
+
+        self._names_edit = QPlainTextEdit()
+        self._names_edit.setPlaceholderText(
+            "Название 1\nНазвание 2\nили через запятую…"
+        )
+        self._names_edit.setMinimumHeight(72)
+        self._names_edit.setMaximumHeight(100)
+        self._names_edit.textChanged.connect(self._on_names_text_changed)
+        root.addWidget(self._names_edit)
+
+        names_row = QHBoxLayout()
+        self._names_source_label_widget = QLabel("Список не задан")
+        self._names_source_label_widget.setObjectName("hint")
+        self._names_source_label_widget.setWordWrap(True)
+        self._btn_pick_names = QPushButton("Импорт из файла…")
+        self._btn_pick_names.clicked.connect(self._pick_names_file)
+        names_row.addWidget(self._names_source_label_widget, 1)
+        names_row.addWidget(self._btn_pick_names)
+        root.addLayout(names_row)
 
         self._shuffle = QCheckBox("Перемешать аватарки")
         self._shuffle.setChecked(True)
         self._shuffle.setToolTip(
             "Случайно перемешать аватарки перед сопоставлением с профилями."
         )
-        self._shuffle.toggled.connect(self._on_shuffle_toggled)
+        self._shuffle.toggled.connect(self._on_assignment_options_changed)
         root.addWidget(self._shuffle)
+
+        self._shuffle_names = QCheckBox("Перемешать названия")
+        self._shuffle_names.setChecked(True)
+        self._shuffle_names.setToolTip(
+            "Случайно перемешать названия перед сопоставлением с профилями."
+        )
+        self._shuffle_names.toggled.connect(self._on_assignment_options_changed)
+        root.addWidget(self._shuffle_names)
 
         self._progress_bar = AnimatedProgressBar()
         self._progress_bar.setRange(0, 1)
@@ -179,9 +220,9 @@ class ProfileAvatarsImportDialog(QDialog):
         self._status.setWordWrap(True)
         root.addWidget(self._status)
 
-        self._table = QTableWidget(0, 4)
+        self._table = QTableWidget(0, 5)
         self._table.setHorizontalHeaderLabels(
-            ["#", "Аватарка", "Профиль", "Статус"]
+            ["#", "Аватарка", "Название", "Профиль", "Статус"]
         )
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -190,15 +231,15 @@ class ProfileAvatarsImportDialog(QDialog):
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.setColumnWidth(0, 36)
         self._table.setColumnWidth(1, 72)
-        self._table.setMinimumHeight(320)
-        self._table.verticalHeader().setDefaultSectionSize(72)
+        self._table.setMinimumHeight(250)
+        self._table.verticalHeader().setDefaultSectionSize(60)
         root.addWidget(self._table, 2)
 
         btns = QHBoxLayout()
         btns.addStretch()
         self._btn_cancel = QPushButton("Отмена")
         self._btn_cancel.setObjectName("secondary")
-        self._btn_save = QPushButton("Загрузить в Studio")
+        self._btn_save = QPushButton("Применить в Studio")
         self._btn_save.setDefault(True)
         self._btn_save.setAutoDefault(True)
         self._btn_save.setEnabled(False)
@@ -210,20 +251,153 @@ class ProfileAvatarsImportDialog(QDialog):
 
         self._populate_table()
         self._status.setText(
-            f"Отмечено профилей: {len(self._profiles)}. Выберите файлы с аватарками."
+            f"Отмечено профилей: {len(self._profiles)}. "
+            "Задайте аватарки и/или названия каналов."
         )
+        self._refresh_assignment()
 
-    def upload_assignments(self) -> list[tuple[str, bytes]]:
-        out: list[tuple[str, bytes]] = []
+    def _place_near_screen_top(self, *, margin: int = 12) -> None:
+        screen = self.screen()
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+        area = screen.availableGeometry()
+        frame = self.frameGeometry()
+        x = area.x() + max(0, (area.width() - frame.width()) // 2)
+        y = area.y() + margin
+        bottom_limit = area.bottom() - frame.height() + 1
+        if y > bottom_limit:
+            y = max(area.y() + margin, bottom_limit)
+        self.move(x, y)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if not self._initial_placement_done:
+            self._place_near_screen_top()
+            self._initial_placement_done = True
+
+    def profile_assignments(self) -> list[dict[str, object]]:
+        out: list[dict[str, object]] = []
         for row in self._rows:
             if not row.get("can_save"):
                 continue
             pid = str(row.get("profile_id") or "").strip()
-            png = row.get("avatar_png")
-            if not pid or not isinstance(png, (bytes, bytearray)) or not png:
+            if not pid:
                 continue
-            out.append((pid, bytes(png)))
+            png = row.get("avatar_png")
+            avatar_bytes = (
+                bytes(png) if isinstance(png, (bytes, bytearray)) and png else None
+            )
+            channel_name = str(row.get("channel_name") or "").strip()
+            skip_name = bool(row.get("skip_name_change"))
+            if not avatar_bytes and not (channel_name and not skip_name):
+                continue
+            out.append(
+                {
+                    "profile_id": pid,
+                    "avatar_png": avatar_bytes,
+                    "channel_name": channel_name or None,
+                    "skip_name_change": skip_name,
+                }
+            )
         return out
+
+    def upload_assignments(self) -> list[tuple[str, bytes]]:
+        """Обратная совместимость: только пары (profile_id, avatar_png)."""
+        out: list[tuple[str, bytes]] = []
+        for item in self.profile_assignments():
+            pid = str(item.get("profile_id") or "")
+            png = item.get("avatar_png")
+            if pid and isinstance(png, (bytes, bytearray)) and png:
+                out.append((pid, bytes(png)))
+        return out
+
+    def _dialog_title(self) -> str:
+        return "Аватарки и названия"
+
+    def _current_channel_names(self) -> list[str]:
+        return parse_channel_names_text(self._names_edit.toPlainText())
+
+    def _pick_names_file(self) -> None:
+        if self._is_detecting():
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Импорт названий каналов",
+            "",
+            "Текстовые файлы (*.txt *.csv);;Все файлы (*.*)",
+        )
+        if not path:
+            return
+        try:
+            names = parse_channel_names_file(path)
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                self._dialog_title(),
+                f"Не удалось прочитать файл:\n{exc}",
+            )
+            return
+        if not names:
+            QMessageBox.warning(
+                self,
+                self._dialog_title(),
+                "В файле не найдено названий каналов.",
+            )
+            return
+        self._names_edit.blockSignals(True)
+        try:
+            self._names_edit.setPlainText("\n".join(names))
+        finally:
+            self._names_edit.blockSignals(False)
+        self._names_source_label = path
+        self._names_source_label_widget.setText(path)
+        self._on_names_text_changed()
+
+    def _on_names_text_changed(self) -> None:
+        if self._is_detecting():
+            return
+        self._channel_names = self._current_channel_names()
+        if not self._names_source_label:
+            if self._channel_names:
+                self._names_source_label_widget.setText(
+                    f"В списке: {len(self._channel_names)} названий"
+                )
+            else:
+                self._names_source_label_widget.setText("Список не задан")
+        self._refresh_assignment()
+
+    def _refresh_assignment(self) -> None:
+        self._channel_names = self._current_channel_names()
+        self._rows = assign_avatars_to_selected_profiles(
+            self._profiles,
+            self._avatar_pngs,
+            shuffle=self._shuffle.isChecked(),
+            channel_names=self._channel_names,
+            shuffle_names=self._shuffle_names.isChecked(),
+        )
+        self._populate_table()
+        self._update_save_button()
+        self._update_status_summary()
+
+    def _update_save_button(self) -> None:
+        self._btn_save.setEnabled(any(row.get("can_save") for row in self._rows))
+
+    def _update_status_summary(self) -> None:
+        matched = sum(1 for row in self._rows if row.get("can_save"))
+        parts = [f"Отмечено профилей: {len(self._profiles)}."]
+        if self._avatar_pngs:
+            parts.append(f"Аватарок: {len(self._avatar_pngs)}.")
+        if self._channel_names:
+            parts.append(f"Названий: {len(self._channel_names)}.")
+        parts.append(f"Готово к применению: {matched}.")
+        self._status.setText(" ".join(parts))
+
+    def _on_assignment_options_changed(self, _checked: bool = False) -> None:
+        if self._is_detecting():
+            return
+        self._refresh_assignment()
 
     def avatar_count(self) -> int:
         return self._avatar_count
@@ -233,15 +407,18 @@ class ProfileAvatarsImportDialog(QDialog):
 
     def _set_busy(self, busy: bool) -> None:
         self._btn_pick.setEnabled(not busy)
+        self._btn_pick_names.setEnabled(not busy)
+        self._names_edit.setEnabled(not busy)
         self._no_crop.setEnabled(not busy)
         self._shuffle.setEnabled(not busy)
+        self._shuffle_names.setEnabled(not busy)
         self._progress_bar.setVisible(busy)
         if busy:
             self._btn_save.setEnabled(False)
         else:
             self._progress_bar.setValue(0)
             self._progress_bar.setFormat("Ожидание…")
-            self._btn_save.setEnabled(any(row.get("can_save") for row in self._rows))
+            self._update_save_button()
 
     def _stop_detection_thread(self) -> None:
         self._detect_aborted = True
@@ -309,6 +486,7 @@ class ProfileAvatarsImportDialog(QDialog):
     def _on_detection_thread_finished(self) -> None:
         self._detect_thread = None
         self._detect_worker = None
+        self._update_save_button()
 
     def _on_detection_progress(self, done: int, total: int, filename: str) -> None:
         if self._detect_aborted:
@@ -318,13 +496,24 @@ class ProfileAvatarsImportDialog(QDialog):
         self._progress_bar.setValue(min(done, max_files))
         no_crop = self._no_crop.isChecked()
         verb = "Загрузка" if no_crop else "Обработка"
-        if filename and done < total:
-            self._progress_bar.setFormat(
-                f"{'Загрузка' if no_crop else 'Файл'} %v из %m — {filename}"
-            )
-            self._status.setText(
-                f"{verb} файла {done + 1} из {total}: {filename}…"
-            )
+        if done < total:
+            label = "Загрузка" if no_crop else "Файл"
+            if done <= 0:
+                self._progress_bar.setFormat(f"{label} %v из %m")
+                if filename:
+                    self._status.setText(f"{verb}: {filename}…")
+                else:
+                    self._status.setText(f"{verb} {total} файлов…")
+            else:
+                self._progress_bar.setFormat(
+                    f"{label} %v из %m"
+                    + (f" — {filename}" if filename else "")
+                )
+                self._status.setText(
+                    f"{verb}: {done} из {total}"
+                    + (f" — {filename}" if filename else "")
+                    + "…"
+                )
         elif done >= total and total > 0:
             self._progress_bar.setValue(max_files)
             self._progress_bar.setFormat("Готово")
@@ -385,7 +574,7 @@ class ProfileAvatarsImportDialog(QDialog):
         if self._detect_aborted:
             return
         self._set_busy(False)
-        QMessageBox.warning(self, "Добавить аватарки", message)
+        QMessageBox.warning(self, self._dialog_title(), message)
         self._status.setText(
             f"Отмечено профилей: {len(self._profiles)}. Выберите другие файлы."
         )
@@ -401,17 +590,16 @@ class ProfileAvatarsImportDialog(QDialog):
     ) -> None:
         if self._detect_aborted:
             return
-        self._set_busy(False)
         if isinstance(source_paths, list):
             self._source_paths = [str(p) for p in source_paths if str(p).strip()]
             self._source_label.setText(_format_source_files(self._source_paths))
 
         avatar_pngs = [bytes(p) for p in pngs if p]
         if not avatar_pngs:
-            self._rows = build_selected_profile_avatar_rows(self._profiles)
             self._avatar_count = 0
             self._avatar_pngs = []
-            self._populate_table()
+            self._set_busy(False)
+            self._refresh_assignment()
             self._clear_preview(
                 placeholder=(
                     "Файлы не загружены"
@@ -419,74 +607,36 @@ class ProfileAvatarsImportDialog(QDialog):
                     else "Аватарки не найдены"
                 )
             )
-            self._btn_save.setEnabled(False)
-            self._status.setText(
-                "Не удалось загрузить выбранные файлы. Попробуйте другие."
-                if self._no_crop.isChecked()
-                else "В выбранных файлах не найдено аватарок. Попробуйте другие файлы."
-            )
+            if not any(row.get("can_save") for row in self._rows):
+                self._status.setText(
+                    "Не удалось загрузить выбранные файлы. Попробуйте другие."
+                    if self._no_crop.isChecked()
+                    else "В выбранных файлах не найдено аватарок. Попробуйте другие файлы."
+                )
             return
 
         self._avatar_count = len(avatar_pngs)
         self._avatar_pngs = avatar_pngs
-        self._apply_avatar_assignment()
+        self._set_busy(False)
+        self._refresh_assignment()
         self._apply_preview_pixmap(bytes(preview_png) if preview_png else b"")
 
-        matched = sum(1 for row in self._rows if row.get("can_save"))
-        extra = sum(
-            1
-            for row in self._rows
-            if not row.get("can_save")
-            and str(row.get("status") or "").startswith("Лишняя")
-        )
-        missing = sum(
-            1
-            for row in self._rows
-            if str(row.get("status") or "") == "Нет аватарки в файле"
-        )
-        no_crop = self._no_crop.isChecked()
-        count_label = "Загружено файлов" if no_crop else "Найдено аватарок"
-        parts = [
-            f"{count_label}: {len(avatar_pngs)} "
-            f"({len(self._source_paths)} файл(ов)).",
-            f"Готово к загрузке: {matched}.",
-        ]
-        if missing:
-            label = "Без файла" if no_crop else "Без аватарки"
-            parts.append(f"{label}: {missing}.")
-        if extra:
-            label = "Лишних файлов" if no_crop else "Лишних аватарок"
-            parts.append(f"{label}: {extra}.")
         warn_lines = [str(e) for e in errors if str(e).strip()]
-        if warn_lines:
-            parts.append(f"Предупреждений по файлам: {len(warn_lines)}.")
-        self._status.setText(" ".join(parts))
-        self._btn_save.setEnabled(matched > 0)
-
         if warn_lines:
             preview = "\n".join(warn_lines[:8])
             if len(warn_lines) > 8:
                 preview += f"\n… и ещё {len(warn_lines) - 8}."
             QMessageBox.warning(
                 self,
-                "Добавить аватарки",
+                self._dialog_title(),
                 "Часть файлов обработана с предупреждениями:\n\n" + preview,
             )
 
     def _apply_avatar_assignment(self) -> None:
-        self._rows = assign_avatars_to_selected_profiles(
-            self._profiles,
-            self._avatar_pngs,
-            shuffle=self._shuffle.isChecked(),
-        )
-        self._populate_table()
-        if not self._is_detecting():
-            self._btn_save.setEnabled(any(row.get("can_save") for row in self._rows))
+        self._refresh_assignment()
 
     def _on_shuffle_toggled(self, _checked: bool) -> None:
-        if self._is_detecting() or not self._avatar_pngs:
-            return
-        self._apply_avatar_assignment()
+        self._on_assignment_options_changed(_checked)
 
     def _populate_table(self) -> None:
         self._table.setRowCount(len(self._rows))
@@ -504,6 +654,13 @@ class ProfileAvatarsImportDialog(QDialog):
                 profile_cell = profile_name
             else:
                 profile_cell = "—"
+            channel_name = str(row.get("channel_name") or "")
+            if channel_name and row.get("skip_name_change"):
+                name_cell = f"{channel_name}\n(не будет изменено)"
+            elif channel_name:
+                name_cell = channel_name
+            else:
+                name_cell = "—"
             status = str(row.get("status") or "")
 
             thumb_label = QLabel()
@@ -515,7 +672,9 @@ class ProfileAvatarsImportDialog(QDialog):
                 thumb_label.setText("—")
             self._table.setCellWidget(i, 1, thumb_label)
 
-            for col, value in enumerate([index_text, "", profile_cell, status]):
+            for col, value in enumerate(
+                [index_text, "", name_cell, profile_cell, status]
+            ):
                 if col == 1:
                     continue
                 item = QTableWidgetItem(value)
@@ -523,34 +682,53 @@ class ProfileAvatarsImportDialog(QDialog):
                     item.setTextAlignment(
                         Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
                     )
-                if not row.get("can_save") and col == 3:
+                if col == 2 and row.get("skip_name_change") and channel_name:
+                    item.setForeground(QColor(180, 130, 0))
+                if not row.get("can_save") and col == 4:
                     item.setForeground(Qt.GlobalColor.darkRed)
                 self._table.setItem(i, col, item)
 
         self._table.resizeColumnsToContents()
         self._table.setColumnWidth(1, 72)
+        self._table.setColumnWidth(2, 160)
 
     def _on_save(self) -> None:
         if self._is_detecting():
             return
-        matched = sum(1 for row in self._rows if row.get("can_save"))
-        if matched <= 0:
+        assignments = self.profile_assignments()
+        if not assignments:
             QMessageBox.warning(
                 self,
-                "Добавить аватарки",
-                "Нет аватарок, сопоставленных с профилями. Сохранять нечего.",
+                self._dialog_title(),
+                "Нет данных для применения. Задайте аватарки и/или названия.",
             )
             return
-        unmatched = len(self._profiles) - matched
-        msg = f"Загрузить аватарки в YouTube Studio для {matched} профилей?"
-        if unmatched > 0:
-            msg += f"\n\n{unmatched} профилей останутся без аватарки."
-        extra = self._avatar_count - matched
-        if extra > 0:
-            msg += f"\n\n{extra} лишних аватарок будут пропущены."
+        with_avatar = sum(1 for a in assignments if a.get("avatar_png"))
+        with_name = sum(
+            1
+            for a in assignments
+            if a.get("channel_name") and not a.get("skip_name_change")
+        )
+        skipped_names = sum(
+            1
+            for a in assignments
+            if a.get("channel_name") and a.get("skip_name_change")
+        )
+        msg = f"Применить изменения в YouTube Studio для {len(assignments)} профилей?"
+        details: list[str] = []
+        if with_avatar:
+            details.append(f"• с аватаркой: {with_avatar}")
+        if with_name:
+            details.append(f"• с названием: {with_name}")
+        if skipped_names:
+            details.append(
+                f"• название пропущено (лимит 14 дн.): {skipped_names}"
+            )
+        if details:
+            msg += "\n\n" + "\n".join(details)
         answer = QMessageBox.question(
             self,
-            "Добавить аватарки",
+            self._dialog_title(),
             msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,

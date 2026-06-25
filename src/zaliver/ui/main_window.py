@@ -1787,14 +1787,14 @@ class MainWindow(QWidget):
         self._btn_profiles_fill_channel.clicked.connect(
             self._start_profiles_channel_fill
         )
-        self._btn_profiles_add_avatars = QPushButton("Добавить аватарки")
+        self._btn_profiles_add_avatars = QPushButton("Аватарки и названия")
         self._btn_profiles_add_avatars.setObjectName("secondary")
         self._btn_profiles_add_avatars.setAutoDefault(False)
         self._btn_profiles_add_avatars.setDefault(False)
         self._btn_profiles_add_avatars.setToolTip(
-            "Только для отмеченных профилей: выбрать картинку со спрайтом аватарок, "
-            "автоматически вырезать иконки и загрузить в YouTube Studio "
-            "(«Настройка канала» → Picture, затем «Опубликовать»). "
+            "Только для отмеченных профилей: аватарки и/или названия каналов "
+            "в YouTube Studio («Настройка канала»). "
+            "Можно задать только аватарки, только названия или оба варианта. "
             "Браузер всегда с окном (не headless), до 5 параллельно."
         )
         self._btn_profiles_add_avatars.clicked.connect(
@@ -4850,27 +4850,31 @@ class MainWindow(QWidget):
         else:
             QMessageBox.information(self, "Импорт данных учёток", msg)
 
+    def _profiles_avatars_dialog_title(self) -> str:
+        return "Аватарки и названия"
+
     def _open_profiles_avatars_import_dialog(self) -> None:
+        title = self._profiles_avatars_dialog_title()
         if self._profiles_avatar_upload_running:
             QMessageBox.information(
                 self,
-                "Добавить аватарки",
-                "Загрузка аватарок уже выполняется. Дождитесь завершения.",
+                title,
+                "Применение аватарок и названий уже выполняется. Дождитесь завершения.",
             )
             return
         kind = self._default_browser_combo.currentData()
         if not _is_own_antidetect_kind(kind if isinstance(kind, str) else ""):
             QMessageBox.information(
                 self,
-                "Добавить аватарки",
-                "Импорт аватарок доступен только для своего антидетекта "
+                title,
+                "Импорт аватарок и названий доступен только для своего антидетекта "
                 "(локальный или удалённый API).",
             )
             return
         if not self._profiles_raw:
             QMessageBox.information(
                 self,
-                "Добавить аватарки",
+                title,
                 "Сначала загрузите список профилей (кнопка «Обновить»).",
             )
             return
@@ -4880,8 +4884,8 @@ class MainWindow(QWidget):
         if not profile_ids:
             QMessageBox.warning(
                 self,
-                "Добавить аватарки",
-                "Отметьте квадратиками профили, которым нужно назначить аватарки.",
+                title,
+                "Отметьте квадратиками профили, которым нужно применить изменения.",
             )
             return
         by_id = self._profiles_by_id_map(self._profiles_raw)
@@ -4889,7 +4893,7 @@ class MainWindow(QWidget):
         if not selected_profiles:
             QMessageBox.warning(
                 self,
-                "Добавить аватарки",
+                title,
                 "Не удалось найти отмеченные профили в загруженном списке.",
             )
             return
@@ -4901,7 +4905,7 @@ class MainWindow(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        assignments = dlg.upload_assignments()
+        assignments = dlg.profile_assignments()
         if not assignments:
             return
 
@@ -4915,7 +4919,7 @@ class MainWindow(QWidget):
         if not (base_url or "").strip():
             QMessageBox.warning(
                 self,
-                "Добавить аватарки",
+                title,
                 f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} "
                 "API в настройках и сохраните.",
             )
@@ -4926,13 +4930,13 @@ class MainWindow(QWidget):
         try:
             remote_cdp = self._remote_cdp_launch_options_for_kind(kind_s)
         except LocalAntidetectError as e:
-            QMessageBox.warning(self, "Добавить аватарки", str(e))
+            QMessageBox.warning(self, title, str(e))
             return
 
         self._profiles_avatar_upload_running = True
         self._sync_profiles_tab_action_buttons()
         self._profiles_status.setText(
-            f"Загрузка аватарок в Studio: 0 / {len(assignments)}…"
+            f"Аватарки и названия в Studio: 0 / {len(assignments)}…"
         )
         self._append_log(
             f"[avatar_upload] Старт для {len(assignments)} профилей "
@@ -4955,7 +4959,7 @@ class MainWindow(QWidget):
     def _profiles_avatar_upload_worker(
         self,
         *,
-        assignments: list[tuple[str, bytes]],
+        assignments: list[dict[str, object]],
         kind: str,
         token: str,
         base_url: str,
@@ -4974,15 +4978,30 @@ class MainWindow(QWidget):
         set_log_sink(self._ui_log_line.emit)
         kind_s = (kind or "").strip()
         base_u = (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
-        avatar_by_id = {pid: png for pid, png in assignments}
+        by_id: dict[str, dict[str, object]] = {}
+        for item in assignments:
+            pid = str(item.get("profile_id") or "").strip()
+            if pid:
+                by_id[pid] = item
 
         def _upload_one(pid: str) -> None:
-            png = avatar_by_id.get(pid)
-            if not png:
-                raise LocalAntidetectError(f"Нет аватарки для профиля {pid!r}.")
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                tf.write(png)
-                tmp_path = Path(tf.name)
+            item = by_id.get(pid)
+            if not item:
+                raise LocalAntidetectError(f"Нет задания для профиля {pid!r}.")
+            png = item.get("avatar_png")
+            avatar_path: Path | None = None
+            if isinstance(png, (bytes, bytearray)) and png:
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                    tf.write(bytes(png))
+                    avatar_path = Path(tf.name)
+            channel_name = str(item.get("channel_name") or "").strip() or None
+            skip_name_change = bool(item.get("skip_name_change"))
+            if avatar_path is None and not (
+                channel_name and not skip_name_change
+            ):
+                raise LocalAntidetectError(
+                    f"Нет аватарки и названия для профиля {pid!r}."
+                )
             try:
                 creds = self._profile_login_credentials(pid)
                 yt_oldest = self._profile_yt_oldest_name(pid) or None
@@ -4995,7 +5014,9 @@ class MainWindow(QWidget):
                         )
                     upload_channel_avatar_in_local_antidetect_profile(
                         pid,
-                        avatar_path=tmp_path,
+                        avatar_path=avatar_path,
+                        channel_name=channel_name,
+                        skip_name_change=skip_name_change,
                         base_url=u,
                         headless=headless,
                         login_credentials=creds,
@@ -5006,7 +5027,9 @@ class MainWindow(QWidget):
                 else:
                     upload_channel_avatar_in_profile(
                         pid,
-                        avatar_path=tmp_path,
+                        avatar_path=avatar_path,
+                        channel_name=channel_name,
+                        skip_name_change=skip_name_change,
                         local_token=token or None,
                         headless=headless,
                         login_credentials=creds,
@@ -5014,16 +5037,17 @@ class MainWindow(QWidget):
                         search_oldest_channel=search_oldest,
                     )
             finally:
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                if avatar_path is not None:
+                    try:
+                        avatar_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
         def _on_progress(done: int, total: int, profile_id: str) -> None:
             self._studio_avatar_upload_progress.emit(done, total, profile_id)
 
         mgr = MultiProfileAvailabilityChecker(
-            profile_ids=list(avatar_by_id.keys()),
+            profile_ids=list(by_id.keys()),
             check_one=_upload_one,
             on_progress=_on_progress,
             log_sink=self._ui_log_line.emit,
@@ -5405,7 +5429,7 @@ class MainWindow(QWidget):
     ) -> None:
         pid = (profile_id or "").strip()
         self._profiles_status.setText(
-            f"Загрузка аватарок в Studio: {current} / {total}"
+            f"Аватарки и названия в Studio: {current} / {total}"
             + (f" — профиль {pid}" if pid else "…")
         )
 
@@ -5413,8 +5437,9 @@ class MainWindow(QWidget):
         self._profiles_avatar_upload_running = False
         self._sync_profiles_tab_action_buttons()
         total = int(ok_n) + int(fail_n)
+        title = self._profiles_avatars_dialog_title()
         self._profiles_status.setText(
-            f"Загрузка аватарок завершена: успешно {ok_n}, с ошибкой {fail_n} "
+            f"Аватарки и названия: успешно {ok_n}, с ошибкой {fail_n} "
             f"(всего {total})."
         )
         self._append_log(
@@ -5428,7 +5453,7 @@ class MainWindow(QWidget):
                 )
         QMessageBox.information(
             self,
-            "Добавить аватарки",
+            title,
             f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
         )
 

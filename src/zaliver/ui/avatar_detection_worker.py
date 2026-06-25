@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 
@@ -15,6 +18,81 @@ class AvatarDetectionCancel:
 
     def __init__(self) -> None:
         self.cancelled = False
+
+
+@dataclass(frozen=True)
+class _FileProcessResult:
+    index: int
+    path: Path
+    pngs: list[bytes]
+    preview: bytes
+    error: str | None = None
+
+
+def _parallel_workers(file_count: int) -> int:
+    if file_count <= 1:
+        return 1
+    cpus = os.cpu_count() or 4
+    return min(file_count, max(2, cpus))
+
+
+def _process_avatar_file(
+    index: int,
+    path: Path,
+    *,
+    crop_sprites: bool,
+) -> _FileProcessResult:
+    try:
+        if crop_sprites:
+            pngs, _boxes, preview_image = extract_avatar_pngs_from_path(
+                path,
+                padding=2,
+                square=True,
+            )
+            if not pngs:
+                return _FileProcessResult(
+                    index,
+                    path,
+                    [],
+                    b"",
+                    f"{path.name}: аватарки не найдены",
+                )
+            buf = BytesIO()
+            preview_image.save(buf, format="PNG")
+            return _FileProcessResult(
+                index,
+                path,
+                [bytes(p) for p in pngs if p],
+                buf.getvalue(),
+                None,
+            )
+
+        png_bytes = load_image_file_as_png(path)
+        if not png_bytes:
+            return _FileProcessResult(
+                index,
+                path,
+                [],
+                b"",
+                f"{path.name}: пустой файл",
+            )
+        return _FileProcessResult(index, path, [png_bytes], png_bytes, None)
+    except OSError as e:
+        return _FileProcessResult(
+            index,
+            path,
+            [],
+            b"",
+            f"{path.name}: не удалось прочитать ({e})",
+        )
+    except Exception as e:
+        return _FileProcessResult(
+            index,
+            path,
+            [],
+            b"",
+            f"{path.name}: ошибка обработки ({e})",
+        )
 
 
 class AvatarDetectionWorker(QObject):
@@ -38,55 +116,128 @@ class AvatarDetectionWorker(QObject):
         self._crop_sprites = crop_sprites
         self._cancel = cancel or AvatarDetectionCancel()
 
+    def _cancelled(self) -> bool:
+        return self._cancel.cancelled
+
+    def _emit_file_result(
+        self,
+        result: _FileProcessResult,
+        *,
+        total: int,
+        completed: int,
+    ) -> None:
+        self.progress.emit(completed, total, result.path.name)
+        if result.preview:
+            self.file_preview.emit(result.preview, str(result.path))
+
+    def _collect_results(
+        self,
+        results: list[_FileProcessResult],
+    ) -> tuple[list[bytes], bytes, str, list[str]]:
+        all_pngs: list[bytes] = []
+        errors: list[str] = []
+        last_preview = b""
+        last_path = ""
+
+        for result in sorted(results, key=lambda item: item.index):
+            if result.error:
+                errors.append(result.error)
+            if result.pngs:
+                all_pngs.extend(result.pngs)
+            if result.preview:
+                last_preview = result.preview
+                last_path = str(result.path)
+            elif result.pngs and not last_path:
+                last_path = str(result.path)
+
+        return all_pngs, last_preview, last_path, errors
+
+    def _run_sequential(self) -> tuple[list[bytes], bytes, str, list[str]] | None:
+        total = len(self._paths)
+        results: list[_FileProcessResult] = []
+
+        for index, path in enumerate(self._paths):
+            if self._cancelled():
+                self.aborted.emit()
+                return None
+
+            result = _process_avatar_file(
+                index,
+                path,
+                crop_sprites=self._crop_sprites,
+            )
+            results.append(result)
+            self._emit_file_result(result, total=total, completed=len(results))
+
+        return self._collect_results(results)
+
+    def _run_parallel(self) -> tuple[list[bytes], bytes, str, list[str]] | None:
+        total = len(self._paths)
+        workers = _parallel_workers(total)
+        results: list[_FileProcessResult] = []
+        pending = list(enumerate(self._paths))
+
+        self.progress.emit(0, total, self._paths[0].name)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            fut_map: dict[Future[_FileProcessResult], int] = {}
+
+            while pending or fut_map:
+                if self._cancelled():
+                    for fut in fut_map:
+                        fut.cancel()
+                    self.aborted.emit()
+                    return None
+
+                while pending and len(fut_map) < workers:
+                    index, path = pending.pop(0)
+                    fut = pool.submit(
+                        _process_avatar_file,
+                        index,
+                        path,
+                        crop_sprites=self._crop_sprites,
+                    )
+                    fut_map[fut] = index
+
+                if not fut_map:
+                    break
+
+                done, _ = wait(fut_map.keys(), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    index = fut_map.pop(fut)
+                    path = self._paths[index]
+                    try:
+                        result = fut.result()
+                    except Exception as e:
+                        result = _FileProcessResult(
+                            index,
+                            path,
+                            [],
+                            b"",
+                            f"{path.name}: ошибка обработки ({e})",
+                        )
+                    results.append(result)
+                    self._emit_file_result(result, total=total, completed=len(results))
+
+        return self._collect_results(results)
+
     def run(self) -> None:
         if not self._paths:
             self.failed.emit("Не выбрано ни одного файла.")
             return
 
-        all_pngs: list[bytes] = []
-        last_preview = b""
-        last_path = ""
-        errors: list[str] = []
         total = len(self._paths)
+        if total <= 1 or _parallel_workers(total) <= 1:
+            collected = self._run_sequential()
+        else:
+            collected = self._run_parallel()
 
-        for idx, path in enumerate(self._paths):
-            if self._cancel.cancelled:
-                self.aborted.emit()
-                return
+        if collected is None:
+            return
 
-            self.progress.emit(idx, total, path.name)
-            try:
-                if self._crop_sprites:
-                    pngs, _boxes, preview_image = extract_avatar_pngs_from_path(
-                        path,
-                        padding=2,
-                        square=True,
-                    )
-                    if not pngs:
-                        errors.append(f"{path.name}: аватарки не найдены")
-                        continue
-                    all_pngs.extend(bytes(p) for p in pngs if p)
-                    buf = BytesIO()
-                    preview_image.save(buf, format="PNG")
-                    last_preview = buf.getvalue()
-                else:
-                    png_bytes = load_image_file_as_png(path)
-                    if not png_bytes:
-                        errors.append(f"{path.name}: пустой файл")
-                        continue
-                    all_pngs.append(png_bytes)
-                    last_preview = png_bytes
-            except OSError as e:
-                errors.append(f"{path.name}: не удалось прочитать ({e})")
-                continue
-            except Exception as e:
-                errors.append(f"{path.name}: ошибка обработки ({e})")
-                continue
+        all_pngs, last_preview, last_path, errors = collected
 
-            last_path = str(path)
-            self.file_preview.emit(last_preview, last_path)
-
-        if self._cancel.cancelled:
+        if self._cancelled():
             self.aborted.emit()
             return
 

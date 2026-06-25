@@ -104,6 +104,22 @@ def _filter_component(
     return True
 
 
+def _filter_by_mean_size(boxes: list[AvatarBox]) -> list[AvatarBox]:
+    """Отбрасывает вырезки меньше средней ширины или высоты."""
+    if not boxes:
+        return []
+
+    widths = np.array([box.width for box in boxes], dtype=np.float32)
+    heights = np.array([box.height for box in boxes], dtype=np.float32)
+    mean_w = float(np.mean(widths))
+    mean_h = float(np.mean(heights))
+    return [
+        box
+        for box in boxes
+        if box.width >= mean_w and box.height >= mean_h
+    ]
+
+
 def _filter_by_dominant_size(
     boxes: list[AvatarBox],
     *,
@@ -313,6 +329,7 @@ def extract_avatar_pngs(
     boxes = detect_avatars(rgba, square=square, **detect_kwargs)
     if padding > 0:
         boxes = [box.with_padding(padding, w, h) for box in boxes]
+    boxes = _filter_by_mean_size(boxes)
 
     pngs: list[bytes] = []
     for box in boxes:

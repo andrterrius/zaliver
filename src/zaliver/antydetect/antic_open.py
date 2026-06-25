@@ -12,6 +12,7 @@ from zaliver.youtube_upload.studio import (
     YoutubeAllChannelsRemovedError,
     YoutubeStudioError,
     run_studio_channel_description_and_link,
+    run_studio_channel_profile_customization,
     run_studio_channel_profile_picture,
     run_upload_latest_ready_video,
     run_youtube_shorts_warmup,
@@ -73,6 +74,30 @@ def _make_save_yt_oldest_name_handler(api, profile_id: str):
     return save
 
 
+def _make_save_name_change_cooldown_handler(api, profile_id: str):
+    from zaliver.ui.profile_avatar_data import (
+        NAME_CHANGE_COOLDOWN_DAYS,
+        channel_name_change_cooldown_payload,
+    )
+
+    def save() -> None:
+        try:
+            api.merge_profile_custom_data(
+                profile_id, channel_name_change_cooldown_payload()
+            )
+            _log(
+                "Local antidetect: в custom_data сохранён лимит смены названия канала "
+                f"({NAME_CHANGE_COOLDOWN_DAYS} дн.)."
+            )
+        except Exception as e:
+            _log(
+                f"Local antidetect: не удалось сохранить лимит смены названия "
+                f"для profile_id={profile_id!r}: {e!r}"
+            )
+
+    return save
+
+
 def _local_studio_workflow_kwargs(
     api,
     profile_id: str,
@@ -86,9 +111,11 @@ def _local_studio_workflow_kwargs(
         "login_credentials": login_credentials,
         "yt_oldest_name": (yt_oldest_name or "").strip() or None,
         "search_oldest_channel": search_oldest_channel,
+        "on_oldest_channel_name": _make_save_yt_oldest_name_handler(api, profile_id),
     }
-    if search_oldest_channel:
-        kw["on_oldest_channel_name"] = _make_save_yt_oldest_name_handler(api, profile_id)
+    kw["on_name_change_cooldown"] = _make_save_name_change_cooldown_handler(
+        api, profile_id
+    )
     return kw
 
 
@@ -417,17 +444,24 @@ def fill_channel_description_and_link_in_local_antidetect_profile(
 def upload_channel_avatar_in_profile(
     profile_id: str,
     *,
-    avatar_path: str | Path,
+    avatar_path: str | Path | None = None,
+    channel_name: str | None = None,
+    skip_name_change: bool = False,
     local_token: str | None = None,
     headless: bool = True,
     login_credentials=None,
     yt_oldest_name: str | None = None,
     search_oldest_channel: bool = True,
 ) -> None:
-    """Dolphin → Studio → «Настройка канала» → аватарка."""
+    """Dolphin → Studio → «Настройка канала» → аватарка и/или название."""
+    has_avatar = bool(avatar_path)
+    has_name = bool((channel_name or "").strip()) and not skip_name_change
+    if not has_avatar and not has_name:
+        raise DolphinAntyError("Не заданы ни аватарка, ни название канала.")
     _log(
-        "Dolphin: загрузка аватарки канала. "
-        f"profile_id={profile_id!r}, headless={headless}"
+        "Dolphin: настройка канала (аватарка/название). "
+        f"profile_id={profile_id!r}, headless={headless}, "
+        f"avatar={has_avatar}, name={has_name}"
     )
     api = DolphinAntyLocalAPI()
     try:
@@ -446,9 +480,11 @@ def upload_channel_avatar_in_profile(
                 p, (conn.ws_url(), conn.http_url())
             )
             try:
-                run_studio_channel_profile_picture(
+                run_studio_channel_profile_customization(
                     page,
                     avatar_path=avatar_path,
+                    channel_name=channel_name,
+                    skip_name_change=skip_name_change,
                     profile_id=profile_id,
                     login_credentials=login_credentials,
                     yt_oldest_name=yt_oldest_name,
@@ -471,7 +507,9 @@ def upload_channel_avatar_in_profile(
 def upload_channel_avatar_in_local_antidetect_profile(
     profile_id: str,
     *,
-    avatar_path: str | Path,
+    avatar_path: str | Path | None = None,
+    channel_name: str | None = None,
+    skip_name_change: bool = False,
     base_url: str,
     headless: bool = True,
     login_credentials=None,
@@ -479,11 +517,7 @@ def upload_channel_avatar_in_local_antidetect_profile(
     search_oldest_channel: bool = True,
     remote_cdp=None,
 ) -> None:
-    """Локальный антидетект → Studio → «Настройка канала» → аватарка."""
-    _log(
-        "Local antidetect: загрузка аватарки канала. "
-        f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}"
-    )
+    """Локальный антидетект → Studio → «Настройка канала» → аватарка и/или название."""
     from zaliver.antydetect.local_antidetect_api import (
         LocalAntidetectError,
         LocalAntidetectHttpAPI,
@@ -491,6 +525,16 @@ def upload_channel_avatar_in_local_antidetect_profile(
     from zaliver.antydetect.local_active_sessions import (
         register_local_session,
         unregister_local_session,
+    )
+
+    has_avatar = bool(avatar_path)
+    has_name = bool((channel_name or "").strip()) and not skip_name_change
+    if not has_avatar and not has_name:
+        raise LocalAntidetectError("Не заданы ни аватарка, ни название канала.")
+    _log(
+        "Local antidetect: настройка канала (аватарка/название). "
+        f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}, "
+        f"avatar={has_avatar}, name={has_name}"
     )
 
     api = LocalAntidetectHttpAPI(base_url)
@@ -518,9 +562,11 @@ def upload_channel_avatar_in_local_antidetect_profile(
                     yt_oldest_name=yt_oldest_name,
                     search_oldest_channel=search_oldest_channel,
                 )
-                run_studio_channel_profile_picture(
+                run_studio_channel_profile_customization(
                     page,
                     avatar_path=avatar_path,
+                    channel_name=channel_name,
+                    skip_name_change=skip_name_change,
                     **studio_kw,
                 )
             finally:

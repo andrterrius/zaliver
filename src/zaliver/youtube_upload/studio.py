@@ -4651,8 +4651,11 @@ def _studio_apply_channel_name_and_handle(page, channel_name: str) -> None:
     name_input.wait_for(state="visible", timeout=60_000)
     _studio_fill_plain_input(page, name_input, name, label="Название канала")
 
-    handle_value = name.lstrip("@")
-    _log(f"Studio: пробуем handle {handle_value!r} (как название канала)…")
+    handle_value = name.lstrip("@").replace(" ", "-")
+    _log(
+        f"Studio: пробуем handle {handle_value!r} "
+        f"(из названия канала, пробелы → «-»)…"
+    )
     handle_input = _studio_channel_handle_input(page)
     handle_input.wait_for(state="visible", timeout=60_000)
     _studio_fill_plain_input(page, handle_input, handle_value, label="Handle")

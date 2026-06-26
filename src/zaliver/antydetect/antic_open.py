@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from playwright.sync_api import Error as PlaywrightError
 from patchright.sync_api import sync_playwright
 
 from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI
@@ -18,7 +17,6 @@ from zaliver.youtube_upload.studio import (
     run_youtube_shorts_warmup,
     set_log_sink,
     verify_studio_upload_dialog_available,
-    _studio_dismiss_upload_dialog,
 )
 
 from zaliver.youtube_upload import studio as _studio
@@ -169,7 +167,7 @@ def _playwright_page_from_cdp(p, endpoint_candidates: tuple[str, ...]):
             )
             last_err = None
             break
-        except PlaywrightError as e:
+        except Exception as e:
             last_err = e
     if browser is None:
         raise DolphinAntyError(
@@ -200,7 +198,7 @@ def _playwright_page_from_local_session_cdp(
                 current_url, timeout=_CDP_CONNECT_TIMEOUT_MS
             )
             return _page_objects_from_connected_browser(browser)
-        except PlaywrightError as e:
+        except Exception as e:
             last_err = e
             if attempt >= connect_attempts or not _cdp_connect_is_conn_refused(e):
                 break
@@ -237,7 +235,7 @@ def check_studio_availability_in_profile(
     search_oldest_channel: bool = True,
 ) -> None:
     """
-    Запуск профиля Dolphin → Studio → окно «Добавить видео» (без загрузки файла).
+    Запуск профиля Dolphin → Studio → ожидание URL канала или channel-appeal.
     """
     _log(
         "Dolphin: проверка доступности Studio. "
@@ -267,7 +265,6 @@ def check_studio_availability_in_profile(
                     yt_oldest_name=yt_oldest_name,
                     search_oldest_channel=search_oldest_channel,
                 )
-                _studio_dismiss_upload_dialog(page)
             finally:
                 try:
                     browser.close()
@@ -295,7 +292,7 @@ def check_studio_availability_in_local_antidetect_profile(
     search_oldest_channel: bool = True,
     remote_cdp=None,
 ) -> None:
-    """Локальный антидетект → Studio → окно загрузки (без файла)."""
+    """Локальный антидетект → Studio → ожидание URL канала или channel-appeal."""
     _log(
         "Local antidetect: проверка доступности Studio. "
         f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}"
@@ -338,7 +335,6 @@ def check_studio_availability_in_local_antidetect_profile(
                     search_oldest_channel=search_oldest_channel,
                 )
                 verify_studio_upload_dialog_available(page, **studio_kw)
-                _studio_dismiss_upload_dialog(page)
             finally:
                 try:
                     browser.close()

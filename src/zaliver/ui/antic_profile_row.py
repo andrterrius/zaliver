@@ -221,7 +221,7 @@ def _tag_semantic_kind(text: str) -> str:
     low = _clean_tag_visible(text).lower()
     if "ошибка" in low:
         return "error"
-    if "успех" in low or "успешный" in low:
+    if "успех" in low or low.startswith("успеш"):
         return "success"
     return ""
 

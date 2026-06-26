@@ -18,8 +18,21 @@ import scipy.io.wavfile as wavfile
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks
 
+from zaliver.processing.ffmpeg_gpu import (
+    GpuPipeline,
+    gpu_pipeline_label,
+    is_gpu_filter_fallback_error,
+    resolve_gpu_pipeline,
+)
 from zaliver.processing.ffmpeg_merge import pick_best_h264_encoder, run_ffmpeg
 from zaliver.processing.ffmpeg_probe import ffprobe_json, probe_media_duration_seconds
+from zaliver.processing.text_overlay import (
+    ScaledTextOverlay,
+    TextOverlaySettings,
+    build_text_overlay_filters,
+    compute_scaled_overlay,
+)
+from zaliver.processing.worker import _filter_complex_argv
 
 SAMPLE_RATE = 16000
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
@@ -32,7 +45,10 @@ DEFAULT_MAX_SCENES = 23
 DEFAULT_EDGE_EXCLUDE = 0.05
 DEFAULT_MIN_SCENE_DURATION = 1.0
 DEFAULT_MAX_SCENE_DURATION = 1.3
-DEFAULT_SLICE_FPS = 60
+DEFAULT_SLICE_FPS = 30
+DEFAULT_SLICE_FPS_MODE = "30"
+SLICE_SCENE_BATCH_SIZE = 5
+SLICE_GPU_MAX_CONCURRENT_BATCHES = 2
 SLICE_ENCODE_CRF = 16
 SLICE_ENCODE_GPU_CQ = 19
 SLICE_ENCODE_VIDEOTOOLBOX_Q = 75
@@ -945,6 +961,18 @@ def get_largest_video_dimensions(clip_paths, dimension_cache=None):
     return largest['width'], largest['height'], largest['path']
 
 
+def resolve_slice_fps(fps_mode: str | int | float) -> float:
+    """30 или 60 fps для нарезки."""
+    if isinstance(fps_mode, (int, float)):
+        v = float(fps_mode)
+        if v > 0:
+            return v
+    mode = str(fps_mode).strip().lower()
+    if mode in ("60", "60fps"):
+        return 60.0
+    return float(DEFAULT_SLICE_FPS)
+
+
 def ensure_even_dimensions(width, height):
     """Делает ширину и высоту чётными для совместимости с yuv420p"""
     if width % 2:
@@ -1049,13 +1077,38 @@ def clamp_frame_counts_to_audio(frame_counts, fps, available_seconds, min_scene_
     return counts
 
 
-def _scene_input_args(fragment: dict) -> list[str]:
+def _slice_hw_input_args(gpu_pipeline: GpuPipeline | None) -> tuple[str, ...]:
+    """
+    Аргументы hwaccel для каждого входа нарезки.
+    AMD/D3D11: только декод на GPU, кадры в RAM — иначе fps/scale не работают
+  с десятками входов в одном filter_complex.
+    """
+    if gpu_pipeline is None:
+        return ()
+    if gpu_pipeline.name == "d3d11va":
+        return ("-hwaccel", "d3d11va")
+    return gpu_pipeline.input_args
+
+
+def _scene_input_args(
+    fragment: dict,
+    gpu_pipeline: GpuPipeline | None = None,
+) -> list[str]:
     """Быстрый seek: -ss перед -i (декодер прыгает к нужной позиции)."""
     start = f"{fragment['start']:.6f}"
     path = fragment['path']
+    hw = list(_slice_hw_input_args(gpu_pipeline))
     if fragment['loop']:
-        return ['-stream_loop', '-1', '-ss', start, '-i', path]
-    return ['-ss', start, '-i', path]
+        return ['-stream_loop', '-1', *hw, '-ss', start, '-i', path]
+    return [*hw, '-ss', start, '-i', path]
+
+
+def _cpu_scale_pad_chain(width: int, height: int) -> str:
+    pad = f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
+    return (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"{pad},setsar=1,format=yuv420p"
+    )
 
 
 def _scene_filter_chain(
@@ -1065,19 +1118,60 @@ def _scene_filter_chain(
     fps: int | float,
     frame_count: int,
     out_label: str,
+    *,
+    gpu_pipeline: GpuPipeline | None = None,
 ) -> str:
     last_frame = max(0, frame_count - 1)
+    select_pts = (
+        f"select='lte(n\\,{last_frame})',setpts=N/FRAME_RATE/TB[{out_label}]"
+    )
+    if gpu_pipeline is None or gpu_pipeline.name in ("videotoolbox", "d3d11va"):
+        return (
+            f"[{input_index}:v]fps={fps},"
+            f"{_cpu_scale_pad_chain(width, height)},"
+            f"{select_pts}"
+        )
+    if gpu_pipeline.name == "cuda":
+        return (
+            f"[{input_index}:v]scale_cuda={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"hwdownload,format=nv12,fps={fps},"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,"
+            f"{select_pts}"
+        )
+    if gpu_pipeline.name == "qsv":
+        return (
+            f"[{input_index}:v]scale_qsv={width}:{height},"
+            f"hwdownload,format=nv12,fps={fps},"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,"
+            f"{select_pts}"
+        )
     return (
         f"[{input_index}:v]fps={fps},"
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
-        f"setsar=1,format=yuv420p,"
-        f"select='lte(n\\,{last_frame})',setpts=N/FRAME_RATE/TB[{out_label}]"
+        f"{_cpu_scale_pad_chain(width, height)},"
+        f"{select_pts}"
     )
 
 
-def _max_filter_complex_inline() -> int:
-    return 7000 if sys.platform == 'win32' else 30000
+def _append_text_overlay_to_graph(
+    concat_label: str,
+    overlay: ScaledTextOverlay,
+    *,
+    total_frames: int,
+    fps: float,
+    total_duration_sec: float,
+) -> str:
+    overlay_part = build_text_overlay_filters(
+        overlay,
+        "v0",
+        start_frame=0,
+        frame_count=int(total_frames),
+        total_frames=int(total_frames),
+        fps=float(fps),
+        total_duration_sec=total_duration_sec,
+    )
+    if "drawtext" not in overlay_part:
+        return f"{concat_label}null[outv]"
+    return f"{concat_label}null[v0];{overlay_part}"
 
 
 def _scene_parallel_workers(n_scenes: int) -> int:
@@ -1085,34 +1179,62 @@ def _scene_parallel_workers(n_scenes: int) -> int:
     return max(1, min(n_scenes, max(2, cpu // 2)))
 
 
+def _batch_parallel_workers(n_batches: int, *, prefer_gpu: bool) -> int:
+    n = max(1, int(n_batches))
+    if prefer_gpu:
+        return max(1, min(n, SLICE_GPU_MAX_CONCURRENT_BATCHES))
+    cpu = os.cpu_count() or 4
+    return max(1, min(n, max(2, cpu // 2)))
+
+
 def _encode_args_for_scenes(
     scene_clips: list[dict],
     width: int,
     height: int,
     fps: int | float,
-) -> tuple[list[str], list[str], int]:
-    """Собирает input_args, filter_complex и суммарное число кадров."""
+    *,
+    gpu_pipeline: GpuPipeline | None = None,
+    scaled_overlay: ScaledTextOverlay | None = None,
+    total_duration_sec: float | None = None,
+) -> tuple[list[str], list[str], int, list[str]]:
+    """Собирает input_args, filter_complex, суммарное число кадров и global hw args."""
     input_args: list[str] = []
     filters: list[str] = []
     concat_labels: list[str] = []
+    global_hw: list[str] = (
+        list(gpu_pipeline.global_args) if gpu_pipeline is not None else []
+    )
     for i, fragment in enumerate(scene_clips):
-        input_args.extend(_scene_input_args(fragment))
+        input_args.extend(_scene_input_args(fragment, gpu_pipeline))
         label = f"s{i}"
         concat_labels.append(f"[{label}]")
         filters.append(
             _scene_filter_chain(
                 i, width, height, fps, int(fragment['frame_count']), label,
+                gpu_pipeline=gpu_pipeline,
             )
         )
     n = len(scene_clips)
+    total_frames = sum(int(fragment['frame_count']) for fragment in scene_clips)
+    concat_out = "[outv]"
+    if scaled_overlay is not None and scaled_overlay.lines:
+        concat_out = "[concatv]"
     filter_complex = (
         ';'.join(filters)
         + ';'
         + ''.join(concat_labels)
-        + f"concat=n={n}:v=1:a=0[outv]"
+        + f"concat=n={n}:v=1:a=0{concat_out}"
     )
-    total_frames = sum(int(fragment['frame_count']) for fragment in scene_clips)
-    return input_args, [filter_complex], total_frames
+    if concat_out == "[concatv]":
+        dur = float(total_duration_sec) if total_duration_sec else total_frames / float(fps)
+        filter_complex += ";" + _append_text_overlay_to_graph(
+            "[concatv]",
+            scaled_overlay,
+            total_frames=total_frames,
+            fps=float(fps),
+            total_duration_sec=dur,
+        )
+    return input_args, [filter_complex], total_frames, global_hw
 
 
 def _run_scene_encode(
@@ -1123,6 +1245,7 @@ def _run_scene_encode(
     total_frames: int,
     fps: int | float,
     prefer_gpu: bool,
+    global_hw_args: list[str] | None = None,
 ) -> None:
     enc, enc_args = pick_best_h264_encoder(
         prefer_gpu=bool(prefer_gpu),
@@ -1140,37 +1263,86 @@ def _run_scene_encode(
         output_path,
     ]
     filter_complex = filter_parts[0]
-    if len(filter_complex) <= _max_filter_complex_inline():
-        run_ffmpeg([
-            *input_args,
-            '-an',
-            '-filter_complex', filter_complex,
-            *tail,
-        ])
-        return
-
-    script_path = ''
+    filter_argv, filter_script = _filter_complex_argv(filter_complex)
+    cmd_base = [
+        *(global_hw_args or []),
+        *input_args,
+        '-an',
+        *filter_argv,
+        *tail,
+    ]
     try:
-        with tempfile.NamedTemporaryFile(
-            mode='w',
-            suffix='.ffscript',
-            delete=False,
-            encoding='utf-8',
-        ) as script_file:
-            script_file.write(filter_complex)
-            script_path = script_file.name
-        run_ffmpeg([
-            *input_args,
-            '-an',
-            '-filter_complex_script', script_path,
-            *tail,
-        ])
+        run_ffmpeg(cmd_base)
     finally:
-        if script_path:
+        if filter_script is not None:
             try:
-                os.unlink(script_path)
+                filter_script.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def _render_with_gpu_fallback(
+    scene_clips: list[dict],
+    output_path: str,
+    width: int,
+    height: int,
+    fps: int | float,
+    *,
+    prefer_gpu: bool,
+    scaled_overlay: ScaledTextOverlay | None = None,
+    total_duration_sec: float | None = None,
+    log: Optional[LogCallback] = None,
+) -> None:
+    enc, _ = pick_best_h264_encoder(
+        prefer_gpu=bool(prefer_gpu),
+        crf=SLICE_ENCODE_CRF,
+        gpu_cq=SLICE_ENCODE_GPU_CQ,
+        videotoolbox_q=SLICE_ENCODE_VIDEOTOOLBOX_Q,
+    )
+    pipelines: list[GpuPipeline | None] = []
+    if prefer_gpu:
+        pipe = resolve_gpu_pipeline(prefer_gpu=True, encoder=enc)
+        if pipe is not None:
+            pipelines.append(pipe)
+    pipelines.append(None)
+
+    last_err: Exception | None = None
+    for pipeline in pipelines:
+        try:
+            input_args, filter_parts, total_frames, global_hw = _encode_args_for_scenes(
+                scene_clips,
+                width,
+                height,
+                fps,
+                gpu_pipeline=pipeline,
+                scaled_overlay=scaled_overlay,
+                total_duration_sec=total_duration_sec,
+            )
+            if pipeline is not None and log is not None:
+                _log(f"    GPU: {gpu_pipeline_label(pipeline)}", log)
+            _run_scene_encode(
+                input_args,
+                filter_parts,
+                output_path,
+                total_frames=total_frames,
+                fps=fps,
+                prefer_gpu=prefer_gpu,
+                global_hw_args=global_hw,
+            )
+            return
+        except RuntimeError as exc:
+            last_err = exc
+            if pipeline is not None and is_gpu_filter_fallback_error([str(exc)]):
+                if log is not None:
+                    detail = str(exc).strip().replace("\n", " ")[:280]
+                    _log(
+                        f"    GPU-фильтры недоступны ({detail}), повтор на CPU…",
+                        log,
+                    )
+                continue
+            raise
+    if last_err is not None:
+        raise last_err
 
 
 def render_scenes_combined(
@@ -1181,19 +1353,129 @@ def render_scenes_combined(
     fps: int | float,
     *,
     prefer_gpu: bool = False,
+    scaled_overlay: ScaledTextOverlay | None = None,
+    total_duration_sec: float | None = None,
+    log: Optional[LogCallback] = None,
 ) -> None:
     """Рендерит все сцены одним ffmpeg (общий filter_complex + concat)."""
-    input_args, filter_parts, total_frames = _encode_args_for_scenes(
-        scene_clips, width, height, fps,
-    )
-    _run_scene_encode(
-        input_args,
-        filter_parts,
+    _render_with_gpu_fallback(
+        scene_clips,
         output_path,
-        total_frames=total_frames,
-        fps=fps,
+        width,
+        height,
+        fps,
         prefer_gpu=prefer_gpu,
+        scaled_overlay=scaled_overlay,
+        total_duration_sec=total_duration_sec,
+        log=log,
     )
+
+
+def _scene_batches(
+    scene_clips: list[dict],
+    batch_size: int = SLICE_SCENE_BATCH_SIZE,
+) -> list[list[dict]]:
+    size = max(1, int(batch_size))
+    return [scene_clips[i:i + size] for i in range(0, len(scene_clips), size)]
+
+
+def render_scenes_batched(
+    scene_clips: list[dict],
+    output_path: str,
+    temp_dir: str,
+    width: int,
+    height: int,
+    fps: int | float,
+    *,
+    prefer_gpu: bool = False,
+    scaled_overlay: ScaledTextOverlay | None = None,
+    total_duration_sec: float | None = None,
+    batch_size: int = SLICE_SCENE_BATCH_SIZE,
+    log: Optional[LogCallback] = None,
+) -> None:
+    """
+    Рендер сцен батчами (по умолчанию 5 входов на ffmpeg), склейка -c copy.
+    Текст — один проход после concat всех батчей.
+    """
+    batches = _scene_batches(scene_clips, batch_size)
+    n_batches = len(batches)
+
+    if n_batches == 1:
+        _render_with_gpu_fallback(
+            scene_clips,
+            output_path,
+            width,
+            height,
+            fps,
+            prefer_gpu=prefer_gpu,
+            scaled_overlay=scaled_overlay,
+            total_duration_sec=total_duration_sec,
+            log=log,
+        )
+        return
+
+    workers = _batch_parallel_workers(n_batches, prefer_gpu=prefer_gpu)
+    if log is not None:
+        _log(
+            f"    Рендер батчами: {len(scene_clips)} сцен → {n_batches} проходов "
+            f"ffmpeg (до {batch_size} сцен, параллельно до {workers}), склейка copy…",
+            log,
+        )
+
+    batch_files: list[str | None] = [None] * n_batches
+
+    def _render_batch(bi: int, batch: list[dict]) -> tuple[int, str]:
+        batch_path = os.path.join(temp_dir, f"scene_batch_{bi:03d}.mp4")
+        if log is not None:
+            _log(f"    Батч {bi + 1}/{n_batches}: {len(batch)} сцен…", log)
+        _render_with_gpu_fallback(
+            batch,
+            batch_path,
+            width,
+            height,
+            fps,
+            prefer_gpu=prefer_gpu,
+            scaled_overlay=None,
+            log=log,
+        )
+        return bi, batch_path
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(_render_batch, bi, batch)
+            for bi, batch in enumerate(batches)
+        ]
+        for future in as_completed(futures):
+            bi, batch_path = future.result()
+            batch_files[bi] = batch_path
+
+    if any(path is None for path in batch_files):
+        raise RuntimeError("Не все батчи отрендерены")
+
+    concat_path = os.path.join(temp_dir, "batches_concat.mp4")
+    _concat_scene_files([str(p) for p in batch_files], concat_path)
+
+    if scaled_overlay is not None and scaled_overlay.lines:
+        from zaliver.processing.slicing_overlay import apply_text_overlay_to_video
+
+        if log is not None:
+            _log(
+                f"    Текст после склейки батчей ({len(scaled_overlay.lines)} строк)…",
+                log,
+            )
+        apply_text_overlay_to_video(
+            concat_path,
+            output_path,
+            scaled_overlay,
+            log=log,
+            prefer_gpu=prefer_gpu,
+        )
+        try:
+            os.unlink(concat_path)
+        except OSError:
+            pass
+    else:
+        shutil.move(concat_path, output_path)
 
 
 def render_scene_clip(
@@ -1205,17 +1487,17 @@ def render_scene_clip(
     frame_count,
     *,
     prefer_gpu: bool = False,
+    log: Optional[LogCallback] = None,
 ):
     """Рендерит одну сцену с точным числом кадров."""
-    input_args = _scene_input_args(fragment)
-    filter_complex = _scene_filter_chain(0, width, height, fps, frame_count, 'outv')
-    _run_scene_encode(
-        input_args,
-        [filter_complex],
+    _render_with_gpu_fallback(
+        [fragment],
         output_path,
-        total_frames=frame_count,
-        fps=fps,
+        width,
+        height,
+        fps,
         prefer_gpu=prefer_gpu,
+        log=log,
     )
 
 
@@ -1227,6 +1509,7 @@ def render_scenes_parallel(
     fps: int | float,
     *,
     prefer_gpu: bool = False,
+    log: Optional[LogCallback] = None,
 ) -> list[str]:
     """Параллельный рендер сцен (fallback, если один проход не удался)."""
     scene_files: list[str | None] = [None] * len(scene_clips)
@@ -1242,6 +1525,7 @@ def render_scenes_parallel(
             fps,
             fragment['frame_count'],
             prefer_gpu=prefer_gpu,
+            log=log,
         )
         return index, scene_file
 
@@ -1266,20 +1550,13 @@ def _concat_scene_files(scene_files: list[str], output_path: str) -> None:
             escaped_path = os.path.abspath(scene_file).replace('\\', '/').replace("'", "'\\''")
             concat_file.write(f"file '{escaped_path}'\n")
 
-    subprocess.run(
-        [
-            'ffmpeg',
-            '-f', 'concat',
-            '-safe', '0',
-            '-i', concat_list,
-            '-c', 'copy',
-            output_path,
-            '-y',
-        ],
-        check=True,
-        capture_output=True,
-        creationflags=_popen_flags(),
-    )
+    run_ffmpeg([
+        '-f', 'concat',
+        '-safe', '0',
+        '-i', concat_list,
+        '-c', 'copy',
+        output_path,
+    ])
 
 
 def get_audio_duration(audio_file):
@@ -1298,10 +1575,11 @@ def generate_video_from_segment(
         *,
         clip_pool: list[str] | None = None,
         clip_dir: str = "clips",
-        fps=DEFAULT_SLICE_FPS,
+        fps=DEFAULT_SLICE_FPS_MODE,
         log: Optional[LogCallback] = None,
         use_gpu: bool = False,
         use_gpu_finalize: bool = False,
+        text_overlay_cfg: dict | None = None,
 ):
     """Генерирует видео: смена фрагмента на каждом пике аудио"""
     _log(f"\n  Генерация видео: {output_video}", log)
@@ -1316,6 +1594,10 @@ def generate_video_from_segment(
         return None
 
     _log(f"    Источник клипов: {len(pool)} файлов", log)
+
+    dimension_cache: dict = {}
+    fps = resolve_slice_fps(fps)
+    _log(f"    FPS рендера: {fps:g}", log)
 
     video_start = segment['start_time']
 
@@ -1437,7 +1719,6 @@ def generate_video_from_segment(
         return None
 
     selected_paths = list({fragment['path'] for fragment in scene_clips})
-    dimension_cache = {}
     size_info = get_largest_video_dimensions(selected_paths, dimension_cache)
     if size_info is None:
         print("    Ошибка: не удалось определить размеры выбранных видео")
@@ -1450,28 +1731,41 @@ def generate_video_from_segment(
         f"(как у {os.path.basename(size_source)})"
     )
 
+    scaled_overlay: ScaledTextOverlay | None = None
+    if text_overlay_cfg:
+        toc = TextOverlaySettings.from_dict(text_overlay_cfg)
+        scaled_overlay = compute_scaled_overlay(toc, video_w=width, video_h=height)
+        if scaled_overlay is not None and scaled_overlay.lines:
+            _log(
+                f"    Текст в одном проходе ({len(scaled_overlay.lines)} строк)…",
+                log,
+            )
+        else:
+            scaled_overlay = None
+
+    prefer_gpu_render = bool(use_gpu or use_gpu_finalize)
     # ====== СОЗДАЕМ ВИДЕО ======
     temp_video = os.path.join(temp_dir, "temp_video.mp4")
 
     try:
         try:
-            _log(
-                f"    Рендер сцен: один проход ffmpeg ({num_scenes} сцен)…",
-                log,
-            )
-            render_scenes_combined(
+            render_scenes_batched(
                 scene_clips,
                 temp_video,
+                temp_dir,
                 width,
                 height,
                 fps,
-                prefer_gpu=bool(use_gpu),
+                prefer_gpu=prefer_gpu_render,
+                scaled_overlay=scaled_overlay,
+                total_duration_sec=total_video_duration,
+                log=log,
             )
-        except Exception as combined_err:
+        except Exception as batched_err:
             workers = _scene_parallel_workers(num_scenes)
             _log(
-                f"    Один проход не удался ({combined_err}), "
-                f"параллельный рендер ({workers} потоков)…",
+                f"    Батчевый рендер не удался ({batched_err}), "
+                f"параллельный рендер по сценам ({workers} потоков)…",
                 log,
             )
             scene_files = render_scenes_parallel(
@@ -1480,9 +1774,24 @@ def generate_video_from_segment(
                 width,
                 height,
                 fps,
-                prefer_gpu=bool(use_gpu),
+                prefer_gpu=prefer_gpu_render,
+                log=log,
             )
-            _concat_scene_files(scene_files, temp_video)
+            concat_out = os.path.join(temp_dir, "concat_no_text.mp4")
+            _concat_scene_files(scene_files, concat_out)
+            if scaled_overlay is not None:
+                from zaliver.processing.slicing_overlay import apply_text_overlay_to_video
+
+                _log("    Наложение текста после склейки сцен…", log)
+                apply_text_overlay_to_video(
+                    concat_out,
+                    temp_video,
+                    scaled_overlay,
+                    log=log,
+                    prefer_gpu=bool(use_gpu_finalize),
+                )
+            else:
+                shutil.move(concat_out, temp_video)
 
     except subprocess.CalledProcessError as e:
         print(f"    Ошибка при создании видео: {e}")

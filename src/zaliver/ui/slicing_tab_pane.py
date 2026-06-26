@@ -36,6 +36,7 @@ from zaliver.processing.slicing import (
     DEFAULT_MAX_SCENES,
     DEFAULT_MIN_SCENE_DURATION,
     DEFAULT_MIN_SCENES,
+    DEFAULT_SLICE_FPS_MODE,
 )
 from zaliver.processing.text_overlay import (
     NEON_WAVE_CHAR_PHASE,
@@ -104,6 +105,7 @@ class SlicingTabPane(QWidget):
             "max_scenes": int(self.max_scenes.value()),
             "use_gpu": bool(self.use_gpu.isChecked()),
             "use_gpu_finalize": bool(self.use_gpu_finalize.isChecked()),
+            "slice_fps_mode": str(self.slice_fps_mode.currentData() or DEFAULT_SLICE_FPS_MODE),
         }
 
     def validate_scene_options(self) -> str | None:
@@ -249,6 +251,14 @@ class SlicingTabPane(QWidget):
             self.use_gpu_finalize.setChecked(
                 bool(s.value("use_gpu_finalize_enabled", False, type=bool))
             )
+        fps_mode = str(s.value("slice/fps_mode", DEFAULT_SLICE_FPS_MODE, type=str) or DEFAULT_SLICE_FPS_MODE)
+        if fps_mode.strip().lower() in ("auto", "авто"):
+            fps_mode = DEFAULT_SLICE_FPS_MODE
+        idx = self.slice_fps_mode.findData(fps_mode)
+        if idx >= 0:
+            self.slice_fps_mode.setCurrentIndex(idx)
+        else:
+            self.slice_fps_mode.setCurrentIndex(0)
 
     def save_settings(self) -> None:
         s = self._settings
@@ -268,6 +278,10 @@ class SlicingTabPane(QWidget):
         if hasattr(self, "use_gpu"):
             s.setValue("use_gpu_enabled", bool(self.use_gpu.isChecked()))
             s.setValue("use_gpu_finalize_enabled", bool(self.use_gpu_finalize.isChecked()))
+        s.setValue(
+            "slice/fps_mode",
+            str(self.slice_fps_mode.currentData() or DEFAULT_SLICE_FPS_MODE),
+        )
         s.setValue("slice/text_overlay_enabled", bool(self.text_overlay_enabled.isChecked()))
         s.setValue("slice/text_overlay_from_middle", bool(self.text_overlay_from_middle.isChecked()))
         orient = self.text_overlay_orientation.currentData()
@@ -501,13 +515,27 @@ class SlicingTabPane(QWidget):
         pg.addWidget(self.use_gpu_finalize, 3, 0, 1, 2)
         pg.addWidget(gpu_hint, 4, 0, 1, 2)
 
-        pg.addWidget(QLabel("Потоков:"), 5, 0)
+        self.slice_fps_mode = QComboBox()
+        self.slice_fps_mode.addItem("30 fps", "30")
+        self.slice_fps_mode.addItem("60 fps", "60")
+        self.slice_fps_mode.setToolTip("Частота кадров итогового ролика.")
+        self.slice_fps_mode.currentIndexChanged.connect(lambda *_: self.save_settings())
+        fps_hint = QLabel(
+            "60 fps вдвое медленнее рендера; для Shorts/Reels обычно достаточно 30."
+        )
+        fps_hint.setObjectName("hint")
+        fps_hint.setWordWrap(True)
+        pg.addWidget(QLabel("FPS:"), 5, 0)
+        pg.addWidget(self.slice_fps_mode, 5, 1)
+        pg.addWidget(fps_hint, 6, 0, 1, 2)
+
+        pg.addWidget(QLabel("Потоков:"), 7, 0)
         thr = QHBoxLayout()
         thr.addWidget(self.thread_slider, 1)
         thr.addWidget(self.thread_label)
         tw = QWidget()
         tw.setLayout(thr)
-        pg.addWidget(tw, 5, 1)
+        pg.addWidget(tw, 7, 1)
 
         text_gb = QGroupBox("Текст на видео")
         text_outer = QVBoxLayout(text_gb)

@@ -428,6 +428,38 @@ QFrame#tagChipSuccess QLabel {
     padding: 4px 6px;
 }
 
+QCheckBox#zaliverTagClearCheck {
+    spacing: 0;
+    background: transparent;
+}
+QCheckBox#zaliverTagClearCheck::indicator {
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    border: 1px solid #3d4258;
+    background: #0f1118;
+}
+QCheckBox#zaliverTagClearCheck::indicator:hover {
+    border-color: #6366f1;
+}
+QCheckBox#zaliverTagClearCheck::indicator:checked {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #6366f1, stop:1 #7c3aed);
+    border: 1px solid #818cf8;
+}
+QLabel#zaliverTagClearLabel {
+    color: #e4e6ef;
+    font-size: 12px;
+    background: transparent;
+    border: none;
+}
+QLabel#zaliverTagClearLabel[tagSemantic="error"] {
+    color: #fda4af;
+}
+QLabel#zaliverTagClearLabel[tagSemantic="success"] {
+    color: #86efac;
+}
+
 QLabel#profileListUpload {
     font-size: 11px;
     font-weight: 700;

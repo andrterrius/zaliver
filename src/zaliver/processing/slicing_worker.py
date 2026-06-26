@@ -25,14 +25,29 @@ from zaliver.processing.slicing import (
     DEFAULT_MAX_SCENES,
     DEFAULT_MIN_SCENE_DURATION,
     DEFAULT_MIN_SCENES,
+    DEFAULT_SLICE_FPS_MODE,
     find_segments_with_peaks,
     generate_video_from_segment,
     suggest_scene_durations,
 )
-from zaliver.processing.slicing_overlay import apply_text_overlay_to_video
-from zaliver.processing.text_overlay import TextOverlaySettings, compute_scaled_overlay
+from zaliver.processing.text_overlay import TextOverlaySettings
 
 LogCallback = Callable[[str], None]
+
+# Одновременных роликов при GPU-кодировании (AMF/NVENC/QSV делят один чип).
+SLICE_GPU_MAX_CONCURRENT_JOBS = 2
+
+
+def _max_concurrent_slice_jobs(
+    num_workers: int,
+    *,
+    use_gpu: bool,
+    use_gpu_finalize: bool,
+) -> int:
+    workers = max(1, int(num_workers))
+    if use_gpu or use_gpu_finalize:
+        return max(1, min(workers, SLICE_GPU_MAX_CONCURRENT_JOBS))
+    return workers
 
 
 def _unique_slice_filename(music_stem: str) -> str:
@@ -74,6 +89,7 @@ def _run_slice_job(
     edge_exclude: float,
     use_gpu: bool,
     use_gpu_finalize: bool,
+    slice_fps_mode: str,
     log: LogCallback,
     cancel_check: Callable[[], bool],
     n_jobs: int,
@@ -125,73 +141,29 @@ def _run_slice_job(
         return job
 
     segment = segments[0]
-    work_tmp = job.output_path.with_suffix(".slice_work.mp4")
     try:
         result = generate_video_from_segment(
             music,
             segment,
-            str(work_tmp),
+            str(job.output_path),
             clip_pool=clip_pool,
+            fps=slice_fps_mode,
             log=log,
             use_gpu=bool(use_gpu),
             use_gpu_finalize=bool(use_gpu_finalize),
+            text_overlay_cfg=text_overlay_cfg,
         )
-        if not result or not work_tmp.is_file():
+        if not result or not job.output_path.is_file():
             job.error = "Не удалось собрать видео из клипов."
             job.skip_youtube_upload = True
             return job
 
-        if cancel_check():
-            job.error = "Отменено."
-            return job
-
-        final_path = job.output_path
-        if text_overlay_cfg:
-            toc = TextOverlaySettings.from_dict(text_overlay_cfg)
-            try:
-                from zaliver.processing.ffmpeg_probe import probe_video_stream
-
-                w, h, _fps, _n, _fc = probe_video_stream(str(work_tmp))
-                scaled = compute_scaled_overlay(toc, video_w=w, video_h=h)
-            except Exception as probe_err:
-                log(
-                    f"{job.tag(n_jobs)}: не удалось прочитать размеры видео ({probe_err}), "
-                    f"текст масштабируется под 1080×1920"
-                )
-                scaled = compute_scaled_overlay(toc, video_w=1080, video_h=1920)
-            if scaled is None:
-                log(
-                    f"{job.tag(n_jobs)}: текст не наложен — пустой макет или опция выключена"
-                )
-                work_tmp.replace(final_path)
-            else:
-                log(f"{job.tag(n_jobs)}: наложение текста ({len(scaled.lines)} строк)…")
-                apply_text_overlay_to_video(
-                    str(work_tmp),
-                    str(final_path),
-                    scaled,
-                    log=log,
-                    prefer_gpu=bool(use_gpu_finalize),
-                )
-                try:
-                    work_tmp.unlink()
-                except OSError:
-                    pass
-        else:
-            work_tmp.replace(final_path)
-
         job.finished = True
-        log(f"{job.tag(n_jobs)}: готово → {final_path.name}")
+        log(f"{job.tag(n_jobs)}: готово → {job.output_path.name}")
     except Exception as e:
         job.error = str(e).strip() or repr(e)
         job.skip_youtube_upload = True
         log(f"{job.tag(n_jobs)}: ошибка — {job.error}")
-    finally:
-        try:
-            if work_tmp.is_file():
-                work_tmp.unlink()
-        except OSError:
-            pass
     return job
 
 
@@ -274,6 +246,11 @@ class SlicingController(QObject):
             edge_exclude = float(options.get("edge_exclude", DEFAULT_EDGE_EXCLUDE))
             use_gpu = bool(options.get("use_gpu", False))
             use_gpu_finalize = bool(options.get("use_gpu_finalize", False))
+            slice_fps_mode = str(
+                options.get("slice_fps_mode", DEFAULT_SLICE_FPS_MODE) or DEFAULT_SLICE_FPS_MODE
+            )
+            if slice_fps_mode.strip().lower() in ("auto", "авто"):
+                slice_fps_mode = DEFAULT_SLICE_FPS_MODE
 
             if use_gpu or use_gpu_finalize:
                 try:
@@ -350,6 +327,22 @@ class SlicingController(QObject):
                     f"Длительность сцены: {min_scene_duration:.2f}–{max_scene_duration:.2f} с"
                 )
             log(f"Количество сцен: {min_scenes}–{max_scenes}")
+            fps_label = {"30": "30", "60": "60"}.get(
+                slice_fps_mode.strip().lower(), slice_fps_mode
+            )
+            log(f"FPS: {fps_label}")
+
+            gpu_queue = use_gpu or use_gpu_finalize
+            max_concurrent = _max_concurrent_slice_jobs(
+                num_workers,
+                use_gpu=use_gpu,
+                use_gpu_finalize=use_gpu_finalize,
+            )
+            if gpu_queue and max_concurrent < num_workers:
+                log(
+                    f"GPU-очередь: до {max_concurrent} роликов одновременно "
+                    f"(в UI потоков {num_workers} — лишние ждут свободный AMF/NVENC)."
+                )
 
             def cancelled() -> bool:
                 return self._cancelled
@@ -371,7 +364,7 @@ class SlicingController(QObject):
                 elif j.error and j.error != "Отменено.":
                     errors.append(f"{j.music_path.name}: {j.error}")
 
-            if num_workers <= 1 or n_jobs == 1:
+            if max_concurrent <= 1 or n_jobs == 1:
                 for job in jobs:
                     if cancelled():
                         self.finished.emit(False, "Отменено.")
@@ -388,13 +381,14 @@ class SlicingController(QObject):
                         edge_exclude=edge_exclude,
                         use_gpu=use_gpu,
                         use_gpu_finalize=use_gpu_finalize,
+                        slice_fps_mode=slice_fps_mode,
                         log=log,
                         cancel_check=cancelled,
                         n_jobs=n_jobs,
                     )
                     on_job_done(job)
             else:
-                with ThreadPoolExecutor(max_workers=num_workers) as pool:
+                with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
                     fut_map: Dict[Future, SliceJob] = {}
                     pending = list(jobs)
                     while pending or fut_map:
@@ -403,7 +397,7 @@ class SlicingController(QObject):
                                 f.cancel()
                             self.finished.emit(False, "Отменено.")
                             return
-                        while pending and len(fut_map) < num_workers:
+                        while pending and len(fut_map) < max_concurrent:
                             job = pending.pop(0)
                             fut = pool.submit(
                                 _run_slice_job,
@@ -418,6 +412,7 @@ class SlicingController(QObject):
                                 edge_exclude=edge_exclude,
                                 use_gpu=use_gpu,
                                 use_gpu_finalize=use_gpu_finalize,
+                                slice_fps_mode=slice_fps_mode,
                                 log=log,
                                 cancel_check=cancelled,
                                 n_jobs=n_jobs,

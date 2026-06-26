@@ -11,7 +11,7 @@ from functools import wraps
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse
 
-from playwright.sync_api import Error as PlaywrightError
+from patchright.sync_api import Error as PlaywrightError
 
 from zaliver.antydetect.profile_tags import (  # noqa: F401 — re-export
     PREVIOUS_UPLOAD_RESULT_TAGS,
@@ -1111,6 +1111,59 @@ def _studio_handle_channel_removed_if_present(page) -> bool:
     return True
 
 
+def _studio_is_youtube_home_url(page) -> bool:
+    url = _studio_page_url_lower(page)
+    if "www.youtube.com" not in url:
+        return False
+    path = url.split("www.youtube.com", 1)[-1].split("?")[0].split("#")[0].strip("/")
+    return path == ""
+
+
+def _studio_youtube_home_page_ready(page, *, probe_timeout_ms: int = 800) -> bool:
+    """True, если главная youtube.com хотя бы частично отрисовалась."""
+    if not _studio_is_youtube_home_url(page):
+        return False
+    if _studio_on_google_auth_page(page, fast=True):
+        return False
+    for loc in (
+        page.locator("ytd-app"),
+        page.locator("ytd-browse[role='main']"),
+        page.locator("ytd-masthead"),
+        page.locator("#content ytd-rich-item-renderer"),
+        page.locator("ytd-rich-grid-renderer"),
+        page.locator("#search-input input"),
+    ):
+        try:
+            if loc.count() > 0 and loc.first.is_visible(timeout=probe_timeout_ms):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _studio_wait_youtube_home_page(page, *, timeout_s: float = 45.0) -> bool:
+    """Ждём хотя бы частичной загрузки главной youtube.com перед Studio."""
+    _log("Studio: ждём загрузку главной youtube.com…")
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _studio_youtube_home_page_ready(page):
+            page.wait_for_timeout(500)
+            _log("Studio: главная youtube.com загружена.")
+            return True
+        if _studio_on_google_auth_page(page):
+            _log(
+                "Studio: редирект на вход Google — "
+                "ожидание главной youtube.com пропущено."
+            )
+            return False
+        page.wait_for_timeout(250)
+    _log(
+        "Studio: таймаут ожидания главной youtube.com — "
+        "переходим в Studio без полной загрузки."
+    )
+    return False
+
+
 def _studio_goto_youtube_home(
     page, *, login_credentials=None, for_channel_scan: bool = True
 ) -> None:
@@ -1124,20 +1177,24 @@ def _studio_goto_youtube_home(
         already_reason = "проверка каналов"
     else:
         goto_reason = "перед переходом в Studio"
-        already_reason = "переход в Studio"
-    if not on_youtube:
+        already_reason = "перед переходом в Studio"
+    need_goto = not on_youtube or (
+        not for_channel_scan and not _studio_is_youtube_home_url(page)
+    )
+    if need_goto:
         _log(f"Studio: переход на https://www.youtube.com/ {goto_reason}…")
         page.goto(
             "https://www.youtube.com/",
-            wait_until="domcontentloaded" if for_channel_scan else "commit",
-            timeout=120_000 if for_channel_scan else 45_000,
+            wait_until="domcontentloaded",
+            timeout=120_000 if for_channel_scan else 60_000,
         )
         if not for_channel_scan:
-            _log("Studio: главная youtube.com открыта.")
+            _studio_wait_youtube_home_page(page)
             return
     else:
         _log(f"Studio: уже на youtube.com — {already_reason}…")
         if not for_channel_scan:
+            _studio_wait_youtube_home_page(page)
             return
     _studio_try_google_login_if_needed(page, login_credentials)
     if _studio_on_google_auth_page(page):
@@ -2415,6 +2472,73 @@ def _studio_page_on_studio_home(page) -> bool:
         return "studio.youtube.com" in (page.url or "").lower()
     except Exception:
         return False
+
+
+_STUDIO_CHANNEL_ID_URL_RE = re.compile(
+    r"studio\.youtube\.com/channel/([A-Za-z0-9_-]+)",
+    re.I,
+)
+
+
+def _studio_availability_url_state(url: str) -> str | None:
+    """
+    Состояние URL для проверки доступности Studio.
+    None — ещё не готово; 'success' — /channel/{id}; 'appeal' — /channel-appeal.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    lower = raw.lower().split("?")[0].split("#")[0].rstrip("/")
+    if lower.endswith("/channel-appeal") or "/channel-appeal" in lower:
+        return "appeal"
+    match = _STUDIO_CHANNEL_ID_URL_RE.search(lower)
+    if match:
+        channel_id = (match.group(1) or "").strip()
+        if channel_id and channel_id.lower() != "appeal":
+            return "success"
+    return None
+
+
+def _studio_wait_for_availability_url(
+    page, *, timeout_s: float = 120.0, login_credentials=None
+) -> str:
+    """Ждёт studio.youtube.com/channel/{id} или studio.youtube.com/channel-appeal."""
+    _log(
+        "Studio: ждём URL studio.youtube.com/channel/{channel_id} "
+        "или studio.youtube.com/channel-appeal…"
+    )
+    deadline = time.monotonic() + timeout_s
+    last_goto = 0.0
+    while time.monotonic() < deadline:
+        try:
+            state = _studio_availability_url_state(page.url or "")
+            if state:
+                return state
+        except Exception:
+            pass
+        if _studio_channel_removed_page_visible(page):
+            return "appeal"
+        if _studio_on_google_auth_page(page) or _studio_login_required(page, fast=True):
+            _studio_raise_if_auth_without_credentials(page, login_credentials)
+            if _studio_try_google_login_if_needed(page, login_credentials):
+                continue
+        now = time.monotonic()
+        if now - last_goto >= 8.0 and not _studio_page_on_studio_home(page):
+            last_goto = now
+            try:
+                page.goto(
+                    "https://studio.youtube.com/",
+                    wait_until="domcontentloaded",
+                    timeout=60_000,
+                )
+            except Exception:
+                pass
+        page.wait_for_timeout(100)
+    raise YoutubeStudioError(
+        "YouTube Studio: не дождались URL канала "
+        "(studio.youtube.com/channel/{channel_id}) "
+        "или страницы апелляции (channel-appeal)."
+    )
 
 
 def _studio_try_match_expected_channel_in_studio(
@@ -4807,8 +4931,9 @@ def verify_studio_upload_dialog_available(
     profile_id: str | None = None,
 ) -> str:
     """
-    Проверка доступности YouTube Studio до окна загрузки (без выбора файла).
-    Успех — видим ytcp-uploads-file-picker («Выбрать файлы»).
+    Проверка доступности YouTube Studio по URL.
+    Успех — studio.youtube.com/channel/{channel_id} (непустой id).
+    Ошибка — studio.youtube.com/channel-appeal или таймаут ожидания URL.
     При search_oldest_channel=True: обход каналов, выбор самого старого.
     При search_oldest_channel=False: текущий канал без переключения.
     """
@@ -4818,14 +4943,24 @@ def verify_studio_upload_dialog_available(
             f"Studio: проверка доступности — сохранённый yt_oldest_name «{saved}» "
             "игнорируем, обходим все каналы…"
         )
-    oldest = _studio_click_create_then_add_video(
+    oldest = _studio_ensure_correct_studio_channel(
         page,
-        login_credentials=login_credentials,
         yt_oldest_name=None if search_oldest_channel else yt_oldest_name,
+        login_credentials=login_credentials,
         on_oldest_channel_name=on_oldest_channel_name,
         search_oldest_channel=search_oldest_channel,
     )
-    _log("Studio: окно загрузки видео доступно — проверка успешна.")
+    state = _studio_wait_for_availability_url(
+        page, login_credentials=login_credentials
+    )
+    if state == "appeal":
+        raise YoutubeStudioError(
+            "YouTube Studio: открыта страница апелляции (channel-appeal) — "
+            "канал удалён или заблокирован."
+        )
+    _log(
+        f"Studio: URL канала подтверждён ({page.url!r}) — проверка успешна."
+    )
     return oldest
 
 

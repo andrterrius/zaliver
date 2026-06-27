@@ -25,6 +25,8 @@ _STUDIO_UI_MS = 120_000
 # После передачи файла ждём в Studio один из исходов: лимит или завершение проверок (часто >1 мин).
 _POST_UPLOAD_STUDIO_OUTCOME_MAX_S = 3600.0
 _POST_UPLOAD_QUOTA_POLL_S = 2.0
+_PUBLISH_CONFIRM_MAX_S = 120.0
+_PUBLISH_REPUBLISH_GRACE_S = 12.0
 _STUDIO_WIZARD_NEXT_MAX = 30
 _STUDIO_WIZARD_NEXT_AFTER_CLICK_MS = 250
 _STUDIO_WIZARD_NEXT_POLL_MS = 40
@@ -45,6 +47,20 @@ _NOT_FOR_KIDS_LABEL_RE = re.compile(
     r"no,?\s*it[''\u2019]?s?\s*not\s*made\s*for\s*kids|"
     r"нет,?\s*это\s*видео\s*не\s*для\s*детей|"
     r"not\s*made\s*for\s*kids",
+    re.I,
+)
+_PUBLISH_SUCCESS_TEXT_RE = re.compile(
+    r"video\s+(?:is\s+)?publish|"
+    r"your\s+video\s+is\s+(?:live|public|on\s+youtube)|"
+    r"published\s+successfully|"
+    r"видео\s+опубликован|"
+    r"опубликовано|"
+    r"short\s+.*(?:publish|live|public)",
+    re.I,
+)
+_POST_PUBLISH_ACK_BTN_RE = re.compile(
+    r"^(ok|okay|got it|i understand|understand|"
+    r"понятно|я понимаю|продолжить|continue|done|готово)$",
     re.I,
 )
 _CHANNEL_REMOVED_PAGE_TITLE_RE = re.compile(
@@ -5763,17 +5779,140 @@ def _studio_select_public_visibility(page) -> str:
 
 
 def _studio_click_publish(page) -> None:
-    """Кнопка «Опубликовать» / Publish."""
-    _studio_handle_interrupt_dialogs_if_present(page)
-    _log("Studio: «Опубликовать»…")
-    btn = (
-        page.locator('ytcp-button-shape button[aria-label="Опубликовать"]')
-        .or_(page.locator('ytcp-button-shape button[aria-label="Publish"]'))
-        .or_(page.get_by_role("button", name=re.compile(r"опубликовать|publish", re.I)))
+    """Кнопка «Опубликовать» / Publish (ждём активности и подтверждения)."""
+    _studio_click_publish_when_enabled(page, _POST_UPLOAD_STUDIO_OUTCOME_MAX_S)
+
+
+def _studio_is_upload_dialog_visible(page) -> bool:
+    dlg = page.locator("ytcp-uploads-dialog")
+    try:
+        if dlg.count() <= 0:
+            return False
+        return bool(dlg.first.is_visible(timeout=300))
+    except Exception:
+        return False
+
+
+def _studio_try_dismiss_post_publish_dialogs(page) -> bool:
+    """Copyright / ограничения: «OK», «Понятно» и т.п. после клика «Опубликовать»."""
+    scopes = (
+        page.locator("ytcp-uploads-dialog"),
+        page.locator("tp-yt-paper-dialog"),
+        page.locator("ytcp-dialog"),
     )
-    btn.first.wait_for(state="visible", timeout=90_000)
-    btn.first.click(timeout=60_000)
-    _log("Studio: «Опубликовать» нажата.")
+    for scope in scopes:
+        try:
+            if scope.count() <= 0 or not scope.first.is_visible(timeout=200):
+                continue
+            btn = scope.first.get_by_role("button", name=_POST_PUBLISH_ACK_BTN_RE)
+            if btn.count() > 0 and btn.first.is_visible(timeout=200):
+                btn.first.click(timeout=15_000)
+                _log(
+                    "Studio: закрыт пост-публикационный диалог "
+                    "(copyright / ограничения / подтверждение)…"
+                )
+                page.wait_for_timeout(400)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _studio_is_publish_confirmed(page) -> bool:
+    """Диалог закрылся или Studio показывает экран/текст успешной публикации."""
+    if not _studio_is_upload_dialog_visible(page):
+        url = (str(page.url or "")).lower()
+        if "studio.youtube.com" in url:
+            return True
+
+    for sel in (
+        "ytcp-uploads-dialog #success-step",
+        "ytcp-uploads-dialog ytcp-post-upload-dialog",
+        "ytcp-upload-success-dialog",
+        "ytcp-uploads-dialog ytcp-video-share-dialog",
+    ):
+        loc = page.locator(sel)
+        try:
+            if loc.count() > 0 and loc.first.is_visible(timeout=200):
+                return True
+        except Exception:
+            pass
+
+    for scope_sel in ("ytcp-uploads-dialog", "body"):
+        try:
+            scope = page.locator(scope_sel).first
+            if not scope.is_visible(timeout=200):
+                continue
+            txt = (scope.inner_text(timeout=1_500) or "").strip()
+            if txt and _PUBLISH_SUCCESS_TEXT_RE.search(txt):
+                return True
+        except Exception:
+            pass
+
+    try:
+        dlg = page.locator("ytcp-uploads-dialog")
+        if dlg.count() <= 0 or not dlg.first.is_visible(timeout=200):
+            return False
+        pub_btn = _studio_upload_publish_button(page)
+        vis = page.locator("ytcp-video-visibility-select")
+        pub_visible = pub_btn.count() > 0 and pub_btn.first.is_visible(timeout=200)
+        vis_visible = vis.count() > 0 and vis.first.is_visible(timeout=200)
+        if not pub_visible and not vis_visible:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _studio_wait_for_publish_confirmed(page, max_wait_sec: float) -> None:
+    """Не закрываем браузер, пока Studio не подтвердит публикацию."""
+    _log(
+        "Studio: ожидание подтверждения публикации "
+        "(закрытие диалога / экран успеха / «Видео опубликовано»)…"
+    )
+    deadline = time.monotonic() + max_wait_sec
+    republish_after = time.monotonic() + _PUBLISH_REPUBLISH_GRACE_S
+    republish_attempted = False
+    poll_n = 0
+    while time.monotonic() < deadline:
+        poll_n += 1
+        if poll_n % _STUDIO_INTERRUPT_DIALOG_EVERY_N_POLLS == 1:
+            _studio_handle_interrupt_dialogs_if_present(page)
+        if _studio_try_dismiss_post_publish_dialogs(page):
+            continue
+        if _studio_is_publish_confirmed(page):
+            _log("Studio: публикация подтверждена Studio.")
+            return
+        if (
+            not republish_attempted
+            and time.monotonic() >= republish_after
+        ):
+            btn = _studio_upload_publish_button(page)
+            try:
+                if (
+                    btn.count() > 0
+                    and btn.first.is_visible(timeout=300)
+                    and btn.first.is_enabled()
+                ):
+                    _log(
+                        "Studio: «Опубликовать» всё ещё активна — повторный клик…"
+                    )
+                    btn.first.click(timeout=60_000)
+                    republish_attempted = True
+                    republish_after = time.monotonic() + _PUBLISH_REPUBLISH_GRACE_S
+            except Exception:
+                pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        page.wait_for_timeout(
+            int(min(_POST_UPLOAD_QUOTA_POLL_S, max(0.3, remaining)) * 1000)
+        )
+    raise YoutubeStudioError(
+        f"YouTube Studio: публикация не подтверждена за {max_wait_sec:.0f} с — "
+        "диалог загрузки всё ещё открыт или нет признаков успешной публикации. "
+        "Проверьте черновики в Studio вручную."
+    )
 
 
 def _studio_is_upload_unavailable_dialog(page) -> bool:
@@ -6175,7 +6314,8 @@ def _studio_click_publish_when_enabled(page, max_wait_sec: float) -> None:
     """«Опубликовать» / Publish — ждём, пока кнопка станет активной."""
     _log("Studio: ожидание активной кнопки «Опубликовать»…")
     btn = _studio_upload_publish_button(page)
-    deadline = time.monotonic() + max_wait_sec
+    started_at = time.monotonic()
+    deadline = started_at + max_wait_sec
     while time.monotonic() < deadline:
         _studio_handle_interrupt_dialogs_if_present(page)
         try:
@@ -6183,6 +6323,11 @@ def _studio_click_publish_when_enabled(page, max_wait_sec: float) -> None:
                 if btn.first.is_enabled():
                     btn.first.click(timeout=60_000)
                     _log("Studio: «Опубликовать» нажата.")
+                    remaining_total = max(0.0, deadline - time.monotonic())
+                    confirm_budget = min(
+                        _PUBLISH_CONFIRM_MAX_S, max(30.0, remaining_total)
+                    )
+                    _studio_wait_for_publish_confirmed(page, confirm_budget)
                     return
         except Exception:
             pass
@@ -6288,7 +6433,7 @@ def _studio_publish_flow_after_upload(page) -> str:
     _studio_select_not_for_kids(page)
     _studio_click_next_until_visibility(page)
     href = _studio_select_public_visibility(page)
-    _studio_click_publish(page)
+    _studio_click_publish_when_enabled(page, _POST_UPLOAD_STUDIO_OUTCOME_MAX_S)
     return href
 
 
@@ -6389,7 +6534,7 @@ def run_upload_latest_ready_video(
                 best_vid = vpub
         except Exception:
             pass
-    page.wait_for_timeout(5000)
+    page.wait_for_timeout(1_500)
     url = ""
     vid = ""
     try:

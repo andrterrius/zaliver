@@ -2918,8 +2918,16 @@ class MainWindow(QWidget):
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(10)
 
-        title_edit = QLineEdit()
-        title_edit.setPlaceholderText("Название видео (обязательное для загрузки в YouTube)…")
+        title_edit = QComboBox()
+        title_edit.setEditable(True)
+        title_edit.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        title_le = title_edit.lineEdit()
+        if title_le is not None:
+            title_le.setPlaceholderText(
+                "Название видео (обязательное для загрузки в YouTube)…"
+            )
+        for recent_title in self._upload_store.list_recent_upload_titles():
+            title_edit.addItem(recent_title)
         desc_edit = QPlainTextEdit()
         desc_edit.setPlaceholderText("Описание (необязательно)…")
         desc_edit.setMinimumHeight(44)
@@ -2954,7 +2962,7 @@ class MainWindow(QWidget):
             profile_rows.append((pid, p))
 
         preselect: set[str] = set()
-        if mode != "slicing" and self._profiles_interaction is not None:
+        if self._profiles_interaction is not None:
             preselect = set(self._profiles_interaction.checked_profile_ids)
 
         last_upload_map = self._upload_store.last_uploaded_at_by_profiles(ids)
@@ -3014,17 +3022,43 @@ class MainWindow(QWidget):
             copies_n = max(1, int(self.copies_per_file.value()))
         except Exception:
             copies_n = 1
-        uniquify_planned = n_inputs * copies_n
-        if mode == "slicing" and hasattr(self, "_slice_tab"):
+
+        def _planned_videos_count() -> int:
+            if mode == "slicing" and hasattr(self, "_slice_tab"):
+                try:
+                    return max(1, int(self._slice_tab.copies_per_track.value()))
+                except Exception:
+                    return 1
             try:
-                copies_t = max(1, int(self._slice_tab.copies_per_track.value()))
+                copies = max(1, int(self.copies_per_file.value()))
             except Exception:
-                copies_t = 1
-            uniquify_planned = copies_t
+                copies = copies_n
+            return max(0, n_inputs) * copies
 
         dlg_profile_count_lbl = QLabel("")
         dlg_profile_count_lbl.setObjectName("hint")
         dlg_profile_count_lbl.setWordWrap(True)
+
+        dlg_raise_videos_btn = QPushButton("")
+        dlg_raise_videos_btn.setObjectName("secondary")
+        dlg_raise_videos_btn.setVisible(False)
+
+        def _raise_videos_to_profile_count(profile_count: int) -> None:
+            target = max(0, int(profile_count))
+            if target <= 0:
+                return
+            if mode == "slicing" and hasattr(self, "_slice_tab"):
+                self._slice_tab.copies_per_track.setValue(target)
+                self._slice_tab.save_settings()
+            elif n_inputs > 0:
+                need_copies = (target + n_inputs - 1) // n_inputs
+                self.copies_per_file.setValue(max(1, need_copies))
+
+        def _on_raise_videos_clicked() -> None:
+            _raise_videos_to_profile_count(dlg_interaction.checked_count())
+            _update_dlg_upload_profile_count()
+
+        dlg_raise_videos_btn.clicked.connect(_on_raise_videos_clicked)
 
         planned_label = (
             "Будет нарезано видео"
@@ -3041,7 +3075,8 @@ class MainWindow(QWidget):
             n = dlg_interaction.checked_count()
             shown = dlg_interaction.lw.count()
             q = dlg_query.text().strip()
-            lines = [f"{planned_label}: {uniquify_planned}"]
+            pv = _planned_videos_count()
+            lines = [f"{planned_label}: {pv}"]
             if q:
                 lines.append(f"Показано профилей: {shown} из {total_dlg_profiles}")
             if n <= 0:
@@ -3051,6 +3086,14 @@ class MainWindow(QWidget):
             else:
                 lines.append(f"Выбрано профилей для залива: {n}")
             dlg_profile_count_lbl.setText("\n".join(lines))
+            can_raise = n > 0 and n > pv and (
+                mode == "slicing" or n_inputs > 0
+            )
+            if can_raise:
+                dlg_raise_videos_btn.setText(f"Увеличить число видео до {n}")
+                dlg_raise_videos_btn.setVisible(True)
+            else:
+                dlg_raise_videos_btn.setVisible(False)
 
         dlg_interaction.selection_changed.connect(_update_dlg_upload_profile_count)
         _update_dlg_upload_profile_count()
@@ -3088,6 +3131,7 @@ class MainWindow(QWidget):
         profiles_col_l.setContentsMargins(0, 0, 0, 0)
         profiles_col_l.setSpacing(8)
         profiles_col_l.addWidget(dlg_profile_count_lbl)
+        profiles_col_l.addWidget(dlg_raise_videos_btn)
         profiles_col_l.addWidget(dlg_query)
         dlg_sel_row, _dlg_checked_lbl = self._build_profiles_selection_toolbar(
             dlg,
@@ -3103,11 +3147,16 @@ class MainWindow(QWidget):
         grid.addWidget(btns, 4, 0, 1, 2)
         grid.setRowStretch(3, 1)
 
-        title_edit.setFocus()
+        if title_le is not None:
+            title_le.setFocus()
+        else:
+            title_edit.setFocus()
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return None
 
-        title = (title_edit.text() or "").strip()
+        title = (title_edit.currentText() or "").strip()
+        if title:
+            self._upload_store.remember_upload_title(title)
         description = (desc_edit.toPlainText() or "").strip()
         picked = dlg_interaction.batch_profile_ids()
 
@@ -6427,24 +6476,7 @@ class MainWindow(QWidget):
         self._work_thread.start()
 
     def _pending_upload_for_slicing(self) -> dict[str, str] | None:
-        """Нарезка без залива, если в списке профилей никто не отмечен."""
-        if not self._collect_checked_profile_ids():
-            profiles = self._profiles_raw or []
-            if not profiles:
-                try:
-                    self._profiles_status.setText(
-                        "Профили ещё не загружены — запускаю загрузку… "
-                        "Нарезка без залива в YouTube (профили не выбраны)."
-                    )
-                except Exception:
-                    pass
-                self._refresh_antydetect_profiles()
-            return {
-                "title": "",
-                "description": "",
-                "profile_ids": "",
-                "publish_before_checks": True,
-            }
+        """Окно названия/описания/профилей — как при уникализации (можно без залива)."""
         return self._prompt_title_desc_and_profile(mode="slicing")
 
     def _start_slicing(self) -> None:

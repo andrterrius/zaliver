@@ -44,6 +44,10 @@ def uploaded_at_sort_ts(iso_s: str) -> float:
 
 # Должно совпадать с подписью «Пауза 3 ч» в UI (`antic_profile_row.format_upload_cooldown_line`).
 _UPLOAD_PAUSE_BETWEEN_UPLOADS = timedelta(hours=3)
+# Сколько уникальных названий показывать в выпадающем списке перед заливом.
+_RECENT_UPLOAD_TITLES_UI_LIMIT = 5
+# Сколько строк хранить в таблице recent_upload_titles (с запасом).
+_RECENT_UPLOAD_TITLES_KEEP = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +204,19 @@ class UploadStore:
                 except sqlite3.Error:
                     pass
 
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS recent_upload_titles (
+                    title TEXT PRIMARY KEY,
+                    used_at TEXT NOT NULL
+                );
+                """
+            )
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_recent_upload_titles_used_at "
+                "ON recent_upload_titles(used_at DESC);"
+            )
+
     def start_session(self, *, planned_videos: int) -> UploadSession:
         started_at = _utc_now_iso()
         planned = max(0, int(planned_videos))
@@ -301,6 +318,64 @@ class UploadStore:
                 ),
             )
             return int(cur.lastrowid or 0)
+
+    def list_recent_upload_titles(
+        self, limit: int = _RECENT_UPLOAD_TITLES_UI_LIMIT
+    ) -> list[str]:
+        """Последние уникальные названия для выпадающего списка перед заливом."""
+        lim = max(1, int(limit))
+        with self._connect() as con:
+            rows = con.execute(
+                """
+                SELECT title FROM recent_upload_titles
+                WHERE trim(title) <> ''
+                ORDER BY used_at DESC, title ASC
+                LIMIT ?;
+                """,
+                (lim,),
+            ).fetchall()
+        out = [str(r["title"]).strip() for r in rows if str(r["title"]).strip()]
+        if out:
+            return out[:lim]
+        with self._connect() as con:
+            rows = con.execute(
+                """
+                SELECT title FROM uploaded_videos
+                WHERE trim(title) <> ''
+                GROUP BY title
+                ORDER BY MAX(uploaded_at) DESC, title ASC
+                LIMIT ?;
+                """,
+                (lim,),
+            ).fetchall()
+        return [str(r["title"]).strip() for r in rows if str(r["title"]).strip()][:lim]
+
+    def remember_upload_title(self, title: str) -> None:
+        """Запомнить название после подтверждения диалога залива."""
+        t = (title or "").strip()
+        if not t:
+            return
+        now = _utc_now_iso()
+        with self._connect() as con:
+            con.execute(
+                """
+                INSERT INTO recent_upload_titles(title, used_at)
+                VALUES(?, ?)
+                ON CONFLICT(title) DO UPDATE SET used_at=excluded.used_at;
+                """,
+                (t, now),
+            )
+            con.execute(
+                """
+                DELETE FROM recent_upload_titles
+                WHERE rowid NOT IN (
+                    SELECT rowid FROM recent_upload_titles
+                    ORDER BY used_at DESC
+                    LIMIT ?
+                );
+                """,
+                (_RECENT_UPLOAD_TITLES_KEEP,),
+            )
 
     def delete_uploaded_videos_by_ids(self, database_row_ids: Iterable[int]) -> int:
         """

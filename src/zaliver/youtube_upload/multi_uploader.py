@@ -32,6 +32,8 @@ _MAX_CONCURRENT_UPLOADS = 3 if sys.platform == "darwin" else 5
 _RECENT_COMPLETED_MAX = 5
 # Если «свободны» только недавно отработавшие профили — пауза диспетчера перед повторным назначением.
 _RECENT_BATCH_WAIT_S = 10800.0
+# Интервал опроса во время [WAIT] (лог cooldown профиля и sleep диспетчера).
+_WAIT_POLL_CHUNK_S = 60.0
 
 
 class MultiProfileUploader:
@@ -247,7 +249,7 @@ class MultiProfileUploader:
         )
         remaining = total
         while remaining > 0 and not self._stop.is_set():
-            chunk = min(30.0, remaining)
+            chunk = min(_WAIT_POLL_CHUNK_S, remaining)
             if self._stop.wait(timeout=chunk):
                 break
             remaining -= chunk
@@ -372,7 +374,7 @@ class MultiProfileUploader:
                     f"[{_ts()}] [upload] [WAIT] profile={profile_id} "
                     f"sleep_s={remaining:.1f} ({hint}) video={task.video_path!r}"
                 )
-                chunk = min(remaining, 30.0)
+                chunk = min(remaining, _WAIT_POLL_CHUNK_S)
                 self._stop.wait(timeout=chunk)
                 if self._stop.is_set():
                     try:

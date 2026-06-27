@@ -31,6 +31,7 @@ _STUDIO_WIZARD_NEXT_POLL_MS = 40
 _STUDIO_UPLOAD_DETAILS_POLL_MS = 30
 _STUDIO_INTERRUPT_DIALOG_EVERY_N_POLLS = 15
 _STUDIO_WARM_WELCOME_NEXT_MAX = 10
+_STUDIO_HOME_URL = "https://studio.youtube.com/"
 _WELCOME_TITLE_RE = re.compile(
     r"добро\s+пожаловать|welcome\s+to\s+(the\s+)?youtube\s+studio",
     re.I,
@@ -2566,7 +2567,7 @@ def _studio_try_match_expected_channel_in_studio(
         if _studio_page_on_studio_home(page):
             _log(
                 "Studio: studio.youtube.com в URL, но интерфейс не загружен — "
-                "прогрев через youtube.com…"
+                "повторная загрузка Studio…"
             )
         else:
             _log(
@@ -2600,10 +2601,10 @@ def _studio_try_match_expected_channel_in_studio(
 def _studio_ensure_current_channel_in_studio(
     page, *, login_credentials=None
 ) -> str:
-    """Главная YouTube → Studio без переключения канала."""
+    """Открыть Studio без переключения канала."""
     _log(
         "Studio: поиск старого канала отключён — "
-        "текущий канал без переключения (youtube.com → Studio)…"
+        "текущий канал без переключения (открываем Studio)…"
     )
     if _studio_page_on_studio_home(page) and _studio_dashboard_ready(
         page, timeout_ms=800
@@ -2611,13 +2612,6 @@ def _studio_ensure_current_channel_in_studio(
         _log("Studio: Studio уже загружен — переключение канала не нужно.")
         return ""
 
-    on_youtube = "www.youtube.com" in _studio_page_url_lower(page)
-    if on_youtube:
-        _log("Studio: youtube.com уже открыт — переход в Studio…")
-    else:
-        _studio_goto_youtube_home(
-            page, login_credentials=login_credentials, for_channel_scan=False
-        )
     _studio_goto_studio_if_needed(
         page, login_credentials=login_credentials, quick=True
     )
@@ -2637,7 +2631,7 @@ def _studio_ensure_correct_studio_channel(
     YouTube → выбор самого старого канала → Studio.
     Если yt_oldest_name задан и в Studio уже тот же канал — переключение не делаем.
     Иначе переключаем канал на youtube.com, затем открываем Studio и сверяем #entity-name.
-    При search_oldest_channel=False — только youtube.com → Studio на текущем канале.
+    При search_oldest_channel=False — только Studio на текущем канале.
     """
     if not search_oldest_channel:
         return _studio_ensure_current_channel_in_studio(
@@ -3167,10 +3161,7 @@ def _studio_dashboard_ready(page, *, timeout_ms: int = 2_000) -> bool:
 def _studio_warmup_youtube_then_studio(
     page, *, login_credentials=None, quick: bool = False
 ) -> None:
-    """Прогрев сессии через youtube.com, затем переход в Studio."""
-    _studio_goto_youtube_home(
-        page, login_credentials=login_credentials, for_channel_scan=False
-    )
+    """Открыть YouTube Studio напрямую (без предварительного захода на youtube.com)."""
     _studio_goto_studio_if_needed(
         page, login_credentials=login_credentials, quick=quick
     )
@@ -3200,19 +3191,21 @@ def _studio_goto_studio_if_needed(
     if on_studio:
         _log(
             "Studio: studio.youtube.com в URL, но дашборд не готов — "
-            "прогрев через youtube.com…"
+            "повторная загрузка Studio…"
         )
-        _studio_goto_youtube_home(
-            page, login_credentials=login_credentials, for_channel_scan=False
+        page.goto(
+            _STUDIO_HOME_URL,
+            wait_until="commit" if quick else "domcontentloaded",
+            timeout=30_000 if quick else 90_000,
         )
     elif not quick:
         _studio_wait_for_google_session(
             page, login_credentials=login_credentials, fast=False
         )
     if not _studio_page_on_studio_home(page):
-        _log("Studio: переход на https://studio.youtube.com/ …")
+        _log(f"Studio: переход на {_STUDIO_HOME_URL} …")
         page.goto(
-            "https://studio.youtube.com/",
+            _STUDIO_HOME_URL,
             wait_until="commit" if quick else "domcontentloaded",
             timeout=30_000 if quick else 90_000,
         )

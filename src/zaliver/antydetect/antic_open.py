@@ -903,7 +903,7 @@ def open_google_in_profile(
                     )
                     return res
                 else:
-                    # Ничего не делаем — прогрев через youtube.com, затем Studio.
+                    # Ничего не делаем — открываем Studio напрямую.
                     _studio._studio_warmup_youtube_then_studio(
                         page, login_credentials=login_credentials
                     )
@@ -1026,7 +1026,7 @@ def open_google_in_local_antidetect_profile(
                         _log("Studio upload: сценарий завершён.")
                         return res
                     else:
-                        _log("Studio: upload_latest_zaliver_video=False → youtube.com → Studio…")
+                        _log("Studio: upload_latest_zaliver_video=False → открываем Studio…")
                         _studio._studio_warmup_youtube_then_studio(
                             page, login_credentials=login_credentials
                         )

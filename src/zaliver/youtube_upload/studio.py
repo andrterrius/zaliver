@@ -11,7 +11,7 @@ from functools import wraps
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse
 
-from patchright.sync_api import Error as PlaywrightError
+from playwright.sync_api import Error as PlaywrightError
 
 from zaliver.antydetect.profile_tags import (  # noqa: F401 — re-export
     PREVIOUS_UPLOAD_RESULT_TAGS,

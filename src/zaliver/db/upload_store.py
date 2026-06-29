@@ -48,6 +48,9 @@ _UPLOAD_PAUSE_BETWEEN_UPLOADS = timedelta(hours=3)
 _RECENT_UPLOAD_TITLES_UI_LIMIT = 5
 # Сколько строк хранить в таблице recent_upload_titles (с запасом).
 _RECENT_UPLOAD_TITLES_KEEP = 20
+# Выпадающие списки в диалоге «Настройка канала».
+_RECENT_CHANNEL_SETUP_UI_LIMIT = 5
+_RECENT_CHANNEL_SETUP_KEEP = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +219,109 @@ class UploadStore:
                 "CREATE INDEX IF NOT EXISTS idx_recent_upload_titles_used_at "
                 "ON recent_upload_titles(used_at DESC);"
             )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS recent_channel_names (
+                    name TEXT PRIMARY KEY,
+                    used_at TEXT NOT NULL
+                );
+                """
+            )
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_recent_channel_names_used_at "
+                "ON recent_channel_names(used_at DESC);"
+            )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS recent_channel_link_titles (
+                    title TEXT PRIMARY KEY,
+                    used_at TEXT NOT NULL
+                );
+                """
+            )
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_recent_channel_link_titles_used_at "
+                "ON recent_channel_link_titles(used_at DESC);"
+            )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS recent_channel_link_urls (
+                    url TEXT PRIMARY KEY,
+                    used_at TEXT NOT NULL
+                );
+                """
+            )
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_recent_channel_link_urls_used_at "
+                "ON recent_channel_link_urls(used_at DESC);"
+            )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS recent_channel_descriptions (
+                    description TEXT PRIMARY KEY,
+                    used_at TEXT NOT NULL
+                );
+                """
+            )
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_recent_channel_descriptions_used_at "
+                "ON recent_channel_descriptions(used_at DESC);"
+            )
+
+    def _list_recent_text_values(
+        self,
+        *,
+        table: str,
+        column: str,
+        limit: int,
+    ) -> list[str]:
+        lim = max(1, int(limit))
+        with self._connect() as con:
+            rows = con.execute(
+                f"""
+                SELECT {column} FROM {table}
+                WHERE trim({column}) <> ''
+                ORDER BY used_at DESC, {column} ASC
+                LIMIT ?;
+                """,
+                (lim,),
+            ).fetchall()
+        return [
+            str(r[column]).strip() for r in rows if str(r[column]).strip()
+        ][:lim]
+
+    def _remember_recent_text_value(
+        self,
+        *,
+        table: str,
+        column: str,
+        value: str,
+        keep: int,
+    ) -> None:
+        v = (value or "").strip()
+        if not v:
+            return
+        now = _utc_now_iso()
+        with self._connect() as con:
+            con.execute(
+                f"""
+                INSERT INTO {table}({column}, used_at)
+                VALUES(?, ?)
+                ON CONFLICT({column}) DO UPDATE SET used_at=excluded.used_at;
+                """,
+                (v, now),
+            )
+            con.execute(
+                f"""
+                DELETE FROM {table}
+                WHERE rowid NOT IN (
+                    SELECT rowid FROM {table}
+                    ORDER BY used_at DESC
+                    LIMIT ?
+                );
+                """,
+                (max(1, int(keep)),),
+            )
 
     def start_session(self, *, planned_videos: int) -> UploadSession:
         started_at = _utc_now_iso()
@@ -352,30 +458,89 @@ class UploadStore:
 
     def remember_upload_title(self, title: str) -> None:
         """Запомнить название после подтверждения диалога залива."""
-        t = (title or "").strip()
-        if not t:
-            return
-        now = _utc_now_iso()
-        with self._connect() as con:
-            con.execute(
-                """
-                INSERT INTO recent_upload_titles(title, used_at)
-                VALUES(?, ?)
-                ON CONFLICT(title) DO UPDATE SET used_at=excluded.used_at;
-                """,
-                (t, now),
+        self._remember_recent_text_value(
+            table="recent_upload_titles",
+            column="title",
+            value=title,
+            keep=_RECENT_UPLOAD_TITLES_KEEP,
+        )
+
+    def list_recent_channel_names(
+        self, limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT
+    ) -> list[str]:
+        """Последние названия каналов для выпадающего списка."""
+        return self._list_recent_text_values(
+            table="recent_channel_names",
+            column="name",
+            limit=limit,
+        )
+
+    def remember_channel_names(self, names: Iterable[str]) -> None:
+        """Запомнить названия каналов после подтверждения настройки."""
+        for name in names:
+            self._remember_recent_text_value(
+                table="recent_channel_names",
+                column="name",
+                value=name,
+                keep=_RECENT_CHANNEL_SETUP_KEEP,
             )
-            con.execute(
-                """
-                DELETE FROM recent_upload_titles
-                WHERE rowid NOT IN (
-                    SELECT rowid FROM recent_upload_titles
-                    ORDER BY used_at DESC
-                    LIMIT ?
-                );
-                """,
-                (_RECENT_UPLOAD_TITLES_KEEP,),
-            )
+
+    def list_recent_channel_link_titles(
+        self, limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT
+    ) -> list[str]:
+        """Последние названия ссылок канала для выпадающего списка."""
+        return self._list_recent_text_values(
+            table="recent_channel_link_titles",
+            column="title",
+            limit=limit,
+        )
+
+    def remember_channel_link_title(self, title: str) -> None:
+        """Запомнить название ссылки после подтверждения настройки канала."""
+        self._remember_recent_text_value(
+            table="recent_channel_link_titles",
+            column="title",
+            value=title,
+            keep=_RECENT_CHANNEL_SETUP_KEEP,
+        )
+
+    def list_recent_channel_link_urls(
+        self, limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT
+    ) -> list[str]:
+        """Последние URL ссылок канала для выпадающего списка."""
+        return self._list_recent_text_values(
+            table="recent_channel_link_urls",
+            column="url",
+            limit=limit,
+        )
+
+    def remember_channel_link_url(self, url: str) -> None:
+        """Запомнить URL ссылки после подтверждения настройки канала."""
+        self._remember_recent_text_value(
+            table="recent_channel_link_urls",
+            column="url",
+            value=url,
+            keep=_RECENT_CHANNEL_SETUP_KEEP,
+        )
+
+    def list_recent_channel_descriptions(
+        self, limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT
+    ) -> list[str]:
+        """Последние описания канала для выпадающего списка."""
+        return self._list_recent_text_values(
+            table="recent_channel_descriptions",
+            column="description",
+            limit=limit,
+        )
+
+    def remember_channel_description(self, description: str) -> None:
+        """Запомнить описание канала после подтверждения настройки."""
+        self._remember_recent_text_value(
+            table="recent_channel_descriptions",
+            column="description",
+            value=description,
+            keep=_RECENT_CHANNEL_SETUP_KEEP,
+        )
 
     def delete_uploaded_videos_by_ids(self, database_row_ids: Iterable[int]) -> int:
         """

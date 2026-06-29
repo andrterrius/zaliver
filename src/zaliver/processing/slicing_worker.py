@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import random
 import secrets
 import shutil
 import tempfile
@@ -55,6 +57,34 @@ def _unique_slice_filename(music_stem: str) -> str:
     return f"{safe}_s_{secrets.token_hex(8)}.mp4"
 
 
+def _slice_music_try_order(primary: Path, pool: List[str]) -> List[Path]:
+    """Основной трек (дважды), затем остальные треки из пула в случайном порядке."""
+    try:
+        primary_resolved = primary.resolve()
+        pkey = os.path.normcase(str(primary_resolved))
+    except OSError:
+        return [primary]
+
+    order: List[Path] = [primary_resolved, primary_resolved]
+    seen = {pkey}
+    rest: List[Path] = []
+    for raw in pool:
+        try:
+            p = Path(raw).resolve()
+        except OSError:
+            continue
+        if not p.is_file():
+            continue
+        k = os.path.normcase(str(p))
+        if k in seen:
+            continue
+        seen.add(k)
+        rest.append(p)
+    random.shuffle(rest)
+    order.extend(rest)
+    return order
+
+
 @dataclass
 class SliceJob:
     job_idx: int
@@ -76,9 +106,90 @@ class SliceJob:
         )
 
 
+def _attempt_slice_with_music(
+    music: str,
+    output_path: Path,
+    *,
+    clip_pool: List[str],
+    text_overlay_cfg: Optional[Dict[str, Any]],
+    use_suggested_durations: bool,
+    min_scene_duration: float,
+    max_scene_duration: float,
+    min_scenes: int,
+    max_scenes: int,
+    edge_exclude: float,
+    use_gpu: bool,
+    use_gpu_finalize: bool,
+    slice_fps_mode: str,
+    log: LogCallback,
+    cancel_check: Callable[[], bool],
+    tag: str,
+) -> Optional[str]:
+    """Одна попытка нарезки. None — успех, иначе текст ошибки."""
+    if cancel_check():
+        return "Отменено."
+
+    min_dur = float(min_scene_duration)
+    max_dur = float(max_scene_duration)
+    if use_suggested_durations:
+        suggestion = suggest_scene_durations(
+            music,
+            edge_exclude=edge_exclude,
+            min_scenes=min_scenes,
+            max_scenes=max_scenes,
+            verbose=False,
+        )
+        if suggestion:
+            min_dur = float(suggestion["min_scene_duration"])
+            max_dur = float(suggestion["max_scene_duration"])
+            log(
+                f"{tag}: рекомендованные сцены "
+                f"{min_dur}–{max_dur} с (BPM≈{suggestion.get('estimated_bpm')})"
+            )
+
+    if cancel_check():
+        return "Отменено."
+
+    segments = find_segments_with_peaks(
+        music,
+        min_scene_duration=min_dur,
+        max_scene_duration=max_dur,
+        min_scenes=min_scenes,
+        max_scenes=max_scenes,
+        edge_exclude=edge_exclude,
+    )
+    if not segments:
+        return "Не найден подходящий сегмент аудио для нарезки."
+
+    if cancel_check():
+        return "Отменено."
+
+    segment = segments[0]
+    try:
+        result = generate_video_from_segment(
+            music,
+            segment,
+            str(output_path),
+            clip_pool=clip_pool,
+            fps=slice_fps_mode,
+            log=log,
+            use_gpu=bool(use_gpu),
+            use_gpu_finalize=bool(use_gpu_finalize),
+            text_overlay_cfg=text_overlay_cfg,
+        )
+        if not result or not output_path.is_file():
+            return "Не удалось собрать видео из клипов."
+        return None
+    except Exception as e:
+        err = str(e).strip() or repr(e)
+        log(f"{tag}: ошибка — {err}")
+        return err
+
+
 def _run_slice_job(
     job: SliceJob,
     *,
+    music_pool: List[str],
     clip_pool: List[str],
     text_overlay_cfg: Optional[Dict[str, Any]],
     use_suggested_durations: bool,
@@ -98,72 +209,56 @@ def _run_slice_job(
         job.error = "Отменено."
         return job
 
-    music = str(job.music_path.resolve())
-    log(f"{job.tag(n_jobs)}: анализ аудио…")
+    tag = job.tag(n_jobs)
+    try_order = _slice_music_try_order(job.music_path, music_pool)
+    last_error: Optional[str] = None
 
-    min_dur = float(min_scene_duration)
-    max_dur = float(max_scene_duration)
-    if use_suggested_durations:
-        suggestion = suggest_scene_durations(
-            music,
-            edge_exclude=edge_exclude,
-            min_scenes=min_scenes,
-            max_scenes=max_scenes,
-            verbose=False,
-        )
-        if suggestion:
-            min_dur = float(suggestion["min_scene_duration"])
-            max_dur = float(suggestion["max_scene_duration"])
-            log(
-                f"{job.tag(n_jobs)}: рекомендованные сцены "
-                f"{min_dur}–{max_dur} с (BPM≈{suggestion.get('estimated_bpm')})"
-            )
-
-    if cancel_check():
-        job.error = "Отменено."
-        return job
-
-    segments = find_segments_with_peaks(
-        music,
-        min_scene_duration=min_dur,
-        max_scene_duration=max_dur,
-        min_scenes=min_scenes,
-        max_scenes=max_scenes,
-        edge_exclude=edge_exclude,
-    )
-    if not segments:
-        job.error = "Не найден подходящий сегмент аудио для нарезки."
-        job.skip_youtube_upload = True
-        return job
-
-    if cancel_check():
-        job.error = "Отменено."
-        return job
-
-    segment = segments[0]
-    try:
-        result = generate_video_from_segment(
-            music,
-            segment,
-            str(job.output_path),
-            clip_pool=clip_pool,
-            fps=slice_fps_mode,
-            log=log,
-            use_gpu=bool(use_gpu),
-            use_gpu_finalize=bool(use_gpu_finalize),
-            text_overlay_cfg=text_overlay_cfg,
-        )
-        if not result or not job.output_path.is_file():
-            job.error = "Не удалось собрать видео из клипов."
-            job.skip_youtube_upload = True
+    for attempt_no, music_path in enumerate(try_order):
+        if cancel_check():
+            job.error = "Отменено."
             return job
 
-        job.finished = True
-        log(f"{job.tag(n_jobs)}: готово → {job.output_path.name}")
-    except Exception as e:
-        job.error = str(e).strip() or repr(e)
-        job.skip_youtube_upload = True
-        log(f"{job.tag(n_jobs)}: ошибка — {job.error}")
+        if attempt_no == 0:
+            log(f"{tag}: анализ аудио…")
+        elif attempt_no == 1:
+            log(f"{tag}: повтор с {music_path.name}…")
+        else:
+            log(f"{tag}: другой трек — {music_path.name}…")
+
+        err = _attempt_slice_with_music(
+            str(music_path),
+            job.output_path,
+            clip_pool=clip_pool,
+            text_overlay_cfg=text_overlay_cfg,
+            use_suggested_durations=use_suggested_durations,
+            min_scene_duration=min_scene_duration,
+            max_scene_duration=max_scene_duration,
+            min_scenes=min_scenes,
+            max_scenes=max_scenes,
+            edge_exclude=edge_exclude,
+            use_gpu=use_gpu,
+            use_gpu_finalize=use_gpu_finalize,
+            slice_fps_mode=slice_fps_mode,
+            log=log,
+            cancel_check=cancel_check,
+            tag=tag,
+        )
+        if err is None:
+            job.finished = True
+            if attempt_no >= 2:
+                log(f"{tag}: готово (трек {music_path.name}) → {job.output_path.name}")
+            else:
+                log(f"{tag}: готово → {job.output_path.name}")
+            return job
+
+        if err == "Отменено.":
+            job.error = err
+            return job
+
+        last_error = err
+
+    job.error = last_error or "Не удалось выполнить нарезку."
+    job.skip_youtube_upload = True
     return job
 
 
@@ -371,6 +466,7 @@ class SlicingController(QObject):
                         return
                     _run_slice_job(
                         job,
+                        music_pool=music_pool,
                         clip_pool=clip_pool,
                         text_overlay_cfg=text_overlay_cfg,
                         use_suggested_durations=use_suggested,
@@ -402,6 +498,7 @@ class SlicingController(QObject):
                             fut = pool.submit(
                                 _run_slice_job,
                                 job,
+                                music_pool=music_pool,
                                 clip_pool=clip_pool,
                                 text_overlay_cfg=text_overlay_cfg,
                                 use_suggested_durations=use_suggested,

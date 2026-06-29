@@ -661,6 +661,241 @@ def upload_channel_avatar_in_local_antidetect_profile(
         api.close()
 
 
+def _channel_setup_work_flags(
+    *,
+    description: str | None,
+    link_title: str | None,
+    link_url: str | None,
+    avatar_path: str | Path | None,
+    channel_name: str | None,
+    skip_name_change: bool,
+) -> tuple[bool, bool, bool]:
+    d = (description or "").strip()
+    lt = (link_title or "").strip()
+    lu = (link_url or "").strip()
+    has_text = bool(d) or bool(lt and lu)
+    has_avatar = bool(avatar_path)
+    has_name = bool((channel_name or "").strip()) and not skip_name_change
+    return has_text, has_avatar, has_name
+
+
+@with_log_profile
+def setup_channel_in_profile(
+    profile_id: str,
+    *,
+    description: str | None = None,
+    link_title: str | None = None,
+    link_url: str | None = None,
+    avatar_path: str | Path | None = None,
+    channel_name: str | None = None,
+    skip_name_change: bool = False,
+    local_token: str | None = None,
+    headless: bool = True,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    search_oldest_channel: bool = True,
+) -> None:
+    """Dolphin → Studio → «Настройка канала» (один запуск профиля на все шаги)."""
+    has_text, has_avatar, has_name = _channel_setup_work_flags(
+        description=description,
+        link_title=link_title,
+        link_url=link_url,
+        avatar_path=avatar_path,
+        channel_name=channel_name,
+        skip_name_change=skip_name_change,
+    )
+    if not has_text and not has_avatar and not has_name:
+        raise DolphinAntyError("Не заданы параметры настройки канала.")
+    parts: list[str] = []
+    if has_text:
+        parts.append("описание/ссылка")
+    if has_avatar:
+        parts.append("аватарка")
+    if has_name:
+        parts.append("название")
+    _log(
+        "Dolphin: настройка канала ("
+        + ", ".join(parts)
+        + f"). profile_id={profile_id!r}, headless={headless}"
+    )
+    api = DolphinAntyLocalAPI()
+    try:
+        tok = (local_token or "").strip()
+        if tok:
+            _log("Dolphin: login_with_token…")
+            api.login_with_token(tok)
+        _log("Dolphin: start_profile…")
+        conn = api.start_profile(profile_id, headless=headless)
+        _log(
+            "Dolphin: профиль запущен. "
+            f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+        )
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_cdp(
+                p, (conn.ws_url(), conn.http_url())
+            )
+            try:
+                studio_kw = {
+                    "profile_id": profile_id,
+                    "login_credentials": login_credentials,
+                    "yt_oldest_name": yt_oldest_name,
+                    "search_oldest_channel": search_oldest_channel,
+                }
+                if has_text:
+                    run_studio_channel_description_and_link(
+                        page,
+                        description=description,
+                        link_title=link_title,
+                        link_url=link_url,
+                        **studio_kw,
+                    )
+                if has_avatar or has_name:
+                    if has_text:
+                        _log(
+                            "Dolphin: повторный переход в Studio "
+                            "для аватарки/названия (без перезапуска профиля)…"
+                        )
+                    run_studio_channel_profile_customization(
+                        page,
+                        avatar_path=avatar_path,
+                        channel_name=channel_name,
+                        skip_name_change=skip_name_change,
+                        **studio_kw,
+                    )
+            finally:
+                _close_playwright_browser(browser)
+    except Exception as e:
+        _log(f"Ошибка настройки канала: {type(e).__name__}: {e!r}")
+        raise _wrap_exc(e) from e
+    finally:
+        try:
+            api.stop_profile(profile_id)
+        except Exception as e:
+            _log(f"Dolphin: stop_profile: {e!r}")
+        api.close()
+
+
+@with_log_profile
+def setup_channel_in_local_antidetect_profile(
+    profile_id: str,
+    *,
+    description: str | None = None,
+    link_title: str | None = None,
+    link_url: str | None = None,
+    avatar_path: str | Path | None = None,
+    channel_name: str | None = None,
+    skip_name_change: bool = False,
+    base_url: str,
+    headless: bool = True,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    search_oldest_channel: bool = True,
+    remote_cdp=None,
+) -> None:
+    """Локальный антидетект → Studio → «Настройка канала» (один запуск профиля)."""
+    from zaliver.antydetect.local_antidetect_api import (
+        LocalAntidetectError,
+        LocalAntidetectHttpAPI,
+    )
+    from zaliver.antydetect.local_active_sessions import (
+        register_local_session,
+        unregister_local_session,
+    )
+
+    has_text, has_avatar, has_name = _channel_setup_work_flags(
+        description=description,
+        link_title=link_title,
+        link_url=link_url,
+        avatar_path=avatar_path,
+        channel_name=channel_name,
+        skip_name_change=skip_name_change,
+    )
+    if not has_text and not has_avatar and not has_name:
+        raise LocalAntidetectError("Не заданы параметры настройки канала.")
+    parts: list[str] = []
+    if has_text:
+        parts.append("описание/ссылка")
+    if has_avatar:
+        parts.append("аватарка")
+    if has_name:
+        parts.append("название")
+    _log(
+        "Local antidetect: настройка канала ("
+        + ", ".join(parts)
+        + f"). profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}"
+    )
+
+    api = LocalAntidetectHttpAPI(base_url)
+    session_id: str | None = None
+    started_at = time.perf_counter()
+    try:
+        acc = api.launch_profile(
+            profile_id, headless=headless, expose_cdp=True, remote_cdp=remote_cdp
+        )
+        sid = acc.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+        session_id = sid.strip()
+        bu = (base_url or "").strip() or "http://127.0.0.1:18765"
+        register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
+        ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+        _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_local_session_cdp(
+                p, api, session_id, ws_url
+            )
+            try:
+                studio_kw = _local_studio_workflow_kwargs(
+                    api,
+                    profile_id,
+                    login_credentials=login_credentials,
+                    yt_oldest_name=yt_oldest_name,
+                    search_oldest_channel=search_oldest_channel,
+                    include_name_change_cooldown=has_name,
+                )
+                if has_text:
+                    run_studio_channel_description_and_link(
+                        page,
+                        description=description,
+                        link_title=link_title,
+                        link_url=link_url,
+                        **studio_kw,
+                    )
+                if has_avatar or has_name:
+                    if has_text:
+                        _log(
+                            "Local antidetect: повторный переход в Studio "
+                            "для аватарки/названия (без перезапуска профиля)…"
+                        )
+                    run_studio_channel_profile_customization(
+                        page,
+                        avatar_path=avatar_path,
+                        channel_name=channel_name,
+                        skip_name_change=skip_name_change,
+                        **studio_kw,
+                    )
+            finally:
+                _close_playwright_browser(browser)
+    except Exception as e:
+        _log(f"Ошибка настройки канала: {type(e).__name__}: {e!r}")
+        raise LocalAntidetectError(f"Ошибка настройки канала: {e}") from e
+    finally:
+        if session_id:
+            unregister_local_session(profile_id=profile_id)
+            try:
+                api.stop_session(session_id)
+            except Exception:
+                pass
+        try:
+            _log(
+                "Local antidetect: настройка канала завершена за "
+                f"{time.perf_counter() - started_at:.1f} с."
+            )
+        except Exception:
+            pass
+        api.close()
+
+
 @with_log_profile
 def warmup_youtube_shorts_in_profile(
     profile_id: str,

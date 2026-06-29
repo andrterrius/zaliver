@@ -25,7 +25,7 @@ _STUDIO_UI_MS = 120_000
 # После передачи файла ждём в Studio один из исходов: лимит или завершение проверок (часто >1 мин).
 _POST_UPLOAD_STUDIO_OUTCOME_MAX_S = 3600.0
 _POST_UPLOAD_QUOTA_POLL_S = 2.0
-_PUBLISH_CONFIRM_MAX_S = 120.0
+_PUBLISH_CONFIRM_MAX_S = 10.0
 _PUBLISH_REPUBLISH_GRACE_S = 12.0
 _STUDIO_WIZARD_NEXT_MAX = 30
 _STUDIO_WIZARD_NEXT_AFTER_CLICK_MS = 250
@@ -61,6 +61,10 @@ _PUBLISH_SUCCESS_TEXT_RE = re.compile(
 _POST_PUBLISH_ACK_BTN_RE = re.compile(
     r"^(ok|okay|got it|i understand|understand|"
     r"понятно|я понимаю|продолжить|continue|done|готово)$",
+    re.I,
+)
+_STILL_PROCESSING_AFTER_PUBLISH_TITLE_RE = re.compile(
+    r"video\s+processing|обработка\s+видео",
     re.I,
 )
 _CHANNEL_REMOVED_PAGE_TITLE_RE = re.compile(
@@ -5793,6 +5797,31 @@ def _studio_is_upload_dialog_visible(page) -> bool:
         return False
 
 
+def _studio_is_still_processing_publish_dialog(page) -> bool:
+    """Диалог «Video processing» после «Опубликовать» (SD ещё обрабатывается)."""
+    for sel in (
+        "ytcp-uploads-still-processing-dialog",
+        "tp-yt-paper-dialog ytcp-uploads-still-processing-dialog",
+    ):
+        loc = page.locator(sel)
+        try:
+            if loc.count() > 0 and loc.first.is_visible(timeout=300):
+                return True
+        except Exception:
+            pass
+    try:
+        title = page.locator(
+            'tp-yt-paper-dialog h1#dialog-title, tp-yt-paper-dialog [id="dialog-title"]'
+        )
+        if title.count() > 0 and title.first.is_visible(timeout=300):
+            txt = (title.first.inner_text(timeout=1_000) or "").strip()
+            if txt and _STILL_PROCESSING_AFTER_PUBLISH_TITLE_RE.search(txt):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _studio_try_dismiss_post_publish_dialogs(page) -> bool:
     """Copyright / ограничения: «OK», «Понятно» и т.п. после клика «Опубликовать»."""
     scopes = (
@@ -5820,6 +5849,8 @@ def _studio_try_dismiss_post_publish_dialogs(page) -> bool:
 
 def _studio_is_publish_confirmed(page) -> bool:
     """Диалог закрылся или Studio показывает экран/текст успешной публикации."""
+    if _studio_is_still_processing_publish_dialog(page):
+        return True
     if not _studio_is_upload_dialog_visible(page):
         url = (str(page.url or "")).lower()
         if "studio.youtube.com" in url:
@@ -5868,7 +5899,7 @@ def _studio_wait_for_publish_confirmed(page, max_wait_sec: float) -> None:
     """Не закрываем браузер, пока Studio не подтвердит публикацию."""
     _log(
         "Studio: ожидание подтверждения публикации "
-        "(закрытие диалога / экран успеха / «Видео опубликовано»)…"
+        "(диалог «Video processing» / закрытие мастера / экран успеха)…"
     )
     deadline = time.monotonic() + max_wait_sec
     republish_after = time.monotonic() + _PUBLISH_REPUBLISH_GRACE_S
@@ -5881,7 +5912,13 @@ def _studio_wait_for_publish_confirmed(page, max_wait_sec: float) -> None:
         if _studio_try_dismiss_post_publish_dialogs(page):
             continue
         if _studio_is_publish_confirmed(page):
-            _log("Studio: публикация подтверждена Studio.")
+            if _studio_is_still_processing_publish_dialog(page):
+                _log(
+                    "Studio: публикация подтверждена — диалог "
+                    "«Video processing» (обработка SD перед публичным показом)."
+                )
+            else:
+                _log("Studio: публикация подтверждена Studio.")
             return
         if (
             not republish_attempted
@@ -5910,7 +5947,8 @@ def _studio_wait_for_publish_confirmed(page, max_wait_sec: float) -> None:
         )
     raise YoutubeStudioError(
         f"YouTube Studio: публикация не подтверждена за {max_wait_sec:.0f} с — "
-        "диалог загрузки всё ещё открыт или нет признаков успешной публикации. "
+        "не появился диалог «Video processing», мастер загрузки всё ещё открыт "
+        "или нет других признаков успешной публикации. "
         "Проверьте черновики в Studio вручную."
     )
 

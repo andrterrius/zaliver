@@ -1,4 +1,4 @@
-"""Диалог импорта аватарок и названий каналов в отмеченные профили."""
+"""Диалог настройки канала: описание, ссылка, аватарки и названия."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ from PyQt6.QtCore import Qt, QThread
 from PyQt6.QtGui import QCloseEvent, QColor, QPixmap, QResizeEvent, QShowEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QTableWidget,
@@ -33,11 +33,28 @@ from zaliver.ui.avatar_import_parser import (
     parse_channel_names_file,
     parse_channel_names_text,
 )
-from zaliver.ui.widgets import AnimatedProgressBar
+from zaliver.ui.widgets import AnimatedProgressBar, CollapsibleSection
 
 # Длинная сторона меньше порога — в превью показываем заметно меньше натурального размера.
 _SMALL_PREVIEW_MAX_SIDE = 520
 _PREVIEW_VIEWPORT_MARGIN = 20
+
+
+def _recent_editable_combo(*, placeholder: str, recent: list[str]) -> QComboBox:
+    combo = QComboBox()
+    combo.setEditable(True)
+    combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+    line_edit = combo.lineEdit()
+    if line_edit is not None:
+        line_edit.setPlaceholderText(placeholder)
+    for value in recent:
+        combo.addItem(value)
+    if combo.count() > 0:
+        combo.setCurrentIndex(0)
+    elif line_edit is not None:
+        combo.setCurrentIndex(-1)
+        line_edit.clear()
+    return combo
 
 
 def _fit_preview_pixmap(pix: QPixmap, max_w: int, max_h: int) -> QPixmap:
@@ -91,15 +108,19 @@ def _format_source_files(paths: list[str]) -> str:
     return f"{len(paths)} файлов: {', '.join(names[:2])}, …"
 
 
-class ProfileAvatarsImportDialog(QDialog):
+class ProfileChannelSetupDialog(QDialog):
     def __init__(
         self,
         *,
         selected_profiles: list[dict[str, object]],
+        recent_channel_names: list[str] | None = None,
+        recent_channel_descriptions: list[str] | None = None,
+        recent_link_titles: list[str] | None = None,
+        recent_link_urls: list[str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Аватарки и названия")
+        self.setWindowTitle("Настройка канала")
         self.setModal(True)
         self.setMinimumSize(760, 720)
         self.resize(820, 780)
@@ -123,20 +144,51 @@ class ProfileAvatarsImportDialog(QDialog):
         root.setSpacing(12)
 
         hint = QLabel(
-            "В таблице — отмеченные профили. Можно задать аватарки, названия каналов "
-            "или оба варианта сразу.\n\n"
-            "Аватарки: выберите файлы со спрайт-листом (или целые картинки при "
-            "«Не обрезать аватарки»). Названия: введите список через запятую или "
-            "с новой строки, либо импортируйте из текстового файла.\n\n"
-            "Если указаны только аватарки — меняется только картинка. "
-            "Если только названия — меняется только название и handle. "
-            "Если оба — сначала аватарка, затем название, затем «Опубликовать». "
+            "Настройка отмеченных профилей в YouTube Studio («Настройка канала»). "
+            "Заполните нужные разделы — можно один или несколько сразу.\n\n"
+            "Описание и ссылка применяются ко всем отмеченным профилям одинаково. "
+            "Аватарки и названия сопоставляются с профилями по порядку в таблице. "
             "Смена названия ограничена раз в 14 дней (в предпросмотре отмечается лимит)."
         )
         hint.setWordWrap(True)
         hint.setObjectName("hint")
         root.addWidget(hint)
 
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll_content = QWidget()
+        sections = QVBoxLayout(scroll_content)
+        sections.setSpacing(8)
+
+        desc_section = CollapsibleSection("Описание")
+        desc_section.set_expanded(True)
+        self._desc_edit = _recent_editable_combo(
+            placeholder="Описание канала…",
+            recent=list(recent_channel_descriptions or []),
+        )
+        self._desc_edit.currentTextChanged.connect(self._on_channel_fields_changed)
+        desc_section.content_layout().addWidget(self._desc_edit)
+        sections.addWidget(desc_section)
+
+        link_section = CollapsibleSection("Ссылка")
+        self._link_title_edit = _recent_editable_combo(
+            placeholder="Название ссылки…",
+            recent=list(recent_link_titles or []),
+        )
+        self._link_title_edit.currentTextChanged.connect(self._on_channel_fields_changed)
+        link_section.content_layout().addWidget(QLabel("Название ссылки"))
+        link_section.content_layout().addWidget(self._link_title_edit)
+        self._link_url_edit = _recent_editable_combo(
+            placeholder="https://…",
+            recent=list(recent_link_urls or []),
+        )
+        self._link_url_edit.currentTextChanged.connect(self._on_channel_fields_changed)
+        link_section.content_layout().addWidget(QLabel("URL"))
+        link_section.content_layout().addWidget(self._link_url_edit)
+        sections.addWidget(link_section)
+
+        avatars_section = CollapsibleSection("Аватарки")
         self._preview_label = QLabel("Превью появится после выбора файлов")
         self._preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preview_label.setObjectName("profilePreviewImage")
@@ -149,7 +201,7 @@ class ProfileAvatarsImportDialog(QDialog):
         self._preview_scroll.setMinimumHeight(140)
         self._preview_scroll.setMaximumHeight(180)
         self._preview_scroll.setWidget(self._preview_label)
-        root.addWidget(self._preview_scroll, 0)
+        avatars_section.content_layout().addWidget(self._preview_scroll)
 
         source_row = QHBoxLayout()
         self._source_label = QLabel("Файлы не выбраны")
@@ -159,7 +211,7 @@ class ProfileAvatarsImportDialog(QDialog):
         self._btn_pick.clicked.connect(self._pick_files)
         source_row.addWidget(self._source_label, 1)
         source_row.addWidget(self._btn_pick)
-        root.addLayout(source_row)
+        avatars_section.content_layout().addLayout(source_row)
 
         self._no_crop = QCheckBox("Не обрезать аватарки (1 файл = 1 профиль)")
         self._no_crop.setToolTip(
@@ -167,19 +219,24 @@ class ProfileAvatarsImportDialog(QDialog):
             "без поиска и вырезки иконок на спрайт-листе."
         )
         self._no_crop.toggled.connect(self._on_assignment_options_changed)
-        root.addWidget(self._no_crop)
+        avatars_section.content_layout().addWidget(self._no_crop)
 
-        names_label = QLabel("Названия каналов")
-        root.addWidget(names_label)
-
-        self._names_edit = QPlainTextEdit()
-        self._names_edit.setPlaceholderText(
-            "Название 1\nНазвание 2\nили через запятую…"
+        self._shuffle = QCheckBox("Перемешать аватарки")
+        self._shuffle.setChecked(True)
+        self._shuffle.setToolTip(
+            "Случайно перемешать аватарки перед сопоставлением с профилями."
         )
-        self._names_edit.setMinimumHeight(72)
-        self._names_edit.setMaximumHeight(100)
-        self._names_edit.textChanged.connect(self._on_names_text_changed)
-        root.addWidget(self._names_edit)
+        self._shuffle.toggled.connect(self._on_assignment_options_changed)
+        avatars_section.content_layout().addWidget(self._shuffle)
+        sections.addWidget(avatars_section)
+
+        names_section = CollapsibleSection("Названия")
+        self._names_edit = _recent_editable_combo(
+            placeholder="Название или несколько через запятую…",
+            recent=list(recent_channel_names or []),
+        )
+        self._names_edit.currentTextChanged.connect(self._on_names_text_changed)
+        names_section.content_layout().addWidget(self._names_edit)
 
         names_row = QHBoxLayout()
         self._names_source_label_widget = QLabel("Список не задан")
@@ -189,15 +246,7 @@ class ProfileAvatarsImportDialog(QDialog):
         self._btn_pick_names.clicked.connect(self._pick_names_file)
         names_row.addWidget(self._names_source_label_widget, 1)
         names_row.addWidget(self._btn_pick_names)
-        root.addLayout(names_row)
-
-        self._shuffle = QCheckBox("Перемешать аватарки")
-        self._shuffle.setChecked(True)
-        self._shuffle.setToolTip(
-            "Случайно перемешать аватарки перед сопоставлением с профилями."
-        )
-        self._shuffle.toggled.connect(self._on_assignment_options_changed)
-        root.addWidget(self._shuffle)
+        names_section.content_layout().addLayout(names_row)
 
         self._shuffle_names = QCheckBox("Перемешать названия")
         self._shuffle_names.setChecked(True)
@@ -205,7 +254,12 @@ class ProfileAvatarsImportDialog(QDialog):
             "Случайно перемешать названия перед сопоставлением с профилями."
         )
         self._shuffle_names.toggled.connect(self._on_assignment_options_changed)
-        root.addWidget(self._shuffle_names)
+        names_section.content_layout().addWidget(self._shuffle_names)
+        sections.addWidget(names_section)
+
+        sections.addStretch()
+        scroll.setWidget(scroll_content)
+        root.addWidget(scroll, 0)
 
         self._progress_bar = AnimatedProgressBar()
         self._progress_bar.setRange(0, 1)
@@ -252,7 +306,7 @@ class ProfileAvatarsImportDialog(QDialog):
         self._populate_table()
         self._status.setText(
             f"Отмечено профилей: {len(self._profiles)}. "
-            "Задайте аватарки и/или названия каналов."
+            "Заполните нужные разделы."
         )
         self._refresh_assignment()
 
@@ -276,6 +330,30 @@ class ProfileAvatarsImportDialog(QDialog):
         if not self._initial_placement_done:
             self._place_near_screen_top()
             self._initial_placement_done = True
+
+    def channel_description(self) -> str:
+        return (self._desc_edit.currentText() or "").strip()
+
+    def channel_link_title(self) -> str:
+        return (self._link_title_edit.currentText() or "").strip()
+
+    def channel_link_url(self) -> str:
+        return (self._link_url_edit.currentText() or "").strip()
+
+    def channel_names_for_remember(self) -> list[str]:
+        return self._current_channel_names()
+
+    def has_channel_text_fill(self) -> bool:
+        desc = self.channel_description()
+        lt = self.channel_link_title()
+        lu = self.channel_link_url()
+        return bool(desc) or bool(lt and lu)
+
+    def has_profile_customization(self) -> bool:
+        return bool(self.profile_assignments())
+
+    def _on_channel_fields_changed(self) -> None:
+        self._update_save_button()
 
     def profile_assignments(self) -> list[dict[str, object]]:
         out: list[dict[str, object]] = []
@@ -314,10 +392,17 @@ class ProfileAvatarsImportDialog(QDialog):
         return out
 
     def _dialog_title(self) -> str:
-        return "Аватарки и названия"
+        return "Настройка канала"
 
     def _current_channel_names(self) -> list[str]:
-        return parse_channel_names_text(self._names_edit.toPlainText())
+        from_items = [
+            self._names_edit.itemText(i).strip()
+            for i in range(self._names_edit.count())
+        ]
+        from_items = [name for name in from_items if name]
+        if from_items:
+            return from_items
+        return parse_channel_names_text(self._names_edit.currentText())
 
     def _pick_names_file(self) -> None:
         if self._is_detecting():
@@ -348,7 +433,11 @@ class ProfileAvatarsImportDialog(QDialog):
             return
         self._names_edit.blockSignals(True)
         try:
-            self._names_edit.setPlainText("\n".join(names))
+            self._names_edit.clear()
+            for name in names:
+                self._names_edit.addItem(name)
+            if names:
+                self._names_edit.setCurrentIndex(0)
         finally:
             self._names_edit.blockSignals(False)
         self._names_source_label = path
@@ -382,7 +471,9 @@ class ProfileAvatarsImportDialog(QDialog):
         self._update_status_summary()
 
     def _update_save_button(self) -> None:
-        self._btn_save.setEnabled(any(row.get("can_save") for row in self._rows))
+        has_text = self.has_channel_text_fill()
+        has_assignments = any(row.get("can_save") for row in self._rows)
+        self._btn_save.setEnabled(has_text or has_assignments)
 
     def _update_status_summary(self) -> None:
         matched = sum(1 for row in self._rows if row.get("can_save"))
@@ -408,6 +499,9 @@ class ProfileAvatarsImportDialog(QDialog):
     def _set_busy(self, busy: bool) -> None:
         self._btn_pick.setEnabled(not busy)
         self._btn_pick_names.setEnabled(not busy)
+        self._desc_edit.setEnabled(not busy)
+        self._link_title_edit.setEnabled(not busy)
+        self._link_url_edit.setEnabled(not busy)
         self._names_edit.setEnabled(not busy)
         self._no_crop.setEnabled(not busy)
         self._shuffle.setEnabled(not busy)
@@ -695,37 +789,57 @@ class ProfileAvatarsImportDialog(QDialog):
     def _on_save(self) -> None:
         if self._is_detecting():
             return
+        desc = self.channel_description()
+        link_title = self.channel_link_title()
+        link_url = self.channel_link_url()
         assignments = self.profile_assignments()
-        if not assignments:
+
+        if not desc and not (link_title and link_url) and not assignments:
             QMessageBox.warning(
                 self,
                 self._dialog_title(),
-                "Нет данных для применения. Задайте аватарки и/или названия.",
+                "Заполните хотя бы один раздел: описание, ссылку "
+                "(название + URL) или аватарки/названия.",
             )
             return
-        with_avatar = sum(1 for a in assignments if a.get("avatar_png"))
-        with_name = sum(
-            1
-            for a in assignments
-            if a.get("channel_name") and not a.get("skip_name_change")
-        )
-        skipped_names = sum(
-            1
-            for a in assignments
-            if a.get("channel_name") and a.get("skip_name_change")
-        )
-        msg = f"Применить изменения в YouTube Studio для {len(assignments)} профилей?"
-        details: list[str] = []
-        if with_avatar:
-            details.append(f"• с аватаркой: {with_avatar}")
-        if with_name:
-            details.append(f"• с названием: {with_name}")
-        if skipped_names:
-            details.append(
-                f"• название пропущено (лимит 14 дн.): {skipped_names}"
+        if (link_title and not link_url) or (link_url and not link_title):
+            QMessageBox.warning(
+                self,
+                self._dialog_title(),
+                "Для ссылки нужны и название, и URL.",
             )
-        if details:
-            msg += "\n\n" + "\n".join(details)
+            return
+
+        msg_parts: list[str] = []
+        if desc or (link_title and link_url):
+            msg_parts.append(
+                f"• описание/ссылка — для всех {len(self._profiles)} профилей"
+            )
+        if assignments:
+            with_avatar = sum(1 for a in assignments if a.get("avatar_png"))
+            with_name = sum(
+                1
+                for a in assignments
+                if a.get("channel_name") and not a.get("skip_name_change")
+            )
+            skipped_names = sum(
+                1
+                for a in assignments
+                if a.get("channel_name") and a.get("skip_name_change")
+            )
+            msg_parts.append(f"• персональные изменения — {len(assignments)} профилей")
+            details: list[str] = []
+            if with_avatar:
+                details.append(f"  — с аватаркой: {with_avatar}")
+            if with_name:
+                details.append(f"  — с названием: {with_name}")
+            if skipped_names:
+                details.append(
+                    f"  — название пропущено (лимит 14 дн.): {skipped_names}"
+                )
+            msg_parts.extend(details)
+
+        msg = "Применить настройки канала в YouTube Studio?\n\n" + "\n".join(msg_parts)
         answer = QMessageBox.question(
             self,
             self._dialog_title(),
@@ -760,3 +874,6 @@ class ProfileAvatarsImportDialog(QDialog):
                 self._last_preview_png,
                 subtitle=self._last_preview_subtitle,
             )
+
+
+ProfileAvatarsImportDialog = ProfileChannelSetupDialog

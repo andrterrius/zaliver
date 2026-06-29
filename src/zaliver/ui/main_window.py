@@ -92,7 +92,7 @@ from zaliver.ui.profile_account_data_dialog import (
     YT_LOGIN_KEY,
 )
 from zaliver.ui.profile_accounts_import_dialog import ProfileAccountsImportDialog
-from zaliver.ui.profile_avatars_import_dialog import ProfileAvatarsImportDialog
+from zaliver.ui.profile_avatars_import_dialog import ProfileChannelSetupDialog
 from zaliver.ui.profile_tags_clear_dialog import ProfileTagsClearDialog
 from zaliver.ui.profile_preview_dialog import ProfileCdpPreviewDialog
 from zaliver.ui.profiles_list_interaction import ProfilesListInteraction
@@ -775,10 +775,8 @@ class MainWindow(QWidget):
     _youtube_upload_phase_finished = pyqtSignal(str)
     _studio_availability_progress = pyqtSignal(int, int, str)
     _studio_availability_finished = pyqtSignal(int, int)
-    _studio_channel_fill_progress = pyqtSignal(int, int, str)
-    _studio_channel_fill_finished = pyqtSignal(int, int)
-    _studio_avatar_upload_progress = pyqtSignal(int, int, str)
-    _studio_avatar_upload_finished = pyqtSignal(int, int)
+    _studio_channel_setup_progress = pyqtSignal(int, int, str)
+    _studio_channel_setup_finished = pyqtSignal(int, int)
     _studio_warmup_progress = pyqtSignal(int, int, str)
     _studio_warmup_finished = pyqtSignal(int, int)
     _zaliver_profile_tags_clear_progress = pyqtSignal(int, int, str)
@@ -817,14 +815,12 @@ class MainWindow(QWidget):
         self._profiles_filter_timer.setSingleShot(True)
         self._profiles_filter_timer.timeout.connect(self._apply_profiles_filter)
         self._profiles_availability_running = False
-        self._profiles_channel_fill_running = False
-        self._profiles_avatar_upload_running = False
+        self._profiles_channel_setup_running = False
         self._profiles_warmup_running = False
         self._profiles_tags_clear_running = False
         self._profiles_refresh_running = False
         self._last_availability_failed_ids: list[str] = []
-        self._last_channel_fill_failed_ids: list[str] = []
-        self._last_avatar_upload_failed_ids: list[str] = []
+        self._last_channel_setup_failed_ids: list[str] = []
         self._last_warmup_failed_ids: list[str] = []
         self._build_ui()
         self._bootstrap_fd_limits()
@@ -855,10 +851,8 @@ class MainWindow(QWidget):
         self._youtube_upload_phase_finished.connect(self._on_youtube_upload_phase_finished)
         self._studio_availability_progress.connect(self._on_studio_availability_progress)
         self._studio_availability_finished.connect(self._on_studio_availability_finished)
-        self._studio_channel_fill_progress.connect(self._on_studio_channel_fill_progress)
-        self._studio_channel_fill_finished.connect(self._on_studio_channel_fill_finished)
-        self._studio_avatar_upload_progress.connect(self._on_studio_avatar_upload_progress)
-        self._studio_avatar_upload_finished.connect(self._on_studio_avatar_upload_finished)
+        self._studio_channel_setup_progress.connect(self._on_studio_channel_setup_progress)
+        self._studio_channel_setup_finished.connect(self._on_studio_channel_setup_finished)
         self._studio_warmup_progress.connect(self._on_studio_warmup_progress)
         self._studio_warmup_finished.connect(self._on_studio_warmup_finished)
         self._zaliver_profile_tags_clear_progress.connect(
@@ -1792,30 +1786,18 @@ class MainWindow(QWidget):
         self._btn_profiles_import_accounts.clicked.connect(
             self._open_profiles_accounts_import_dialog
         )
-        self._btn_profiles_fill_channel = QPushButton("Заполнить описание и ссылку")
-        self._btn_profiles_fill_channel.setObjectName("secondary")
-        self._btn_profiles_fill_channel.setAutoDefault(False)
-        self._btn_profiles_fill_channel.setDefault(False)
-        self._btn_profiles_fill_channel.setToolTip(
-            "Только для отмеченных профилей: Studio → «Настройка канала», "
-            "описание канала и ссылка, затем «Опубликовать». "
+        self._btn_profiles_channel_setup = QPushButton("Настройка канала")
+        self._btn_profiles_channel_setup.setObjectName("secondary")
+        self._btn_profiles_channel_setup.setAutoDefault(False)
+        self._btn_profiles_channel_setup.setDefault(False)
+        self._btn_profiles_channel_setup.setToolTip(
+            "Только для отмеченных профилей: Studio → «Настройка канала» — "
+            "описание, ссылка, аватарки и/или названия. "
+            "Можно заполнить один или несколько разделов сразу. "
             "Браузер всегда с окном (не headless), до 5 параллельно."
         )
-        self._btn_profiles_fill_channel.clicked.connect(
-            self._start_profiles_channel_fill
-        )
-        self._btn_profiles_add_avatars = QPushButton("Аватарки и названия")
-        self._btn_profiles_add_avatars.setObjectName("secondary")
-        self._btn_profiles_add_avatars.setAutoDefault(False)
-        self._btn_profiles_add_avatars.setDefault(False)
-        self._btn_profiles_add_avatars.setToolTip(
-            "Только для отмеченных профилей: аватарки и/или названия каналов "
-            "в YouTube Studio («Настройка канала»). "
-            "Можно задать только аватарки, только названия или оба варианта. "
-            "Браузер всегда с окном (не headless), до 5 параллельно."
-        )
-        self._btn_profiles_add_avatars.clicked.connect(
-            self._open_profiles_avatars_import_dialog
+        self._btn_profiles_channel_setup.clicked.connect(
+            self._open_profiles_channel_setup_dialog
         )
         self._btn_profiles_warmup = QPushButton("Прогрев")
         self._btn_profiles_warmup.setObjectName("secondary")
@@ -1840,8 +1822,7 @@ class MainWindow(QWidget):
         self._btn_profiles_clear_zaliver_tags.clicked.connect(
             self._start_clear_zaliver_profile_tags
         )
-        profiles_actions_row.addWidget(self._btn_profiles_fill_channel)
-        profiles_actions_row.addWidget(self._btn_profiles_add_avatars)
+        profiles_actions_row.addWidget(self._btn_profiles_channel_setup)
         profiles_actions_row.addWidget(self._btn_profiles_warmup)
         profiles_actions_row.addWidget(self._btn_profiles_check_availability)
         profiles_actions_row.addWidget(self._btn_profiles_import_accounts)
@@ -2928,6 +2909,11 @@ class MainWindow(QWidget):
             )
         for recent_title in self._upload_store.list_recent_upload_titles():
             title_edit.addItem(recent_title)
+        if title_edit.count() > 0:
+            title_edit.setCurrentIndex(0)
+        elif title_le is not None:
+            title_edit.setCurrentIndex(-1)
+            title_le.clear()
         desc_edit = QPlainTextEdit()
         desc_edit.setPlaceholderText("Описание (необязательно)…")
         desc_edit.setMinimumHeight(44)
@@ -3576,8 +3562,7 @@ class MainWindow(QWidget):
         own = _is_own_antidetect_kind(kind)
         busy = (
             self._profiles_availability_running
-            or self._profiles_channel_fill_running
-            or self._profiles_avatar_upload_running
+            or self._profiles_channel_setup_running
             or self._profiles_warmup_running
             or self._profiles_tags_clear_running
             or self._profiles_refresh_running
@@ -3586,10 +3571,8 @@ class MainWindow(QWidget):
             self._btn_profiles_clear_zaliver_tags.setEnabled(own and not busy)
         if hasattr(self, "_btn_profiles_check_availability"):
             self._btn_profiles_check_availability.setEnabled(not busy)
-        if hasattr(self, "_btn_profiles_fill_channel"):
-            self._btn_profiles_fill_channel.setEnabled(not busy)
-        if hasattr(self, "_btn_profiles_add_avatars"):
-            self._btn_profiles_add_avatars.setEnabled(own and not busy)
+        if hasattr(self, "_btn_profiles_channel_setup"):
+            self._btn_profiles_channel_setup.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_warmup"):
             self._btn_profiles_warmup.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_refresh"):
@@ -4290,82 +4273,299 @@ class MainWindow(QWidget):
             self._last_availability_failed_ids = list(profile_ids)
             self._studio_availability_finished.emit(0, len(profile_ids))
 
-    def _prompt_channel_description_and_link(
-        self,
-    ) -> tuple[str, str, str] | None:
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Описание и ссылка канала")
-        dlg.setModal(True)
-        dlg.setMinimumWidth(520)
-        v = QVBoxLayout(dlg)
+    def _profiles_channel_setup_dialog_title(self) -> str:
+        return "Настройка канала"
 
-        hint = QLabel(
-            "Текст будет применён ко всем отмеченным профилям. "
-            "Описание и ссылку можно указать вместе или по отдельности "
-            "(для ссылки нужны и название, и URL)."
+    def _open_profiles_channel_setup_dialog(self) -> None:
+        title = self._profiles_channel_setup_dialog_title()
+        if self._profiles_channel_setup_running:
+            QMessageBox.information(
+                self,
+                title,
+                "Настройка канала уже выполняется. Дождитесь завершения.",
+            )
+            return
+        if not self._profiles_raw:
+            QMessageBox.information(
+                self,
+                title,
+                "Сначала загрузите список профилей (кнопка «Обновить»).",
+            )
+            return
+        if self._profiles_interaction is None:
+            return
+        profile_ids = self._profiles_interaction.batch_profile_ids()
+        if not profile_ids:
+            QMessageBox.warning(
+                self,
+                title,
+                "Отметьте квадратиками профили, для которых нужна настройка канала.",
+            )
+            return
+        by_id = self._profiles_by_id_map(self._profiles_raw)
+        selected_profiles = [by_id[pid] for pid in profile_ids if pid in by_id]
+        if not selected_profiles:
+            QMessageBox.warning(
+                self,
+                title,
+                "Не удалось найти отмеченные профили в загруженном списке.",
+            )
+            return
+
+        dlg = ProfileChannelSetupDialog(
+            selected_profiles=selected_profiles,
+            recent_channel_names=self._upload_store.list_recent_channel_names(),
+            recent_channel_descriptions=self._upload_store.list_recent_channel_descriptions(),
+            recent_link_titles=self._upload_store.list_recent_channel_link_titles(),
+            recent_link_urls=self._upload_store.list_recent_channel_link_urls(),
+            parent=self,
         )
-        hint.setWordWrap(True)
-        hint.setObjectName("hint")
-        v.addWidget(hint)
-
-        desc_edit = QPlainTextEdit()
-        desc_edit.setPlaceholderText("Описание канала…")
-        desc_edit.setMinimumHeight(120)
-        v.addWidget(QLabel("Описание"))
-        v.addWidget(desc_edit)
-
-        link_title_edit = QLineEdit()
-        link_title_edit.setPlaceholderText("Название ссылки…")
-        v.addWidget(QLabel("Название ссылки"))
-        v.addWidget(link_title_edit)
-
-        link_url_edit = QLineEdit()
-        link_url_edit.setPlaceholderText("https://…")
-        v.addWidget(QLabel("Ссылка"))
-        v.addWidget(link_url_edit)
-
-        row = QHBoxLayout()
-        row.addStretch()
-        btn_cancel = QPushButton("Отмена")
-        btn_cancel.setObjectName("danger")
-        btn_start = QPushButton("Заполнить")
-        btn_start.setDefault(True)
-        btn_start.setAutoDefault(True)
-
-        def on_start() -> None:
-            desc = (desc_edit.toPlainText() or "").strip()
-            link_title = (link_title_edit.text() or "").strip()
-            link_url = (link_url_edit.text() or "").strip()
-            if not desc and not (link_title and link_url):
-                QMessageBox.warning(
-                    dlg,
-                    "Описание и ссылка канала",
-                    "Укажите описание и/или пару «Название ссылки + Ссылка».",
-                )
-                return
-            if (link_title and not link_url) or (link_url and not link_title):
-                QMessageBox.warning(
-                    dlg,
-                    "Описание и ссылка канала",
-                    "Для ссылки нужны и название, и URL.",
-                )
-                return
-            dlg.accept()
-
-        btn_start.clicked.connect(on_start)
-        btn_cancel.clicked.connect(dlg.reject)
-        row.addWidget(btn_cancel)
-        row.addWidget(btn_start)
-        v.addLayout(row)
-
-        desc_edit.setFocus()
         if dlg.exec() != QDialog.DialogCode.Accepted:
-            return None
-        return (
-            (desc_edit.toPlainText() or "").strip(),
-            (link_title_edit.text() or "").strip(),
-            (link_url_edit.text() or "").strip(),
+            return
+
+        description = dlg.channel_description()
+        link_title = dlg.channel_link_title()
+        link_url = dlg.channel_link_url()
+        if description:
+            self._upload_store.remember_channel_description(description)
+        if link_title:
+            self._upload_store.remember_channel_link_title(link_title)
+        if link_url:
+            self._upload_store.remember_channel_link_url(link_url)
+        channel_names = dlg.channel_names_for_remember()
+        if channel_names:
+            self._upload_store.remember_channel_names(channel_names)
+        assignments = dlg.profile_assignments()
+        has_text_fill = dlg.has_channel_text_fill()
+        has_customization = dlg.has_profile_customization()
+
+        if not has_text_fill and not has_customization:
+            return
+
+        kind = self._default_browser_combo.currentData()
+        kind_s = kind if isinstance(kind, str) else "dolphin"
+        if has_customization and not _is_own_antidetect_kind(kind_s):
+            QMessageBox.information(
+                self,
+                title,
+                "Аватарки и названия доступны только для своего антидетекта "
+                "(локальный или удалённый API).",
+            )
+            return
+
+        token = (self._dolphin_token.text() or "").strip()
+        if not token:
+            token = (
+                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
+            ).strip()
+        base_url = self._own_antidetect_base_url_from_settings(kind_s)
+        if has_customization and not (base_url or "").strip():
+            QMessageBox.warning(
+                self,
+                title,
+                f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} "
+                "API в настройках и сохраните.",
+            )
+            return
+
+        headless = False
+
+        try:
+            remote_cdp = self._remote_cdp_launch_options_for_kind(kind_s)
+        except LocalAntidetectError as e:
+            QMessageBox.warning(self, title, str(e))
+            return
+
+        work_profile_ids = [
+            pid
+            for pid in profile_ids
+            if has_text_fill or pid in {
+                str(a.get("profile_id") or "").strip() for a in assignments
+            }
+        ]
+        if not work_profile_ids:
+            return
+
+        self._profiles_channel_setup_running = True
+        self._sync_profiles_tab_action_buttons()
+        self._profiles_status.setText(
+            f"Настройка канала в Studio: 0 / {len(work_profile_ids)}…"
         )
+        self._append_log(
+            f"[channel_setup] Старт для {len(work_profile_ids)} профилей "
+            f"(с окном браузера, до 5 параллельно)…"
+        )
+
+        threading.Thread(
+            target=self._profiles_channel_setup_worker,
+            kwargs={
+                "profile_ids": work_profile_ids,
+                "kind": kind_s,
+                "token": token,
+                "base_url": base_url,
+                "headless": headless,
+                "description": description,
+                "link_title": link_title,
+                "link_url": link_url,
+                "assignments": assignments,
+                "has_text_fill": has_text_fill,
+                "remote_cdp": remote_cdp,
+            },
+            daemon=True,
+        ).start()
+
+    def _profiles_channel_setup_worker(
+        self,
+        *,
+        profile_ids: list[str],
+        kind: str,
+        token: str,
+        base_url: str,
+        headless: bool,
+        description: str,
+        link_title: str,
+        link_url: str,
+        assignments: list[dict[str, object]],
+        has_text_fill: bool,
+        remote_cdp: RemoteCdpLaunchOptions | None = None,
+    ) -> None:
+        from zaliver.antydetect.antic_open import (
+            set_log_sink,
+            setup_channel_in_local_antidetect_profile,
+            setup_channel_in_profile,
+        )
+        from zaliver.youtube_upload.multi_availability_checker import (
+            MultiProfileAvailabilityChecker,
+        )
+
+        set_log_sink(self._ui_log_line.emit)
+        kind_s = (kind or "").strip()
+        base_u = (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
+        by_id: dict[str, dict[str, object]] = {}
+        for item in assignments:
+            pid = str(item.get("profile_id") or "").strip()
+            if pid:
+                by_id[pid] = item
+
+        def _setup_one(pid: str) -> None:
+            creds = self._profile_login_credentials(pid)
+            yt_oldest = self._profile_yt_oldest_name(pid) or None
+            search_oldest = self._youtube_search_oldest_channel()
+
+            item = by_id.get(pid)
+            png = item.get("avatar_png") if item else None
+            avatar_path: Path | None = None
+            if isinstance(png, (bytes, bytearray)) and png:
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                    tf.write(bytes(png))
+                    avatar_path = Path(tf.name)
+            channel_name = (
+                str(item.get("channel_name") or "").strip() or None if item else None
+            )
+            skip_name_change = bool(item.get("skip_name_change")) if item else False
+
+            try:
+                if _is_own_antidetect_kind(kind_s):
+                    u = (base_url or "").strip()
+                    if not u:
+                        raise LocalAntidetectError(
+                            f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
+                        )
+                    setup_channel_in_local_antidetect_profile(
+                        pid,
+                        description=description if has_text_fill else None,
+                        link_title=link_title if has_text_fill else None,
+                        link_url=link_url if has_text_fill else None,
+                        avatar_path=avatar_path,
+                        channel_name=channel_name,
+                        skip_name_change=skip_name_change,
+                        base_url=u,
+                        headless=headless,
+                        login_credentials=creds,
+                        yt_oldest_name=yt_oldest,
+                        search_oldest_channel=search_oldest,
+                        remote_cdp=remote_cdp,
+                    )
+                else:
+                    setup_channel_in_profile(
+                        pid,
+                        description=description if has_text_fill else None,
+                        link_title=link_title if has_text_fill else None,
+                        link_url=link_url if has_text_fill else None,
+                        avatar_path=avatar_path,
+                        channel_name=channel_name,
+                        skip_name_change=skip_name_change,
+                        local_token=token or None,
+                        headless=headless,
+                        login_credentials=creds,
+                        yt_oldest_name=yt_oldest,
+                        search_oldest_channel=search_oldest,
+                    )
+            finally:
+                if avatar_path is not None:
+                    try:
+                        avatar_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+
+        def _on_progress(done: int, total: int, profile_id: str) -> None:
+            self._studio_channel_setup_progress.emit(done, total, profile_id)
+
+        def _on_profile_done(pid: str, ok: bool, err: str) -> None:
+            if not _is_own_antidetect_kind(kind_s):
+                return
+            from zaliver.antydetect.profile_tags import (
+                AVATAR_CHANGE_ERROR_TAG,
+                AVATAR_CHANGE_SUCCESS_TAG,
+                DESCRIPTION_FILL_ERROR_TAG,
+                DESCRIPTION_FILL_SUCCESS_TAG,
+                LINK_FILL_ERROR_TAG,
+                LINK_FILL_SUCCESS_TAG,
+                NAME_CHANGE_ERROR_TAG,
+                NAME_CHANGE_SUCCESS_TAG,
+            )
+
+            updates: list[tuple[bool, str, str]] = []
+            if has_text_fill:
+                if (description or "").strip():
+                    updates.append(
+                        (ok, DESCRIPTION_FILL_SUCCESS_TAG, DESCRIPTION_FILL_ERROR_TAG)
+                    )
+                if (link_title or "").strip() and (link_url or "").strip():
+                    updates.append((ok, LINK_FILL_SUCCESS_TAG, LINK_FILL_ERROR_TAG))
+
+            item = by_id.get(pid)
+            if item:
+                has_avatar = bool(item.get("avatar_png"))
+                has_name = bool(str(item.get("channel_name") or "").strip()) and not bool(
+                    item.get("skip_name_change")
+                )
+                if has_avatar:
+                    updates.append(
+                        (ok, AVATAR_CHANGE_SUCCESS_TAG, AVATAR_CHANGE_ERROR_TAG)
+                    )
+                if has_name:
+                    updates.append((ok, NAME_CHANGE_SUCCESS_TAG, NAME_CHANGE_ERROR_TAG))
+
+            if updates:
+                self._apply_zaliver_profile_tags_from_worker(
+                    profile_id=pid,
+                    kind=kind_s,
+                    base_url=base_u,
+                    updates=updates,
+                    log_prefix="channel_setup",
+                )
+
+        mgr = MultiProfileAvailabilityChecker(
+            profile_ids=profile_ids,
+            check_one=_setup_one,
+            on_profile_done=_on_profile_done,
+            on_progress=_on_progress,
+            log_sink=self._ui_log_line.emit,
+        )
+        ok_n, fail_n, failed_ids = mgr.run()
+        self._last_channel_setup_failed_ids = list(failed_ids)
+        self._studio_channel_setup_finished.emit(ok_n, fail_n)
 
     def _prompt_shorts_warmup_settings(self) -> ShortsWarmupSettings | None:
         dlg = QDialog(self)
@@ -4501,180 +4701,6 @@ class MainWindow(QWidget):
             horizontal_search_query=(search_edit.text() or "").strip(),
             horizontal_videos_count=horizontal_count_spin.value(),
         )
-
-    def _start_profiles_channel_fill(self) -> None:
-        if self._profiles_channel_fill_running:
-            QMessageBox.information(
-                self,
-                "Описание и ссылка канала",
-                "Заполнение уже выполняется. Дождитесь завершения.",
-            )
-            return
-        if self._profiles_raw is None:
-            QMessageBox.warning(
-                self,
-                "Описание и ссылка канала",
-                "Сначала загрузите список профилей (кнопка «Обновить»).",
-            )
-            return
-        profile_ids = self._collect_checked_profile_ids()
-        if not profile_ids:
-            QMessageBox.warning(
-                self,
-                "Описание и ссылка канала",
-                "Отметьте квадратиками профили, для которых нужно заполнить канал.",
-            )
-            return
-
-        values = self._prompt_channel_description_and_link()
-        if values is None:
-            return
-        description, link_title, link_url = values
-
-        token = (self._dolphin_token.text() or "").strip()
-        if not token:
-            token = (
-                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
-            ).strip()
-        kind = self._default_browser_combo.currentData()
-        if not isinstance(kind, str) or not kind.strip():
-            kind = "dolphin"
-        base_url = self._own_antidetect_base_url_from_settings(kind)
-
-        headless = False
-
-        try:
-            remote_cdp = self._remote_cdp_launch_options_for_kind(kind)
-        except LocalAntidetectError as e:
-            QMessageBox.warning(self, "Описание и ссылка канала", str(e))
-            return
-
-        self._profiles_channel_fill_running = True
-        self._sync_profiles_tab_action_buttons()
-        self._profiles_status.setText(
-            f"Заполнение описания/ссылки канала: 0 / {len(profile_ids)}…"
-        )
-        self._append_log(
-            f"[channel_fill] Старт для {len(profile_ids)} профилей "
-            f"(с окном браузера, до 5 параллельно)…"
-        )
-
-        threading.Thread(
-            target=self._profiles_channel_fill_worker,
-            kwargs={
-                "profile_ids": profile_ids,
-                "kind": kind,
-                "token": token,
-                "base_url": base_url,
-                "headless": headless,
-                "description": description,
-                "link_title": link_title,
-                "link_url": link_url,
-                "remote_cdp": remote_cdp,
-            },
-            daemon=True,
-        ).start()
-
-    def _profiles_channel_fill_worker(
-        self,
-        *,
-        profile_ids: list[str],
-        kind: str,
-        token: str,
-        base_url: str,
-        headless: bool,
-        description: str,
-        link_title: str,
-        link_url: str,
-        remote_cdp: RemoteCdpLaunchOptions | None = None,
-    ) -> None:
-        from zaliver.antydetect.antic_open import (
-            fill_channel_description_and_link_in_local_antidetect_profile,
-            fill_channel_description_and_link_in_profile,
-            set_log_sink,
-        )
-        from zaliver.youtube_upload.multi_availability_checker import (
-            MultiProfileAvailabilityChecker,
-        )
-
-        set_log_sink(self._ui_log_line.emit)
-        kind_s = (kind or "").strip()
-        base_u = (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
-
-        def _fill_one(pid: str) -> None:
-            creds = self._profile_login_credentials(pid)
-            yt_oldest = self._profile_yt_oldest_name(pid) or None
-            search_oldest = self._youtube_search_oldest_channel()
-            if _is_own_antidetect_kind(kind_s):
-                u = (base_url or "").strip()
-                if not u:
-                    raise LocalAntidetectError(
-                        f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
-                    )
-                fill_channel_description_and_link_in_local_antidetect_profile(
-                    pid,
-                    description=description or None,
-                    link_title=link_title or None,
-                    link_url=link_url or None,
-                    base_url=u,
-                    headless=headless,
-                    login_credentials=creds,
-                    yt_oldest_name=yt_oldest,
-                    search_oldest_channel=search_oldest,
-                    remote_cdp=remote_cdp,
-                )
-            else:
-                fill_channel_description_and_link_in_profile(
-                    pid,
-                    description=description or None,
-                    link_title=link_title or None,
-                    link_url=link_url or None,
-                    local_token=token or None,
-                    headless=headless,
-                    login_credentials=creds,
-                    yt_oldest_name=yt_oldest,
-                    search_oldest_channel=search_oldest,
-                )
-
-        def _on_progress(done: int, total: int, profile_id: str) -> None:
-            self._studio_channel_fill_progress.emit(done, total, profile_id)
-
-        def _on_profile_done(pid: str, ok: bool, err: str) -> None:
-            if not _is_own_antidetect_kind(kind_s):
-                return
-            from zaliver.antydetect.profile_tags import (
-                DESCRIPTION_FILL_ERROR_TAG,
-                DESCRIPTION_FILL_SUCCESS_TAG,
-                LINK_FILL_ERROR_TAG,
-                LINK_FILL_SUCCESS_TAG,
-            )
-
-            updates: list[tuple[bool, str, str]] = []
-            if (description or "").strip():
-                updates.append(
-                    (ok, DESCRIPTION_FILL_SUCCESS_TAG, DESCRIPTION_FILL_ERROR_TAG)
-                )
-            if (link_title or "").strip() and (link_url or "").strip():
-                updates.append((ok, LINK_FILL_SUCCESS_TAG, LINK_FILL_ERROR_TAG))
-            if updates:
-                self._apply_zaliver_profile_tags_from_worker(
-                    profile_id=pid,
-                    kind=kind_s,
-                    base_url=base_u,
-                    updates=updates,
-                    log_prefix="channel_fill",
-                )
-
-        mgr = MultiProfileAvailabilityChecker(
-            profile_ids=profile_ids,
-            check_one=_fill_one,
-            on_profile_done=_on_profile_done,
-            on_progress=_on_progress,
-            log_sink=self._ui_log_line.emit,
-        )
-        ok_n, fail_n, failed_ids = mgr.run()
-        self._last_channel_fill_failed_ids = list(failed_ids)
-        self._studio_channel_fill_finished.emit(ok_n, fail_n)
 
     def _start_profiles_warmup(self) -> None:
         if self._profiles_warmup_running:
@@ -5044,246 +5070,6 @@ class MainWindow(QWidget):
         else:
             QMessageBox.information(self, "Импорт данных учёток", msg)
 
-    def _profiles_avatars_dialog_title(self) -> str:
-        return "Аватарки и названия"
-
-    def _open_profiles_avatars_import_dialog(self) -> None:
-        title = self._profiles_avatars_dialog_title()
-        if self._profiles_avatar_upload_running:
-            QMessageBox.information(
-                self,
-                title,
-                "Применение аватарок и названий уже выполняется. Дождитесь завершения.",
-            )
-            return
-        kind = self._default_browser_combo.currentData()
-        if not _is_own_antidetect_kind(kind if isinstance(kind, str) else ""):
-            QMessageBox.information(
-                self,
-                title,
-                "Импорт аватарок и названий доступен только для своего антидетекта "
-                "(локальный или удалённый API).",
-            )
-            return
-        if not self._profiles_raw:
-            QMessageBox.information(
-                self,
-                title,
-                "Сначала загрузите список профилей (кнопка «Обновить»).",
-            )
-            return
-        if self._profiles_interaction is None:
-            return
-        profile_ids = self._profiles_interaction.batch_profile_ids()
-        if not profile_ids:
-            QMessageBox.warning(
-                self,
-                title,
-                "Отметьте квадратиками профили, которым нужно применить изменения.",
-            )
-            return
-        by_id = self._profiles_by_id_map(self._profiles_raw)
-        selected_profiles = [by_id[pid] for pid in profile_ids if pid in by_id]
-        if not selected_profiles:
-            QMessageBox.warning(
-                self,
-                title,
-                "Не удалось найти отмеченные профили в загруженном списке.",
-            )
-            return
-
-        dlg = ProfileAvatarsImportDialog(
-            selected_profiles=selected_profiles,
-            parent=self,
-        )
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        assignments = dlg.profile_assignments()
-        if not assignments:
-            return
-
-        token = (self._dolphin_token.text() or "").strip()
-        if not token:
-            token = (
-                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
-            ).strip()
-        kind_s = kind if isinstance(kind, str) else "dolphin"
-        base_url = self._own_antidetect_base_url_from_settings(kind_s)
-        if not (base_url or "").strip():
-            QMessageBox.warning(
-                self,
-                title,
-                f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} "
-                "API в настройках и сохраните.",
-            )
-            return
-
-        headless = False
-
-        try:
-            remote_cdp = self._remote_cdp_launch_options_for_kind(kind_s)
-        except LocalAntidetectError as e:
-            QMessageBox.warning(self, title, str(e))
-            return
-
-        self._profiles_avatar_upload_running = True
-        self._sync_profiles_tab_action_buttons()
-        self._profiles_status.setText(
-            f"Аватарки и названия в Studio: 0 / {len(assignments)}…"
-        )
-        self._append_log(
-            f"[avatar_upload] Старт для {len(assignments)} профилей "
-            f"(с окном браузера, до 5 параллельно)…"
-        )
-
-        threading.Thread(
-            target=self._profiles_avatar_upload_worker,
-            kwargs={
-                "assignments": assignments,
-                "kind": kind_s,
-                "token": token,
-                "base_url": base_url,
-                "headless": headless,
-                "remote_cdp": remote_cdp,
-            },
-            daemon=True,
-        ).start()
-
-    def _profiles_avatar_upload_worker(
-        self,
-        *,
-        assignments: list[dict[str, object]],
-        kind: str,
-        token: str,
-        base_url: str,
-        headless: bool,
-        remote_cdp: RemoteCdpLaunchOptions | None = None,
-    ) -> None:
-        from zaliver.antydetect.antic_open import (
-            set_log_sink,
-            upload_channel_avatar_in_local_antidetect_profile,
-            upload_channel_avatar_in_profile,
-        )
-        from zaliver.youtube_upload.multi_availability_checker import (
-            MultiProfileAvailabilityChecker,
-        )
-
-        set_log_sink(self._ui_log_line.emit)
-        kind_s = (kind or "").strip()
-        base_u = (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
-        by_id: dict[str, dict[str, object]] = {}
-        for item in assignments:
-            pid = str(item.get("profile_id") or "").strip()
-            if pid:
-                by_id[pid] = item
-
-        def _upload_one(pid: str) -> None:
-            item = by_id.get(pid)
-            if not item:
-                raise LocalAntidetectError(f"Нет задания для профиля {pid!r}.")
-            png = item.get("avatar_png")
-            avatar_path: Path | None = None
-            if isinstance(png, (bytes, bytearray)) and png:
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                    tf.write(bytes(png))
-                    avatar_path = Path(tf.name)
-            channel_name = str(item.get("channel_name") or "").strip() or None
-            skip_name_change = bool(item.get("skip_name_change"))
-            if avatar_path is None and not (
-                channel_name and not skip_name_change
-            ):
-                raise LocalAntidetectError(
-                    f"Нет аватарки и названия для профиля {pid!r}."
-                )
-            try:
-                creds = self._profile_login_credentials(pid)
-                yt_oldest = self._profile_yt_oldest_name(pid) or None
-                search_oldest = self._youtube_search_oldest_channel()
-                if _is_own_antidetect_kind(kind_s):
-                    u = (base_url or "").strip()
-                    if not u:
-                        raise LocalAntidetectError(
-                            f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
-                        )
-                    upload_channel_avatar_in_local_antidetect_profile(
-                        pid,
-                        avatar_path=avatar_path,
-                        channel_name=channel_name,
-                        skip_name_change=skip_name_change,
-                        base_url=u,
-                        headless=headless,
-                        login_credentials=creds,
-                        yt_oldest_name=yt_oldest,
-                        search_oldest_channel=search_oldest,
-                        remote_cdp=remote_cdp,
-                    )
-                else:
-                    upload_channel_avatar_in_profile(
-                        pid,
-                        avatar_path=avatar_path,
-                        channel_name=channel_name,
-                        skip_name_change=skip_name_change,
-                        local_token=token or None,
-                        headless=headless,
-                        login_credentials=creds,
-                        yt_oldest_name=yt_oldest,
-                        search_oldest_channel=search_oldest,
-                    )
-            finally:
-                if avatar_path is not None:
-                    try:
-                        avatar_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-
-        def _on_progress(done: int, total: int, profile_id: str) -> None:
-            self._studio_avatar_upload_progress.emit(done, total, profile_id)
-
-        def _on_profile_done(pid: str, ok: bool, err: str) -> None:
-            if not _is_own_antidetect_kind(kind_s):
-                return
-            item = by_id.get(pid)
-            if not item:
-                return
-            from zaliver.antydetect.profile_tags import (
-                AVATAR_CHANGE_ERROR_TAG,
-                AVATAR_CHANGE_SUCCESS_TAG,
-                NAME_CHANGE_ERROR_TAG,
-                NAME_CHANGE_SUCCESS_TAG,
-            )
-
-            has_avatar = bool(item.get("avatar_png"))
-            has_name = bool(str(item.get("channel_name") or "").strip()) and not bool(
-                item.get("skip_name_change")
-            )
-            updates: list[tuple[bool, str, str]] = []
-            if has_avatar:
-                updates.append(
-                    (ok, AVATAR_CHANGE_SUCCESS_TAG, AVATAR_CHANGE_ERROR_TAG)
-                )
-            if has_name:
-                updates.append((ok, NAME_CHANGE_SUCCESS_TAG, NAME_CHANGE_ERROR_TAG))
-            if updates:
-                self._apply_zaliver_profile_tags_from_worker(
-                    profile_id=pid,
-                    kind=kind_s,
-                    base_url=base_u,
-                    updates=updates,
-                    log_prefix="avatar_upload",
-                )
-
-        mgr = MultiProfileAvailabilityChecker(
-            profile_ids=list(by_id.keys()),
-            check_one=_upload_one,
-            on_profile_done=_on_profile_done,
-            on_progress=_on_progress,
-            log_sink=self._ui_log_line.emit,
-        )
-        ok_n, fail_n, failed_ids = mgr.run()
-        self._last_avatar_upload_failed_ids = list(failed_ids)
-        self._studio_avatar_upload_finished.emit(ok_n, fail_n)
-
     def _open_profile_cdp_preview(self, profile_id: str) -> None:
         pid = (profile_id or "").strip()
         if not pid:
@@ -5639,65 +5425,32 @@ class MainWindow(QWidget):
             f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
         )
 
-    def _on_studio_channel_fill_progress(
+    def _on_studio_channel_setup_progress(
         self, current: int, total: int, profile_id: str
     ) -> None:
         pid = (profile_id or "").strip()
         self._profiles_status.setText(
-            f"Заполнение описания/ссылки канала: {current} / {total}"
+            f"Настройка канала в Studio: {current} / {total}"
             + (f" — профиль {pid}" if pid else "…")
         )
 
-    def _on_studio_channel_fill_finished(self, ok_n: int, fail_n: int) -> None:
-        self._profiles_channel_fill_running = False
+    def _on_studio_channel_setup_finished(self, ok_n: int, fail_n: int) -> None:
+        self._profiles_channel_setup_running = False
         self._sync_profiles_tab_action_buttons()
         total = int(ok_n) + int(fail_n)
+        title = self._profiles_channel_setup_dialog_title()
         self._profiles_status.setText(
-            f"Заполнение канала завершено: успешно {ok_n}, с ошибкой {fail_n} "
+            f"Настройка канала завершена: успешно {ok_n}, с ошибкой {fail_n} "
             f"(всего {total})."
         )
         self._append_log(
-            f"[channel_fill] Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}."
+            f"[channel_setup] Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}."
         )
         if int(fail_n) > 0:
-            failed = getattr(self, "_last_channel_fill_failed_ids", None) or []
+            failed = getattr(self, "_last_channel_setup_failed_ids", None) or []
             if failed:
                 self._append_log(
-                    "[channel_fill] Ошибки (ID): " + ", ".join(failed)
-                )
-        self._refresh_profiles_list_after_zaliver_tags()
-        QMessageBox.information(
-            self,
-            "Описание и ссылка канала",
-            f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
-        )
-
-    def _on_studio_avatar_upload_progress(
-        self, current: int, total: int, profile_id: str
-    ) -> None:
-        pid = (profile_id or "").strip()
-        self._profiles_status.setText(
-            f"Аватарки и названия в Studio: {current} / {total}"
-            + (f" — профиль {pid}" if pid else "…")
-        )
-
-    def _on_studio_avatar_upload_finished(self, ok_n: int, fail_n: int) -> None:
-        self._profiles_avatar_upload_running = False
-        self._sync_profiles_tab_action_buttons()
-        total = int(ok_n) + int(fail_n)
-        title = self._profiles_avatars_dialog_title()
-        self._profiles_status.setText(
-            f"Аватарки и названия: успешно {ok_n}, с ошибкой {fail_n} "
-            f"(всего {total})."
-        )
-        self._append_log(
-            f"[avatar_upload] Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}."
-        )
-        if int(fail_n) > 0:
-            failed = getattr(self, "_last_avatar_upload_failed_ids", None) or []
-            if failed:
-                self._append_log(
-                    "[avatar_upload] Ошибки (ID): " + ", ".join(failed)
+                    "[channel_setup] Ошибки (ID): " + ", ".join(failed)
                 )
         self._refresh_profiles_list_after_zaliver_tags()
         QMessageBox.information(

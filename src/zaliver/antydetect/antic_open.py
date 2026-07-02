@@ -851,7 +851,6 @@ def setup_channel_in_local_antidetect_profile(
                     login_credentials=login_credentials,
                     yt_oldest_name=yt_oldest_name,
                     search_oldest_channel=search_oldest_channel,
-                    include_name_change_cooldown=has_name,
                 )
                 if has_text:
                     run_studio_channel_description_and_link(
@@ -867,12 +866,17 @@ def setup_channel_in_local_antidetect_profile(
                             "Local antidetect: повторный переход в Studio "
                             "для аватарки/названия (без перезапуска профиля)…"
                         )
+                    profile_kw = dict(studio_kw)
+                    if has_name:
+                        profile_kw["on_name_change_cooldown"] = (
+                            _make_save_name_change_cooldown_handler(api, profile_id)
+                        )
                     run_studio_channel_profile_customization(
                         page,
                         avatar_path=avatar_path,
                         channel_name=channel_name,
                         skip_name_change=skip_name_change,
-                        **studio_kw,
+                        **profile_kw,
                     )
             finally:
                 _close_playwright_browser(browser)

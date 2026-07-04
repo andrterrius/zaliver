@@ -267,6 +267,18 @@ class UploadStore:
                 "CREATE INDEX IF NOT EXISTS idx_recent_channel_descriptions_used_at "
                 "ON recent_channel_descriptions(used_at DESC);"
             )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS recent_video_default_titles (
+                    title TEXT PRIMARY KEY,
+                    used_at TEXT NOT NULL
+                );
+                """
+            )
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_recent_video_default_titles_used_at "
+                "ON recent_video_default_titles(used_at DESC);"
+            )
 
     def _list_recent_text_values(
         self,
@@ -539,6 +551,25 @@ class UploadStore:
             table="recent_channel_descriptions",
             column="description",
             value=description,
+            keep=_RECENT_CHANNEL_SETUP_KEEP,
+        )
+
+    def list_recent_video_default_titles(
+        self, limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT
+    ) -> list[str]:
+        """Последние названия по умолчанию для загрузки видео."""
+        return self._list_recent_text_values(
+            table="recent_video_default_titles",
+            column="title",
+            limit=limit,
+        )
+
+    def remember_video_default_title(self, title: str) -> None:
+        """Запомнить название по умолчанию для загрузки видео."""
+        self._remember_recent_text_value(
+            table="recent_video_default_titles",
+            column="title",
+            value=title,
             keep=_RECENT_CHANNEL_SETUP_KEEP,
         )
 

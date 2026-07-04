@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections.abc import Callable
 from typing import NamedTuple
 from functools import partial
@@ -19,9 +19,11 @@ from PyQt6.QtCore import (
     QEvent,
     QObject,
     QPointF,
+    QDateTime,
     QSettings,
     QSize,
     QThread,
+    QTimeZone,
     QTimer,
     Qt,
     QUrl,
@@ -52,6 +54,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QCheckBox,
     QComboBox,
+    QDateTimeEdit,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
@@ -98,6 +101,7 @@ from zaliver.ui.profile_preview_dialog import ProfileCdpPreviewDialog
 from zaliver.ui.profiles_list_interaction import ProfilesListInteraction
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
 from zaliver.stats_server_client import notify_uploaded_video
+from zaliver.youtube_upload.schedule_publish import MSK, validate_schedule_times
 from zaliver.ui.uploaded_stats_refresh_worker import UploadedStatsRefreshWorker
 from zaliver.ui.widgets import (
     AnimatedProgressBar,
@@ -2882,7 +2886,7 @@ class MainWindow(QWidget):
             except Exception:
                 pass
             self._refresh_antydetect_profiles()
-            return {"title": "", "description": "", "profile_ids": "", "publish_before_checks": True}
+            return {"title": "", "description": "", "profile_ids": "", "publish_before_checks": True, "keep_studio_title": False, "schedule_publish": False, "schedule_times_iso": []}
 
         dlg = QDialog(self)
         dlg_title = (
@@ -2928,6 +2932,137 @@ class MainWindow(QWidget):
             "или сообщения «Загрузка завершена… обработка скоро начнётся», "
             "без ожидания проверок YouTube."
         )
+
+        keep_studio_title_cb = QCheckBox("Название из настроек/названия файлов")
+        keep_studio_title_cb.setChecked(False)
+        keep_studio_title_cb.setToolTip(
+            "Если включено — в YouTube Studio не очищаем поле «Название»: "
+            "остаётся значение из настроек канала или имени файла."
+        )
+
+        def _sync_keep_studio_title_ui(checked: bool) -> None:
+            title_edit.setEnabled(not checked)
+            if checked and title_le is not None:
+                title_le.setPlaceholderText(
+                    "Название не вводится — берётся из Studio (настройки канала или имя файла)…"
+                )
+            elif title_le is not None:
+                title_le.setPlaceholderText(
+                    "Название видео (обязательное для загрузки в YouTube)…"
+                )
+
+        keep_studio_title_cb.toggled.connect(_sync_keep_studio_title_ui)
+
+        schedule_publish_cb = QCheckBox("Опубликовать в отложку")
+        schedule_publish_cb.setChecked(False)
+        schedule_publish_cb.setToolTip(
+            "На экране «Открытый доступ» выбирается отложенная публикация (Москва). "
+            "На каждый профиль подряд загружается по одному видео на каждое указанное время."
+        )
+
+        schedule_times_widget = QWidget()
+        schedule_times_layout = QVBoxLayout(schedule_times_widget)
+        schedule_times_layout.setContentsMargins(24, 0, 0, 0)
+        schedule_times_layout.setSpacing(6)
+        msk_tz = QTimeZone(b"Europe/Moscow")
+        now_msk = datetime.now(tz=MSK)
+        default_base = (now_msk + timedelta(days=1)).replace(
+            hour=10, minute=0, second=0, microsecond=0
+        )
+
+        def _default_schedule_qdt(offset_hours: int = 0) -> QDateTime:
+            dt = default_base + timedelta(hours=offset_hours)
+            qdt = QDateTime(dt.year, dt.month, dt.day, dt.hour, dt.minute)
+            qdt.setTimeZone(msk_tz)
+            return qdt
+
+        schedule_time_edits: list[QDateTimeEdit] = []
+        schedule_time_rows: list[QWidget] = []
+
+        def _make_schedule_time_row(index: int, *, visible: bool) -> QDateTimeEdit:
+            row = QWidget()
+            row_l = QHBoxLayout(row)
+            row_l.setContentsMargins(0, 0, 0, 0)
+            row_l.setSpacing(8)
+            lbl = QLabel(f"Время {index} (МСК):")
+            edit = QDateTimeEdit()
+            edit.setDisplayFormat("dd.MM.yyyy HH:mm")
+            edit.setCalendarPopup(True)
+            edit.setTimeZone(msk_tz)
+            edit.setDateTime(_default_schedule_qdt(5 * (index - 1)))
+            row_l.addWidget(lbl)
+            row_l.addWidget(edit, 1)
+            schedule_times_layout.addWidget(row)
+            schedule_time_edits.append(edit)
+            schedule_time_rows.append(row)
+            row.setVisible(visible)
+            return edit
+
+        _make_schedule_time_row(1, visible=True)
+        _make_schedule_time_row(2, visible=False)
+        _make_schedule_time_row(3, visible=False)
+
+        schedule_slots_visible = 1
+        schedule_btns = QHBoxLayout()
+        btn_add_schedule_time = QPushButton("Добавить время")
+        btn_add_schedule_time.setObjectName("secondary")
+        btn_remove_schedule_time = QPushButton("Убрать время")
+        btn_remove_schedule_time.setObjectName("secondary")
+        schedule_btns.addWidget(btn_add_schedule_time)
+        schedule_btns.addWidget(btn_remove_schedule_time)
+        schedule_btns.addStretch()
+        schedule_times_layout.addLayout(schedule_btns)
+        schedule_hint = QLabel(
+            "До 3 времён, интервал между ними не менее 5 часов. "
+            "Сначала все видео на одном профиле (по одному на каждое время), затем следующий профиль."
+        )
+        schedule_hint.setObjectName("hint")
+        schedule_hint.setWordWrap(True)
+        schedule_times_layout.addWidget(schedule_hint)
+
+        def _sync_schedule_time_buttons() -> None:
+            btn_add_schedule_time.setEnabled(schedule_slots_visible < 3)
+            btn_remove_schedule_time.setEnabled(schedule_slots_visible > 1)
+
+        def _sync_schedule_times_visibility(checked: bool) -> None:
+            schedule_times_widget.setVisible(checked)
+
+        def _add_schedule_time_slot() -> None:
+            nonlocal schedule_slots_visible
+            if schedule_slots_visible >= 3:
+                return
+            schedule_slots_visible += 1
+            schedule_time_rows[schedule_slots_visible - 1].setVisible(True)
+            prev = schedule_time_edits[schedule_slots_visible - 2].dateTime()
+            nxt = prev.addSecs(5 * 3600)
+            schedule_time_edits[schedule_slots_visible - 1].setDateTime(nxt)
+            _sync_schedule_time_buttons()
+
+        def _remove_schedule_time_slot() -> None:
+            nonlocal schedule_slots_visible
+            if schedule_slots_visible <= 1:
+                return
+            schedule_time_rows[schedule_slots_visible - 1].setVisible(False)
+            schedule_slots_visible -= 1
+            _sync_schedule_time_buttons()
+
+        btn_add_schedule_time.clicked.connect(_add_schedule_time_slot)
+        btn_remove_schedule_time.clicked.connect(_remove_schedule_time_slot)
+        schedule_publish_cb.toggled.connect(_sync_schedule_times_visibility)
+        _sync_schedule_times_visibility(False)
+        _sync_schedule_time_buttons()
+
+        def _collect_schedule_times_msk() -> list[datetime]:
+            out: list[datetime] = []
+            for i in range(schedule_slots_visible):
+                qdt = schedule_time_edits[i].dateTime()
+                py = qdt.toPyDateTime()
+                if py.tzinfo is None:
+                    py = py.replace(tzinfo=MSK)
+                else:
+                    py = py.astimezone(MSK)
+                out.append(py)
+            return out
 
         lw = QListWidget()
         lw.setObjectName("uploadProfilesList")
@@ -3029,6 +3164,10 @@ class MainWindow(QWidget):
         dlg_raise_videos_btn.setObjectName("secondary")
         dlg_raise_videos_btn.setVisible(False)
 
+        dlg_raise_videos_schedule_btn = QPushButton("")
+        dlg_raise_videos_schedule_btn.setObjectName("secondary")
+        dlg_raise_videos_schedule_btn.setVisible(False)
+
         def _raise_videos_to_profile_count(profile_count: int) -> None:
             target = max(0, int(profile_count))
             if target <= 0:
@@ -3044,7 +3183,14 @@ class MainWindow(QWidget):
             _raise_videos_to_profile_count(dlg_interaction.checked_count())
             _update_dlg_upload_profile_count()
 
+        def _on_raise_videos_schedule_clicked() -> None:
+            n = dlg_interaction.checked_count()
+            target = n * schedule_slots_visible
+            _raise_videos_to_profile_count(target)
+            _update_dlg_upload_profile_count()
+
         dlg_raise_videos_btn.clicked.connect(_on_raise_videos_clicked)
+        dlg_raise_videos_schedule_btn.clicked.connect(_on_raise_videos_schedule_clicked)
 
         planned_label = (
             "Будет нарезано видео"
@@ -3072,16 +3218,40 @@ class MainWindow(QWidget):
             else:
                 lines.append(f"Выбрано профилей для залива: {n}")
             dlg_profile_count_lbl.setText("\n".join(lines))
-            can_raise = n > 0 and n > pv and (
+            can_raise_base = n > 0 and (
                 mode == "slicing" or n_inputs > 0
             )
-            if can_raise:
+            can_raise_profiles = can_raise_base and n > pv
+            schedule_multi = (
+                schedule_publish_cb.isChecked() and schedule_slots_visible > 1
+            )
+            required_schedule = n * schedule_slots_visible if schedule_multi else 0
+            can_raise_schedule = (
+                can_raise_base and schedule_multi and required_schedule > pv
+            )
+
+            if can_raise_profiles:
                 dlg_raise_videos_btn.setText(f"Увеличить число видео до {n}")
                 dlg_raise_videos_btn.setVisible(True)
             else:
                 dlg_raise_videos_btn.setVisible(False)
 
+            if can_raise_schedule:
+                dlg_raise_videos_schedule_btn.setText(
+                    f"Увеличить число видео до {required_schedule}"
+                )
+                dlg_raise_videos_schedule_btn.setVisible(True)
+            else:
+                dlg_raise_videos_schedule_btn.setVisible(False)
+
         dlg_interaction.selection_changed.connect(_update_dlg_upload_profile_count)
+        schedule_publish_cb.toggled.connect(lambda _c: _update_dlg_upload_profile_count())
+        btn_add_schedule_time.clicked.connect(
+            lambda: _update_dlg_upload_profile_count()
+        )
+        btn_remove_schedule_time.clicked.connect(
+            lambda: _update_dlg_upload_profile_count()
+        )
         _update_dlg_upload_profile_count()
 
         if not ids:
@@ -3112,12 +3282,16 @@ class MainWindow(QWidget):
         )
         grid.addWidget(desc_edit, 1, 1)
         grid.addWidget(publish_before_checks_cb, 2, 1)
+        grid.addWidget(keep_studio_title_cb, 3, 1)
+        grid.addWidget(schedule_publish_cb, 4, 1)
+        grid.addWidget(schedule_times_widget, 5, 1)
         profiles_col = QWidget()
         profiles_col_l = QVBoxLayout(profiles_col)
         profiles_col_l.setContentsMargins(0, 0, 0, 0)
         profiles_col_l.setSpacing(8)
         profiles_col_l.addWidget(dlg_profile_count_lbl)
         profiles_col_l.addWidget(dlg_raise_videos_btn)
+        profiles_col_l.addWidget(dlg_raise_videos_schedule_btn)
         profiles_col_l.addWidget(dlg_query)
         dlg_sel_row, _dlg_checked_lbl = self._build_profiles_selection_toolbar(
             dlg,
@@ -3128,10 +3302,10 @@ class MainWindow(QWidget):
         profiles_col_l.addLayout(dlg_sel_row)
         profiles_col_l.addWidget(lw, 1)
 
-        grid.addWidget(QLabel("Профили:"), 3, 0, Qt.AlignmentFlag.AlignTop)
-        grid.addWidget(profiles_col, 3, 1)
-        grid.addWidget(btns, 4, 0, 1, 2)
-        grid.setRowStretch(3, 1)
+        grid.addWidget(QLabel("Профили:"), 6, 0, Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(profiles_col, 6, 1)
+        grid.addWidget(btns, 7, 0, 1, 2)
+        grid.setRowStretch(6, 1)
 
         if title_le is not None:
             title_le.setFocus()
@@ -3140,8 +3314,18 @@ class MainWindow(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return None
 
+        keep_studio_title = keep_studio_title_cb.isChecked()
+        schedule_publish = schedule_publish_cb.isChecked()
+        schedule_times_iso: list[str] = []
+        if schedule_publish:
+            schedule_times_msk = _collect_schedule_times_msk()
+            sched_err = validate_schedule_times(schedule_times_msk)
+            if sched_err:
+                QMessageBox.warning(self, "Zaliver", sched_err)
+                return None
+            schedule_times_iso = [t.isoformat() for t in sorted(schedule_times_msk)]
         title = (title_edit.currentText() or "").strip()
-        if title:
+        if title and not keep_studio_title:
             self._upload_store.remember_upload_title(title)
         description = (desc_edit.toPlainText() or "").strip()
         picked = dlg_interaction.batch_profile_ids()
@@ -3154,8 +3338,11 @@ class MainWindow(QWidget):
                 "description": description,
                 "profile_ids": "",
                 "publish_before_checks": publish_before_checks_cb.isChecked(),
+                "keep_studio_title": keep_studio_title,
+                "schedule_publish": schedule_publish,
+                "schedule_times_iso": schedule_times_iso,
             }
-        if not title:
+        if not keep_studio_title and not title:
             QMessageBox.warning(self, "Zaliver", "Название видео обязательно для загрузки в YouTube.")
             return None
 
@@ -3164,6 +3351,9 @@ class MainWindow(QWidget):
             "description": description,
             "profile_ids": ",".join(picked),
             "publish_before_checks": publish_before_checks_cb.isChecked(),
+            "keep_studio_title": keep_studio_title,
+            "schedule_publish": schedule_publish,
+            "schedule_times_iso": schedule_times_iso,
         }
 
     def showEvent(self, event: QShowEvent) -> None:
@@ -3676,7 +3866,9 @@ class MainWindow(QWidget):
 
     def _stats_server_username_stripped(self) -> str:
         if not hasattr(self, "_stats_server_username"):
-            return ""
+            return (
+                self._settings.value("stats_server/username", "", type=str) or ""
+            ).strip()
         return (self._stats_server_username.text() or "").strip()
 
     def _persist_stats_server_username_to_settings(self, username: str) -> None:
@@ -4318,6 +4510,7 @@ class MainWindow(QWidget):
             recent_channel_descriptions=self._upload_store.list_recent_channel_descriptions(),
             recent_link_titles=self._upload_store.list_recent_channel_link_titles(),
             recent_link_urls=self._upload_store.list_recent_channel_link_urls(),
+            recent_video_default_titles=self._upload_store.list_recent_video_default_titles(),
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -4326,20 +4519,24 @@ class MainWindow(QWidget):
         description = dlg.channel_description()
         link_title = dlg.channel_link_title()
         link_url = dlg.channel_link_url()
+        video_default_title = dlg.video_default_title()
         if description:
             self._upload_store.remember_channel_description(description)
         if link_title:
             self._upload_store.remember_channel_link_title(link_title)
         if link_url:
             self._upload_store.remember_channel_link_url(link_url)
+        if video_default_title:
+            self._upload_store.remember_video_default_title(video_default_title)
         channel_names = dlg.channel_names_for_remember()
         if channel_names:
             self._upload_store.remember_channel_names(channel_names)
         assignments = dlg.profile_assignments()
         has_text_fill = dlg.has_channel_text_fill()
+        has_video_title_fill = dlg.has_video_default_title()
         has_customization = dlg.has_profile_customization()
 
-        if not has_text_fill and not has_customization:
+        if not has_text_fill and not has_video_title_fill and not has_customization:
             return
 
         kind = self._default_browser_combo.currentData()
@@ -4379,7 +4576,7 @@ class MainWindow(QWidget):
         work_profile_ids = [
             pid
             for pid in profile_ids
-            if has_text_fill or pid in {
+            if has_text_fill or has_video_title_fill or pid in {
                 str(a.get("profile_id") or "").strip() for a in assignments
             }
         ]
@@ -4407,8 +4604,10 @@ class MainWindow(QWidget):
                 "description": description,
                 "link_title": link_title,
                 "link_url": link_url,
+                "video_default_title": video_default_title,
                 "assignments": assignments,
                 "has_text_fill": has_text_fill,
+                "has_video_title_fill": has_video_title_fill,
                 "remote_cdp": remote_cdp,
             },
             daemon=True,
@@ -4425,8 +4624,10 @@ class MainWindow(QWidget):
         description: str,
         link_title: str,
         link_url: str,
+        video_default_title: str,
         assignments: list[dict[str, object]],
         has_text_fill: bool,
+        has_video_title_fill: bool,
         remote_cdp: RemoteCdpLaunchOptions | None = None,
     ) -> None:
         from zaliver.antydetect.antic_open import (
@@ -4476,6 +4677,7 @@ class MainWindow(QWidget):
                         description=description if has_text_fill else None,
                         link_title=link_title if has_text_fill else None,
                         link_url=link_url if has_text_fill else None,
+                        video_default_title=video_default_title if has_video_title_fill else None,
                         avatar_path=avatar_path,
                         channel_name=channel_name,
                         skip_name_change=skip_name_change,
@@ -4492,6 +4694,7 @@ class MainWindow(QWidget):
                         description=description if has_text_fill else None,
                         link_title=link_title if has_text_fill else None,
                         link_url=link_url if has_text_fill else None,
+                        video_default_title=video_default_title if has_video_title_fill else None,
                         avatar_path=avatar_path,
                         channel_name=channel_name,
                         skip_name_change=skip_name_change,
@@ -6603,6 +6806,17 @@ class MainWindow(QWidget):
             self._upload_cancel_dolphin_token = token
             self._upload_cancel_profile_ids = list(profile_ids)
             publish_before_checks = bool(pending.get("publish_before_checks", True))
+            keep_studio_title = bool(pending.get("keep_studio_title", False))
+            from zaliver.youtube_upload.schedule_publish import parse_msk_datetime
+
+            schedule_times: list[datetime] = []
+            if pending.get("schedule_publish"):
+                for raw in pending.get("schedule_times_iso") or []:
+                    dt = parse_msk_datetime(raw)
+                    if dt is not None:
+                        schedule_times.append(dt)
+                schedule_times = sorted(schedule_times)
+            schedule_batch_size = len(schedule_times)
 
             def _upload_one(profile_id: str, task: VideoTask) -> None:
                 from zaliver.antydetect.antic_open import (
@@ -6625,88 +6839,144 @@ class MainWindow(QWidget):
                 creds = self._profile_login_credentials(profile_id)
                 yt_oldest = self._profile_yt_oldest_name(profile_id) or None
                 search_oldest = self._youtube_search_oldest_channel()
+                guser = self._stats_server_username_stripped()
+                open_kw = dict(
+                    headless=headless,
+                    video_path=task.video_path,
+                    title=task.title,
+                    description=task.description,
+                    login_credentials=creds,
+                    yt_oldest_name=yt_oldest,
+                    search_oldest_channel=search_oldest,
+                    publish_before_checks=publish_before_checks,
+                    keep_studio_title=keep_studio_title,
+                    schedule_publish_at=task.schedule_publish_at,
+                    scheduled_batch=task.scheduled_batch,
+                    stats_server_username=guser or None,
+                )
                 if _is_own_antidetect_kind(kind):
                     res = open_google_in_local_antidetect_profile(
                         profile_id,
                         base_url=(base_url or "").strip(),
-                        headless=headless,
-                        video_path=task.video_path,
-                        title=task.title,
-                        description=task.description,
-                        login_credentials=creds,
-                        yt_oldest_name=yt_oldest,
-                        search_oldest_channel=search_oldest,
                         remote_cdp=remote_cdp,
-                        publish_before_checks=publish_before_checks,
+                        **open_kw,
                     )
                 else:
                     res = open_google_in_profile(
                         profile_id,
                         local_token=token or None,
-                        headless=headless,
+                        **open_kw,
+                    )
+
+                def _record_one(*, video_path: str, title: str, description: str, one_res) -> None:
+                    vid = ""
+                    url = ""
+                    if isinstance(one_res, dict):
+                        vid = str(one_res.get("video_id") or "").strip()
+                        url = str(one_res.get("url") or "").strip()
+                    if not vid and url:
+                        try:
+                            from zaliver.youtube_parsing.video_stats import extract_video_id
+
+                            vid = extract_video_id(url)
+                        except Exception:
+                            pass
+                    if not vid:
+                        raise RuntimeError(f"Empty video_id (res={one_res!r})")
+                    if not url:
+                        url = _studio_canonical_watch_url(vid)
+                    if not url:
+                        raise RuntimeError(f"Empty url (res={one_res!r})")
+
+                    sid = int(self._upload_session.id) if self._upload_session is not None else 0
+                    if sid <= 0:
+                        raise RuntimeError("upload_session is not set (sid=0)")
+
+                    stored_title = title or ""
+                    if keep_studio_title and not stored_title:
+                        stored_title = Path(video_path).stem
+
+                    self._upload_store.add_uploaded_video(
+                        session_id=sid,
+                        title=stored_title,
+                        description=description or "",
+                        url=url,
+                        video_id=vid,
+                        profile_id=profile_id,
+                    )
+                    try:
+                        self._upload_store.inc_uploaded_ok(session_id=sid, delta=1)
+                    except Exception:
+                        pass
+                    try:
+                        stats_notified = bool(
+                            isinstance(one_res, dict) and one_res.get("stats_notified")
+                        )
+                        if guser and not stats_notified:
+                            ok = notify_uploaded_video(
+                                video_id=vid,
+                                username=guser,
+                                profile_id=profile_id,
+                            )
+                            try:
+                                if ok:
+                                    self._ui_log_line.emit(
+                                        f"[stats_server] уведомление отправлено: videoId={vid}"
+                                    )
+                                else:
+                                    self._ui_log_line.emit(
+                                        f"[stats_server] сервер не принял уведомление: videoId={vid}"
+                                    )
+                            except Exception:
+                                pass
+                        elif not guser:
+                            try:
+                                self._ui_log_line.emit(
+                                    "[stats_server] username не задан — уведомление пропущено."
+                                )
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        try:
+                            self._ui_log_line.emit(
+                                f"[stats_server] ошибка уведомления: {e!r}"
+                            )
+                        except Exception:
+                            pass
+                    try:
+                        QTimer.singleShot(0, self._refresh_uploaded_list)
+                    except Exception:
+                        pass
+                    with self._upload_success_lock:
+                        self._upload_success_video_paths.add(video_path)
+
+                batch_results = []
+                if isinstance(res, dict):
+                    raw_batch = res.get("batch_results")
+                    if isinstance(raw_batch, list):
+                        batch_results = raw_batch
+
+                if batch_results and task.scheduled_batch:
+                    if len(batch_results) != len(task.scheduled_batch):
+                        raise RuntimeError(
+                            "scheduled_batch size mismatch: "
+                            f"{len(batch_results)} results vs "
+                            f"{len(task.scheduled_batch)} tasks"
+                        )
+                    for item, item_res in zip(task.scheduled_batch, batch_results):
+                        _record_one(
+                            video_path=item.video_path,
+                            title=item.title,
+                            description=item.description,
+                            one_res=item_res,
+                        )
+                else:
+                    _record_one(
                         video_path=task.video_path,
                         title=task.title,
                         description=task.description,
-                        login_credentials=creds,
-                        yt_oldest_name=yt_oldest,
-                        search_oldest_channel=search_oldest,
-                        publish_before_checks=publish_before_checks,
+                        one_res=res,
                     )
-
-                vid = ""
-                url = ""
-                if isinstance(res, dict):
-                    vid = str(res.get("video_id") or "").strip()
-                    url = str(res.get("url") or "").strip()
-                if not vid and url:
-                    try:
-                        from zaliver.youtube_parsing.video_stats import extract_video_id
-
-                        vid = extract_video_id(url)
-                    except Exception:
-                        pass
-                if not vid:
-                    raise RuntimeError(f"Empty video_id (res={res!r})")
-                if not url:
-                    url = _studio_canonical_watch_url(vid)
-                if not url:
-                    raise RuntimeError(f"Empty url (res={res!r})")
-
-                sid = int(self._upload_session.id) if self._upload_session is not None else 0
-                if sid <= 0:
-                    raise RuntimeError("upload_session is not set (sid=0)")
-
-                self._upload_store.add_uploaded_video(
-                    session_id=sid,
-                    title=task.title or "",
-                    description=task.description or "",
-                    url=url,
-                    video_id=vid,
-                    profile_id=profile_id,
-                )
-                try:
-                    self._upload_store.inc_uploaded_ok(session_id=sid, delta=1)
-                except Exception:
-                    pass
-                try:
-                    guser = (
-                        self._settings.value("stats_server/username", "", type=str)
-                        or ""
-                    ).strip()
-                    if guser:
-                        notify_uploaded_video(
-                            video_id=vid,
-                            username=guser,
-                            profile_id=profile_id,
-                        )
-                except Exception:
-                    pass
-                try:
-                    QTimer.singleShot(0, self._refresh_uploaded_list)
-                except Exception:
-                    pass
-                with self._upload_success_lock:
-                    self._upload_success_video_paths.add(task.video_path)
 
             def _on_profile_upload_attempt(pid: str, ok: bool, err: str) -> None:
                 try:
@@ -6739,15 +7009,21 @@ class MainWindow(QWidget):
                 profile_ids=profile_ids,
                 cooldown_s=10.0,
                 max_attempts_per_profile=2,
+                max_concurrent_uploads=1 if schedule_batch_size > 0 else 5,
                 profile_upload_pause_remaining_s=self._upload_store.profile_upload_pause_remaining_seconds,
                 log_sink=self._ui_log_line.emit,
                 upload_one=_upload_one,
                 on_profile_attempt=_on_profile_upload_attempt,
+                schedule_batch_size=schedule_batch_size,
+                schedule_times=schedule_times,
             )
             self._upload_manager = mgr
+            upload_title = pending.get("title", "Название")
+            if pending.get("keep_studio_title"):
+                upload_title = ""
             mgr.enqueue_videos(
                 video_paths=video_paths,
-                title=pending.get("title", "Название"),
+                title=upload_title,
                 description=pending.get("description", ""),
             )
 

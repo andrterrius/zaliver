@@ -13,6 +13,7 @@ from zaliver.youtube_upload.studio import (
     run_studio_channel_description_and_link,
     run_studio_channel_profile_customization,
     run_studio_channel_profile_picture,
+    run_studio_upload_default_title,
     run_upload_latest_ready_video,
     run_youtube_shorts_warmup,
     set_log_sink,
@@ -117,6 +118,64 @@ def _local_studio_workflow_kwargs(
             api, profile_id
         )
     return kw
+
+
+def _run_profile_studio_upload(
+    *,
+    page,
+    browser,
+    zaliver_db_path: Path | None,
+    video_path: str | None,
+    title: str | None,
+    description: str | None,
+    publish_before_checks: bool,
+    keep_studio_title: bool,
+    schedule_publish_at,
+    scheduled_batch=None,
+    stats_server_username: str | None,
+    studio_kw: dict,
+):
+    if scheduled_batch:
+        from zaliver.youtube_upload.studio import (
+            ScheduledStudioUpload,
+            run_upload_scheduled_video_batch,
+        )
+
+        uploads = [
+            ScheduledStudioUpload(
+                video_path=item.video_path,
+                title=item.title,
+                description=item.description,
+                schedule_publish_at=item.schedule_publish_at,
+            )
+            for item in scheduled_batch
+        ]
+        results = run_upload_scheduled_video_batch(
+            page=page,
+            browser=browser,
+            uploads=uploads,
+            publish_before_checks=publish_before_checks,
+            keep_studio_title=keep_studio_title,
+            stats_server_username=stats_server_username,
+            **studio_kw,
+        )
+        last = results[-1] if results else {}
+        out = dict(last)
+        out["batch_results"] = results
+        return out
+    return run_upload_latest_ready_video(
+        page=page,
+        browser=browser,
+        zaliver_db_path=zaliver_db_path,
+        video_path=video_path,
+        title=title,
+        description=description,
+        publish_before_checks=publish_before_checks,
+        keep_studio_title=keep_studio_title,
+        schedule_publish_at=schedule_publish_at,
+        stats_server_username=stats_server_username,
+        **studio_kw,
+    )
 
 
 _CDP_CONNECT_TIMEOUT_MS = 60_000
@@ -666,17 +725,19 @@ def _channel_setup_work_flags(
     description: str | None,
     link_title: str | None,
     link_url: str | None,
+    video_default_title: str | None,
     avatar_path: str | Path | None,
     channel_name: str | None,
     skip_name_change: bool,
-) -> tuple[bool, bool, bool]:
+) -> tuple[bool, bool, bool, bool]:
     d = (description or "").strip()
     lt = (link_title or "").strip()
     lu = (link_url or "").strip()
     has_text = bool(d) or bool(lt and lu)
+    has_video_title = bool((video_default_title or "").strip())
     has_avatar = bool(avatar_path)
     has_name = bool((channel_name or "").strip()) and not skip_name_change
-    return has_text, has_avatar, has_name
+    return has_text, has_video_title, has_avatar, has_name
 
 
 @with_log_profile
@@ -686,6 +747,7 @@ def setup_channel_in_profile(
     description: str | None = None,
     link_title: str | None = None,
     link_url: str | None = None,
+    video_default_title: str | None = None,
     avatar_path: str | Path | None = None,
     channel_name: str | None = None,
     skip_name_change: bool = False,
@@ -696,19 +758,22 @@ def setup_channel_in_profile(
     search_oldest_channel: bool = True,
 ) -> None:
     """Dolphin → Studio → «Настройка канала» (один запуск профиля на все шаги)."""
-    has_text, has_avatar, has_name = _channel_setup_work_flags(
+    has_text, has_video_title, has_avatar, has_name = _channel_setup_work_flags(
         description=description,
         link_title=link_title,
         link_url=link_url,
+        video_default_title=video_default_title,
         avatar_path=avatar_path,
         channel_name=channel_name,
         skip_name_change=skip_name_change,
     )
-    if not has_text and not has_avatar and not has_name:
+    if not has_text and not has_video_title and not has_avatar and not has_name:
         raise DolphinAntyError("Не заданы параметры настройки канала.")
     parts: list[str] = []
     if has_text:
         parts.append("описание/ссылка")
+    if has_video_title:
+        parts.append("название для видео")
     if has_avatar:
         parts.append("аватарка")
     if has_name:
@@ -749,8 +814,19 @@ def setup_channel_in_profile(
                         link_url=link_url,
                         **studio_kw,
                     )
-                if has_avatar or has_name:
+                if has_video_title:
                     if has_text:
+                        _log(
+                            "Dolphin: повторный переход в Studio "
+                            "для названия видео (без перезапуска профиля)…"
+                        )
+                    run_studio_upload_default_title(
+                        page,
+                        title=video_default_title,
+                        **studio_kw,
+                    )
+                if has_avatar or has_name:
+                    if has_text or has_video_title:
                         _log(
                             "Dolphin: повторный переход в Studio "
                             "для аватарки/названия (без перезапуска профиля)…"
@@ -782,6 +858,7 @@ def setup_channel_in_local_antidetect_profile(
     description: str | None = None,
     link_title: str | None = None,
     link_url: str | None = None,
+    video_default_title: str | None = None,
     avatar_path: str | Path | None = None,
     channel_name: str | None = None,
     skip_name_change: bool = False,
@@ -802,19 +879,22 @@ def setup_channel_in_local_antidetect_profile(
         unregister_local_session,
     )
 
-    has_text, has_avatar, has_name = _channel_setup_work_flags(
+    has_text, has_video_title, has_avatar, has_name = _channel_setup_work_flags(
         description=description,
         link_title=link_title,
         link_url=link_url,
+        video_default_title=video_default_title,
         avatar_path=avatar_path,
         channel_name=channel_name,
         skip_name_change=skip_name_change,
     )
-    if not has_text and not has_avatar and not has_name:
+    if not has_text and not has_video_title and not has_avatar and not has_name:
         raise LocalAntidetectError("Не заданы параметры настройки канала.")
     parts: list[str] = []
     if has_text:
         parts.append("описание/ссылка")
+    if has_video_title:
+        parts.append("название для видео")
     if has_avatar:
         parts.append("аватарка")
     if has_name:
@@ -860,8 +940,19 @@ def setup_channel_in_local_antidetect_profile(
                         link_url=link_url,
                         **studio_kw,
                     )
-                if has_avatar or has_name:
+                if has_video_title:
                     if has_text:
+                        _log(
+                            "Local antidetect: повторный переход в Studio "
+                            "для названия видео (без перезапуска профиля)…"
+                        )
+                    run_studio_upload_default_title(
+                        page,
+                        title=video_default_title,
+                        **studio_kw,
+                    )
+                if has_avatar or has_name:
+                    if has_text or has_video_title:
                         _log(
                             "Local antidetect: повторный переход в Studio "
                             "для аватарки/названия (без перезапуска профиля)…"
@@ -1094,6 +1185,10 @@ def open_google_in_profile(
     yt_oldest_name: str | None = None,
     search_oldest_channel: bool = True,
     publish_before_checks: bool = False,
+    keep_studio_title: bool = False,
+    schedule_publish_at=None,
+    scheduled_batch=None,
+    stats_server_username: str | None = None,
 ) -> dict | None:
     """
     Запуск профиля через Dolphin Local API + Playwright CDP.
@@ -1127,18 +1222,24 @@ def open_google_in_profile(
 
             try:
                 if upload_latest_zaliver_video:
-                    res = run_upload_latest_ready_video(
+                    res = _run_profile_studio_upload(
                         page=page,
                         browser=browser,
-                        profile_id=profile_id,
                         zaliver_db_path=zaliver_db_path,
                         video_path=video_path,
                         title=title,
                         description=description,
-                        login_credentials=login_credentials,
-                        yt_oldest_name=yt_oldest_name,
-                        search_oldest_channel=search_oldest_channel,
                         publish_before_checks=publish_before_checks,
+                        keep_studio_title=keep_studio_title,
+                        schedule_publish_at=schedule_publish_at,
+                        scheduled_batch=scheduled_batch,
+                        stats_server_username=stats_server_username,
+                        studio_kw={
+                            "profile_id": profile_id,
+                            "login_credentials": login_credentials,
+                            "yt_oldest_name": yt_oldest_name,
+                            "search_oldest_channel": search_oldest_channel,
+                        },
                     )
                     return res
                 else:
@@ -1183,6 +1284,10 @@ def open_google_in_local_antidetect_profile(
     search_oldest_channel: bool = True,
     remote_cdp=None,
     publish_before_checks: bool = False,
+    keep_studio_title: bool = False,
+    schedule_publish_at=None,
+    scheduled_batch=None,
+    stats_server_username: str | None = None,
 ) -> dict | None:
     """
     Запуск профиля через локальный HTTP API (см. OpenAPI антидетекта: launch + опрос сессии на cdp_ws_url),
@@ -1250,7 +1355,7 @@ def open_google_in_local_antidetect_profile(
                         )
 
                         def _run_upload():
-                            return run_upload_latest_ready_video(
+                            return _run_profile_studio_upload(
                                 page=page,
                                 browser=browser,
                                 zaliver_db_path=zaliver_db_path,
@@ -1258,7 +1363,11 @@ def open_google_in_local_antidetect_profile(
                                 title=title,
                                 description=description,
                                 publish_before_checks=publish_before_checks,
-                                **studio_kw,
+                                keep_studio_title=keep_studio_title,
+                                schedule_publish_at=schedule_publish_at,
+                                scheduled_batch=scheduled_batch,
+                                stats_server_username=stats_server_username,
+                                studio_kw=studio_kw,
                             )
 
                         res = _run_upload()

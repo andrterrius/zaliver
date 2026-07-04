@@ -49,10 +49,8 @@ def _recent_editable_combo(*, placeholder: str, recent: list[str]) -> QComboBox:
         line_edit.setPlaceholderText(placeholder)
     for value in recent:
         combo.addItem(value)
-    if combo.count() > 0:
-        combo.setCurrentIndex(0)
-    elif line_edit is not None:
-        combo.setCurrentIndex(-1)
+    combo.setCurrentIndex(-1)
+    if line_edit is not None:
         line_edit.clear()
     return combo
 
@@ -117,6 +115,7 @@ class ProfileChannelSetupDialog(QDialog):
         recent_channel_descriptions: list[str] | None = None,
         recent_link_titles: list[str] | None = None,
         recent_link_urls: list[str] | None = None,
+        recent_video_default_titles: list[str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -146,7 +145,8 @@ class ProfileChannelSetupDialog(QDialog):
         hint = QLabel(
             "Настройка отмеченных профилей в YouTube Studio («Настройка канала»). "
             "Заполните нужные разделы — можно один или несколько сразу.\n\n"
-            "Описание и ссылка применяются ко всем отмеченным профилям одинаково. "
+            "Описание, ссылка и название для видео применяются ко всем отмеченным "
+            "профилям одинаково. "
             "Аватарки и названия сопоставляются с профилями по порядку в таблице. "
             "Смена названия ограничена раз в 14 дней (в предпросмотре отмечается лимит)."
         )
@@ -187,6 +187,15 @@ class ProfileChannelSetupDialog(QDialog):
         link_section.content_layout().addWidget(QLabel("URL"))
         link_section.content_layout().addWidget(self._link_url_edit)
         sections.addWidget(link_section)
+
+        video_title_section = CollapsibleSection("Название для видео")
+        self._video_title_edit = _recent_editable_combo(
+            placeholder="Название по умолчанию при загрузке…",
+            recent=list(recent_video_default_titles or []),
+        )
+        self._video_title_edit.currentTextChanged.connect(self._on_channel_fields_changed)
+        video_title_section.content_layout().addWidget(self._video_title_edit)
+        sections.addWidget(video_title_section)
 
         avatars_section = CollapsibleSection("Аватарки")
         self._preview_label = QLabel("Превью появится после выбора файлов")
@@ -340,6 +349,9 @@ class ProfileChannelSetupDialog(QDialog):
     def channel_link_url(self) -> str:
         return (self._link_url_edit.currentText() or "").strip()
 
+    def video_default_title(self) -> str:
+        return (self._video_title_edit.currentText() or "").strip()
+
     def channel_names_for_remember(self) -> list[str]:
         return self._current_channel_names()
 
@@ -348,6 +360,9 @@ class ProfileChannelSetupDialog(QDialog):
         lt = self.channel_link_title()
         lu = self.channel_link_url()
         return bool(desc) or bool(lt and lu)
+
+    def has_video_default_title(self) -> bool:
+        return bool(self.video_default_title())
 
     def has_profile_customization(self) -> bool:
         return bool(self.profile_assignments())
@@ -395,13 +410,12 @@ class ProfileChannelSetupDialog(QDialog):
         return "Настройка канала"
 
     def _current_channel_names(self) -> list[str]:
-        from_items = [
-            self._names_edit.itemText(i).strip()
-            for i in range(self._names_edit.count())
-        ]
-        from_items = [name for name in from_items if name]
-        if from_items:
-            return from_items
+        if self._names_source_label:
+            from_items = [
+                self._names_edit.itemText(i).strip()
+                for i in range(self._names_edit.count())
+            ]
+            return [name for name in from_items if name]
         return parse_channel_names_text(self._names_edit.currentText())
 
     def _pick_names_file(self) -> None:
@@ -472,8 +486,9 @@ class ProfileChannelSetupDialog(QDialog):
 
     def _update_save_button(self) -> None:
         has_text = self.has_channel_text_fill()
+        has_video_title = self.has_video_default_title()
         has_assignments = any(row.get("can_save") for row in self._rows)
-        self._btn_save.setEnabled(has_text or has_assignments)
+        self._btn_save.setEnabled(has_text or has_video_title or has_assignments)
 
     def _update_status_summary(self) -> None:
         matched = sum(1 for row in self._rows if row.get("can_save"))
@@ -502,6 +517,7 @@ class ProfileChannelSetupDialog(QDialog):
         self._desc_edit.setEnabled(not busy)
         self._link_title_edit.setEnabled(not busy)
         self._link_url_edit.setEnabled(not busy)
+        self._video_title_edit.setEnabled(not busy)
         self._names_edit.setEnabled(not busy)
         self._no_crop.setEnabled(not busy)
         self._shuffle.setEnabled(not busy)
@@ -792,14 +808,20 @@ class ProfileChannelSetupDialog(QDialog):
         desc = self.channel_description()
         link_title = self.channel_link_title()
         link_url = self.channel_link_url()
+        video_title = self.video_default_title()
         assignments = self.profile_assignments()
 
-        if not desc and not (link_title and link_url) and not assignments:
+        if (
+            not desc
+            and not (link_title and link_url)
+            and not video_title
+            and not assignments
+        ):
             QMessageBox.warning(
                 self,
                 self._dialog_title(),
                 "Заполните хотя бы один раздел: описание, ссылку "
-                "(название + URL) или аватарки/названия.",
+                "(название + URL), название для видео или аватарки/названия.",
             )
             return
         if (link_title and not link_url) or (link_url and not link_title):
@@ -814,6 +836,10 @@ class ProfileChannelSetupDialog(QDialog):
         if desc or (link_title and link_url):
             msg_parts.append(
                 f"• описание/ссылка — для всех {len(self._profiles)} профилей"
+            )
+        if video_title:
+            msg_parts.append(
+                f"• название для видео — для всех {len(self._profiles)} профилей"
             )
         if assignments:
             with_avatar = sum(1 for a in assignments if a.get("avatar_png"))

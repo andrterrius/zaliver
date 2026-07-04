@@ -7,9 +7,19 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
+from datetime import datetime
 from functools import wraps
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse
+
+from zaliver.youtube_upload.schedule_publish import (
+    MSK,
+    parse_msk_datetime,
+    studio_date_input_candidates,
+    studio_date_picker_locale_from_text,
+    studio_date_trigger_matches,
+    studio_time_match_patterns,
+)
 
 from playwright.sync_api import Error as PlaywrightError
 
@@ -42,6 +52,19 @@ _AADC_HEADING_RE = re.compile(
     r"видео\s+в\s+открытом\s+доступе|videos?\s+(in\s+)?public|publicly\s+available",
     re.I,
 )
+_VERIFY_IT_IS_YOU_TITLE_RE = re.compile(
+    r"verify\s+it[''\u2019]?s?\s+you|"
+    r"подтвердите,?\s*что\s+это\s+вы|"
+    r"подтвердите\s+свою\s+личность",
+    re.I,
+)
+_VERIFY_IT_IS_YOU_BODY_RE = re.compile(
+    r"confirm\s+it[''\u2019]?s?\s+really\s+you|"
+    r"extra\s+layer\s+of\s+security|"
+    r"подтвердите,?\s*что\s+это\s+действительно\s+вы|"
+    r"дополнительный\s+уровень\s+защиты",
+    re.I,
+)
 _NOT_FOR_KIDS_RADIO_NAME = "VIDEO_MADE_FOR_KIDS_NOT_MFK"
 _NOT_FOR_KIDS_LABEL_RE = re.compile(
     r"no,?\s*it[''\u2019]?s?\s*not\s*made\s*for\s*kids|"
@@ -53,8 +76,13 @@ _PUBLISH_SUCCESS_TEXT_RE = re.compile(
     r"video\s+(?:is\s+)?publish|"
     r"your\s+video\s+is\s+(?:live|public|on\s+youtube)|"
     r"published\s+successfully|"
+    r"scheduled\s+to\s+be\s+public|"
+    r"video\s+scheduled|"
+    r"scheduling\s+complete|"
     r"видео\s+опубликован|"
     r"опубликовано|"
+    r"запланирован|"
+    r"будет\s+опубликован|"
     r"short\s+.*(?:publish|live|public)",
     re.I,
 )
@@ -133,6 +161,9 @@ class YoutubeAllChannelsRemovedError(YoutubeStudioError):
 
 _LOG_SINK = None
 _STUDIO_PROFILE_ID: ContextVar[str | None] = ContextVar("studio_profile_id", default=None)
+_STUDIO_LOGIN_CREDENTIALS: ContextVar[object | None] = ContextVar(
+    "studio_login_credentials", default=None
+)
 
 
 def set_log_sink(sink) -> None:
@@ -157,6 +188,19 @@ def get_studio_profile_id() -> str | None:
     return _STUDIO_PROFILE_ID.get()
 
 
+def get_studio_login_credentials():
+    return _STUDIO_LOGIN_CREDENTIALS.get()
+
+
+@contextmanager
+def studio_login_credentials_context(login_credentials):
+    token = _STUDIO_LOGIN_CREDENTIALS.set(login_credentials)
+    try:
+        yield
+    finally:
+        _STUDIO_LOGIN_CREDENTIALS.reset(token)
+
+
 @contextmanager
 def studio_profile_context(profile_id: str | None):
     pid = (profile_id or "").strip() or None
@@ -174,7 +218,8 @@ def _studio_entrypoint(fn):
     @wraps(fn)
     def wrapped(*args, **kwargs):
         with studio_profile_context(kwargs.get("profile_id")):
-            return fn(*args, **kwargs)
+            with studio_login_credentials_context(kwargs.get("login_credentials")):
+                return fn(*args, **kwargs)
 
     return wrapped
 
@@ -2599,7 +2644,7 @@ def _studio_try_match_expected_channel_in_studio(
 
     _studio_try_google_login_if_needed(page, login_credentials)
     _studio_handle_channel_removed_if_present(page)
-    _studio_handle_onboarding_dialogs_if_present(page)
+    _studio_handle_onboarding_dialogs_if_present(page, login_credentials=login_credentials)
 
     current = _studio_wait_navigation_drawer_channel_name(page)
     if current and _studio_channel_names_match(expected, current):
@@ -2997,9 +3042,307 @@ def _studio_handle_aadc_notice_dialog_if_present(page) -> bool:
     return True
 
 
-def _studio_handle_interrupt_dialogs_if_present(page) -> bool:
+def _studio_verify_identity_dialog_locator(page):
+    """Studio: «Verify it's you» / ytcp-auth-confirmation-dialog."""
+    by_auth = page.locator("tp-yt-paper-dialog").filter(
+        has=page.locator("ytcp-auth-confirmation-dialog")
+    )
+    by_title = page.locator("tp-yt-paper-dialog").filter(
+        has=page.locator(
+            "h1.dialog-title, [id^='dialog-title']"
+        ).filter(has_text=_VERIFY_IT_IS_YOU_TITLE_RE)
+    )
+    by_confirm_in_modal = page.locator('tp-yt-paper-dialog[aria-modal="true"]').filter(
+        has=page.locator("ytcp-button#confirm-button, #confirm-button")
+    ).filter(
+        has=page.locator(
+            "ytcp-auth-confirmation-dialog, ytcp-confirmation-dialog"
+        )
+    )
+    return by_auth.or_(by_title).or_(by_confirm_in_modal)
+
+
+def _studio_verify_identity_next_button_locator(page):
+    dialog = _studio_verify_identity_dialog_locator(page)
+    return (
+        dialog.locator("ytcp-button#confirm-button button")
+        .or_(dialog.locator("#confirm-button button"))
+        .or_(dialog.locator("#confirm-button"))
+        .or_(
+            dialog.locator(
+                "button[aria-label='Next'], button[aria-label='Далее']"
+            )
+        )
+        .or_(
+            dialog.get_by_role(
+                "button", name=re.compile(r"^next$|^далее$", re.I)
+            )
+        )
+    )
+
+
+def _studio_element_has_layout(locator, *, min_w: float = 24.0, min_h: float = 16.0) -> bool:
+    try:
+        if locator.count() <= 0:
+            return False
+        box = locator.first.bounding_box(timeout=300)
+        if not box:
+            return False
+        return box.get("width", 0) >= min_w and box.get("height", 0) >= min_h
+    except Exception:
+        return False
+
+
+def _studio_verify_identity_dialog_present_in_dom(page) -> bool:
     """
-    Прерывающие диалоги Studio: создание канала, приветствие «Далее», AADC «ОК».
+    Диалог «Verify it's you» иногда рендерится с невидимым текстом (CSS),
+    но разметка и кнопка #confirm-button остаются в DOM.
+    """
+    try:
+        return bool(
+            page.evaluate(
+                """() => {
+                    const auth = document.querySelector(
+                        'ytcp-auth-confirmation-dialog'
+                    );
+                    if (!auth) return false;
+                    const paper = auth.closest('tp-yt-paper-dialog')
+                        || auth.closest('ytcp-dialog');
+                    if (!paper) return false;
+                    const style = window.getComputedStyle(paper);
+                    if (style.display === 'none' || style.visibility === 'hidden') {
+                        return false;
+                    }
+                    const rect = paper.getBoundingClientRect();
+                    if (rect.width < 80 || rect.height < 80) return false;
+                    const btn = paper.querySelector(
+                        '#confirm-button button, ytcp-button#confirm-button button'
+                    );
+                    return !!btn;
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+def _studio_verify_identity_dialog_text_matches(page) -> bool:
+    """Текст заголовка/тела в DOM (не зависит от видимости шрифта)."""
+    try:
+        text = page.evaluate(
+            """() => {
+                const auth = document.querySelector(
+                    'ytcp-auth-confirmation-dialog'
+                );
+                if (!auth) return '';
+                const paper = auth.closest('tp-yt-paper-dialog')
+                    || auth.closest('ytcp-dialog');
+                const title = paper
+                    ? paper.querySelector(
+                        'h1.dialog-title, [id^="dialog-title"]'
+                      )
+                    : null;
+                const body = auth.querySelector(
+                    "p[slot='dialog-content'], #dialog-content-text"
+                );
+                return [
+                    title ? (title.textContent || '') : '',
+                    body ? (body.textContent || '') : '',
+                    auth.textContent || '',
+                ].join('\\n');
+            }"""
+        )
+        blob = (text or "").strip()
+        if not blob:
+            return False
+        return bool(
+            _VERIFY_IT_IS_YOU_TITLE_RE.search(blob)
+            or _VERIFY_IT_IS_YOU_BODY_RE.search(blob)
+        )
+    except Exception:
+        return False
+
+
+def _studio_verify_identity_dialog_visible(page) -> bool:
+    try:
+        btn = _studio_verify_identity_next_button_locator(page)
+        if btn.count() > 0 and btn.first.is_visible(timeout=200):
+            return True
+    except Exception:
+        pass
+    try:
+        dialog = _studio_verify_identity_dialog_locator(page)
+        if dialog.count() > 0 and _studio_element_has_layout(
+            dialog, min_w=120.0, min_h=80.0
+        ):
+            btn = _studio_verify_identity_next_button_locator(page)
+            if btn.count() > 0 and _studio_element_has_layout(btn):
+                return True
+    except Exception:
+        pass
+    if _studio_verify_identity_dialog_present_in_dom(page):
+        return True
+    if _studio_verify_identity_dialog_text_matches(page):
+        btn = page.locator("ytcp-auth-confirmation-dialog").locator(
+            "xpath=ancestor::tp-yt-paper-dialog | ancestor::ytcp-dialog"
+        ).locator("#confirm-button button")
+        return btn.count() > 0 and _studio_element_has_layout(btn)
+    return False
+
+
+def _studio_resolve_verify_identity_next_button(page):
+    btn = _studio_verify_identity_next_button_locator(page)
+    if btn.count() > 0:
+        return btn
+    return (
+        page.locator("ytcp-auth-confirmation-dialog")
+        .locator("xpath=ancestor::tp-yt-paper-dialog | ancestor::ytcp-dialog")
+        .locator("#confirm-button button, ytcp-button#confirm-button button")
+    )
+
+
+def _studio_click_verify_identity_next_button(page, btn) -> None:
+    """Клик «Next» — при невидимом шрифте обычный click может не сработать."""
+    btn.first.wait_for(state="attached", timeout=15_000)
+    try:
+        if btn.first.is_visible(timeout=500):
+            btn.first.click(timeout=30_000)
+            return
+    except Exception:
+        pass
+    try:
+        if _studio_element_has_layout(btn):
+            btn.first.click(timeout=30_000, force=True)
+            return
+    except Exception:
+        pass
+    try:
+        btn.first.evaluate("(node) => { node.focus(); node.click(); }")
+        return
+    except Exception as e:
+        raise YoutubeStudioError(
+            "YouTube Studio: не удалось нажать «Next» в окне «Verify it's you»."
+        ) from e
+
+
+def _studio_find_google_auth_page(context, *, studio_page, before_pages) -> object | None:
+    """Вкладка входа Google после «Verify it's you» → Next."""
+    for pg in context.pages:
+        if pg in before_pages:
+            continue
+        try:
+            if pg.is_closed():
+                continue
+        except Exception:
+            continue
+        if _studio_on_google_auth_page(pg, fast=True):
+            return pg
+    for pg in context.pages:
+        if pg is studio_page:
+            continue
+        try:
+            if pg.is_closed():
+                continue
+        except Exception:
+            continue
+        if _studio_on_google_auth_page(pg, fast=True):
+            return pg
+    if _studio_on_google_auth_page(studio_page, fast=True):
+        return studio_page
+    return None
+
+
+def _studio_handle_verify_identity_dialog_if_present(
+    page, *, login_credentials=None
+) -> bool:
+    """
+    «Verify it's you» в Studio: «Next» → новая вкладка Google (пароль / 2FA) →
+    возврат к диалогу загрузки на исходной вкладке.
+    """
+    if not _studio_verify_identity_dialog_visible(page):
+        return False
+
+    creds = (
+        login_credentials
+        if login_credentials is not None
+        else get_studio_login_credentials()
+    )
+    _studio_raise_if_auth_without_credentials(page, creds)
+
+    from zaliver.youtube_upload.google_login import (
+        GoogleLoginCredentialsMissingError,
+        attempt_google_login_for_studio,
+    )
+
+    _log(
+        "Studio: «Verify it's you» — нажимаем «Next» "
+        "(откроется вкладка входа Google)…"
+    )
+    context = page.context
+    before_pages = set(context.pages)
+    btn = _studio_resolve_verify_identity_next_button(page)
+
+    auth_page = None
+    try:
+        with context.expect_page(timeout=30_000) as page_info:
+            _studio_click_verify_identity_next_button(page, btn)
+        auth_page = page_info.value
+    except PlaywrightError:
+        page.wait_for_timeout(1_000)
+        auth_page = _studio_find_google_auth_page(
+            context, studio_page=page, before_pages=before_pages
+        )
+
+    if auth_page is None:
+        raise YoutubeStudioError(
+            "YouTube Studio: после «Verify it's you» не открылась вкладка входа Google."
+        )
+
+    try:
+        auth_url = auth_page.url
+    except Exception:
+        auth_url = "(url недоступен)"
+    _log(f"Studio: вкладка входа Google: {auth_url!r}")
+
+    try:
+        attempt_google_login_for_studio(auth_page, creds)
+    except GoogleLoginCredentialsMissingError:
+        raise
+    except RuntimeError as e:
+        raise YoutubeStudioError(str(e)) from e
+
+    try:
+        if auth_page is not page and not auth_page.is_closed():
+            auth_page.close()
+    except Exception as e:
+        _log(f"Studio: не удалось закрыть вкладку входа Google: {e!r}")
+
+    try:
+        page.bring_to_front()
+    except Exception:
+        pass
+
+    deadline = time.monotonic() + 45.0
+    while time.monotonic() < deadline:
+        if not _studio_verify_identity_dialog_visible(page):
+            break
+        page.wait_for_timeout(300)
+    else:
+        raise YoutubeStudioError(
+            "YouTube Studio: окно «Verify it's you» не закрылось после входа Google."
+        )
+
+    page.wait_for_timeout(400)
+    _log("Studio: подтверждение личности («Verify it's you») завершено.")
+    return True
+
+
+def _studio_handle_interrupt_dialogs_if_present(
+    page, *, login_credentials=None
+) -> bool:
+    """
+    Прерывающие диалоги Studio: создание канала, приветствие «Далее», AADC «ОК»,
+    «Verify it's you» (повторный вход Google).
     Могут появиться на разных этапах залива — опрашиваем и закрываем.
     """
     from zaliver.youtube_upload.google_login import handle_channel_switcher_if_present
@@ -3007,6 +3350,10 @@ def _studio_handle_interrupt_dialogs_if_present(page) -> bool:
     handled = False
     for _ in range(5):
         step_handled = False
+        if _studio_handle_verify_identity_dialog_if_present(
+            page, login_credentials=login_credentials
+        ):
+            step_handled = True
         if _studio_handle_channel_removed_if_present(page):
             step_handled = True
         if handle_channel_switcher_if_present(page):
@@ -3023,9 +3370,13 @@ def _studio_handle_interrupt_dialogs_if_present(page) -> bool:
     return handled
 
 
-def _studio_handle_onboarding_dialogs_if_present(page) -> bool:
+def _studio_handle_onboarding_dialogs_if_present(
+    page, *, login_credentials=None
+) -> bool:
     """См. ``_studio_handle_interrupt_dialogs_if_present`` (обратная совместимость)."""
-    return _studio_handle_interrupt_dialogs_if_present(page)
+    return _studio_handle_interrupt_dialogs_if_present(
+        page, login_credentials=login_credentials
+    )
 
 
 def _studio_wait_create_or_login(
@@ -3056,7 +3407,9 @@ def _studio_wait_create_or_login(
         now = time.monotonic()
         if now - last_dialog_check >= 1.0:
             last_dialog_check = now
-            if _studio_handle_onboarding_dialogs_if_present(page):
+            if _studio_handle_onboarding_dialogs_if_present(
+                page, login_credentials=login_credentials
+            ):
                 continue
         try:
             if create_locator.count() > 0 and create_locator.first.is_visible(timeout=300):
@@ -3098,6 +3451,11 @@ _CHANNEL_SETTINGS_NAV_RE = re.compile(
     re.I,
 )
 _CHANNEL_PROFILE_TAB_RE = re.compile(r"^profile$|^профиль$", re.I)
+_STUDIO_SETTINGS_NAV_RE = re.compile(r"^настройки$|^settings$", re.I)
+_STUDIO_UPLOAD_DEFAULTS_MENU_RE = re.compile(
+    r"загрузка\s+видео|upload\s+defaults|default\s+upload|video\s+uploads?",
+    re.I,
+)
 
 
 def _studio_ensure_channel_profile_tab(page) -> None:
@@ -3193,7 +3551,7 @@ def _studio_prepare_studio_dashboard(page, *, login_credentials=None) -> None:
     Без ожидания кнопки «Создать» — для настройки канала и пр.
     """
     _studio_goto_studio_if_needed(page, login_credentials=login_credentials)
-    _studio_handle_onboarding_dialogs_if_present(page)
+    _studio_handle_onboarding_dialogs_if_present(page, login_credentials=login_credentials)
 
 
 def _studio_goto_studio_if_needed(
@@ -3253,7 +3611,7 @@ def _studio_resolve_create_button(page, *, login_credentials=None):
     """
     _studio_goto_studio_if_needed(page, login_credentials=login_credentials)
     create = _studio_create_button_locator(page)
-    _studio_handle_onboarding_dialogs_if_present(page)
+    _studio_handle_onboarding_dialogs_if_present(page, login_credentials=login_credentials)
     if _studio_create_button_visible(page, timeout_ms=4_000):
         return create
 
@@ -3272,7 +3630,9 @@ def _studio_resolve_create_button(page, *, login_credentials=None):
         now = time.monotonic()
         if now - last_dialog_check >= 1.0:
             last_dialog_check = now
-            if _studio_handle_onboarding_dialogs_if_present(page):
+            if _studio_handle_onboarding_dialogs_if_present(
+                page, login_credentials=login_credentials
+            ):
                 if _studio_create_button_visible(page, timeout_ms=400):
                     return create
                 continue
@@ -3367,7 +3727,9 @@ def _studio_wait_upload_file_picker_visible(
             raise YoutubeStudioError(
                 "YouTube Studio: требуется вход в Google (профиль без активной сессии)."
             )
-        if _studio_handle_onboarding_dialogs_if_present(page):
+        if _studio_handle_onboarding_dialogs_if_present(
+            page, login_credentials=login_credentials
+        ):
             continue
         try:
             if picker.count() > 0 and picker.first.is_visible():
@@ -4463,6 +4825,100 @@ def run_studio_channel_description_and_link(
     )
 
 
+def _studio_navigate_to_upload_defaults_settings(
+    page,
+    *,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    on_oldest_channel_name=None,
+    search_oldest_channel: bool = True,
+) -> None:
+    """Studio → «Настройки» → «Загрузка видео» (параметры по умолчанию)."""
+    _studio_ensure_correct_studio_channel(
+        page,
+        yt_oldest_name=yt_oldest_name,
+        login_credentials=login_credentials,
+        on_oldest_channel_name=on_oldest_channel_name,
+        search_oldest_channel=search_oldest_channel,
+    )
+    _studio_prepare_studio_dashboard(page, login_credentials=login_credentials)
+    _log("Studio: переход в «Настройки» → «Загрузка видео»…")
+
+    settings_item = page.locator("#settings-item").or_(
+        page.locator("tp-yt-paper-icon-item").filter(
+            has=page.locator(".nav-item-text", has_text=_STUDIO_SETTINGS_NAV_RE)
+        )
+    )
+    settings_item.first.wait_for(state="visible", timeout=30_000)
+    settings_item.first.scroll_into_view_if_needed(timeout=15_000)
+    settings_item.first.click(timeout=30_000)
+    page.wait_for_timeout(500)
+
+    uploads_item = page.locator("li#uploads").or_(
+        page.locator("li.menu-item").filter(has_text=_STUDIO_UPLOAD_DEFAULTS_MENU_RE)
+    )
+    uploads_item.first.wait_for(state="visible", timeout=30_000)
+    uploads_item.first.click(timeout=30_000)
+
+    title_area = page.locator("ytcp-form-textarea#title-textarea textarea").or_(
+        page.locator("#page-basic-info ytcp-form-textarea#title-textarea textarea")
+    )
+    title_area.first.wait_for(state="visible", timeout=120_000)
+    _log("Studio: раздел «Загрузка видео» в настройках загружен.")
+
+
+def _studio_fill_upload_default_title(page, *, title: str) -> None:
+    value = (title or "").strip()
+    if not value:
+        raise YoutubeStudioError("Название видео по умолчанию не задано.")
+
+    _studio_handle_interrupt_dialogs_if_present(page)
+
+    title_area = page.locator("ytcp-form-textarea#title-textarea textarea").or_(
+        page.locator("#page-basic-info ytcp-form-textarea#title-textarea textarea")
+    )
+    _studio_fill_plain_input(
+        page,
+        title_area,
+        value,
+        label="название по умолчанию для загрузки",
+    )
+
+    save_btn = page.locator("ytcp-button#submit-button button").or_(
+        page.get_by_role("button", name=re.compile(r"^сохранить$|^save$", re.I))
+    )
+    save_btn.first.wait_for(state="visible", timeout=30_000)
+    save_btn.first.scroll_into_view_if_needed(timeout=15_000)
+    save_btn.first.click(timeout=30_000)
+    page.wait_for_timeout(800)
+    _log("Studio: название по умолчанию для загрузки сохранено.")
+
+
+@_studio_entrypoint
+def run_studio_upload_default_title(
+    page,
+    *,
+    title: str | None = None,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    on_oldest_channel_name=None,
+    search_oldest_channel: bool = True,
+    profile_id: str | None = None,
+) -> None:
+    """Studio → «Настройки» → «Загрузка видео» → название → «Сохранить»."""
+    value = (title or "").strip()
+    if not value:
+        raise YoutubeStudioError("Название видео по умолчанию не задано.")
+    _studio_navigate_to_upload_defaults_settings(
+        page,
+        login_credentials=login_credentials,
+        yt_oldest_name=yt_oldest_name,
+        on_oldest_channel_name=on_oldest_channel_name,
+        search_oldest_channel=search_oldest_channel,
+    )
+    _studio_fill_upload_default_title(page, title=value)
+
+
 def _studio_channel_name_input(page):
     return page.locator(
         "input.ytcpChannelEditingChannelNameBrandNameInput, "
@@ -5263,6 +5719,7 @@ def _studio_upload_pick_file(
     skip_validation: bool = False,
     title: str | None = None,
     description: str | None = None,
+    keep_studio_title: bool = False,
 ) -> tuple[bool, bool, bool]:
     """Диалог ytcp-uploads-file-picker: файл через CDP (локальный путь) или fallback file chooser.
 
@@ -5365,10 +5822,15 @@ def _studio_upload_pick_file(
 
     metadata_state = (True, True, False)
     if file_submitted and (
-        (title or "").strip() or (description or "").strip()
+        keep_studio_title
+        or (title or "").strip()
+        or (description or "").strip()
     ):
         metadata_state = _studio_prepare_upload_details_during_transfer(
-            page, title=title, description=description
+            page,
+            title=title,
+            description=description,
+            keep_studio_title=keep_studio_title,
         )
 
     try:
@@ -5445,16 +5907,21 @@ def _studio_prepare_upload_details_during_transfer(
     *,
     title: str | None,
     description: str | None,
+    keep_studio_title: bool = False,
     timeout_sec: float = 180.0,
 ) -> tuple[bool, bool, bool]:
     """
-    Пока идёт загрузка: как только видны поля — сразу очищаем название и вводим метаданные.
+    Пока идёт загрузка: как только видны поля — заполняем метаданные.
+    При keep_studio_title поле «Название» не трогаем.
     Возвращает (title_done, description_done, not_for_kids_done).
     """
-    t = _studio_normalize_upload_title(title)
+    t = "" if keep_studio_title else _studio_normalize_upload_title(title)
     d = (description or "").strip()
-    if not t and not d:
+    if not t and not d and not keep_studio_title:
         return True, True, False
+
+    if keep_studio_title:
+        _log("Studio: название из настроек/файла — поле «Название» не трогаем.")
 
     title_done = not t
     desc_done = not d
@@ -5538,6 +6005,7 @@ def _studio_set_title_and_description(
     title: str | None,
     description: str | None,
     metadata_state: tuple[bool, bool, bool] | None = None,
+    keep_studio_title: bool = False,
 ) -> bool:
     """
     Заполнение полей «Название» и «Описание» в диалоге загрузки Studio.
@@ -5546,14 +6014,17 @@ def _studio_set_title_and_description(
 
     Возвращает True, если «Не для детей» уже выбрано в ходе подготовки метаданных.
     """
-    t = _studio_normalize_upload_title(title)
+    t = "" if keep_studio_title else _studio_normalize_upload_title(title)
     d = (description or "").strip()
-    if not t and not d:
+    if not t and not d and not keep_studio_title:
         return metadata_state[2] if metadata_state else False
 
     if metadata_state is None:
         title_done, desc_done, kids_done = _studio_prepare_upload_details_during_transfer(
-            page, title=title, description=description
+            page,
+            title=title,
+            description=description,
+            keep_studio_title=keep_studio_title,
         )
     else:
         title_done, desc_done, kids_done = metadata_state
@@ -5725,18 +6196,7 @@ def _studio_log_video_link_before_public(page) -> str:
         _log("Studio: ссылка на видео (ytcp-video-info) не найдена — ставим доступ без URL.")
         return ""
     _log(f"Studio: ссылка на видео: {href}")
-    try:
-        page.evaluate(
-            """(url) => {
-                try {
-                    if (navigator.clipboard && navigator.clipboard.writeText)
-                        void navigator.clipboard.writeText(url);
-                } catch (e) {}
-            }""",
-            href,
-        )
-    except Exception:
-        pass
+    _studio_copy_text_to_clipboard(page, href)
     return href
 
 
@@ -5745,7 +6205,8 @@ def _studio_try_extract_video_url(page) -> str:
     Best-effort extraction of the uploaded video's URL from the Studio upload dialog.
     """
     candidates = (
-        page.locator("ytcp-video-info .video-url-fadeable a[href]")
+        _studio_uploads_review_video_link_locators(page)
+        .or_(page.locator("ytcp-video-info .video-url-fadeable a[href]"))
         .or_(page.locator("ytcp-video-info .value a[href]"))
         .or_(page.locator('ytcp-video-info a[target="_blank"][href*="youtu"]'))
         .or_(page.locator("ytcp-uploads-dialog ytcp-video-info a[href]"))
@@ -5764,7 +6225,444 @@ def _studio_try_extract_video_url(page) -> str:
         return ""
 
 
-def _studio_select_public_visibility(page) -> str:
+def _studio_copy_text_to_clipboard(page, text: str) -> None:
+    href = (text or "").strip()
+    if not href:
+        return
+    try:
+        page.evaluate(
+            """(url) => {
+                try {
+                    if (navigator.clipboard && navigator.clipboard.writeText)
+                        void navigator.clipboard.writeText(url);
+                } catch (e) {}
+            }""",
+            href,
+        )
+    except Exception:
+        pass
+
+
+def _studio_uploads_review_video_link_locators(page):
+    return (
+        page.locator("ytcp-uploads-review .right-col ytcp-video-info a[href]")
+        .or_(page.locator("ytcp-uploads-review ytcp-video-info .video-url-fadeable a[href]"))
+        .or_(page.locator("ytcp-uploads-review ytcp-video-info .value a[href]"))
+        .or_(
+            page.locator(
+                "ytcp-uploads-review ytcp-video-info a[target='_blank'][href*='youtu']"
+            )
+        )
+        .or_(page.locator("ytcp-uploads-dialog ytcp-uploads-review ytcp-video-info a[href]"))
+    )
+
+
+def _studio_capture_uploads_review_video_link(page, *, max_wait_sec: float = 30) -> str:
+    """Ссылка/videoId с ytcp-uploads-review перед «Запланировать публикацию»."""
+    candidates = _studio_uploads_review_video_link_locators(page)
+    deadline = time.monotonic() + max(1.0, max_wait_sec)
+    while time.monotonic() < deadline:
+        _studio_handle_interrupt_dialogs_if_present(page)
+        try:
+            if candidates.count() > 0 and candidates.first.is_visible(timeout=500):
+                href = (candidates.first.get_attribute("href") or "").strip()
+                if not href:
+                    href = (candidates.first.inner_text(timeout=2_000) or "").strip()
+                if href and _studio_is_probably_youtube_video_url(href):
+                    vid = _studio_try_extract_video_id_from_url(href)
+                    if vid:
+                        _log(
+                            f"Studio: videoId из review перед отложкой: {vid} — {href}"
+                        )
+                        _studio_copy_text_to_clipboard(page, href)
+                        copy_btn = page.locator(
+                            "ytcp-uploads-review ytcp-icon-button[aria-label*='Копировать'], "
+                            "ytcp-uploads-review ytcp-icon-button[aria-label*='Copy']"
+                        )
+                        try:
+                            if copy_btn.count() > 0 and copy_btn.first.is_visible(timeout=300):
+                                copy_btn.first.click(timeout=5_000)
+                        except Exception:
+                            pass
+                        return href
+        except Exception:
+            pass
+        page.wait_for_timeout(300)
+    _log("Studio: ссылка на видео в ytcp-uploads-review не найдена перед отложкой.")
+    return ""
+
+
+def _studio_try_notify_stats_server(
+    video_id: str,
+    *,
+    profile_id: str | None,
+    username: str | None,
+) -> bool:
+    user = (username or "").strip()
+    vid = (video_id or "").strip()
+    if not vid:
+        return False
+    if not user:
+        _log("Studio: stats_server — username не задан, уведомление пропущено.")
+        return False
+    try:
+        from zaliver.stats_server_client import notify_uploaded_video
+
+        ok = notify_uploaded_video(
+            video_id=vid,
+            username=user,
+            profile_id=(profile_id or "").strip(),
+        )
+        if ok:
+            _log(f"Studio: stats_server — уведомление отправлено (videoId={vid}).")
+        else:
+            _log(
+                f"Studio: stats_server — сервер не принял уведомление (videoId={vid})."
+            )
+        return ok
+    except Exception as e:
+        _log(f"Studio: stats_server — ошибка уведомления: {e!r}")
+        return False
+
+
+def _studio_schedule_section_locator(page):
+    return page.locator("ytcp-video-visibility-select #second-container")
+
+
+def _studio_expand_schedule_section(page) -> None:
+    section = _studio_schedule_section_locator(page)
+    section.first.wait_for(state="visible", timeout=30_000)
+    scheduler = section.locator(
+        "#publish-from-private-non-sponsor-selector, ytcp-visibility-scheduler"
+    )
+    try:
+        if scheduler.count() > 0 and scheduler.first.is_visible(timeout=500):
+            return
+    except Exception:
+        pass
+    expand = section.locator("#second-container-expand-button")
+    header = section.locator("#visibility-title, .early-access-header").filter(
+        has_text=re.compile(r"schedule|запланировать", re.I)
+    )
+    for target in (expand, header):
+        try:
+            if target.count() > 0 and target.first.is_visible(timeout=500):
+                target.first.click(timeout=10_000)
+                page.wait_for_timeout(400)
+                if scheduler.count() > 0 and scheduler.first.is_visible(timeout=500):
+                    return
+        except Exception:
+            pass
+    try:
+        scheduler.first.wait_for(state="visible", timeout=15_000)
+    except Exception:
+        _log(
+            "Studio: блок «Запланировать публикацию» не раскрылся — "
+            "пробуем клик по #second-container…"
+        )
+        try:
+            section.first.click(timeout=10_000)
+            page.wait_for_timeout(400)
+        except Exception:
+            pass
+
+
+def _studio_select_schedule_timezone_moscow(page) -> None:
+    tz_btn = (
+        page.locator(
+            "ytcp-visibility-scheduler #timezone-select-button button, "
+            "ytcp-datetime-picker #timezone-select-button button"
+        )
+        .or_(
+            page.get_by_role(
+                "button",
+                name=re.compile(r"^time zone$|^часовой пояс$", re.I),
+            )
+        )
+    )
+    tz_btn.first.wait_for(state="visible", timeout=30_000)
+    tz_btn.first.click(timeout=15_000)
+    page.wait_for_timeout(300)
+    moscow_re = re.compile(r"\)\s*Moscow|\)\s*Москва", re.I)
+    item = page.locator("ytcp-text-menu tp-yt-paper-item").filter(has_text=moscow_re)
+    if item.count() <= 0:
+        item = page.get_by_role("option", name=moscow_re)
+    item.first.wait_for(state="visible", timeout=15_000)
+    try:
+        item.first.scroll_into_view_if_needed(timeout=5_000)
+    except Exception:
+        pass
+    item.first.click(timeout=15_000)
+    page.wait_for_timeout(400)
+    _log("Studio: часовой пояс — Москва (GMT+03:00).")
+
+
+_RU_MONTH_LABEL_PARTS: dict[int, tuple[str, ...]] = {
+    1: ("jan", "янв"),
+    2: ("feb", "фев"),
+    3: ("mar", "мар"),
+    4: ("apr", "апр"),
+    5: ("may", "май", "мая"),
+    6: ("jun", "июн"),
+    7: ("jul", "июл"),
+    8: ("aug", "авг"),
+    9: ("sep", "сен"),
+    10: ("oct", "окт"),
+    11: ("nov", "ноя"),
+    12: ("dec", "дек"),
+}
+
+
+def _studio_date_picker_trigger_text(page) -> str:
+    trigger = page.locator(
+        "ytcp-datetime-picker #datepicker-trigger .dropdown-trigger-text, "
+        "ytcp-visibility-scheduler #datepicker-trigger .dropdown-trigger-text"
+    )
+    try:
+        if trigger.count() > 0:
+            return (trigger.first.inner_text(timeout=1_000) or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _studio_detect_date_picker_locale(page) -> str:
+    date_input = page.locator(
+        "ytcp-date-picker tp-yt-paper-input#textbox input, "
+        "ytcp-date-picker input[aria-label]"
+    )
+    try:
+        if date_input.count() > 0:
+            aria = (date_input.first.get_attribute("aria-label") or "").strip()
+            if aria:
+                loc = studio_date_picker_locale_from_text(aria)
+                if loc == "ru":
+                    return "ru"
+    except Exception:
+        pass
+    trigger_text = _studio_date_picker_trigger_text(page)
+    if trigger_text:
+        loc = studio_date_picker_locale_from_text(trigger_text)
+        if loc == "ru":
+            return "ru"
+    return "en"
+
+
+def _studio_date_picked_ok(page, dt: datetime) -> bool:
+    dialog = _studio_date_picker_dialog(page)
+    try:
+        if dialog.count() > 0 and dialog.first.is_visible(timeout=200):
+            return False
+    except Exception:
+        pass
+    shown = _studio_date_picker_trigger_text(page)
+    return studio_date_trigger_matches(shown, dt)
+
+
+def _studio_calendar_month_label_matches(label: str, *, year: int, month: int) -> bool:
+    text = (label or "").strip().lower()
+    if str(year) not in text:
+        return False
+    anchor = datetime(year, month, 1)
+    if anchor.strftime("%B").lower() in text or anchor.strftime("%b").lower() in text:
+        return True
+    return any(part in text for part in _RU_MONTH_LABEL_PARTS.get(month, ()))
+
+
+def _studio_date_picker_dialog(page):
+    return page.locator(
+        "ytcp-date-picker tp-yt-paper-dialog#dialog, "
+        "ytcp-date-picker tp-yt-paper-dialog[role='dialog']"
+    )
+
+
+def _studio_pick_calendar_day_via_input(page, dt: datetime, *, locale: str) -> bool:
+    date_input = page.locator(
+        "ytcp-date-picker tp-yt-paper-input#textbox input, "
+        "ytcp-date-picker input[aria-label*='дату'], "
+        "ytcp-date-picker input[aria-label*='date'], "
+        "ytcp-date-picker input[aria-label*='Date']"
+    )
+    if date_input.count() <= 0:
+        return False
+    field = date_input.first
+    field.wait_for(state="visible", timeout=10_000)
+    for raw in studio_date_input_candidates(dt, locale=locale):
+        field.click(timeout=5_000)
+        field.fill(raw)
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(400)
+        if _studio_date_picked_ok(page, dt):
+            return True
+    return False
+
+
+def _studio_pick_calendar_day_via_scrollable_calendar(page, dt: datetime) -> bool:
+    day = str(int(dt.day))
+    month = int(dt.month)
+    year = int(dt.year)
+    months = page.locator("ytcp-scrollable-calendar .calendar-month")
+    if months.count() <= 0:
+        return False
+    for i in range(months.count()):
+        block = months.nth(i)
+        label_el = block.locator(".calendar-month-label")
+        if label_el.count() <= 0:
+            continue
+        label = (label_el.first.inner_text(timeout=1_000) or "").strip()
+        if not _studio_calendar_month_label_matches(label, year=year, month=month):
+            continue
+        day_btn = block.locator(
+            "span.calendar-day:not(.disabled):not(.invisible)"
+        ).filter(has_text=re.compile(rf"^{re.escape(day)}$"))
+        if day_btn.count() <= 0:
+            continue
+        try:
+            day_btn.first.scroll_into_view_if_needed(timeout=5_000)
+        except Exception:
+            pass
+        day_btn.first.click(timeout=10_000)
+        page.wait_for_timeout(400)
+        if _studio_date_picked_ok(page, dt):
+            return True
+    return False
+
+
+def _studio_navigate_calendar_to_month(page, dt: datetime) -> bool:
+    """Листаем #prev-month / #next-month, пока целевой месяц не виден."""
+    target = dt.astimezone(MSK)
+    month = int(target.month)
+    year = int(target.year)
+    for _ in range(24):
+        if _studio_pick_calendar_day_via_scrollable_calendar(page, target):
+            return True
+        labels = page.locator("ytcp-scrollable-calendar .calendar-month-label")
+        visible_months: list[tuple[int, int]] = []
+        try:
+            for i in range(labels.count()):
+                label = (labels.nth(i).inner_text(timeout=500) or "").strip()
+                for m in range(1, 13):
+                    if _studio_calendar_month_label_matches(label, year=year, month=m):
+                        visible_months.append((year, m))
+                        break
+                else:
+                    for y in (year - 1, year, year + 1):
+                        if str(y) not in label:
+                            continue
+                        for m in range(1, 13):
+                            if _studio_calendar_month_label_matches(label, year=y, month=m):
+                                visible_months.append((y, m))
+                                break
+        except Exception:
+            pass
+        if not visible_months:
+            break
+        first_y, first_m = visible_months[0]
+        last_y, last_m = visible_months[-1]
+        target_ord = year * 12 + month
+        if target_ord < first_y * 12 + first_m:
+            nav = page.locator("ytcp-date-picker #prev-month")
+        elif target_ord > last_y * 12 + last_m:
+            nav = page.locator("ytcp-date-picker #next-month")
+        else:
+            break
+        try:
+            if nav.count() <= 0 or not nav.first.is_visible(timeout=300):
+                break
+            nav.first.click(timeout=5_000)
+            page.wait_for_timeout(350)
+        except Exception:
+            break
+    return _studio_pick_calendar_day_via_scrollable_calendar(page, target)
+
+
+def _studio_pick_calendar_day(page, target: datetime) -> None:
+    dt = target.astimezone(MSK)
+    locale = "en"
+    trigger = page.locator(
+        "ytcp-visibility-scheduler #datepicker-trigger, "
+        "ytcp-datetime-picker #datepicker-trigger"
+    )
+    trigger.first.wait_for(state="visible", timeout=30_000)
+    trigger.first.click(timeout=15_000)
+    page.wait_for_timeout(400)
+    _studio_date_picker_dialog(page).first.wait_for(state="visible", timeout=15_000)
+    locale = _studio_detect_date_picker_locale(page)
+
+    if _studio_navigate_calendar_to_month(page, dt):
+        _log(
+            f"Studio: дата отложенной публикации — {dt.date():%Y-%m-%d} "
+            f"(календарь, locale={locale})."
+        )
+        return
+
+    if _studio_pick_calendar_day_via_input(page, dt, locale=locale):
+        _log(
+            f"Studio: дата отложенной публикации — {dt.date():%Y-%m-%d} "
+            f"(ввод в поле, locale={locale})."
+        )
+        return
+
+    raise YoutubeStudioError(
+        f"Не удалось выбрать дату отложенной публикации ({dt.date():%Y-%m-%d})."
+    )
+
+
+def _studio_pick_schedule_time_of_day(page, target: datetime) -> None:
+    dt = parse_msk_datetime(target)
+    if dt is None:
+        raise YoutubeStudioError("Пустое время отложенной публикации.")
+    time_input = page.locator(
+        "ytcp-visibility-scheduler #time-of-day-container input, "
+        "ytcp-datetime-picker #time-of-day-container input, "
+        "ytcp-datetime-picker tp-yt-paper-input#textbox input"
+    )
+    time_input.first.wait_for(state="visible", timeout=30_000)
+    time_input.first.click(timeout=15_000)
+    page.wait_for_timeout(300)
+    picker = page.locator("ytcp-time-of-day-picker tp-yt-paper-item")
+    try:
+        picker.first.wait_for(state="visible", timeout=10_000)
+    except Exception:
+        page.keyboard.press("Control+A")
+        page.keyboard.type(dt.strftime("%H:%M"), delay=30)
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(300)
+        _log(f"Studio: время отложенной публикации — {dt.strftime('%H:%M')} (ввод с клавиатуры).")
+        return
+    patterns = studio_time_match_patterns(dt)
+    for pat in patterns:
+        item = picker.filter(has_text=pat)
+        if item.count() > 0:
+            item.first.click(timeout=10_000)
+            page.wait_for_timeout(300)
+            _log(f"Studio: время отложенной публикации — {item.first.inner_text(timeout=2_000)!r}.")
+            return
+    label_en = dt.astimezone(MSK).strftime("%I:%M %p").lstrip("0")
+    for raw in (label_en, dt.strftime("%H:%M")):
+        item = picker.filter(has_text=re.compile(re.escape(raw.strip()), re.I))
+        if item.count() > 0:
+            item.first.click(timeout=10_000)
+            page.wait_for_timeout(300)
+            _log(f"Studio: время отложенной публикации — {raw}.")
+            return
+    raise YoutubeStudioError(
+        f"Не найден слот времени в списке Studio для {dt.strftime('%H:%M')} (МСК)."
+    )
+
+
+def _studio_configure_scheduled_publish(page, schedule_at: datetime) -> None:
+    dt = parse_msk_datetime(schedule_at)
+    if dt is None:
+        raise YoutubeStudioError("Некорректное время отложенной публикации.")
+    _log(f"Studio: отложенная публикация — {dt.strftime('%d.%m.%Y %H:%M')} МСК…")
+    _studio_expand_schedule_section(page)
+    _studio_select_schedule_timezone_moscow(page)
+    _studio_pick_calendar_day(page, dt)
+    _studio_pick_schedule_time_of_day(page, dt)
+
+
+def _studio_select_public_visibility(page, *, schedule_at: datetime | None = None) -> str:
     """Ссылка на видео в лог, затем «Открытый доступ» (PUBLIC). Возвращает href (если нашли)."""
     _studio_handle_interrupt_dialogs_if_present(page)
     _log("Studio: экран доступа — фиксируем ссылку на видео…")
@@ -5779,6 +6677,8 @@ def _studio_select_public_visibility(page) -> str:
     )
     pub.first.wait_for(state="visible", timeout=30_000)
     pub.first.click(timeout=15_000)
+    if schedule_at is not None:
+        _studio_configure_scheduled_publish(page, schedule_at)
     return href
 
 
@@ -5895,10 +6795,13 @@ def _studio_is_publish_confirmed(page) -> bool:
     return False
 
 
-def _studio_wait_for_publish_confirmed(page, max_wait_sec: float) -> None:
-    """Не закрываем браузер, пока Studio не подтвердит публикацию."""
+def _studio_wait_for_publish_confirmed(
+    page, max_wait_sec: float, *, schedule: bool = False
+) -> None:
+    """Не закрываем браузер, пока Studio не подтвердит публикацию/планирование."""
+    what = "планирования" if schedule else "публикации"
     _log(
-        "Studio: ожидание подтверждения публикации "
+        f"Studio: ожидание подтверждения {what} "
         "(диалог «Video processing» / закрытие мастера / экран успеха)…"
     )
     deadline = time.monotonic() + max_wait_sec
@@ -5918,21 +6821,27 @@ def _studio_wait_for_publish_confirmed(page, max_wait_sec: float) -> None:
                     "«Video processing» (обработка SD перед публичным показом)."
                 )
             else:
-                _log("Studio: публикация подтверждена Studio.")
+                _log(
+                    f"Studio: {'планирование' if schedule else 'публикация'} "
+                    "подтверждено Studio."
+                )
             return
         if (
             not republish_attempted
             and time.monotonic() >= republish_after
         ):
-            btn = _studio_upload_publish_button(page)
+            btn = _studio_upload_finalize_button(page, schedule=schedule)
             try:
                 if (
                     btn.count() > 0
                     and btn.first.is_visible(timeout=300)
                     and btn.first.is_enabled()
                 ):
+                    retry_label = (
+                        "«Запланировать публикацию»" if schedule else "«Опубликовать»"
+                    )
                     _log(
-                        "Studio: «Опубликовать» всё ещё активна — повторный клик…"
+                        f"Studio: {retry_label} всё ещё активна — повторный клик…"
                     )
                     btn.first.click(timeout=60_000)
                     republish_attempted = True
@@ -5946,9 +6855,9 @@ def _studio_wait_for_publish_confirmed(page, max_wait_sec: float) -> None:
             int(min(_POST_UPLOAD_QUOTA_POLL_S, max(0.3, remaining)) * 1000)
         )
     raise YoutubeStudioError(
-        f"YouTube Studio: публикация не подтверждена за {max_wait_sec:.0f} с — "
+        f"YouTube Studio: {what} не подтверждено за {max_wait_sec:.0f} с — "
         "не появился диалог «Video processing», мастер загрузки всё ещё открыт "
-        "или нет других признаков успешной публикации. "
+        f"или нет других признаков успешного {what}. "
         "Проверьте черновики в Studio вручную."
     )
 
@@ -6337,36 +7246,109 @@ def _studio_wait_for_upload_file_transfer_complete(
     )
 
 
-def _studio_upload_publish_button(page):
+def _studio_upload_finalize_button(page, *, schedule: bool = False):
+    """Кнопка завершения мастера: «Опубликовать» или «Запланировать публикацию» (#done-button)."""
+    dialog = page.locator("ytcp-uploads-dialog")
+    done_btn = dialog.locator("ytcp-button#done-button button").or_(
+        dialog.locator("#done-button button")
+    )
+    schedule_re = re.compile(
+        r"^schedule$|^запланировать(?:\s+публикацию)?$",
+        re.I,
+    )
+    if schedule:
+        return (
+            dialog.locator('ytcp-button#done-button button[aria-label="Schedule"]')
+            .or_(
+                dialog.locator(
+                    'ytcp-button#done-button button[aria-label="Запланировать публикацию"]'
+                )
+            )
+            .or_(dialog.locator('ytcp-button#done-button button[aria-label="Запланировать"]'))
+            .or_(done_btn.filter(has_text=schedule_re))
+            .or_(page.get_by_role("button", name=schedule_re))
+        )
     return (
-        page.locator("ytcp-uploads-dialog ytcp-button#done-button button")
-        .or_(page.locator('ytcp-uploads-dialog ytcp-button-shape button[aria-label="Опубликовать"]'))
-        .or_(page.locator('ytcp-uploads-dialog ytcp-button-shape button[aria-label="Publish"]'))
-        .or_(page.locator('ytcp-button-shape button[aria-label="Опубликовать"]'))
-        .or_(page.locator('ytcp-button-shape button[aria-label="Publish"]'))
-        .or_(page.get_by_role("button", name=re.compile(r"^опубликовать$|^publish$", re.I)))
+        dialog.locator('ytcp-button#done-button button[aria-label="Publish"]')
+        .or_(dialog.locator('ytcp-button#done-button button[aria-label="Опубликовать"]'))
+        .or_(
+            done_btn.filter(
+                has_text=re.compile(r"^publish$|^опубликовать$", re.I)
+            )
+        )
+        .or_(page.get_by_role("button", name=re.compile(r"^publish$|^опубликовать$", re.I)))
     )
 
 
-def _studio_click_publish_when_enabled(page, max_wait_sec: float) -> None:
-    """«Опубликовать» / Publish — ждём, пока кнопка станет активной."""
-    _log("Studio: ожидание активной кнопки «Опубликовать»…")
-    btn = _studio_upload_publish_button(page)
+def _studio_upload_publish_button(page):
+    """Обратная совместимость: кнопка «Опубликовать» или «Запланировать» на #done-button."""
+    dialog = page.locator("ytcp-uploads-dialog")
+    done_btn = dialog.locator("ytcp-button#done-button button").or_(
+        dialog.locator("#done-button button")
+    )
+    finalize_re = re.compile(
+        r"^schedule$|^запланировать(?:\s+публикацию)?$|^publish$|^опубликовать$",
+        re.I,
+    )
+    return (
+        dialog.locator('ytcp-button#done-button button[aria-label="Schedule"]')
+        .or_(
+            dialog.locator(
+                'ytcp-button#done-button button[aria-label="Запланировать публикацию"]'
+            )
+        )
+        .or_(dialog.locator('ytcp-button#done-button button[aria-label="Запланировать"]'))
+        .or_(dialog.locator('ytcp-button#done-button button[aria-label="Publish"]'))
+        .or_(dialog.locator('ytcp-button#done-button button[aria-label="Опубликовать"]'))
+        .or_(done_btn.filter(has_text=finalize_re))
+        .or_(page.get_by_role("button", name=finalize_re))
+    )
+
+
+def _studio_click_publish_when_enabled(
+    page,
+    max_wait_sec: float,
+    *,
+    schedule: bool = False,
+    stats_server_username: str | None = None,
+    profile_id: str | None = None,
+) -> tuple[str, bool]:
+    """«Опубликовать» / «Запланировать публикацию» — ждём активной кнопки."""
+    label = "«Запланировать публикацию»" if schedule else "«Опубликовать»"
+    _log(f"Studio: ожидание активной кнопки {label}…")
+    btn = _studio_upload_finalize_button(page, schedule=schedule)
     started_at = time.monotonic()
     deadline = started_at + max_wait_sec
+    captured_href = ""
+    stats_notified = False
     while time.monotonic() < deadline:
         _studio_handle_interrupt_dialogs_if_present(page)
         try:
             if btn.count() > 0 and btn.first.is_visible(timeout=500):
                 if btn.first.is_enabled():
+                    if schedule:
+                        remaining = max(0.0, deadline - time.monotonic())
+                        captured_href = _studio_capture_uploads_review_video_link(
+                            page, max_wait_sec=min(30.0, max(5.0, remaining))
+                        )
+                        if captured_href:
+                            vid = _studio_try_extract_video_id_from_url(captured_href)
+                            if vid:
+                                stats_notified = _studio_try_notify_stats_server(
+                                    vid,
+                                    profile_id=profile_id,
+                                    username=stats_server_username,
+                                )
                     btn.first.click(timeout=60_000)
-                    _log("Studio: «Опубликовать» нажата.")
+                    _log(f"Studio: {label} нажата.")
                     remaining_total = max(0.0, deadline - time.monotonic())
                     confirm_budget = min(
                         _PUBLISH_CONFIRM_MAX_S, max(30.0, remaining_total)
                     )
-                    _studio_wait_for_publish_confirmed(page, confirm_budget)
-                    return
+                    _studio_wait_for_publish_confirmed(
+                        page, confirm_budget, schedule=schedule
+                    )
+                    return captured_href, stats_notified
         except Exception:
             pass
         remaining = deadline - time.monotonic()
@@ -6376,13 +7358,20 @@ def _studio_click_publish_when_enabled(page, max_wait_sec: float) -> None:
             int(min(_POST_UPLOAD_QUOTA_POLL_S, max(0.3, remaining)) * 1000)
         )
     raise YoutubeStudioError(
-        "YouTube Studio: кнопка «Опубликовать» так и не стала активной."
+        f"YouTube Studio: кнопка {label} так и не стала активной."
     )
 
 
 def _studio_publish_flow_before_checks(
-    page, browser, max_wait_sec: float, *, kids_already_selected: bool = False
-) -> str:
+    page,
+    browser,
+    max_wait_sec: float,
+    *,
+    kids_already_selected: bool = False,
+    schedule_at: datetime | None = None,
+    stats_server_username: str | None = None,
+    profile_id: str | None = None,
+) -> tuple[str, bool]:
     """
     Публикация до проверок: сразу после названия — мастер до «Открытый доступ»
     (пока идёт загрузка), затем «Опубликовать» после 100% / завершения загрузки.
@@ -6396,7 +7385,7 @@ def _studio_publish_flow_before_checks(
     _studio_poll_upload_fatal(page, browser)
     _studio_click_next_until_visibility(page, fast_if_upload_done=True)
     _studio_poll_upload_fatal(page, browser)
-    href = _studio_select_public_visibility(page)
+    href = _studio_select_public_visibility(page, schedule_at=schedule_at)
     if _studio_is_upload_file_transfer_complete(page):
         status = _studio_read_upload_progress_label(page)
         if status and _studio_is_upload_past_percent_phase(status):
@@ -6407,8 +7396,16 @@ def _studio_publish_flow_before_checks(
             _log("Studio: передача файла уже завершена — ждать 100% не нужно.")
     else:
         _studio_wait_for_upload_file_transfer_complete(page, browser, max_wait_sec)
-    _studio_click_publish_when_enabled(page, max_wait_sec)
-    return href
+    schedule_href, stats_notified = _studio_click_publish_when_enabled(
+        page,
+        max_wait_sec,
+        schedule=schedule_at is not None,
+        stats_server_username=stats_server_username,
+        profile_id=profile_id,
+    )
+    if schedule_href:
+        href = schedule_href
+    return href, stats_notified
 
 
 def _studio_wait_after_upload_studio_outcome(
@@ -6466,13 +7463,27 @@ def _studio_wait_after_upload_studio_outcome(
     )
 
 
-def _studio_publish_flow_after_upload(page) -> str:
-    """После паузы: не для детей → Далее… → открытый доступ → Опубликовать. Возвращает href (если нашли)."""
+def _studio_publish_flow_after_upload(
+    page,
+    *,
+    schedule_at: datetime | None = None,
+    stats_server_username: str | None = None,
+    profile_id: str | None = None,
+) -> tuple[str, bool]:
+    """После паузы: не для детей → Далее… → открытый доступ → Опубликовать."""
     _studio_select_not_for_kids(page)
     _studio_click_next_until_visibility(page)
-    href = _studio_select_public_visibility(page)
-    _studio_click_publish_when_enabled(page, _POST_UPLOAD_STUDIO_OUTCOME_MAX_S)
-    return href
+    href = _studio_select_public_visibility(page, schedule_at=schedule_at)
+    schedule_href, stats_notified = _studio_click_publish_when_enabled(
+        page,
+        _POST_UPLOAD_STUDIO_OUTCOME_MAX_S,
+        schedule=schedule_at is not None,
+        stats_server_username=stats_server_username,
+        profile_id=profile_id,
+    )
+    if schedule_href:
+        href = schedule_href
+    return href, stats_notified
 
 
 class UploadedStudioResult(dict):
@@ -6484,13 +7495,35 @@ class UploadedStudioResult(dict):
     """
 
 
-@_studio_entrypoint
-def run_upload_latest_ready_video(
+@dataclass(frozen=True, slots=True)
+class ScheduledStudioUpload:
+    video_path: str
+    title: str = ""
+    description: str = ""
+    schedule_publish_at: datetime | None = None
+
+
+def _studio_reload_for_next_scheduled_upload(page, *, login_credentials=None) -> None:
+    """Обновить дашборд Studio перед следующей отложенной загрузкой в той же сессии."""
+    _log(
+        "Studio: отложка — обновляем страницу YouTube Studio для следующего видео…"
+    )
+    page.goto(
+        _STUDIO_HOME_URL,
+        wait_until="domcontentloaded",
+        timeout=90_000,
+    )
+    _studio_handle_onboarding_dialogs_if_present(
+        page, login_credentials=login_credentials
+    )
+    _studio_goto_studio_home_ready(page, login_credentials=login_credentials)
+
+
+def _studio_upload_single_video(
     *,
     page,
     browser,
-    zaliver_db_path: Path | None,
-    video_path: str | None = None,
+    upload_file: Path,
     title: str | None = None,
     description: str | None = None,
     login_credentials=None,
@@ -6499,18 +7532,13 @@ def run_upload_latest_ready_video(
     search_oldest_channel: bool = True,
     profile_id: str | None = None,
     publish_before_checks: bool = False,
-) -> None:
-    """
-    Полный сценарий Studio: Create → Upload → ждать outcome → мастер → Publish.
-    """
+    keep_studio_title: bool = False,
+    schedule_publish_at: datetime | None = None,
+    stats_server_username: str | None = None,
+) -> UploadedStudioResult:
+    """Create → Upload → publish/schedule для одного файла (Studio уже открыта)."""
     best_url = ""
     best_vid = ""
-
-    chosen = (video_path or "").strip()
-    if not chosen:
-        chosen = resolve_latest_zaliver_video_on_disk(db_path=zaliver_db_path)
-    upload_file = _studio_validate_video_file_path(chosen)
-    _log(f"Studio: файл для загрузки: {str(upload_file)!r}")
 
     try:
         _studio_click_create_then_add_video(
@@ -6530,20 +7558,26 @@ def run_upload_latest_ready_video(
         skip_validation=True,
         title=title,
         description=description,
+        keep_studio_title=keep_studio_title,
     )
     kids_already_selected = _studio_set_title_and_description(
         page,
         title=title,
         description=description,
         metadata_state=metadata_state,
+        keep_studio_title=keep_studio_title,
     )
     href_before_public = ""
+    stats_notified = False
     if publish_before_checks:
-        href_before_public = _studio_publish_flow_before_checks(
+        href_before_public, stats_notified = _studio_publish_flow_before_checks(
             page,
             browser,
             _POST_UPLOAD_STUDIO_OUTCOME_MAX_S,
             kids_already_selected=kids_already_selected,
+            schedule_at=schedule_publish_at,
+            stats_server_username=stats_server_username,
+            profile_id=profile_id,
         )
     else:
         _log(
@@ -6553,7 +7587,6 @@ def run_upload_latest_ready_video(
         _studio_wait_after_upload_studio_outcome(
             page, browser, _POST_UPLOAD_STUDIO_OUTCOME_MAX_S
         )
-        # Иногда ссылка/ID доступны уже на этапе прогресса.
         try:
             u0 = _studio_try_extract_video_url(page)
             if u0:
@@ -6563,7 +7596,12 @@ def run_upload_latest_ready_video(
                     best_vid = v0
         except Exception:
             pass
-        href_before_public = _studio_publish_flow_after_upload(page)
+        href_before_public, stats_notified = _studio_publish_flow_after_upload(
+            page,
+            schedule_at=schedule_publish_at,
+            stats_server_username=stats_server_username,
+            profile_id=profile_id,
+        )
     if href_before_public:
         best_url = href_before_public
         try:
@@ -6577,7 +7615,6 @@ def run_upload_latest_ready_video(
     vid = ""
     try:
         url = _studio_try_extract_video_url(page)
-        # Never overwrite the URL captured from ytcp-video-info with unrelated links.
         if url and not best_url and _studio_is_probably_youtube_video_url(url):
             best_url = url
     except Exception:
@@ -6595,8 +7632,6 @@ def run_upload_latest_ready_video(
     except Exception:
         vid = ""
 
-    # IMPORTANT: итоговая ссылка должна совпадать со ссылкой из ytcp-video-info (если она была).
-    # Канонический watch URL используем только как fallback.
     if not best_url and best_vid:
         best_url = _studio_canonical_watch_url(best_vid)
 
@@ -6604,7 +7639,104 @@ def run_upload_latest_ready_video(
         _log(f"Studio: итоговая ссылка: {best_url}")
     if best_vid:
         _log(f"Studio: итоговый videoId: {best_vid}")
-    return UploadedStudioResult(video_id=best_vid, url=best_url)
+    return UploadedStudioResult(
+        video_id=best_vid, url=best_url, stats_notified=stats_notified
+    )
+
+
+@_studio_entrypoint
+def run_upload_scheduled_video_batch(
+    *,
+    page,
+    browser,
+    uploads: list[ScheduledStudioUpload],
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    on_oldest_channel_name=None,
+    search_oldest_channel: bool = True,
+    profile_id: str | None = None,
+    publish_before_checks: bool = False,
+    keep_studio_title: bool = False,
+    stats_server_username: str | None = None,
+) -> list[UploadedStudioResult]:
+    """Несколько отложенных загрузок подряд в одной сессии браузера."""
+    if not uploads:
+        raise YoutubeStudioError("Пустой список отложенных загрузок.")
+    results: list[UploadedStudioResult] = []
+    total = len(uploads)
+    for i, item in enumerate(uploads):
+        if i > 0:
+            _studio_reload_for_next_scheduled_upload(
+                page, login_credentials=login_credentials
+            )
+        upload_file = _studio_validate_video_file_path(item.video_path)
+        _log(
+            f"Studio: отложка — загрузка {i + 1}/{total}: "
+            f"{str(upload_file)!r}, schedule={item.schedule_publish_at!r}"
+        )
+        res = _studio_upload_single_video(
+            page=page,
+            browser=browser,
+            upload_file=upload_file,
+            title=item.title,
+            description=item.description,
+            login_credentials=login_credentials,
+            yt_oldest_name=yt_oldest_name,
+            on_oldest_channel_name=on_oldest_channel_name,
+            search_oldest_channel=search_oldest_channel if i == 0 else False,
+            profile_id=profile_id,
+            publish_before_checks=publish_before_checks,
+            keep_studio_title=keep_studio_title,
+            schedule_publish_at=item.schedule_publish_at,
+            stats_server_username=stats_server_username,
+        )
+        results.append(res)
+    return results
+
+
+@_studio_entrypoint
+def run_upload_latest_ready_video(
+    *,
+    page,
+    browser,
+    zaliver_db_path: Path | None,
+    video_path: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    on_oldest_channel_name=None,
+    search_oldest_channel: bool = True,
+    profile_id: str | None = None,
+    publish_before_checks: bool = False,
+    keep_studio_title: bool = False,
+    schedule_publish_at: datetime | None = None,
+    stats_server_username: str | None = None,
+) -> UploadedStudioResult:
+    """
+    Полный сценарий Studio: Create → Upload → ждать outcome → мастер → Publish.
+    """
+    chosen = (video_path or "").strip()
+    if not chosen:
+        chosen = resolve_latest_zaliver_video_on_disk(db_path=zaliver_db_path)
+    upload_file = _studio_validate_video_file_path(chosen)
+    _log(f"Studio: файл для загрузки: {str(upload_file)!r}")
+    return _studio_upload_single_video(
+        page=page,
+        browser=browser,
+        upload_file=upload_file,
+        title=title,
+        description=description,
+        login_credentials=login_credentials,
+        yt_oldest_name=yt_oldest_name,
+        on_oldest_channel_name=on_oldest_channel_name,
+        search_oldest_channel=search_oldest_channel,
+        profile_id=profile_id,
+        publish_before_checks=publish_before_checks,
+        keep_studio_title=keep_studio_title,
+        schedule_publish_at=schedule_publish_at,
+        stats_server_username=stats_server_username,
+    )
 
 
 _YOUTUBE_HOME_URL = "https://www.youtube.com/"

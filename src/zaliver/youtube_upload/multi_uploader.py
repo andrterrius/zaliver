@@ -6,6 +6,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from queue import Empty, Queue
 from typing import Callable, Dict, Iterable, Optional
 
@@ -18,10 +19,21 @@ def _ts() -> str:
 
 
 @dataclass(slots=True)
+class ScheduledUploadItem:
+    video_path: str
+    title: str
+    description: str
+    schedule_publish_at: datetime | None = None
+
+
+@dataclass(slots=True)
 class VideoTask:
     video_path: str
     title: str
     description: str
+    schedule_publish_at: datetime | None = None
+    scheduled_batch: list[ScheduledUploadItem] | None = None
+    schedule_slot_start: int | None = None
     attempts_by_profile: Dict[str, int] = field(default_factory=dict)
     last_failed_profile: str = ""
 
@@ -68,6 +80,8 @@ class MultiProfileUploader:
         log_sink: Callable[[str], None],
         upload_one: Callable[[str, VideoTask], None],
         on_profile_attempt: Callable[[str, bool, str], None] | None = None,
+        schedule_batch_size: int = 0,
+        schedule_times: list[datetime] | None = None,
     ) -> None:
         self._profiles = [p.strip() for p in (profile_ids or []) if (p or "").strip()]
         self._cooldown_s = float(cooldown_s)
@@ -80,6 +94,13 @@ class MultiProfileUploader:
         self._upload_one = upload_one
         self._on_profile_attempt = on_profile_attempt
         self._profile_upload_pause_remaining_s = profile_upload_pause_remaining_s
+
+        self._schedule_batch_size = max(0, int(schedule_batch_size or 0))
+        self._schedule_times = list(schedule_times or [])
+        if self._schedule_batch_size > 0 and len(self._schedule_times) != self._schedule_batch_size:
+            raise ValueError("schedule_times length must match schedule_batch_size")
+        self._profile_batch_assigned: dict[str, int] = {pid: 0 for pid in self._profiles}
+        self._schedule_profile_order_idx = 0
 
         self._stop = threading.Event()
         self._stop_reason = ""
@@ -230,6 +251,52 @@ class MultiProfileUploader:
             out.append(pid)
         return out
 
+    def _current_schedule_profile(self) -> str | None:
+        if self._schedule_batch_size <= 0:
+            return None
+        n = len(self._profiles)
+        if n <= 0:
+            return None
+        checked = 0
+        while checked < n:
+            idx = self._schedule_profile_order_idx % n
+            pid = self._profiles[idx]
+            if self._profile_batch_assigned.get(pid, 0) < self._schedule_batch_size:
+                return pid
+            self._schedule_profile_order_idx += 1
+            checked += 1
+        return None
+
+    def _assign_schedule_slot(self, profile_id: str, task: VideoTask) -> None:
+        slot = int(self._profile_batch_assigned.get(profile_id, 0))
+        if slot < 0 or slot >= len(self._schedule_times):
+            task.schedule_publish_at = None
+            return
+        task.schedule_publish_at = self._schedule_times[slot]
+        self._profile_batch_assigned[profile_id] = slot + 1
+        if self._profile_batch_assigned[profile_id] >= self._schedule_batch_size:
+            self._schedule_profile_order_idx += 1
+            if self._schedule_profile_order_idx >= len(self._profiles):
+                self._schedule_profile_order_idx = 0
+                for p in self._profiles:
+                    self._profile_batch_assigned[p] = 0
+
+    def _pick_profile_for_task(self, task: VideoTask, eligible: list[str], start_idx: int) -> str | None:
+        if self._schedule_batch_size <= 0:
+            with self._recent_lock:
+                recent = set(self._recent_completed)
+            preferred = [p for p in eligible if p not in recent]
+            if not preferred:
+                return None
+            return self._pick_round_robin(preferred, start_idx)
+
+        sched_pid = self._current_schedule_profile()
+        if sched_pid is None:
+            return None
+        if sched_pid not in eligible:
+            return None
+        return sched_pid
+
     def _pick_round_robin(self, candidates: list[str], start_idx: int) -> str:
         if not candidates:
             raise ValueError("candidates must be non-empty")
@@ -259,6 +326,15 @@ class MultiProfileUploader:
     def _dispatch_loop(self) -> None:
         idx = 0
         while not self._stop.is_set():
+            if self._schedule_batch_size > 1:
+                dispatched, idx = self._try_dispatch_schedule_batch(idx)
+                if dispatched:
+                    continue
+                if self._is_all_done():
+                    return
+                time.sleep(0.05)
+                continue
+
             try:
                 task = self._global_q.get(timeout=0.25)
             except Empty:
@@ -287,20 +363,33 @@ class MultiProfileUploader:
                     time.sleep(0.05)
                     continue
 
-                with self._recent_lock:
-                    recent = set(self._recent_completed)
-                preferred = [p for p in eligible if p not in recent]
-                if not preferred:
-                    self._wait_recent_batch_cooldown()
-                    if self._stop.is_set():
-                        try:
-                            self._global_q.put(task)
-                        except Exception:
-                            pass
-                        return
+                if self._schedule_batch_size <= 0:
+                    with self._recent_lock:
+                        recent = set(self._recent_completed)
+                    preferred = [p for p in eligible if p not in recent]
+                    if not preferred:
+                        self._wait_recent_batch_cooldown()
+                        if self._stop.is_set():
+                            try:
+                                self._global_q.put(task)
+                            except Exception:
+                                pass
+                            return
+                        continue
+                    chosen = self._pick_profile_for_task(task, eligible, idx)
+                else:
+                    chosen = self._pick_profile_for_task(task, eligible, idx)
+                    if chosen is None:
+                        time.sleep(0.05)
+                        continue
+
+                if chosen is None:
+                    time.sleep(0.05)
                     continue
 
-                chosen = self._pick_round_robin(preferred, idx)
+                if self._schedule_batch_size > 0:
+                    self._assign_schedule_slot(chosen, task)
+
                 try:
                     pos = self._profiles.index(chosen)
                 except ValueError:
@@ -308,12 +397,100 @@ class MultiProfileUploader:
                 idx = (pos + 1) % max(1, len(self._profiles))
 
                 self._per_profile_q[chosen].put(task)
+                sched_note = ""
+                if task.schedule_publish_at is not None:
+                    sched_note = f" schedule_at={task.schedule_publish_at.isoformat()}"
                 self._log(
                     f"[{_ts()}] [upload] [QUEUED] profile={chosen} video={task.video_path!r} "
-                    f"attempts={int(task.attempts_by_profile.get(chosen, 0)) + 1}"
+                    f"attempts={int(task.attempts_by_profile.get(chosen, 0)) + 1}{sched_note}"
                 )
                 self._global_q.task_done()
                 break
+
+    def _try_dispatch_schedule_batch(self, idx: int) -> tuple[bool, int]:
+        """Пакет отложенных загрузок на один профиль без закрытия браузера."""
+        eligible: list[str] = []
+        for pid in self._profiles:
+            if not self._per_profile_q[pid].empty():
+                return False, idx
+            if self._profile_batch_assigned.get(pid, 0) >= self._schedule_batch_size:
+                continue
+            eligible.append(pid)
+        if not eligible:
+            return False, idx
+
+        sched_pid = self._current_schedule_profile()
+        if sched_pid is None or sched_pid not in eligible:
+            return False, idx
+
+        slot_start = int(self._profile_batch_assigned.get(sched_pid, 0))
+        remaining_slots = self._schedule_batch_size - slot_start
+        if remaining_slots <= 0:
+            return False, idx
+
+        available = self._global_q.qsize()
+        if available <= 0:
+            return False, idx
+        take = min(remaining_slots, available)
+
+        batch_tasks: list[VideoTask] = []
+        for _ in range(take):
+            try:
+                batch_tasks.append(self._global_q.get_nowait())
+            except Empty:
+                for t in batch_tasks:
+                    self._global_q.put(t)
+                return False, idx
+
+        batch_items: list[ScheduledUploadItem] = []
+        for i, t in enumerate(batch_tasks):
+            batch_items.append(
+                ScheduledUploadItem(
+                    video_path=t.video_path,
+                    title=t.title,
+                    description=t.description,
+                    schedule_publish_at=self._schedule_times[slot_start + i],
+                )
+            )
+
+        merged = VideoTask(
+            video_path=batch_tasks[0].video_path,
+            title=batch_tasks[0].title,
+            description=batch_tasks[0].description,
+            schedule_publish_at=self._schedule_times[slot_start],
+            scheduled_batch=batch_items,
+            schedule_slot_start=slot_start,
+            attempts_by_profile=dict(batch_tasks[0].attempts_by_profile),
+            last_failed_profile=batch_tasks[0].last_failed_profile,
+        )
+
+        self._profile_batch_assigned[sched_pid] = slot_start + take
+        if self._profile_batch_assigned[sched_pid] >= self._schedule_batch_size:
+            self._schedule_profile_order_idx += 1
+            if self._schedule_profile_order_idx >= len(self._profiles):
+                self._schedule_profile_order_idx = 0
+                for p in self._profiles:
+                    self._profile_batch_assigned[p] = 0
+
+        try:
+            pos = self._profiles.index(sched_pid)
+        except ValueError:
+            pos = 0
+        idx = (pos + 1) % max(1, len(self._profiles))
+
+        self._per_profile_q[sched_pid].put(merged)
+        times_note = ", ".join(
+            item.schedule_publish_at.isoformat()
+            for item in batch_items
+            if item.schedule_publish_at is not None
+        )
+        self._log(
+            f"[{_ts()}] [upload] [QUEUED] profile={sched_pid} "
+            f"scheduled_batch={len(batch_items)} videos={times_note!r}"
+        )
+        for _ in batch_tasks:
+            self._global_q.task_done()
+        return True, idx
 
     def _worker_loop(self, profile_id: str) -> None:
         from zaliver.log_format import log_profile_context
@@ -438,22 +615,48 @@ class MultiProfileUploader:
                         pass
 
                 if ok:
+                    n_ok = (
+                        len(task.scheduled_batch)
+                        if task.scheduled_batch
+                        else 1
+                    )
                     self._log(
-                        f"[{_ts()}] [upload] [OK] profile={profile_id} video={task.video_path!r}"
+                        f"[{_ts()}] [upload] [OK] profile={profile_id} "
+                        f"video={task.video_path!r}"
+                        + (
+                            f" batch={n_ok}"
+                            if task.scheduled_batch
+                            else ""
+                        )
                     )
                     with self._done_lock:
-                        self._done_ok += 1
+                        self._done_ok += n_ok
                 else:
                     # Record attempt on this profile and requeue to another one.
                     task.attempts_by_profile[profile_id] = int(
                         task.attempts_by_profile.get(profile_id, 0)
                     ) + 1
                     task.last_failed_profile = profile_id
+                    if task.scheduled_batch:
+                        slot_start = task.schedule_slot_start
+                        if slot_start is not None:
+                            self._profile_batch_assigned[profile_id] = slot_start
+                        for item in task.scheduled_batch:
+                            retry = VideoTask(
+                                video_path=item.video_path,
+                                title=item.title,
+                                description=item.description,
+                                schedule_publish_at=item.schedule_publish_at,
+                                attempts_by_profile=dict(task.attempts_by_profile),
+                                last_failed_profile=profile_id,
+                            )
+                            self._global_q.put(retry)
+                    else:
+                        self._global_q.put(task)
                     self._log(
                         f"[{_ts()}] [upload] [ERROR] profile={profile_id} video={task.video_path!r} "
                         f"attempt={task.attempts_by_profile[profile_id]}/{self._max_attempts} err={err_text!r}"
                     )
-                    self._global_q.put(task)
             finally:
                 self._upload_slots.release()
 

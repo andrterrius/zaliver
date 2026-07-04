@@ -47,6 +47,13 @@ def notify_uploaded_video(
                 code,
                 (resp.text or "")[:500],
             )
+        else:
+            _LOG.info(
+                "stats_server notify ok: video_id=%s username=%s profile_id=%s",
+                vid,
+                user,
+                (profile_id or "").strip(),
+            )
         return ok
     except requests.RequestException as e:
         _LOG.warning("stats_server notify request failed: %s", e)

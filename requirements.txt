@@ -4,5 +4,6 @@ scipy>=1.11.0
 Pillow>=10.0.0
 pyinstaller
 requests>=2.32.0
+tzdata>=2024.1
 patchright>=1.59.1
 playwright>=1.46.0

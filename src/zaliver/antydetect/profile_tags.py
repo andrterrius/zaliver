@@ -34,6 +34,14 @@ WARMUP_RESULT_TAGS: tuple[str, ...] = (
     WARMUP_SUCCESS_TAG,
 )
 
+# Смена языка интерфейса YouTube.
+LANGUAGE_CHANGE_ERROR_TAG = "ОШИБКА СМЕНЫ ЯЗЫКА"
+LANGUAGE_CHANGE_SUCCESS_TAG = "УСПЕШНАЯ СМЕНА ЯЗЫКА"
+LANGUAGE_CHANGE_RESULT_TAGS: tuple[str, ...] = (
+    LANGUAGE_CHANGE_ERROR_TAG,
+    LANGUAGE_CHANGE_SUCCESS_TAG,
+)
+
 # Заполнение описания канала.
 DESCRIPTION_FILL_ERROR_TAG = "ОШИБКА ЗАПОЛНЕНИЯ ОПИСАНИЯ"
 DESCRIPTION_FILL_SUCCESS_TAG = "УСПЕШНОЕ ЗАПОЛНЕНИЕ ОПИСАНИЯ"
@@ -48,6 +56,14 @@ LINK_FILL_SUCCESS_TAG = "УСПЕШНОЕ ЗАПОЛНЕНИЕ ССЫЛКИ"
 LINK_FILL_RESULT_TAGS: tuple[str, ...] = (
     LINK_FILL_ERROR_TAG,
     LINK_FILL_SUCCESS_TAG,
+)
+
+# Смена названия по умолчанию для загрузки видео.
+VIDEO_TITLE_CHANGE_ERROR_TAG = "ОШИБКА СМЕНЫ НАЗВАНИЯ ВИДЕО"
+VIDEO_TITLE_CHANGE_SUCCESS_TAG = "УСПЕШНАЯ СМЕНА НАЗВАНИЯ ВИДЕО"
+VIDEO_TITLE_CHANGE_RESULT_TAGS: tuple[str, ...] = (
+    VIDEO_TITLE_CHANGE_ERROR_TAG,
+    VIDEO_TITLE_CHANGE_SUCCESS_TAG,
 )
 
 # Результат последней попытки залива (взаимоисключающие).
@@ -71,10 +87,14 @@ ZALIVER_PROFILE_TAGS: tuple[str, ...] = (
     NAME_CHANGE_SUCCESS_TAG,
     WARMUP_ERROR_TAG,
     WARMUP_SUCCESS_TAG,
+    LANGUAGE_CHANGE_ERROR_TAG,
+    LANGUAGE_CHANGE_SUCCESS_TAG,
     DESCRIPTION_FILL_ERROR_TAG,
     DESCRIPTION_FILL_SUCCESS_TAG,
     LINK_FILL_ERROR_TAG,
     LINK_FILL_SUCCESS_TAG,
+    VIDEO_TITLE_CHANGE_ERROR_TAG,
+    VIDEO_TITLE_CHANGE_SUCCESS_TAG,
     UPLOAD_PREVIOUS_SUCCESS_TAG,
     UPLOAD_PREVIOUS_ERROR_TAG,
     UPLOAD_ERROR_3X_TAG,

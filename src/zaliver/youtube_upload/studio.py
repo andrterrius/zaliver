@@ -123,6 +123,26 @@ _SWITCH_ACCOUNT_LABEL_RE = re.compile(
     r"сменить\s+аккаунт|switch\s+account",
     re.I,
 )
+_INTERFACE_LANGUAGE_LABEL_RE = re.compile(
+    r"язык\s+интерфейса|"
+    r"display\s+language|"
+    r"language\s+of\s+(?:the\s+)?interface|"
+    r"^language$|"
+    r"interface\s+language|"
+    r"^sprache$|"
+    r"benutzeroberfl[aä]chensprache|"
+    r"^idioma$|"
+    r"idioma\s+de\s+la\s+interfaz|"
+    r"^langue$|"
+    r"langue\s+de\s+l['\u2019]?interface|"
+    r"^dil$|"
+    r"aray[uü]z\s+dili|"
+    r"^lingua$|"
+    r"lingua\s+dell['\u2019]?interfaccia",
+    re.I,
+)
+_RUSSIAN_LANGUAGE_OPTION_RE = re.compile(r"^Русский$", re.I)
+_YOUTUBE_HOME_NAV_RU_RE = re.compile(r"^Главная$", re.I)
 _YOUR_CHANNEL_LABEL_RE = re.compile(
     r"your\s+channel|ваш\s+канал",
     re.I,
@@ -866,6 +886,106 @@ def _studio_open_avatar_menu(page) -> None:
     avatar.first.focus()
     page.keyboard.press("Enter")
     page.wait_for_timeout(600)
+
+
+def _studio_interface_language_menu_item_locators(page):
+    """Пункт «Язык интерфейса» / Display language в меню профиля."""
+    return (
+        page.locator("ytd-compact-link-renderer")
+        .filter(
+            has=page.locator(
+                "yt-formatted-string#label", has_text=_INTERFACE_LANGUAGE_LABEL_RE
+            )
+        )
+        .locator("tp-yt-paper-item"),
+        page.locator("ytd-compact-link-renderer")
+        .filter(
+            has=page.locator(
+                "yt-formatted-string#label", has_text=_INTERFACE_LANGUAGE_LABEL_RE
+            )
+        )
+        .locator("a#endpoint"),
+        page.locator("ytd-compact-link-renderer yt-formatted-string#label").filter(
+            has_text=_INTERFACE_LANGUAGE_LABEL_RE
+        ),
+        page.get_by_text(_INTERFACE_LANGUAGE_LABEL_RE),
+    )
+
+
+def _studio_russian_language_option_locators(page):
+    return (
+        page.locator("ytd-compact-link-renderer yt-formatted-string").filter(
+            has_text=_RUSSIAN_LANGUAGE_OPTION_RE
+        ),
+        page.locator("ytd-compact-link-renderer tp-yt-paper-item").filter(
+            has_text=_RUSSIAN_LANGUAGE_OPTION_RE
+        ),
+        page.locator("tp-yt-paper-item").filter(has_text=_RUSSIAN_LANGUAGE_OPTION_RE),
+        page.get_by_text("Русский", exact=True),
+    )
+
+
+def _studio_youtube_shows_russian_home_nav(page, *, probe_timeout_ms: int = 800) -> bool:
+    """True, если в навигации YouTube видна подпись «Главная» (русский интерфейс)."""
+    for loc in (
+        page.locator("ytd-guide-entry-renderer yt-formatted-string").filter(
+            has_text=_YOUTUBE_HOME_NAV_RU_RE
+        ),
+        page.locator("ytd-mini-guide-entry-renderer").filter(
+            has_text=_YOUTUBE_HOME_NAV_RU_RE
+        ),
+        page.locator("ytd-guide-entry-renderer").filter(
+            has_text=_YOUTUBE_HOME_NAV_RU_RE
+        ),
+        page.get_by_role("link", name="Главная"),
+        page.get_by_text("Главная", exact=True),
+    ):
+        try:
+            if loc.count() > 0 and loc.first.is_visible(timeout=probe_timeout_ms):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _studio_wait_russian_home_nav(page, *, timeout_s: float = 45.0) -> bool:
+    _log("YouTube: ждём появление «Главная» в навигации…")
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _studio_youtube_shows_russian_home_nav(page):
+            _log("YouTube: найдена «Главная» — интерфейс на русском.")
+            return True
+        page.wait_for_timeout(400)
+    return False
+
+
+def _studio_select_russian_interface_language(page) -> None:
+    """Меню профиля → язык интерфейса → «Русский»."""
+    _studio_open_avatar_menu(page)
+    lang_item = _studio_first_visible_locator(
+        page, _studio_interface_language_menu_item_locators(page), probe_timeout_ms=3_000
+    )
+    if lang_item is None:
+        raise YoutubeStudioError(
+            "YouTube: не найден пункт смены языка интерфейса в меню профиля."
+        )
+    lang_item.click(timeout=30_000)
+    page.wait_for_timeout(800)
+
+    russian = _studio_first_visible_locator(
+        page, _studio_russian_language_option_locators(page), probe_timeout_ms=5_000
+    )
+    if russian is None:
+        raise YoutubeStudioError(
+            "YouTube: пункт «Русский» не найден в списке языков интерфейса."
+        )
+    russian.click(timeout=30_000)
+    page.wait_for_timeout(1_200)
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=60_000)
+    except Exception:
+        pass
+    _studio_wait_youtube_home_page(page)
 
 
 def _studio_account_switcher_locator(page):
@@ -3462,6 +3582,21 @@ _STUDIO_UPLOAD_DEFAULTS_MENU_RE = re.compile(
     r"загрузка\s+видео|upload\s+defaults|default\s+upload|video\s+uploads?",
     re.I,
 )
+_STUDIO_CHANNEL_SETTINGS_MENU_RE = re.compile(r"^канал$|^channel$", re.I)
+_STUDIO_CHANNEL_ADVANCED_SETTINGS_RE = re.compile(
+    r"расширенные\s+настройки|advanced\s+settings",
+    re.I,
+)
+_UPLOAD_DEFAULTS_PUBLIC_PRIVACY_LABEL_RE = re.compile(
+    r"^открытый\s+доступ$|^public$",
+    re.I,
+)
+_CHANNEL_NOT_MADE_FOR_KIDS_RADIO_NAME = "NOT_MADE_FOR_KIDS"
+_CHANNEL_NOT_MADE_FOR_KIDS_LABEL_RE = re.compile(
+    r"нет,?\s*мой\s*канал\s*не\s*для\s*детей|"
+    r"not\s*made\s*for\s*kids",
+    re.I,
+)
 
 
 def _studio_ensure_channel_profile_tab(page) -> None:
@@ -4635,6 +4770,7 @@ def _studio_open_channel_link_row(page, links_root) -> tuple[object, object]:
 
 
 _CHANNEL_CUSTOMIZATION_PUBLISH_WAIT_MS = 10_000
+_UPLOAD_DEFAULT_TITLE_SAVE_WAIT_MS = 3_000
 
 
 def _studio_channel_customization_publish_state(page) -> dict:
@@ -4873,6 +5009,166 @@ def _studio_navigate_to_upload_defaults_settings(
     _log("Studio: раздел «Загрузка видео» в настройках загружен.")
 
 
+def _studio_upload_default_title_save_still_enabled(page) -> bool:
+    try:
+        return bool(
+            page.evaluate(
+                """
+() => {
+  const host = document.querySelector('ytcp-button#submit-button');
+  if (!host) return false;
+  let btn = host.querySelector('button');
+  if (!btn && host.shadowRoot) {
+    btn = host.shadowRoot.querySelector('button');
+  }
+  if (!btn) return false;
+  return !btn.disabled;
+}
+"""
+            )
+        )
+    except Exception:
+        return False
+
+
+def _studio_click_settings_save_and_wait(page, *, context: str) -> None:
+    save_btn = page.locator("ytcp-button#submit-button button").or_(
+        page.get_by_role("button", name=re.compile(r"^сохранить$|^save$", re.I))
+    )
+    save_btn.first.wait_for(state="visible", timeout=30_000)
+    save_btn.first.scroll_into_view_if_needed(timeout=15_000)
+    save_btn.first.click(timeout=30_000)
+    _log(
+        f"Studio: ожидание {_UPLOAD_DEFAULT_TITLE_SAVE_WAIT_MS // 1000} с "
+        f"после «Сохранить» ({context})…"
+    )
+    page.wait_for_timeout(_UPLOAD_DEFAULT_TITLE_SAVE_WAIT_MS)
+    if _studio_upload_default_title_save_still_enabled(page):
+        _log(f"Studio: кнопка «Сохранить» ({context}) всё ещё активна — дополнительная пауза.")
+        page.wait_for_timeout(2_000)
+
+
+def _studio_set_upload_defaults_public_privacy(page) -> None:
+    _studio_handle_interrupt_dialogs_if_present(page)
+    _log("Studio: параметры доступа — «Открытый доступ»…")
+
+    privacy_select = (
+        page.locator("ytcp-upload-defaults-settings ytcp-form-select#privacy-select")
+        .or_(page.locator("#privacy-row ytcp-form-select#privacy-select"))
+        .or_(page.locator("ytcp-form-select#privacy-select"))
+    )
+    trigger = privacy_select.locator("ytcp-dropdown-trigger").or_(
+        privacy_select.locator("#trigger ytcp-dropdown-trigger")
+    )
+    trigger.first.wait_for(state="visible", timeout=30_000)
+    trigger.first.scroll_into_view_if_needed(timeout=15_000)
+
+    try:
+        current = (
+            privacy_select.locator(".dropdown-trigger-text").first.inner_text(timeout=2_000)
+            or ""
+        ).strip()
+        if _UPLOAD_DEFAULTS_PUBLIC_PRIVACY_LABEL_RE.search(current):
+            _log("Studio: параметры доступа уже «Открытый доступ».")
+            return
+    except Exception:
+        pass
+
+    trigger.first.click(timeout=15_000)
+    page.wait_for_timeout(300)
+
+    public_item = (
+        page.locator('tp-yt-paper-item[test-id="VIDEO_PRIVACY_PUBLIC"]')
+        .or_(
+            page.locator("ytcp-text-menu tp-yt-paper-item").filter(
+                has_text=_UPLOAD_DEFAULTS_PUBLIC_PRIVACY_LABEL_RE
+            )
+        )
+        .or_(page.get_by_role("option", name=_UPLOAD_DEFAULTS_PUBLIC_PRIVACY_LABEL_RE))
+    )
+    public_item.first.wait_for(state="visible", timeout=15_000)
+    try:
+        public_item.first.scroll_into_view_if_needed(timeout=5_000)
+    except Exception:
+        pass
+    public_item.first.click(timeout=15_000)
+    page.wait_for_timeout(350)
+    _log("Studio: выбран «Открытый доступ».")
+
+
+def _studio_navigate_to_channel_advanced_settings(page) -> None:
+    _log("Studio: переход в «Настройки» → «Канал» → «Расширенные настройки»…")
+
+    channel_item = (
+        page.locator("li#channel")
+        .or_(page.locator("li.menu-item#channel"))
+        .or_(
+            page.locator("ytcp-navigation li.menu-item").filter(
+                has_text=_STUDIO_CHANNEL_SETTINGS_MENU_RE
+            )
+        )
+    )
+    channel_item.first.wait_for(state="visible", timeout=30_000)
+    channel_item.first.scroll_into_view_if_needed(timeout=15_000)
+    channel_item.first.click(timeout=30_000)
+    page.wait_for_timeout(500)
+
+    advanced = (
+        page.locator("ytcp-primary-action-bar").filter(
+            has_text=_STUDIO_CHANNEL_ADVANCED_SETTINGS_RE
+        )
+        .or_(page.get_by_text(_STUDIO_CHANNEL_ADVANCED_SETTINGS_RE))
+    )
+    advanced.first.wait_for(state="visible", timeout=30_000)
+    advanced.first.scroll_into_view_if_needed(timeout=15_000)
+    advanced.first.click(timeout=30_000)
+    page.wait_for_timeout(500)
+
+    radio = (
+        page.locator(
+            'ytcp-channel-settings tp-yt-paper-radio-button[name="NOT_MADE_FOR_KIDS"]'
+        )
+        .or_(page.locator(f'tp-yt-paper-radio-button[name="{_CHANNEL_NOT_MADE_FOR_KIDS_RADIO_NAME}"]'))
+    )
+    radio.first.wait_for(state="visible", timeout=60_000)
+    _log("Studio: раздел «Расширенные настройки» канала загружен.")
+
+
+def _studio_set_channel_not_made_for_kids(page) -> None:
+    _studio_handle_interrupt_dialogs_if_present(page)
+    _log("Studio: аудитория канала — «Не для детей»…")
+
+    radio = (
+        page.locator(
+            'ytcp-channel-settings tp-yt-paper-radio-button[name="NOT_MADE_FOR_KIDS"]'
+        )
+        .or_(
+            page.locator(
+                f'tp-yt-paper-radio-button[name="{_CHANNEL_NOT_MADE_FOR_KIDS_RADIO_NAME}"]'
+            )
+        )
+        .or_(
+            page.locator("ytcp-channel-settings tp-yt-paper-radio-button").filter(
+                has_text=_CHANNEL_NOT_MADE_FOR_KIDS_LABEL_RE
+            )
+        )
+        .or_(page.get_by_role("radio", name=_CHANNEL_NOT_MADE_FOR_KIDS_LABEL_RE))
+    )
+    radio.first.wait_for(state="visible", timeout=30_000)
+
+    try:
+        if (radio.first.get_attribute("aria-checked") or "").strip().lower() == "true":
+            _log("Studio: аудитория канала уже «Не для детей».")
+            return
+    except Exception:
+        pass
+
+    radio.first.scroll_into_view_if_needed(timeout=15_000)
+    radio.first.click(timeout=15_000)
+    page.wait_for_timeout(350)
+    _log("Studio: выбрано «Не для детей» для канала.")
+
+
 def _studio_fill_upload_default_title(page, *, title: str) -> None:
     value = (title or "").strip()
     if not value:
@@ -4889,15 +5185,14 @@ def _studio_fill_upload_default_title(page, *, title: str) -> None:
         value,
         label="название по умолчанию для загрузки",
     )
+    _studio_set_upload_defaults_public_privacy(page)
 
-    save_btn = page.locator("ytcp-button#submit-button button").or_(
-        page.get_by_role("button", name=re.compile(r"^сохранить$|^save$", re.I))
+    _studio_navigate_to_channel_advanced_settings(page)
+    _studio_set_channel_not_made_for_kids(page)
+    _studio_click_settings_save_and_wait(
+        page, context="канал: расширенные настройки"
     )
-    save_btn.first.wait_for(state="visible", timeout=30_000)
-    save_btn.first.scroll_into_view_if_needed(timeout=15_000)
-    save_btn.first.click(timeout=30_000)
-    page.wait_for_timeout(800)
-    _log("Studio: название по умолчанию для загрузки сохранено.")
+    _log("Studio: настройки загрузки видео и канала сохранены.")
 
 
 @_studio_entrypoint
@@ -4911,7 +5206,7 @@ def run_studio_upload_default_title(
     search_oldest_channel: bool = True,
     profile_id: str | None = None,
 ) -> None:
-    """Studio → «Настройки» → «Загрузка видео» → название → «Сохранить»."""
+    """Studio → «Загрузка видео» (название, доступ) → «Канал» → «Не для детей» → «Сохранить»."""
     value = (title or "").strip()
     if not value:
         raise YoutubeStudioError("Название видео по умолчанию не задано.")
@@ -8170,24 +8465,77 @@ def _studio_wait_shorts_feed_ready(page) -> None:
     _studio_dismiss_shorts_player_overlays(page)
 
 
+def _studio_focus_shorts_player(page) -> None:
+    """Фокус на ленте Shorts для клавиатуры/скролла (без toggle play/pause)."""
+    try:
+        focused = page.evaluate(
+            """() => {
+            const candidates = [
+                document.querySelector('#shorts-container'),
+                document.querySelector('ytd-shorts'),
+            ];
+            for (const el of candidates) {
+                if (!el) continue;
+                try {
+                    if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1');
+                    el.focus({ preventScroll: true });
+                    return true;
+                } catch (_) {}
+            }
+            return false;
+        }"""
+        )
+        if focused:
+            page.wait_for_timeout(100)
+            return
+    except Exception:
+        pass
+    for sel in ("#shorts-container", "ytd-shorts"):
+        try:
+            loc = page.locator(sel).first
+            if loc.is_visible(timeout=500):
+                loc.hover(timeout=2_000)
+                page.wait_for_timeout(100)
+                return
+        except Exception:
+            continue
+
+
+def _studio_swipe_shorts_feed_up(page) -> None:
+    """Свайп вверх по ленте Shorts (fallback, если ArrowDown не сработал)."""
+    container = page.locator("#shorts-container")
+    try:
+        box = container.first.bounding_box(timeout=2_000)
+    except Exception:
+        box = None
+    if not box:
+        try:
+            box = page.locator("#shorts-player").first.bounding_box(timeout=2_000)
+        except Exception:
+            box = None
+    if not box:
+        return
+    cx = box["x"] + box["width"] / 2
+    y_from = box["y"] + box["height"] * 0.78
+    y_to = box["y"] + box["height"] * 0.22
+    try:
+        page.mouse.move(cx, y_from)
+        page.mouse.down()
+        page.mouse.move(cx, y_to, steps=12)
+        page.mouse.up()
+    except Exception:
+        pass
+
+
 def _studio_scroll_shorts_to_next(
     page, *, prev_video_id: str = "", timeout_s: float = 15.0
 ) -> str:
     """Прокрутка к следующему Short; возвращает id нового ролика или ''."""
     deadline = time.monotonic() + timeout_s
     container = page.locator("#shorts-container")
-    focus = page.locator(
-        "#shorts-player, #shorts-container, video.html5-main-video"
-    )
 
     while time.monotonic() < deadline:
-        try:
-            focus.first.click(timeout=2_000)
-        except Exception:
-            try:
-                container.first.click(timeout=2_000)
-            except Exception:
-                pass
+        _studio_focus_shorts_player(page)
 
         page.keyboard.press("ArrowDown")
         page.wait_for_timeout(800)
@@ -8202,6 +8550,12 @@ def _studio_scroll_shorts_to_next(
         except Exception:
             pass
         page.wait_for_timeout(800)
+        vid = _studio_read_active_short_video_id(page)
+        if vid and vid != prev_video_id:
+            return vid
+
+        _studio_swipe_shorts_feed_up(page)
+        page.wait_for_timeout(900)
         vid = _studio_read_active_short_video_id(page)
         if vid and vid != prev_video_id:
             return vid
@@ -8425,6 +8779,15 @@ def _studio_wait_for_short_full_watch(
                 _log("Shorts: прогресс застыл — пробуем возобновить воспроизведение.")
                 if _studio_is_shorts_paused(page) is not False:
                     _studio_resume_shorts_playback(page)
+                stall_rounds = 0
+        else:
+            stall_rounds += 1
+            if stall_rounds >= _SHORTS_FULL_WATCH_STALL_ROUNDS:
+                _log(
+                    "Shorts: прогресс не определяется — "
+                    "пробуем запустить воспроизведение."
+                )
+                _studio_ensure_shorts_playing(page)
                 stall_rounds = 0
 
         if _studio_wait_ms_with_stop(
@@ -8712,23 +9075,59 @@ def _studio_collect_search_shorts_links(page) -> list:
     return links
 
 
+def _studio_resolve_youtube_href(href: str) -> str:
+    h = (href or "").strip()
+    if not h:
+        return ""
+    if h.startswith("http://") or h.startswith("https://"):
+        return h
+    if h.startswith("/"):
+        return f"https://www.youtube.com{h}"
+    return h
+
+
 def _studio_open_first_search_short(page) -> bool:
-    """Открыть первый Short из выдачи поиска и перейти в ленту."""
+    """Открыть первый Short из выдачи поиска и перейти в полноценную ленту /shorts/."""
     links = _studio_collect_search_shorts_links(page)
     if not links:
         _log("Shorts: в выдаче поиска нет Shorts.")
         return False
-    link = links[0]
     try:
-        href = (link.get_attribute("href") or "").strip()
-        link.click(timeout=10_000)
-        page.wait_for_timeout(2_000)
+        href = _studio_resolve_youtube_href(links[0].get_attribute("href") or "")
+        if "/shorts/" not in href:
+            _log("Shorts: в выдаче поиска нет корректной ссылки на Short.")
+            return False
+        _log(f"Shorts: переход в ленту по ссылке из поиска ({href!r})…")
         try:
-            page.wait_for_load_state("domcontentloaded", timeout=30_000)
+            page.bring_to_front()
         except Exception:
             pass
+        page.goto(href, wait_until="domcontentloaded", timeout=60_000)
+        page.wait_for_timeout(1_500)
+        if not _studio_page_on_youtube_shorts(page):
+            _log(
+                "Shorts: goto не открыл /shorts/ — пробуем клик по превью в выдаче…"
+            )
+            links[0].click(timeout=10_000)
+            page.wait_for_timeout(2_000)
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=30_000)
+            except Exception:
+                pass
         _studio_wait_shorts_feed_ready(page)
-        _log(f"Shorts: открыт первый Short из поиска ({href!r}).")
+        _studio_ensure_shorts_playing(page)
+        if not _studio_page_on_youtube_shorts(page):
+            _log(
+                "Shorts: не удалось открыть ленту Shorts "
+                f"(URL={page.url!r})."
+            )
+            return False
+        vid = _studio_read_active_short_video_id(page)
+        _log(
+            "Shorts: открыт первый Short из поиска"
+            + (f" ({vid})" if vid else "")
+            + f" — {page.url!r}"
+        )
         return True
     except Exception as e:
         _log(
@@ -8909,6 +9308,28 @@ def _studio_browse_horizontal_videos(
             break
 
     _log(f"Горизонтальные видео: просмотрено {watched} из {n}.")
+
+
+@_studio_entrypoint
+def run_youtube_interface_language_to_russian(
+    page,
+    *,
+    login_credentials=None,
+) -> None:
+    """Главная YouTube → меню профиля → язык интерфейса → «Русский» → «Главная»."""
+    _log("YouTube: смена языка интерфейса на русский…")
+    _studio_goto_youtube_home(
+        page, login_credentials=login_credentials, for_channel_scan=False
+    )
+    if _studio_youtube_shows_russian_home_nav(page):
+        _log("YouTube: интерфейс уже на русском (найдена «Главная»).")
+        return
+    _studio_select_russian_interface_language(page)
+    if not _studio_wait_russian_home_nav(page):
+        raise YoutubeStudioError(
+            "YouTube: после смены языка не найдена надпись «Главная» в навигации."
+        )
+    _log("YouTube: язык интерфейса переключён на русский.")
 
 
 @_studio_entrypoint

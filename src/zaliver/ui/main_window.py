@@ -783,6 +783,8 @@ class MainWindow(QWidget):
     _studio_channel_setup_finished = pyqtSignal(int, int)
     _studio_warmup_progress = pyqtSignal(int, int, str)
     _studio_warmup_finished = pyqtSignal(int, int)
+    _studio_language_progress = pyqtSignal(int, int, str)
+    _studio_language_finished = pyqtSignal(int, int)
     _zaliver_profile_tags_clear_progress = pyqtSignal(int, int, str)
     _zaliver_profile_tags_clear_finished = pyqtSignal(int, int)
     _profile_zaliver_tags_cache_update = pyqtSignal(str, object)
@@ -821,11 +823,13 @@ class MainWindow(QWidget):
         self._profiles_availability_running = False
         self._profiles_channel_setup_running = False
         self._profiles_warmup_running = False
+        self._profiles_language_running = False
         self._profiles_tags_clear_running = False
         self._profiles_refresh_running = False
         self._last_availability_failed_ids: list[str] = []
         self._last_channel_setup_failed_ids: list[str] = []
         self._last_warmup_failed_ids: list[str] = []
+        self._last_language_failed_ids: list[str] = []
         self._build_ui()
         self._bootstrap_fd_limits()
         self._ui_log_line.connect(self._route_ui_log_line)
@@ -859,6 +863,8 @@ class MainWindow(QWidget):
         self._studio_channel_setup_finished.connect(self._on_studio_channel_setup_finished)
         self._studio_warmup_progress.connect(self._on_studio_warmup_progress)
         self._studio_warmup_finished.connect(self._on_studio_warmup_finished)
+        self._studio_language_progress.connect(self._on_studio_language_progress)
+        self._studio_language_finished.connect(self._on_studio_language_finished)
         self._zaliver_profile_tags_clear_progress.connect(
             self._on_zaliver_profile_tags_clear_progress
         )
@@ -1814,13 +1820,25 @@ class MainWindow(QWidget):
             "Режим Headless из настроек, до 5 параллельно."
         )
         self._btn_profiles_warmup.clicked.connect(self._start_profiles_warmup)
+        self._btn_profiles_change_language = QPushButton("Поменять язык")
+        self._btn_profiles_change_language.setObjectName("secondary")
+        self._btn_profiles_change_language.setAutoDefault(False)
+        self._btn_profiles_change_language.setDefault(False)
+        self._btn_profiles_change_language.setToolTip(
+            "Открывает отмеченные профили (до 3 параллельно), заходит на главную YouTube, "
+            "переключает язык интерфейса на «Русский» и закрывает профиль."
+        )
+        self._btn_profiles_change_language.clicked.connect(
+            self._start_profiles_language_change
+        )
         self._btn_profiles_clear_zaliver_tags = QPushButton("Очистить теги залива")
         self._btn_profiles_clear_zaliver_tags.setObjectName("secondary")
         self._btn_profiles_clear_zaliver_tags.setAutoDefault(False)
         self._btn_profiles_clear_zaliver_tags.setDefault(False)
         self._btn_profiles_clear_zaliver_tags.setToolTip(
             "С отмеченных профилей снимает служебные теги Zaliver "
-            "(ошибки залива, проверки Studio, смены аватарки/названия, прогрева "
+            "(ошибки залива, проверки Studio, смены аватарки/названия, прогрева, "
+            "смены языка "
             "и заполнения канала и т.д.). Только свой антидетект."
         )
         self._btn_profiles_clear_zaliver_tags.clicked.connect(
@@ -1828,6 +1846,7 @@ class MainWindow(QWidget):
         )
         profiles_actions_row.addWidget(self._btn_profiles_channel_setup)
         profiles_actions_row.addWidget(self._btn_profiles_warmup)
+        profiles_actions_row.addWidget(self._btn_profiles_change_language)
         profiles_actions_row.addWidget(self._btn_profiles_check_availability)
         profiles_actions_row.addWidget(self._btn_profiles_import_accounts)
         profiles_actions_row.addStretch()
@@ -3845,6 +3864,7 @@ class MainWindow(QWidget):
             self._profiles_availability_running
             or self._profiles_channel_setup_running
             or self._profiles_warmup_running
+            or self._profiles_language_running
             or self._profiles_tags_clear_running
             or self._profiles_refresh_running
         )
@@ -3856,6 +3876,8 @@ class MainWindow(QWidget):
             self._btn_profiles_channel_setup.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_warmup"):
             self._btn_profiles_warmup.setEnabled(not busy)
+        if hasattr(self, "_btn_profiles_change_language"):
+            self._btn_profiles_change_language.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_refresh"):
             self._btn_profiles_refresh.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_import_accounts"):
@@ -4820,6 +4842,8 @@ class MainWindow(QWidget):
                 LINK_FILL_SUCCESS_TAG,
                 NAME_CHANGE_ERROR_TAG,
                 NAME_CHANGE_SUCCESS_TAG,
+                VIDEO_TITLE_CHANGE_ERROR_TAG,
+                VIDEO_TITLE_CHANGE_SUCCESS_TAG,
             )
 
             updates: list[tuple[bool, str, str]] = []
@@ -4837,12 +4861,23 @@ class MainWindow(QWidget):
                 has_name = bool(str(item.get("channel_name") or "").strip()) and not bool(
                     item.get("skip_name_change")
                 )
+                has_video_title = bool(
+                    str(item.get("video_default_title") or "").strip()
+                )
                 if has_avatar:
                     updates.append(
                         (ok, AVATAR_CHANGE_SUCCESS_TAG, AVATAR_CHANGE_ERROR_TAG)
                     )
                 if has_name:
                     updates.append((ok, NAME_CHANGE_SUCCESS_TAG, NAME_CHANGE_ERROR_TAG))
+                if has_video_title:
+                    updates.append(
+                        (
+                            ok,
+                            VIDEO_TITLE_CHANGE_SUCCESS_TAG,
+                            VIDEO_TITLE_CHANGE_ERROR_TAG,
+                        )
+                    )
 
             if updates:
                 self._apply_zaliver_profile_tags_from_worker(
@@ -5180,6 +5215,162 @@ class MainWindow(QWidget):
         ok_n, fail_n, failed_ids = mgr.run()
         self._last_warmup_failed_ids = list(failed_ids)
         self._studio_warmup_finished.emit(ok_n, fail_n)
+
+    def _start_profiles_language_change(self) -> None:
+        if self._profiles_language_running:
+            QMessageBox.information(
+                self,
+                "Смена языка",
+                "Смена языка уже выполняется. Дождитесь завершения.",
+            )
+            return
+        if self._profiles_raw is None:
+            QMessageBox.warning(
+                self,
+                "Смена языка",
+                "Сначала загрузите список профилей (кнопка «Обновить»).",
+            )
+            return
+        profile_ids = self._collect_checked_profile_ids()
+        if not profile_ids:
+            QMessageBox.warning(
+                self,
+                "Смена языка",
+                "Отметьте квадратиками профили, для которых нужно сменить язык YouTube.",
+            )
+            return
+
+        token = (self._dolphin_token.text() or "").strip()
+        if not token:
+            token = (
+                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
+            ).strip()
+        kind = self._default_browser_combo.currentData()
+        if not isinstance(kind, str) or not kind.strip():
+            kind = "dolphin"
+        base_url = self._own_antidetect_base_url_from_settings(kind)
+
+        headless = True
+        if hasattr(self, "_dolphin_headless"):
+            headless = bool(self._dolphin_headless.isChecked())
+        else:
+            headless = bool(
+                self._settings.value("antydetect/dolphin_headless", True, type=bool)
+            )
+
+        try:
+            remote_cdp = self._remote_cdp_launch_options_for_kind(kind)
+        except LocalAntidetectError as e:
+            QMessageBox.warning(self, "Смена языка", str(e))
+            return
+
+        from zaliver.youtube_upload.multi_availability_checker import (
+            _MAX_CONCURRENT_LANGUAGE_CHANGES,
+        )
+
+        self._profiles_language_running = True
+        self._sync_profiles_tab_action_buttons()
+        self._profiles_status.setText(
+            f"Смена языка YouTube: 0 / {len(profile_ids)}…"
+        )
+        headless_label = "headless" if headless else "с окном браузера"
+        self._append_log(
+            f"[language] Старт для {len(profile_ids)} профилей "
+            f"({headless_label}, до {_MAX_CONCURRENT_LANGUAGE_CHANGES} параллельно)…"
+        )
+
+        threading.Thread(
+            target=self._profiles_language_worker,
+            kwargs={
+                "profile_ids": profile_ids,
+                "kind": kind,
+                "token": token,
+                "base_url": base_url,
+                "headless": headless,
+                "remote_cdp": remote_cdp,
+            },
+            daemon=True,
+        ).start()
+
+    def _profiles_language_worker(
+        self,
+        *,
+        profile_ids: list[str],
+        kind: str,
+        token: str,
+        base_url: str,
+        headless: bool,
+        remote_cdp: RemoteCdpLaunchOptions | None = None,
+    ) -> None:
+        from zaliver.antydetect.antic_open import (
+            set_log_sink,
+            set_youtube_interface_language_in_local_antidetect_profile,
+            set_youtube_interface_language_in_profile,
+        )
+        from zaliver.antydetect.local_antidetect_api import LocalAntidetectError
+        from zaliver.youtube_upload.multi_availability_checker import (
+            MultiProfileAvailabilityChecker,
+            _MAX_CONCURRENT_LANGUAGE_CHANGES,
+        )
+
+        set_log_sink(self._ui_log_line.emit)
+        kind_s = (kind or "").strip()
+
+        def _change_language_one(pid: str) -> None:
+            creds = self._profile_login_credentials(pid)
+            if _is_own_antidetect_kind(kind_s):
+                u = (base_url or "").strip()
+                if not u:
+                    raise LocalAntidetectError(
+                        f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
+                    )
+                set_youtube_interface_language_in_local_antidetect_profile(
+                    pid,
+                    base_url=u,
+                    headless=headless,
+                    login_credentials=creds,
+                    remote_cdp=remote_cdp,
+                )
+            else:
+                set_youtube_interface_language_in_profile(
+                    pid,
+                    local_token=token or None,
+                    headless=headless,
+                    login_credentials=creds,
+                )
+
+        def _on_progress(done: int, total: int, profile_id: str) -> None:
+            self._studio_language_progress.emit(done, total, profile_id)
+
+        def _on_profile_done(pid: str, ok: bool, err: str) -> None:
+            if not _is_own_antidetect_kind(kind_s):
+                return
+            from zaliver.antydetect.profile_tags import (
+                LANGUAGE_CHANGE_ERROR_TAG,
+                LANGUAGE_CHANGE_SUCCESS_TAG,
+            )
+
+            self._apply_zaliver_profile_tags_from_worker(
+                profile_id=pid,
+                kind=kind_s,
+                base_url=base_url,
+                updates=[
+                    (ok, LANGUAGE_CHANGE_SUCCESS_TAG, LANGUAGE_CHANGE_ERROR_TAG)
+                ],
+                log_prefix="language",
+            )
+
+        mgr = MultiProfileAvailabilityChecker(
+            profile_ids=profile_ids,
+            check_one=_change_language_one,
+            on_profile_done=_on_profile_done,
+            on_progress=_on_progress,
+            log_sink=self._ui_log_line.emit,
+            max_concurrent=_MAX_CONCURRENT_LANGUAGE_CHANGES,
+        )
+        ok_n, fail_n, failed_ids = mgr.run()
+        self._last_language_failed_ids = list(failed_ids)
+        self._studio_language_finished.emit(ok_n, fail_n)
 
     def _collect_checked_profile_ids(self) -> list[str]:
         if self._profiles_interaction is None:
@@ -5786,6 +5977,41 @@ class MainWindow(QWidget):
         QMessageBox.information(
             self,
             "Прогрев Shorts",
+            f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
+        )
+
+    def _on_studio_language_progress(
+        self, current: int, total: int, profile_id: str
+    ) -> None:
+        pid = (profile_id or "").strip()
+        self._profiles_status.setText(
+            f"Смена языка YouTube: {current} / {total}"
+            + (f" — профиль {pid}" if pid else "…")
+        )
+
+    def _on_studio_language_finished(self, ok_n: int, fail_n: int) -> None:
+        self._profiles_language_running = False
+        self._sync_profiles_tab_action_buttons()
+        total = int(ok_n) + int(fail_n)
+        self._profiles_status.setText(
+            f"Смена языка завершена: успешно {ok_n}, с ошибкой {fail_n} "
+            f"(всего {total})."
+        )
+        self._append_log(
+            f"[language] Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}."
+        )
+        if int(fail_n) > 0:
+            failed = getattr(self, "_last_language_failed_ids", None) or []
+            if failed:
+                self._append_log(
+                    "[language] Ошибки (ID): " + ", ".join(failed)
+                )
+        kind = self._default_browser_combo.currentData()
+        if _is_own_antidetect_kind((kind or "").strip()) and total > 0:
+            self._refresh_profiles_list_after_zaliver_tags()
+        QMessageBox.information(
+            self,
+            "Смена языка",
             f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
         )
 

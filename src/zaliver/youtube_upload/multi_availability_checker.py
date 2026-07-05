@@ -10,6 +10,8 @@ from zaliver.youtube_upload.multi_uploader import _MAX_CONCURRENT_UPLOADS
 
 # Проверка доступности Studio — отдельный лимит параллельных профилей.
 _MAX_CONCURRENT_AVAILABILITY_CHECKS = 4
+# Смена языка интерфейса YouTube — до 3 профилей одновременно.
+_MAX_CONCURRENT_LANGUAGE_CHANGES = 3
 
 
 class MultiProfileAvailabilityChecker:

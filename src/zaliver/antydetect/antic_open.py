@@ -16,6 +16,7 @@ from zaliver.youtube_upload.studio import (
     run_studio_channel_profile_picture,
     run_studio_upload_default_title,
     run_upload_latest_ready_video,
+    run_youtube_interface_language_to_russian,
     run_youtube_shorts_warmup,
     run_youtube_shorts_warmup_during_upload,
     set_log_sink,
@@ -1357,6 +1358,126 @@ def warmup_youtube_shorts_in_local_antidetect_profile(
         try:
             _log(
                 "Local antidetect: прогрев Shorts завершён за "
+                f"{time.perf_counter() - started_at:.1f} с."
+            )
+        except Exception:
+            pass
+        api.close()
+
+
+@with_log_profile
+def set_youtube_interface_language_in_profile(
+    profile_id: str,
+    *,
+    local_token: str | None = None,
+    headless: bool = True,
+    login_credentials=None,
+) -> None:
+    """Dolphin → главная YouTube → смена языка интерфейса на русский."""
+    _log(
+        "Dolphin: смена языка YouTube. "
+        f"profile_id={profile_id!r}, headless={headless}"
+    )
+    api = DolphinAntyLocalAPI()
+    try:
+        tok = (local_token or "").strip()
+        if tok:
+            _log("Dolphin: login_with_token…")
+            api.login_with_token(tok)
+        _log("Dolphin: start_profile…")
+        conn = api.start_profile(profile_id, headless=headless)
+        _log(
+            "Dolphin: профиль запущен. "
+            f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+        )
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_cdp(
+                p, (conn.ws_url(), conn.http_url())
+            )
+            try:
+                run_youtube_interface_language_to_russian(
+                    page, login_credentials=login_credentials
+                )
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        _log(f"Ошибка смены языка YouTube: {type(e).__name__}: {e!r}")
+        raise _wrap_exc(e) from e
+    finally:
+        try:
+            api.stop_profile(profile_id)
+        except Exception as e:
+            _log(f"Dolphin: stop_profile: {e!r}")
+        api.close()
+
+
+@with_log_profile
+def set_youtube_interface_language_in_local_antidetect_profile(
+    profile_id: str,
+    *,
+    base_url: str,
+    headless: bool = True,
+    login_credentials=None,
+    remote_cdp=None,
+) -> None:
+    """Локальный антидетект → главная YouTube → смена языка интерфейса на русский."""
+    _log(
+        "Local antidetect: смена языка YouTube. "
+        f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}"
+    )
+    from zaliver.antydetect.local_antidetect_api import (
+        LocalAntidetectError,
+        LocalAntidetectHttpAPI,
+    )
+    from zaliver.antydetect.local_active_sessions import (
+        register_local_session,
+        unregister_local_session,
+    )
+
+    api = LocalAntidetectHttpAPI(base_url)
+    session_id: str | None = None
+    started_at = time.perf_counter()
+    try:
+        acc = api.launch_profile(
+            profile_id, headless=headless, expose_cdp=True, remote_cdp=remote_cdp
+        )
+        sid = acc.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+        session_id = sid.strip()
+        bu = (base_url or "").strip() or "http://127.0.0.1:18765"
+        register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
+        ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+        _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_local_session_cdp(
+                p, api, session_id, ws_url
+            )
+            try:
+                run_youtube_interface_language_to_russian(
+                    page, login_credentials=login_credentials
+                )
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        _log(f"Ошибка смены языка YouTube: {type(e).__name__}: {e!r}")
+        raise LocalAntidetectError(f"Ошибка смены языка YouTube: {e}") from e
+    finally:
+        if session_id:
+            unregister_local_session(profile_id=profile_id)
+            try:
+                api.stop_session(session_id)
+            except Exception:
+                pass
+        try:
+            _log(
+                "Local antidetect: смена языка YouTube завершена за "
                 f"{time.perf_counter() - started_at:.1f} с."
             )
         except Exception:

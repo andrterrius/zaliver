@@ -6273,21 +6273,6 @@ def _studio_prepare_upload_details_during_transfer(
             except Exception:
                 pass
 
-        if not kids_done:
-            btn = _studio_not_for_kids_button_locator(page).first
-            try:
-                if btn.is_visible(timeout=0):
-                    btn.click(timeout=5_000)
-                    try:
-                        if (btn.get_attribute("aria-checked") or "").lower() != "true":
-                            btn.locator("#radioContainer").click(timeout=5_000)
-                    except Exception:
-                        pass
-                    kids_done = True
-                    _log("Studio: выбрано «Не для детей».")
-            except Exception:
-                pass
-
         if title_done and desc_done:
             return title_done, desc_done, kids_done
 
@@ -6434,16 +6419,76 @@ def _studio_select_not_for_kids(page, *, skip_if_done: bool = False) -> None:
         pass
 
 
-def _studio_click_next_until_visibility(page, *, fast_if_upload_done: bool = False) -> None:
-    """«Далее» / Next пока не появится выбор доступа (#privacy-radios / PUBLIC)."""
-    _log("Studio: «Далее» до экрана доступа…")
-    public_radio = (
+def _studio_public_visibility_radio_locator(page):
+    return (
         page.locator(
             "ytcp-video-visibility-select tp-yt-paper-radio-group#privacy-radios "
             'tp-yt-paper-radio-button[name="PUBLIC"]'
         )
         .or_(page.locator('ytcp-video-visibility-select tp-yt-paper-radio-button[name="PUBLIC"]'))
     )
+
+
+def _studio_visibility_screen_visible(page) -> bool:
+    try:
+        return _studio_public_visibility_radio_locator(page).first.is_visible(timeout=0)
+    except Exception:
+        return False
+
+
+def _studio_access_step_tab_locator(page):
+    dialog = page.locator("ytcp-uploads-dialog")
+    return (
+        dialog.locator('button.step[test-id="REVIEW"]')
+        .or_(dialog.locator('button[test-id="REVIEW"]'))
+        .or_(dialog.locator("#step-badge-3"))
+        .or_(dialog.get_by_role("tab", name=re.compile(r"^доступ$|^access$", re.I)))
+    )
+
+
+def _studio_try_goto_access_tab(page) -> bool:
+    """Клик по вкладке «Доступ»; True, если открылся экран выбора доступа."""
+    tab = _studio_access_step_tab_locator(page)
+    try:
+        if not tab.first.is_visible(timeout=0):
+            return False
+        _log("Studio: вкладка «Доступ»…")
+        tab.first.click(timeout=15_000)
+        page.wait_for_timeout(_STUDIO_WIZARD_NEXT_AFTER_CLICK_MS)
+        if _studio_visibility_screen_visible(page):
+            _log("Studio: экран доступа виден.")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _studio_goto_visibility_step(
+    page,
+    *,
+    kids_already_selected: bool = False,
+    fast_if_upload_done: bool = False,
+) -> None:
+    """После метаданных — вкладка «Доступ»; при ошибке «Не для детей» и повтор."""
+    _log("Studio: переход на вкладку «Доступ»…")
+    _studio_handle_interrupt_dialogs_if_present(page)
+    if _studio_try_goto_access_tab(page):
+        return
+    _log(
+        "Studio: экран «Доступ» не открылся — "
+        "«Не для детей» и повторный переход…"
+    )
+    _studio_select_not_for_kids(page, skip_if_done=kids_already_selected)
+    if _studio_try_goto_access_tab(page):
+        return
+    _log("Studio: вкладка «Доступ» недоступна — проход «Далее»…")
+    _studio_click_next_until_visibility(page, fast_if_upload_done=fast_if_upload_done)
+
+
+def _studio_click_next_until_visibility(page, *, fast_if_upload_done: bool = False) -> None:
+    """«Далее» / Next пока не появится выбор доступа (#privacy-radios / PUBLIC)."""
+    _log("Studio: «Далее» до экрана доступа…")
+    public_radio = _studio_public_visibility_radio_locator(page)
     nxt = _studio_wizard_next_button_locator(page)
     poll_n = 0
     for i in range(_STUDIO_WIZARD_NEXT_MAX):
@@ -7881,9 +7926,11 @@ def _studio_publish_flow_before_checks(
         "параллельно загрузке файла…"
     )
     _studio_poll_upload_fatal(page, browser)
-    _studio_select_not_for_kids(page, skip_if_done=kids_already_selected)
-    _studio_poll_upload_fatal(page, browser)
-    _studio_click_next_until_visibility(page, fast_if_upload_done=True)
+    _studio_goto_visibility_step(
+        page,
+        kids_already_selected=kids_already_selected,
+        fast_if_upload_done=True,
+    )
     _studio_poll_upload_fatal(page, browser)
     href = _studio_select_public_visibility(page, schedule_at=schedule_at)
     if _studio_is_upload_file_transfer_complete(page):
@@ -7967,13 +8014,16 @@ def _studio_wait_after_upload_studio_outcome(
 def _studio_publish_flow_after_upload(
     page,
     *,
+    kids_already_selected: bool = False,
     schedule_at: datetime | None = None,
     stats_server_username: str | None = None,
     profile_id: str | None = None,
 ) -> tuple[str, bool]:
-    """После паузы: не для детей → Далее… → открытый доступ → Опубликовать."""
-    _studio_select_not_for_kids(page)
-    _studio_click_next_until_visibility(page)
+    """После паузы: «Доступ» → открытый доступ → Опубликовать."""
+    _studio_goto_visibility_step(
+        page,
+        kids_already_selected=kids_already_selected,
+    )
     href = _studio_select_public_visibility(page, schedule_at=schedule_at)
     schedule_href, stats_notified = _studio_click_publish_when_enabled(
         page,
@@ -8100,6 +8150,7 @@ def _studio_upload_single_video(
             pass
         href_before_public, stats_notified = _studio_publish_flow_after_upload(
             page,
+            kids_already_selected=kids_already_selected,
             schedule_at=schedule_publish_at,
             stats_server_username=stats_server_username,
             profile_id=profile_id,

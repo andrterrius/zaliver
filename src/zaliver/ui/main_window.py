@@ -4610,15 +4610,16 @@ class MainWindow(QWidget):
         description = dlg.channel_description()
         link_title = dlg.channel_link_title()
         link_url = dlg.channel_link_url()
-        video_default_title = dlg.video_default_title()
         if description:
             self._upload_store.remember_channel_description(description)
         if link_title:
             self._upload_store.remember_channel_link_title(link_title)
         if link_url:
             self._upload_store.remember_channel_link_url(link_url)
-        if video_default_title:
-            self._upload_store.remember_video_default_title(video_default_title)
+        video_default_titles = dlg.video_default_titles_for_remember()
+        if video_default_titles:
+            for title in video_default_titles:
+                self._upload_store.remember_video_default_title(title)
         channel_names = dlg.channel_names_for_remember()
         if channel_names:
             self._upload_store.remember_channel_names(channel_names)
@@ -4667,9 +4668,9 @@ class MainWindow(QWidget):
         work_profile_ids = [
             pid
             for pid in profile_ids
-            if has_text_fill or has_video_title_fill or pid in {
-                str(a.get("profile_id") or "").strip() for a in assignments
-            }
+            if has_text_fill
+            or pid
+            in {str(a.get("profile_id") or "").strip() for a in assignments}
         ]
         if not work_profile_ids:
             return
@@ -4695,10 +4696,8 @@ class MainWindow(QWidget):
                 "description": description,
                 "link_title": link_title,
                 "link_url": link_url,
-                "video_default_title": video_default_title,
                 "assignments": assignments,
                 "has_text_fill": has_text_fill,
-                "has_video_title_fill": has_video_title_fill,
                 "remote_cdp": remote_cdp,
             },
             daemon=True,
@@ -4715,10 +4714,8 @@ class MainWindow(QWidget):
         description: str,
         link_title: str,
         link_url: str,
-        video_default_title: str,
         assignments: list[dict[str, object]],
         has_text_fill: bool,
-        has_video_title_fill: bool,
         remote_cdp: RemoteCdpLaunchOptions | None = None,
     ) -> None:
         from zaliver.antydetect.antic_open import (
@@ -4755,6 +4752,12 @@ class MainWindow(QWidget):
                 str(item.get("channel_name") or "").strip() or None if item else None
             )
             skip_name_change = bool(item.get("skip_name_change")) if item else False
+            video_default_title = (
+                str(item.get("video_default_title") or "").strip() or None
+                if item
+                else None
+            )
+            has_video_title_fill = bool(video_default_title)
 
             try:
                 if _is_own_antidetect_kind(kind_s):

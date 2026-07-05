@@ -131,6 +131,8 @@ class ProfileChannelSetupDialog(QDialog):
         self._source_paths: list[str] = []
         self._channel_names: list[str] = []
         self._names_source_label = ""
+        self._video_titles: list[str] = []
+        self._video_titles_source_label = ""
         self._detect_thread: QThread | None = None
         self._detect_worker: AvatarDetectionWorker | None = None
         self._detect_cancel = AvatarDetectionCancel()
@@ -145,9 +147,10 @@ class ProfileChannelSetupDialog(QDialog):
         hint = QLabel(
             "Настройка отмеченных профилей в YouTube Studio («Настройка канала»). "
             "Заполните нужные разделы — можно один или несколько сразу.\n\n"
-            "Описание, ссылка и название для видео применяются ко всем отмеченным "
-            "профилям одинаково. "
-            "Аватарки и названия сопоставляются с профилями по порядку в таблице. "
+            "Описание и ссылка применяются ко всем отмеченным профилям одинаково. "
+            "Аватарки, названия каналов и названия для видео сопоставляются с профилями "
+            "по порядку в таблице (несколько значений — через запятую, точку с запятой "
+            "или с новой строки, либо импорт из файла). "
             "Смена названия ограничена раз в 14 дней (в предпросмотре отмечается лимит)."
         )
         hint.setWordWrap(True)
@@ -190,11 +193,29 @@ class ProfileChannelSetupDialog(QDialog):
 
         video_title_section = CollapsibleSection("Название для видео")
         self._video_title_edit = _recent_editable_combo(
-            placeholder="Название по умолчанию при загрузке…",
+            placeholder="Название или несколько через запятую, ; или с новой строки…",
             recent=list(recent_video_default_titles or []),
         )
-        self._video_title_edit.currentTextChanged.connect(self._on_channel_fields_changed)
+        self._video_title_edit.currentTextChanged.connect(self._on_video_titles_text_changed)
         video_title_section.content_layout().addWidget(self._video_title_edit)
+
+        video_titles_row = QHBoxLayout()
+        self._video_titles_source_label_widget = QLabel("Список не задан")
+        self._video_titles_source_label_widget.setObjectName("hint")
+        self._video_titles_source_label_widget.setWordWrap(True)
+        self._btn_pick_video_titles = QPushButton("Импорт из файла…")
+        self._btn_pick_video_titles.clicked.connect(self._pick_video_titles_file)
+        video_titles_row.addWidget(self._video_titles_source_label_widget, 1)
+        video_titles_row.addWidget(self._btn_pick_video_titles)
+        video_title_section.content_layout().addLayout(video_titles_row)
+
+        self._shuffle_video_titles = QCheckBox("Перемешать названия для видео")
+        self._shuffle_video_titles.setChecked(True)
+        self._shuffle_video_titles.setToolTip(
+            "Случайно перемешать названия для видео перед сопоставлением с профилями."
+        )
+        self._shuffle_video_titles.toggled.connect(self._on_assignment_options_changed)
+        video_title_section.content_layout().addWidget(self._shuffle_video_titles)
         sections.addWidget(video_title_section)
 
         avatars_section = CollapsibleSection("Аватарки")
@@ -241,7 +262,7 @@ class ProfileChannelSetupDialog(QDialog):
 
         names_section = CollapsibleSection("Названия")
         self._names_edit = _recent_editable_combo(
-            placeholder="Название или несколько через запятую…",
+            placeholder="Название или несколько через запятую, ; или с новой строки…",
             recent=list(recent_channel_names or []),
         )
         self._names_edit.currentTextChanged.connect(self._on_names_text_changed)
@@ -352,6 +373,9 @@ class ProfileChannelSetupDialog(QDialog):
     def video_default_title(self) -> str:
         return (self._video_title_edit.currentText() or "").strip()
 
+    def video_default_titles_for_remember(self) -> list[str]:
+        return self._current_video_titles()
+
     def channel_names_for_remember(self) -> list[str]:
         return self._current_channel_names()
 
@@ -362,7 +386,7 @@ class ProfileChannelSetupDialog(QDialog):
         return bool(desc) or bool(lt and lu)
 
     def has_video_default_title(self) -> bool:
-        return bool(self.video_default_title())
+        return bool(self._current_video_titles())
 
     def has_profile_customization(self) -> bool:
         return bool(self.profile_assignments())
@@ -383,8 +407,13 @@ class ProfileChannelSetupDialog(QDialog):
                 bytes(png) if isinstance(png, (bytes, bytearray)) and png else None
             )
             channel_name = str(row.get("channel_name") or "").strip()
+            video_default_title = str(row.get("video_default_title") or "").strip()
             skip_name = bool(row.get("skip_name_change"))
-            if not avatar_bytes and not (channel_name and not skip_name):
+            if (
+                not avatar_bytes
+                and not (channel_name and not skip_name)
+                and not video_default_title
+            ):
                 continue
             out.append(
                 {
@@ -392,6 +421,7 @@ class ProfileChannelSetupDialog(QDialog):
                     "avatar_png": avatar_bytes,
                     "channel_name": channel_name or None,
                     "skip_name_change": skip_name,
+                    "video_default_title": video_default_title or None,
                 }
             )
         return out
@@ -417,6 +447,15 @@ class ProfileChannelSetupDialog(QDialog):
             ]
             return [name for name in from_items if name]
         return parse_channel_names_text(self._names_edit.currentText())
+
+    def _current_video_titles(self) -> list[str]:
+        if self._video_titles_source_label:
+            from_items = [
+                self._video_title_edit.itemText(i).strip()
+                for i in range(self._video_title_edit.count())
+            ]
+            return [title for title in from_items if title]
+        return parse_channel_names_text(self._video_title_edit.currentText())
 
     def _pick_names_file(self) -> None:
         if self._is_detecting():
@@ -458,6 +497,59 @@ class ProfileChannelSetupDialog(QDialog):
         self._names_source_label_widget.setText(path)
         self._on_names_text_changed()
 
+    def _pick_video_titles_file(self) -> None:
+        if self._is_detecting():
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Импорт названий для видео",
+            "",
+            "Текстовые файлы (*.txt *.csv);;Все файлы (*.*)",
+        )
+        if not path:
+            return
+        try:
+            titles = parse_channel_names_file(path)
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                self._dialog_title(),
+                f"Не удалось прочитать файл:\n{exc}",
+            )
+            return
+        if not titles:
+            QMessageBox.warning(
+                self,
+                self._dialog_title(),
+                "В файле не найдено названий для видео.",
+            )
+            return
+        self._video_title_edit.blockSignals(True)
+        try:
+            self._video_title_edit.clear()
+            for title in titles:
+                self._video_title_edit.addItem(title)
+            if titles:
+                self._video_title_edit.setCurrentIndex(0)
+        finally:
+            self._video_title_edit.blockSignals(False)
+        self._video_titles_source_label = path
+        self._video_titles_source_label_widget.setText(path)
+        self._on_video_titles_text_changed()
+
+    def _on_video_titles_text_changed(self) -> None:
+        if self._is_detecting():
+            return
+        self._video_titles = self._current_video_titles()
+        if not self._video_titles_source_label:
+            if self._video_titles:
+                self._video_titles_source_label_widget.setText(
+                    f"В списке: {len(self._video_titles)} названий"
+                )
+            else:
+                self._video_titles_source_label_widget.setText("Список не задан")
+        self._refresh_assignment()
+
     def _on_names_text_changed(self) -> None:
         if self._is_detecting():
             return
@@ -473,12 +565,15 @@ class ProfileChannelSetupDialog(QDialog):
 
     def _refresh_assignment(self) -> None:
         self._channel_names = self._current_channel_names()
+        self._video_titles = self._current_video_titles()
         self._rows = assign_avatars_to_selected_profiles(
             self._profiles,
             self._avatar_pngs,
             shuffle=self._shuffle.isChecked(),
             channel_names=self._channel_names,
             shuffle_names=self._shuffle_names.isChecked(),
+            video_default_titles=self._video_titles,
+            shuffle_video_titles=self._shuffle_video_titles.isChecked(),
         )
         self._populate_table()
         self._update_save_button()
@@ -497,6 +592,8 @@ class ProfileChannelSetupDialog(QDialog):
             parts.append(f"Аватарок: {len(self._avatar_pngs)}.")
         if self._channel_names:
             parts.append(f"Названий: {len(self._channel_names)}.")
+        if self._video_titles:
+            parts.append(f"Названий для видео: {len(self._video_titles)}.")
         parts.append(f"Готово к применению: {matched}.")
         self._status.setText(" ".join(parts))
 
@@ -514,6 +611,7 @@ class ProfileChannelSetupDialog(QDialog):
     def _set_busy(self, busy: bool) -> None:
         self._btn_pick.setEnabled(not busy)
         self._btn_pick_names.setEnabled(not busy)
+        self._btn_pick_video_titles.setEnabled(not busy)
         self._desc_edit.setEnabled(not busy)
         self._link_title_edit.setEnabled(not busy)
         self._link_url_edit.setEnabled(not busy)
@@ -522,6 +620,7 @@ class ProfileChannelSetupDialog(QDialog):
         self._no_crop.setEnabled(not busy)
         self._shuffle.setEnabled(not busy)
         self._shuffle_names.setEnabled(not busy)
+        self._shuffle_video_titles.setEnabled(not busy)
         self._progress_bar.setVisible(busy)
         if busy:
             self._btn_save.setEnabled(False)
@@ -765,12 +864,16 @@ class ProfileChannelSetupDialog(QDialog):
             else:
                 profile_cell = "—"
             channel_name = str(row.get("channel_name") or "")
-            if channel_name and row.get("skip_name_change"):
-                name_cell = f"{channel_name}\n(не будет изменено)"
-            elif channel_name:
-                name_cell = channel_name
-            else:
-                name_cell = "—"
+            video_default_title = str(row.get("video_default_title") or "")
+            name_parts: list[str] = []
+            if channel_name:
+                if row.get("skip_name_change"):
+                    name_parts.append(f"{channel_name}\n(не будет изменено)")
+                else:
+                    name_parts.append(channel_name)
+            if video_default_title:
+                name_parts.append(f"Видео: {video_default_title}")
+            name_cell = "\n".join(name_parts) if name_parts else "—"
             status = str(row.get("status") or "")
 
             thumb_label = QLabel()
@@ -808,13 +911,13 @@ class ProfileChannelSetupDialog(QDialog):
         desc = self.channel_description()
         link_title = self.channel_link_title()
         link_url = self.channel_link_url()
-        video_title = self.video_default_title()
+        video_titles = self._current_video_titles()
         assignments = self.profile_assignments()
 
         if (
             not desc
             and not (link_title and link_url)
-            and not video_title
+            and not video_titles
             and not assignments
         ):
             QMessageBox.warning(
@@ -837,9 +940,13 @@ class ProfileChannelSetupDialog(QDialog):
             msg_parts.append(
                 f"• описание/ссылка — для всех {len(self._profiles)} профилей"
             )
-        if video_title:
+        if video_titles:
+            with_video_title = sum(
+                1 for a in assignments if a.get("video_default_title")
+            )
             msg_parts.append(
-                f"• название для видео — для всех {len(self._profiles)} профилей"
+                f"• названия для видео — {with_video_title} из "
+                f"{len(self._profiles)} профилей"
             )
         if assignments:
             with_avatar = sum(1 for a in assignments if a.get("avatar_png"))

@@ -310,7 +310,7 @@ class SlicingController(QObject):
                     "Нужны ffmpeg и ffprobe в PATH.",
                 )
                 return
-
+            
             try:
                 out_dir.mkdir(parents=True, exist_ok=True)
             except OSError as e:

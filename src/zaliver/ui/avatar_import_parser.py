@@ -56,6 +56,8 @@ def _empty_row(profile: dict[str, object], *, status: str) -> dict[str, object]:
         "avatar_index": 0,
         "channel_name": "",
         "name_index": 0,
+        "video_default_title": "",
+        "video_title_index": 0,
         "skip_name_change": blocked,
         "name_change_reason": (
             f"Лимит 14 дн. (до {blocked_label})" if blocked else ""
@@ -83,8 +85,10 @@ def assign_avatars_to_selected_profiles(
     shuffle: bool = False,
     channel_names: list[str] | None = None,
     shuffle_names: bool = False,
+    video_default_titles: list[str] | None = None,
+    shuffle_video_titles: bool = False,
 ) -> list[dict[str, object]]:
-    """Сопоставляет аватарки и названия с профилями по порядку."""
+    """Сопоставляет аватарки, названия каналов и названия для видео с профилями по порядку."""
     pngs = list(avatar_pngs)
     if shuffle and len(pngs) > 1:
         random.shuffle(pngs)
@@ -93,12 +97,18 @@ def assign_avatars_to_selected_profiles(
     if shuffle_names and len(names) > 1:
         random.shuffle(names)
 
+    video_titles = list(video_default_titles or [])
+    if shuffle_video_titles and len(video_titles) > 1:
+        random.shuffle(video_titles)
+
     rows: list[dict[str, object]] = []
     for i, profile in enumerate(profiles):
         png = pngs[i] if i < len(pngs) else b""
         has_avatar = bool(png)
         channel_name = names[i] if i < len(names) else ""
         has_name = bool(channel_name)
+        video_title = video_titles[i] if i < len(video_titles) else ""
+        has_video_title = bool(video_title)
 
         cd = _profile_custom_data_dict(profile)
         skip_name = is_channel_name_change_blocked(cd)
@@ -107,7 +117,7 @@ def assign_avatars_to_selected_profiles(
             f"Лимит 14 дн. (до {blocked_label})" if skip_name and has_name else ""
         )
 
-        can_save = has_avatar or (has_name and not skip_name)
+        can_save = has_avatar or (has_name and not skip_name) or has_video_title
         status_parts: list[str] = []
         if has_avatar:
             status_parts.append("Аватарка")
@@ -116,9 +126,13 @@ def assign_avatars_to_selected_profiles(
                 status_parts.append("Название не будет изменено")
             else:
                 status_parts.append("Название")
+        if has_video_title:
+            status_parts.append("Название для видео")
         if not status_parts:
             if names and not has_name:
                 status_parts.append("Нет названия в списке")
+            elif video_titles and not has_video_title:
+                status_parts.append("Нет названия для видео в списке")
             elif pngs and not has_avatar:
                 status_parts.append("Нет аватарки в файле")
             else:
@@ -132,6 +146,8 @@ def assign_avatars_to_selected_profiles(
                 "avatar_index": i + 1 if has_avatar else 0,
                 "channel_name": channel_name,
                 "name_index": i + 1 if has_name else 0,
+                "video_default_title": video_title,
+                "video_title_index": i + 1 if has_video_title else 0,
                 "skip_name_change": skip_name,
                 "name_change_reason": name_reason,
                 "status": " · ".join(status_parts),
@@ -148,6 +164,8 @@ def assign_avatars_to_selected_profiles(
                 "avatar_index": j,
                 "channel_name": "",
                 "name_index": 0,
+                "video_default_title": "",
+                "video_title_index": 0,
                 "skip_name_change": False,
                 "name_change_reason": "",
                 "status": "Лишняя аватарка (нет профиля)",
@@ -163,9 +181,28 @@ def assign_avatars_to_selected_profiles(
                 "avatar_index": 0,
                 "channel_name": name,
                 "name_index": j,
+                "video_default_title": "",
+                "video_title_index": 0,
                 "skip_name_change": False,
                 "name_change_reason": "",
                 "status": "Лишнее название (нет профиля)",
+                "can_save": False,
+            }
+        )
+    for j, title in enumerate(video_titles[len(profiles) :], start=len(profiles) + 1):
+        rows.append(
+            {
+                "profile_id": "",
+                "profile_name": "",
+                "avatar_png": b"",
+                "avatar_index": 0,
+                "channel_name": "",
+                "name_index": 0,
+                "video_default_title": title,
+                "video_title_index": j,
+                "skip_name_change": False,
+                "name_change_reason": "",
+                "status": "Лишнее название для видео (нет профиля)",
                 "can_save": False,
             }
         )

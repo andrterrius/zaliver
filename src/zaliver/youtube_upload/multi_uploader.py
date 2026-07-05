@@ -412,7 +412,7 @@ class MultiProfileUploader:
         eligible: list[str] = []
         for pid in self._profiles:
             if not self._per_profile_q[pid].empty():
-                return False, idx
+                continue
             if self._profile_batch_assigned.get(pid, 0) >= self._schedule_batch_size:
                 continue
             eligible.append(pid)

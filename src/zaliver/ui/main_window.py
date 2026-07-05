@@ -2886,7 +2886,7 @@ class MainWindow(QWidget):
             except Exception:
                 pass
             self._refresh_antydetect_profiles()
-            return {"title": "", "description": "", "profile_ids": "", "publish_before_checks": True, "keep_studio_title": False, "schedule_publish": False, "schedule_times_iso": []}
+            return {"title": "", "description": "", "profile_ids": "", "publish_before_checks": True, "keep_studio_title": False, "schedule_publish": False, "schedule_times_iso": [], "schedule_warmup_shorts": False, "schedule_warmup_shorts_recommendations": True, "schedule_warmup_search_query": ""}
 
         dlg = QDialog(self)
         dlg_title = (
@@ -2960,6 +2960,39 @@ class MainWindow(QWidget):
             "На каждый профиль подряд загружается по одному видео на каждое указанное время."
         )
 
+        schedule_warmup_group = QGroupBox("Прогрев во время отложки")
+        schedule_warmup_layout = QVBoxLayout(schedule_warmup_group)
+        schedule_warmup_layout.setContentsMargins(12, 8, 8, 8)
+        schedule_warmup_layout.setSpacing(6)
+
+        schedule_warmup_cb = QCheckBox("Прогрев Shorts во второй вкладке")
+        schedule_warmup_cb.setChecked(True)
+        schedule_warmup_cb.setToolTip(
+            "Пока на одной вкладке профиля идёт отложенная заливка в Studio, "
+            "на соседней вкладке того же профиля крутится лента YouTube Shorts. "
+            "Прогрев останавливается после отложки всех видео этого профиля."
+        )
+        schedule_warmup_layout.addWidget(schedule_warmup_cb)
+
+        schedule_warmup_recommend_cb = QCheckBox("Рекомендации Shorts")
+        schedule_warmup_recommend_cb.setChecked(True)
+        schedule_warmup_recommend_cb.setToolTip(
+            "Открыть ленту рекомендаций Shorts. Если снять галочку — "
+            "можно указать поисковый запрос и смотреть Shorts из выдачи."
+        )
+        schedule_warmup_layout.addWidget(schedule_warmup_recommend_cb)
+
+        schedule_warmup_search_row = QWidget()
+        schedule_warmup_search_row_l = QHBoxLayout(schedule_warmup_search_row)
+        schedule_warmup_search_row_l.setContentsMargins(24, 0, 0, 0)
+        schedule_warmup_search_row_l.setSpacing(8)
+        schedule_warmup_search_lbl = QLabel("Поисковый запрос:")
+        schedule_warmup_search_edit = QLineEdit()
+        schedule_warmup_search_edit.setPlaceholderText("Текст для поиска Shorts на YouTube")
+        schedule_warmup_search_row_l.addWidget(schedule_warmup_search_lbl)
+        schedule_warmup_search_row_l.addWidget(schedule_warmup_search_edit, 1)
+        schedule_warmup_layout.addWidget(schedule_warmup_search_row)
+
         schedule_times_widget = QWidget()
         schedule_times_layout = QVBoxLayout(schedule_times_widget)
         schedule_times_layout.setContentsMargins(24, 0, 0, 0)
@@ -2978,6 +3011,27 @@ class MainWindow(QWidget):
 
         schedule_time_edits: list[QDateTimeEdit] = []
         schedule_time_rows: list[QWidget] = []
+        schedule_time_rows_container = QWidget()
+        schedule_time_rows_layout = QVBoxLayout(schedule_time_rows_container)
+        schedule_time_rows_layout.setContentsMargins(0, 0, 0, 0)
+        schedule_time_rows_layout.setSpacing(6)
+
+        schedule_time_scroll = QScrollArea()
+        schedule_time_scroll.setWidgetResizable(True)
+        schedule_time_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        schedule_time_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        schedule_time_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        schedule_time_scroll.setWidget(schedule_time_rows_container)
+        schedule_time_scroll.setMinimumHeight(40)
+        schedule_time_scroll.setMaximumHeight(220)
+        schedule_time_scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        schedule_times_layout.addWidget(schedule_time_scroll)
 
         def _make_schedule_time_row(index: int, *, visible: bool) -> QDateTimeEdit:
             row = QWidget()
@@ -2992,15 +3046,13 @@ class MainWindow(QWidget):
             edit.setDateTime(_default_schedule_qdt(5 * (index - 1)))
             row_l.addWidget(lbl)
             row_l.addWidget(edit, 1)
-            schedule_times_layout.addWidget(row)
+            schedule_time_rows_layout.addWidget(row)
             schedule_time_edits.append(edit)
             schedule_time_rows.append(row)
             row.setVisible(visible)
             return edit
 
         _make_schedule_time_row(1, visible=True)
-        _make_schedule_time_row(2, visible=False)
-        _make_schedule_time_row(3, visible=False)
 
         schedule_slots_visible = 1
         schedule_btns = QHBoxLayout()
@@ -3013,7 +3065,7 @@ class MainWindow(QWidget):
         schedule_btns.addStretch()
         schedule_times_layout.addLayout(schedule_btns)
         schedule_hint = QLabel(
-            "До 3 времён, интервал между ними не менее 5 часов. "
+            "Интервал между временами — не менее 5 часов. "
             "Сначала все видео на одном профиле (по одному на каждое время), затем следующий профиль."
         )
         schedule_hint.setObjectName("hint")
@@ -3021,35 +3073,45 @@ class MainWindow(QWidget):
         schedule_times_layout.addWidget(schedule_hint)
 
         def _sync_schedule_time_buttons() -> None:
-            btn_add_schedule_time.setEnabled(schedule_slots_visible < 3)
             btn_remove_schedule_time.setEnabled(schedule_slots_visible > 1)
 
         def _sync_schedule_times_visibility(checked: bool) -> None:
             schedule_times_widget.setVisible(checked)
+            schedule_warmup_group.setVisible(checked)
+
+        def _sync_schedule_warmup_options() -> None:
+            warmup_on = schedule_warmup_cb.isChecked()
+            schedule_warmup_recommend_cb.setEnabled(warmup_on)
+            use_search = warmup_on and not schedule_warmup_recommend_cb.isChecked()
+            schedule_warmup_search_row.setVisible(use_search)
 
         def _add_schedule_time_slot() -> None:
             nonlocal schedule_slots_visible
-            if schedule_slots_visible >= 3:
-                return
             schedule_slots_visible += 1
-            schedule_time_rows[schedule_slots_visible - 1].setVisible(True)
-            prev = schedule_time_edits[schedule_slots_visible - 2].dateTime()
-            nxt = prev.addSecs(5 * 3600)
-            schedule_time_edits[schedule_slots_visible - 1].setDateTime(nxt)
+            prev = schedule_time_edits[-1].dateTime()
+            edit = _make_schedule_time_row(schedule_slots_visible, visible=True)
+            edit.setDateTime(prev.addSecs(5 * 3600))
             _sync_schedule_time_buttons()
 
         def _remove_schedule_time_slot() -> None:
             nonlocal schedule_slots_visible
             if schedule_slots_visible <= 1:
                 return
-            schedule_time_rows[schedule_slots_visible - 1].setVisible(False)
+            row = schedule_time_rows.pop()
+            schedule_time_edits.pop()
+            schedule_time_rows_layout.removeWidget(row)
+            row.deleteLater()
             schedule_slots_visible -= 1
             _sync_schedule_time_buttons()
 
         btn_add_schedule_time.clicked.connect(_add_schedule_time_slot)
         btn_remove_schedule_time.clicked.connect(_remove_schedule_time_slot)
         schedule_publish_cb.toggled.connect(_sync_schedule_times_visibility)
+        schedule_warmup_cb.toggled.connect(_sync_schedule_warmup_options)
+        schedule_warmup_recommend_cb.toggled.connect(_sync_schedule_warmup_options)
         _sync_schedule_times_visibility(False)
+        schedule_warmup_group.setVisible(False)
+        _sync_schedule_warmup_options()
         _sync_schedule_time_buttons()
 
         def _collect_schedule_times_msk() -> list[datetime]:
@@ -3284,7 +3346,8 @@ class MainWindow(QWidget):
         grid.addWidget(publish_before_checks_cb, 2, 1)
         grid.addWidget(keep_studio_title_cb, 3, 1)
         grid.addWidget(schedule_publish_cb, 4, 1)
-        grid.addWidget(schedule_times_widget, 5, 1)
+        grid.addWidget(schedule_warmup_group, 5, 1)
+        grid.addWidget(schedule_times_widget, 6, 1)
         profiles_col = QWidget()
         profiles_col_l = QVBoxLayout(profiles_col)
         profiles_col_l.setContentsMargins(0, 0, 0, 0)
@@ -3302,10 +3365,10 @@ class MainWindow(QWidget):
         profiles_col_l.addLayout(dlg_sel_row)
         profiles_col_l.addWidget(lw, 1)
 
-        grid.addWidget(QLabel("Профили:"), 6, 0, Qt.AlignmentFlag.AlignTop)
-        grid.addWidget(profiles_col, 6, 1)
-        grid.addWidget(btns, 7, 0, 1, 2)
-        grid.setRowStretch(6, 1)
+        grid.addWidget(QLabel("Профили:"), 7, 0, Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(profiles_col, 7, 1)
+        grid.addWidget(btns, 8, 0, 1, 2)
+        grid.setRowStretch(7, 1)
 
         if title_le is not None:
             title_le.setFocus()
@@ -3316,6 +3379,28 @@ class MainWindow(QWidget):
 
         keep_studio_title = keep_studio_title_cb.isChecked()
         schedule_publish = schedule_publish_cb.isChecked()
+        schedule_warmup_shorts = schedule_publish and schedule_warmup_cb.isChecked()
+        schedule_warmup_shorts_recommendations = (
+            schedule_warmup_recommend_cb.isChecked()
+            if schedule_warmup_shorts
+            else True
+        )
+        schedule_warmup_search_query = (
+            schedule_warmup_search_edit.text().strip()
+            if schedule_warmup_shorts and not schedule_warmup_shorts_recommendations
+            else ""
+        )
+        if (
+            schedule_warmup_shorts
+            and not schedule_warmup_shorts_recommendations
+            and not schedule_warmup_search_query
+        ):
+            QMessageBox.warning(
+                self,
+                "Zaliver",
+                "Укажите поисковый запрос для прогрева Shorts или включите «Рекомендации Shorts».",
+            )
+            return None
         schedule_times_iso: list[str] = []
         if schedule_publish:
             schedule_times_msk = _collect_schedule_times_msk()
@@ -3341,6 +3426,9 @@ class MainWindow(QWidget):
                 "keep_studio_title": keep_studio_title,
                 "schedule_publish": schedule_publish,
                 "schedule_times_iso": schedule_times_iso,
+                "schedule_warmup_shorts": schedule_warmup_shorts,
+                "schedule_warmup_shorts_recommendations": schedule_warmup_shorts_recommendations,
+                "schedule_warmup_search_query": schedule_warmup_search_query,
             }
         if not keep_studio_title and not title:
             QMessageBox.warning(self, "Zaliver", "Название видео обязательно для загрузки в YouTube.")
@@ -3354,6 +3442,9 @@ class MainWindow(QWidget):
             "keep_studio_title": keep_studio_title,
             "schedule_publish": schedule_publish,
             "schedule_times_iso": schedule_times_iso,
+            "schedule_warmup_shorts": schedule_warmup_shorts,
+            "schedule_warmup_shorts_recommendations": schedule_warmup_shorts_recommendations,
+            "schedule_warmup_search_query": schedule_warmup_search_query,
         }
 
     def showEvent(self, event: QShowEvent) -> None:
@@ -6817,6 +6908,13 @@ class MainWindow(QWidget):
                         schedule_times.append(dt)
                 schedule_times = sorted(schedule_times)
             schedule_batch_size = len(schedule_times)
+            schedule_warmup_shorts = bool(pending.get("schedule_warmup_shorts"))
+            schedule_warmup_shorts_recommendations = bool(
+                pending.get("schedule_warmup_shorts_recommendations", True)
+            )
+            schedule_warmup_search_query = (
+                pending.get("schedule_warmup_search_query") or ""
+            ).strip()
 
             def _upload_one(profile_id: str, task: VideoTask) -> None:
                 from zaliver.antydetect.antic_open import (
@@ -6840,6 +6938,21 @@ class MainWindow(QWidget):
                 yt_oldest = self._profile_yt_oldest_name(profile_id) or None
                 search_oldest = self._youtube_search_oldest_channel()
                 guser = self._stats_server_username_stripped()
+                task_scheduled = (
+                    task.schedule_publish_at is not None or task.scheduled_batch
+                )
+                warmup_kw = {}
+                if schedule_warmup_shorts and task_scheduled:
+                    warmup_kw = dict(
+                        warmup_during_schedule=True,
+                        warmup_shorts_recommendations=schedule_warmup_shorts_recommendations,
+                        warmup_search_query=schedule_warmup_search_query or None,
+                        warmup_shorts_batch_count=5,
+                        warmup_like_probability_pct=10.0,
+                        warmup_subscribe_probability_pct=10.0,
+                        warmup_shorts_watch_min_s=5.0,
+                        warmup_shorts_watch_max_s=25.0,
+                    )
                 open_kw = dict(
                     headless=headless,
                     video_path=task.video_path,
@@ -6853,6 +6966,7 @@ class MainWindow(QWidget):
                     schedule_publish_at=task.schedule_publish_at,
                     scheduled_batch=task.scheduled_batch,
                     stats_server_username=guser or None,
+                    **warmup_kw,
                 )
                 if _is_own_antidetect_kind(kind):
                     res = open_google_in_local_antidetect_profile(
@@ -7009,7 +7123,7 @@ class MainWindow(QWidget):
                 profile_ids=profile_ids,
                 cooldown_s=10.0,
                 max_attempts_per_profile=2,
-                max_concurrent_uploads=1 if schedule_batch_size > 0 else 5,
+                max_concurrent_uploads=3,
                 profile_upload_pause_remaining_s=self._upload_store.profile_upload_pause_remaining_seconds,
                 log_sink=self._ui_log_line.emit,
                 upload_one=_upload_one,

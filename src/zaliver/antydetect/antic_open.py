@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from zaliver.youtube_upload.studio import (
     run_studio_upload_default_title,
     run_upload_latest_ready_video,
     run_youtube_shorts_warmup,
+    run_youtube_shorts_warmup_during_upload,
     set_log_sink,
     verify_studio_upload_dialog_available,
 )
@@ -35,6 +37,198 @@ def _close_playwright_browser(browser) -> None:
             browser.close()
     except Exception:
         pass
+
+
+def _is_scheduled_studio_upload(schedule_publish_at, scheduled_batch) -> bool:
+    if scheduled_batch:
+        return True
+    return schedule_publish_at is not None
+
+
+def _pick_studio_page_from_context(context, *, exclude=None):
+    """Вкладка YouTube Studio в контексте браузера (не вкладка Shorts)."""
+    fallback = None
+    for pg in context.pages:
+        if pg is exclude:
+            continue
+        try:
+            if pg.is_closed():
+                continue
+        except Exception:
+            continue
+        try:
+            url = pg.url or ""
+        except Exception:
+            url = ""
+        if "studio.youtube.com" in url:
+            return pg
+        if fallback is None:
+            fallback = pg
+    return fallback
+
+
+def _bring_studio_tab_to_front(page, *, log_label: str = "Upload") -> None:
+    """Активировать вкладку YouTube Studio в браузере."""
+    try:
+        page.bring_to_front()
+        url = page.url or ""
+        if "studio.youtube.com" in url:
+            _log(f"{log_label}: фокус на вкладке YouTube Studio ({url!r}).")
+        else:
+            _log(f"{log_label}: фокус возвращён на вкладку заливки ({url!r}).")
+    except Exception as e:
+        _log(f"{log_label}: не удалось вернуть фокус на Studio: {e!r}")
+
+
+def _refocus_studio_tab_after_warmup_start(studio_page, *, timeout_s: float = 5.0) -> None:
+    """Дождаться открытия вкладки Shorts и вернуть фокус на Studio."""
+    deadline = time.monotonic() + max(0.5, float(timeout_s))
+    while time.monotonic() < deadline:
+        _bring_studio_tab_to_front(studio_page, log_label="Upload")
+        try:
+            if "studio.youtube.com" in (studio_page.url or ""):
+                return
+        except Exception:
+            pass
+        time.sleep(0.15)
+    _bring_studio_tab_to_front(studio_page, log_label="Upload")
+
+
+class ParallelShortsWarmupRunner:
+    """Прогрев Shorts на второй вкладке профиля (отдельное CDP-подключение Playwright)."""
+
+    def __init__(
+        self,
+        *,
+        cdp_endpoints: tuple[str, ...],
+        login_credentials=None,
+        shorts_recommendations: bool = True,
+        search_query: str | None = None,
+        shorts_batch_count: int = 5,
+        like_probability_pct: float = 10.0,
+        subscribe_probability_pct: float = 10.0,
+        shorts_watch_min_s: float = 5.0,
+        shorts_watch_max_s: float = 25.0,
+    ) -> None:
+        self._cdp_endpoints = tuple(
+            e.strip() for e in cdp_endpoints if (e or "").strip()
+        )
+        self._login_credentials = login_credentials
+        self._shorts_recommendations = bool(shorts_recommendations)
+        self._search_query = (search_query or "").strip() or None
+        self._shorts_batch_count = max(1, int(shorts_batch_count))
+        self._like_probability_pct = float(like_probability_pct)
+        self._subscribe_probability_pct = float(subscribe_probability_pct)
+        self._shorts_watch_min_s = float(shorts_watch_min_s)
+        self._shorts_watch_max_s = float(shorts_watch_max_s)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.error: BaseException | None = None
+
+    def start(self) -> None:
+        if not self._cdp_endpoints:
+            raise DolphinAntyError("Parallel Shorts warmup: пустой CDP endpoint.")
+        self._thread = threading.Thread(
+            target=self._worker,
+            name="parallel-shorts-warmup",
+            daemon=True,
+        )
+        self._thread.start()
+        _log("Parallel Shorts warmup: фоновая вкладка Shorts запущена.")
+
+    def stop(self, *, timeout_s: float = 90.0) -> None:
+        self._stop.set()
+        th = self._thread
+        if th is not None and th.is_alive():
+            th.join(timeout=max(1.0, float(timeout_s)))
+        if self.error is not None:
+            _log(
+                "Parallel Shorts warmup: завершено с ошибкой "
+                f"{type(self.error).__name__}: {self.error!r}"
+            )
+        else:
+            _log("Parallel Shorts warmup: фоновая вкладка Shorts остановлена.")
+
+    def _worker(self) -> None:
+        try:
+            with sync_playwright() as p:
+                browser, context, _page = _playwright_page_from_cdp(
+                    p, self._cdp_endpoints
+                )
+                shorts_page = context.new_page()
+                studio_page = _pick_studio_page_from_context(
+                    context, exclude=shorts_page
+                )
+                if studio_page is not None:
+                    _bring_studio_tab_to_front(
+                        studio_page, log_label="Parallel Shorts warmup"
+                    )
+                try:
+                    run_youtube_shorts_warmup_during_upload(
+                        shorts_page,
+                        should_stop=self._stop.is_set,
+                        login_credentials=self._login_credentials,
+                        shorts_recommendations=self._shorts_recommendations,
+                        search_query=self._search_query,
+                        shorts_batch_count=self._shorts_batch_count,
+                        like_probability_pct=self._like_probability_pct,
+                        subscribe_probability_pct=self._subscribe_probability_pct,
+                        shorts_watch_min_s=self._shorts_watch_min_s,
+                        shorts_watch_max_s=self._shorts_watch_max_s,
+                    )
+                finally:
+                    try:
+                        shorts_page.close()
+                    except Exception:
+                        pass
+                    _close_playwright_browser(browser)
+        except Exception as e:
+            self.error = e
+            if not self._stop.is_set():
+                _log(
+                    "Parallel Shorts warmup: ошибка в фоне "
+                    f"{type(e).__name__}: {e!r}"
+                )
+
+
+def _maybe_start_parallel_shorts_warmup(
+    *,
+    enabled: bool,
+    schedule_publish_at,
+    scheduled_batch,
+    cdp_endpoints: tuple[str, ...],
+    login_credentials,
+    shorts_recommendations: bool = True,
+    search_query: str | None = None,
+    shorts_batch_count: int = 5,
+    like_probability_pct: float = 10.0,
+    subscribe_probability_pct: float = 10.0,
+    shorts_watch_min_s: float = 5.0,
+    shorts_watch_max_s: float = 25.0,
+) -> ParallelShortsWarmupRunner | None:
+    if not enabled:
+        return None
+    if not _is_scheduled_studio_upload(schedule_publish_at, scheduled_batch):
+        return None
+    runner = ParallelShortsWarmupRunner(
+        cdp_endpoints=cdp_endpoints,
+        login_credentials=login_credentials,
+        shorts_recommendations=shorts_recommendations,
+        search_query=search_query,
+        shorts_batch_count=shorts_batch_count,
+        like_probability_pct=like_probability_pct,
+        subscribe_probability_pct=subscribe_probability_pct,
+        shorts_watch_min_s=shorts_watch_min_s,
+        shorts_watch_max_s=shorts_watch_max_s,
+    )
+    runner.start()
+    return runner
+
+
+def _stop_parallel_shorts_warmup(runner: ParallelShortsWarmupRunner | None) -> None:
+    if runner is None:
+        return
+    runner.stop()
 
 
 def _wrap_exc(e: Exception) -> DolphinAntyError:
@@ -1189,6 +1383,14 @@ def open_google_in_profile(
     schedule_publish_at=None,
     scheduled_batch=None,
     stats_server_username: str | None = None,
+    warmup_during_schedule: bool = False,
+    warmup_shorts_recommendations: bool = True,
+    warmup_search_query: str | None = None,
+    warmup_shorts_batch_count: int = 5,
+    warmup_like_probability_pct: float = 10.0,
+    warmup_subscribe_probability_pct: float = 10.0,
+    warmup_shorts_watch_min_s: float = 5.0,
+    warmup_shorts_watch_max_s: float = 25.0,
 ) -> dict | None:
     """
     Запуск профиля через Dolphin Local API + Playwright CDP.
@@ -1220,6 +1422,22 @@ def open_google_in_profile(
                 p, (conn.ws_url(), conn.http_url())
             )
 
+            warmup_runner = _maybe_start_parallel_shorts_warmup(
+                enabled=warmup_during_schedule,
+                schedule_publish_at=schedule_publish_at,
+                scheduled_batch=scheduled_batch,
+                cdp_endpoints=(conn.ws_url(), conn.http_url()),
+                login_credentials=login_credentials,
+                shorts_recommendations=warmup_shorts_recommendations,
+                search_query=warmup_search_query,
+                shorts_batch_count=warmup_shorts_batch_count,
+                like_probability_pct=warmup_like_probability_pct,
+                subscribe_probability_pct=warmup_subscribe_probability_pct,
+                shorts_watch_min_s=warmup_shorts_watch_min_s,
+                shorts_watch_max_s=warmup_shorts_watch_max_s,
+            )
+            if warmup_runner is not None:
+                _refocus_studio_tab_after_warmup_start(page)
             try:
                 if upload_latest_zaliver_video:
                     res = _run_profile_studio_upload(
@@ -1256,6 +1474,8 @@ def open_google_in_profile(
                 except Exception as se:
                     _log(f"Dolphin: stop_profile: {se!r}")
                 raise _wrap_exc(e) from e
+            finally:
+                _stop_parallel_shorts_warmup(warmup_runner)
 
             _close_playwright_browser(browser)
         return None
@@ -1288,6 +1508,14 @@ def open_google_in_local_antidetect_profile(
     schedule_publish_at=None,
     scheduled_batch=None,
     stats_server_username: str | None = None,
+    warmup_during_schedule: bool = False,
+    warmup_shorts_recommendations: bool = True,
+    warmup_search_query: str | None = None,
+    warmup_shorts_batch_count: int = 5,
+    warmup_like_probability_pct: float = 10.0,
+    warmup_subscribe_probability_pct: float = 10.0,
+    warmup_shorts_watch_min_s: float = 5.0,
+    warmup_shorts_watch_max_s: float = 25.0,
 ) -> dict | None:
     """
     Запуск профиля через локальный HTTP API (см. OpenAPI антидетекта: launch + опрос сессии на cdp_ws_url),
@@ -1337,6 +1565,22 @@ def open_google_in_local_antidetect_profile(
                     p, api, session_id, ws_url
                 )
 
+                warmup_runner = _maybe_start_parallel_shorts_warmup(
+                    enabled=warmup_during_schedule,
+                    schedule_publish_at=schedule_publish_at,
+                    scheduled_batch=scheduled_batch,
+                    cdp_endpoints=(ws_url,),
+                    login_credentials=login_credentials,
+                    shorts_recommendations=warmup_shorts_recommendations,
+                    search_query=warmup_search_query,
+                    shorts_batch_count=warmup_shorts_batch_count,
+                    like_probability_pct=warmup_like_probability_pct,
+                    subscribe_probability_pct=warmup_subscribe_probability_pct,
+                    shorts_watch_min_s=warmup_shorts_watch_min_s,
+                    shorts_watch_max_s=warmup_shorts_watch_max_s,
+                )
+                if warmup_runner is not None:
+                    _refocus_studio_tab_after_warmup_start(page)
                 try:
                     if upload_latest_zaliver_video:
                         _log(
@@ -1354,23 +1598,20 @@ def open_google_in_local_antidetect_profile(
                             search_oldest_channel=search_oldest_channel,
                         )
 
-                        def _run_upload():
-                            return _run_profile_studio_upload(
-                                page=page,
-                                browser=browser,
-                                zaliver_db_path=zaliver_db_path,
-                                video_path=video_path,
-                                title=title,
-                                description=description,
-                                publish_before_checks=publish_before_checks,
-                                keep_studio_title=keep_studio_title,
-                                schedule_publish_at=schedule_publish_at,
-                                scheduled_batch=scheduled_batch,
-                                stats_server_username=stats_server_username,
-                                studio_kw=studio_kw,
-                            )
-
-                        res = _run_upload()
+                        res = _run_profile_studio_upload(
+                            page=page,
+                            browser=browser,
+                            zaliver_db_path=zaliver_db_path,
+                            video_path=video_path,
+                            title=title,
+                            description=description,
+                            publish_before_checks=publish_before_checks,
+                            keep_studio_title=keep_studio_title,
+                            schedule_publish_at=schedule_publish_at,
+                            scheduled_batch=scheduled_batch,
+                            stats_server_username=stats_server_username,
+                            studio_kw=studio_kw,
+                        )
                         _log("Studio upload: сценарий завершён.")
                         return res
                     else:
@@ -1384,6 +1625,8 @@ def open_google_in_local_antidetect_profile(
                     _log("Local antidetect: все каналы удалены — закрываем профиль.")
                     _close_playwright_browser(browser)
                     raise LocalAntidetectError(str(e)) from e
+                finally:
+                    _stop_parallel_shorts_warmup(warmup_runner)
 
                 if not upload_latest_zaliver_video:
                     _close_playwright_browser(browser)

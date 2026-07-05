@@ -4,6 +4,7 @@ import os
 import random
 import re
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
@@ -18,7 +19,12 @@ from zaliver.youtube_upload.schedule_publish import (
     studio_date_input_candidates,
     studio_date_picker_locale_from_text,
     studio_date_trigger_matches,
+    studio_time_input_label,
+    studio_time_label_en,
+    studio_time_label_en_variants,
+    studio_time_label_ru,
     studio_time_match_patterns,
+    studio_time_picker_locale_from_text,
 )
 
 from playwright.sync_api import Error as PlaywrightError
@@ -6608,6 +6614,192 @@ def _studio_pick_calendar_day(page, target: datetime) -> None:
     )
 
 
+def _studio_schedule_time_picker_locale(page, picker) -> str:
+    """Определить формат списка времени: en (AM/PM) или ru (24 ч)."""
+    try:
+        count = min(picker.count(), 16)
+        for i in range(count):
+            text = (picker.nth(i).inner_text(timeout=500) or "").strip()
+            if studio_time_picker_locale_from_text(text) == "en":
+                return "en"
+    except Exception:
+        pass
+    try:
+        val = (
+            page.locator(
+                "ytcp-visibility-scheduler #time-of-day-container input, "
+                "ytcp-datetime-picker #time-of-day-container input"
+            )
+            .first.input_value(timeout=500)
+            or ""
+        ).strip()
+        if studio_time_picker_locale_from_text(val) == "en":
+            return "en"
+    except Exception:
+        pass
+    return "ru"
+
+
+def _studio_try_pick_schedule_time_slot(
+    page, picker, dt: datetime, *, locale: str
+) -> bool:
+    """Клик по слоту времени в открытом ytcp-time-of-day-picker."""
+    patterns = studio_time_match_patterns(dt, locale=locale)
+    for pat in patterns:
+        item = picker.filter(has_text=pat)
+        if item.count() > 0:
+            try:
+                item.first.scroll_into_view_if_needed(timeout=5_000)
+            except Exception:
+                pass
+            item.first.click(timeout=10_000)
+            page.wait_for_timeout(300)
+            _log(
+                f"Studio: время отложенной публикации — "
+                f"{item.first.inner_text(timeout=2_000)!r}."
+            )
+            return True
+    if locale == "en":
+        candidates = studio_time_label_en_variants(dt)
+    else:
+        candidates = [studio_time_label_ru(dt), dt.astimezone(MSK).strftime("%H:%M")]
+    for raw in candidates:
+        item = picker.filter(has_text=re.compile(re.escape(raw.strip()), re.I))
+        if item.count() > 0:
+            try:
+                item.first.scroll_into_view_if_needed(timeout=5_000)
+            except Exception:
+                pass
+            item.first.click(timeout=10_000)
+            page.wait_for_timeout(300)
+            _log(f"Studio: время отложенной публикации — {raw}.")
+            return True
+    return False
+
+
+def _studio_scroll_schedule_time_picker_to_top(page) -> None:
+    try:
+        page.evaluate(
+            """() => {
+            const root = document.querySelector('ytcp-time-of-day-picker');
+            if (!root) return;
+            const scrollers = [
+                root.querySelector('#items'),
+                root.querySelector('tp-yt-paper-listbox'),
+                root.querySelector('[role="listbox"]'),
+                root,
+            ];
+            for (const el of scrollers) {
+                if (!el || typeof el.scrollTop !== 'number') continue;
+                el.scrollTop = 0;
+                return;
+            }
+        }"""
+        )
+    except Exception:
+        pass
+
+
+def _studio_scroll_schedule_time_picker_step(page, picker) -> bool:
+    """Прокрутка списка времени вниз; False — дальше некуда."""
+    moved = False
+    try:
+        moved = bool(
+            page.evaluate(
+                """() => {
+                const root = document.querySelector('ytcp-time-of-day-picker');
+                if (!root) return false;
+                const scrollers = [
+                    root.querySelector('#items'),
+                    root.querySelector('tp-yt-paper-listbox'),
+                    root.querySelector('[role="listbox"]'),
+                    root,
+                ].filter((el) => el && typeof el.scrollTop === 'number');
+                for (const el of scrollers) {
+                    const before = el.scrollTop;
+                    const step = Math.max(100, Math.floor(el.clientHeight * 0.8));
+                    el.scrollTop = Math.min(el.scrollTop + step, el.scrollHeight);
+                    if (el.scrollTop > before) return true;
+                }
+                const items = root.querySelectorAll('tp-yt-paper-item');
+                if (!items.length) return false;
+                const last = items[items.length - 1];
+                const beforeY = last.getBoundingClientRect().top;
+                last.scrollIntoView({ block: 'end', behavior: 'instant' });
+                return Math.abs(last.getBoundingClientRect().top - beforeY) > 2;
+            }"""
+            )
+        )
+    except Exception:
+        moved = False
+    if moved:
+        return True
+    try:
+        count = picker.count()
+        if count <= 0:
+            return False
+        before = picker.nth(count - 1).bounding_box()
+        picker.nth(count - 1).scroll_into_view_if_needed(timeout=3_000)
+        page.wait_for_timeout(150)
+        after = picker.nth(count - 1).bounding_box()
+        if before and after:
+            return abs(after.get("y", 0) - before.get("y", 0)) > 2
+    except Exception:
+        pass
+    return False
+
+
+def _studio_pick_schedule_time_via_scrolling_list(
+    page, picker, dt: datetime, *, locale: str
+) -> bool:
+    """Листает весь список ytcp-time-of-day-picker в поисках слота."""
+    target_label = studio_time_input_label(dt, locale=locale)
+    _log(
+        f"Studio: слот {target_label} не виден — листаем список времени…"
+    )
+    _studio_scroll_schedule_time_picker_to_top(page)
+    page.wait_for_timeout(200)
+    seen_signature = ""
+    stuck_rounds = 0
+    for _ in range(120):
+        if _studio_try_pick_schedule_time_slot(page, picker, dt, locale=locale):
+            return True
+        try:
+            count = min(picker.count(), 8)
+            parts: list[str] = []
+            for i in range(count):
+                parts.append((picker.nth(i).inner_text(timeout=400) or "").strip())
+            signature = "|".join(parts)
+        except Exception:
+            signature = ""
+        if signature and signature == seen_signature:
+            stuck_rounds += 1
+        else:
+            stuck_rounds = 0
+            seen_signature = signature
+        if stuck_rounds >= 2:
+            break
+        if not _studio_scroll_schedule_time_picker_step(page, picker):
+            stuck_rounds += 1
+            if stuck_rounds >= 2:
+                break
+        page.wait_for_timeout(180)
+    return False
+
+
+def _studio_type_schedule_time_of_day(
+    page, time_input, dt: datetime, *, locale: str
+) -> None:
+    text = studio_time_input_label(dt, locale=locale)
+    time_input.first.click(timeout=5_000)
+    page.wait_for_timeout(120)
+    page.keyboard.press("Control+A")
+    page.keyboard.type(text, delay=30)
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(300)
+    _log(f"Studio: время отложенной публикации — {text} (ввод с клавиатуры).")
+
+
 def _studio_pick_schedule_time_of_day(page, target: datetime) -> None:
     dt = parse_msk_datetime(target)
     if dt is None:
@@ -6624,31 +6816,33 @@ def _studio_pick_schedule_time_of_day(page, target: datetime) -> None:
     try:
         picker.first.wait_for(state="visible", timeout=10_000)
     except Exception:
-        page.keyboard.press("Control+A")
-        page.keyboard.type(dt.strftime("%H:%M"), delay=30)
-        page.keyboard.press("Enter")
-        page.wait_for_timeout(300)
-        _log(f"Studio: время отложенной публикации — {dt.strftime('%H:%M')} (ввод с клавиатуры).")
+        locale = _studio_schedule_time_picker_locale(page, picker)
+        _studio_type_schedule_time_of_day(page, time_input, dt, locale=locale)
         return
-    patterns = studio_time_match_patterns(dt)
-    for pat in patterns:
-        item = picker.filter(has_text=pat)
-        if item.count() > 0:
-            item.first.click(timeout=10_000)
-            page.wait_for_timeout(300)
-            _log(f"Studio: время отложенной публикации — {item.first.inner_text(timeout=2_000)!r}.")
-            return
-    label_en = dt.astimezone(MSK).strftime("%I:%M %p").lstrip("0")
-    for raw in (label_en, dt.strftime("%H:%M")):
-        item = picker.filter(has_text=re.compile(re.escape(raw.strip()), re.I))
-        if item.count() > 0:
-            item.first.click(timeout=10_000)
-            page.wait_for_timeout(300)
-            _log(f"Studio: время отложенной публикации — {raw}.")
-            return
-    raise YoutubeStudioError(
-        f"Не найден слот времени в списке Studio для {dt.strftime('%H:%M')} (МСК)."
+    locale = _studio_schedule_time_picker_locale(page, picker)
+    if locale == "en":
+        _log(
+            f"Studio: список времени — 12 ч (AM/PM), "
+            f"ищем {studio_time_label_en(dt)!r}…"
+        )
+    if _studio_try_pick_schedule_time_slot(page, picker, dt, locale=locale):
+        return
+    if _studio_pick_schedule_time_via_scrolling_list(
+        page, picker, dt, locale=locale
+    ):
+        return
+    target_label = studio_time_input_label(dt, locale=locale)
+    _log(
+        f"Studio: слот {target_label} не найден в списке — "
+        "пробуем ввод с клавиатуры…"
     )
+    try:
+        _studio_type_schedule_time_of_day(page, time_input, dt, locale=locale)
+        return
+    except Exception as e:
+        raise YoutubeStudioError(
+            f"Не найден слот времени в списке Studio для {target_label} (МСК)."
+        ) from e
 
 
 def _studio_configure_scheduled_publish(page, schedule_at: datetime) -> None:
@@ -7785,6 +7979,11 @@ _SHORTS_WARMUP_MIN_WATCH_S = 5.0
 _SHORTS_WARMUP_MAX_WATCH_S = 25.0
 _SHORTS_WARMUP_DEFAULT_LIKE_PROB_PCT = 10.0
 _SHORTS_WARMUP_DEFAULT_SUBSCRIBE_PROB_PCT = 10.0
+_SHORTS_FULL_WATCH_COMPLETE_PCT = 95.0
+_SHORTS_FULL_WATCH_LOOP_RESET_PCT = 12.0
+_SHORTS_FULL_WATCH_MAX_S = 120.0
+_SHORTS_FULL_WATCH_POLL_S = 0.45
+_SHORTS_FULL_WATCH_STALL_ROUNDS = 22
 _SHORTS_LIKE_BTN_RE = re.compile(
     r"like\s+this\s+video|"
     r"лайк|"
@@ -8075,6 +8274,191 @@ def _studio_try_subscribe_current_short(page) -> bool:
     return False
 
 
+def _studio_read_shorts_playback_pct(page) -> float | None:
+    """Процент просмотра текущего Short (0–100) из scrubber или video."""
+    for sel in (
+        'yt-progress-bar [role="slider"][aria-valuenow]',
+        '#scrubber [role="slider"][aria-valuenow]',
+        'desktop-shorts-player-controls [role="slider"][aria-valuenow]',
+    ):
+        try:
+            loc = page.locator(sel)
+            if loc.count() > 0 and loc.first.is_visible(timeout=300):
+                raw = loc.first.get_attribute("aria-valuenow")
+                if raw is not None and str(raw).strip():
+                    return float(raw)
+        except Exception:
+            continue
+    try:
+        pct = page.evaluate(
+            """() => {
+            const v = document.querySelector('#shorts-player video.html5-main-video')
+                || document.querySelector('video.html5-main-video');
+            if (!v || !v.duration || !isFinite(v.duration) || v.duration <= 0) return null;
+            return (v.currentTime / v.duration) * 100;
+        }"""
+        )
+        if pct is not None:
+            return float(pct)
+    except Exception:
+        pass
+    try:
+        pct = page.evaluate(
+            """() => {
+            const el = document.querySelector('.ytProgressBarLineProgressBarPlayed');
+            if (!el || !el.style || !el.style.width) return null;
+            const m = String(el.style.width).match(/([\\d.]+)%/);
+            return m ? parseFloat(m[1]) : null;
+        }"""
+        )
+        if pct is not None:
+            return float(pct)
+    except Exception:
+        pass
+    return None
+
+
+def _studio_is_shorts_paused(page) -> bool | None:
+    """True — пауза, False — играет, None — не удалось определить."""
+    try:
+        state = page.evaluate(
+            """() => {
+            const v = document.querySelector('#shorts-player video.html5-main-video')
+                || document.querySelector('video.html5-main-video');
+            if (v) return Boolean(v.paused);
+            const root = document.querySelector('#shorts-player');
+            if (root) return root.classList.contains('paused-mode');
+            return null;
+        }"""
+        )
+        if state is None:
+            return None
+        return bool(state)
+    except Exception:
+        return None
+
+
+def _studio_resume_shorts_playback(page) -> bool:
+    """Запустить Short, если он на паузе. Не трогает уже играющий ролик."""
+    for sel in (
+        'ytd-shorts-player-controls button[aria-label*="Play"]',
+        '#play-pause-button-shape button[aria-label*="Play"]',
+        '#shorts-player.ytp-paused .ytp-large-play-button',
+    ):
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=400):
+                btn.click(timeout=2_000)
+                page.wait_for_timeout(250)
+                return True
+        except Exception:
+            continue
+    try:
+        resumed = page.evaluate(
+            """() => {
+            const v = document.querySelector('#shorts-player video.html5-main-video')
+                || document.querySelector('video.html5-main-video');
+            if (!v || !v.paused) return false;
+            const p = v.play();
+            if (p && typeof p.catch === 'function') p.catch(() => {});
+            return true;
+        }"""
+        )
+        if resumed:
+            page.wait_for_timeout(250)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _studio_ensure_shorts_playing(page) -> None:
+    _studio_dismiss_shorts_player_overlays(page)
+    paused = _studio_is_shorts_paused(page)
+    if paused is False:
+        return
+    _studio_resume_shorts_playback(page)
+
+
+def _studio_wait_for_short_full_watch(
+    page,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+    complete_pct: float = _SHORTS_FULL_WATCH_COMPLETE_PCT,
+    max_wait_s: float = _SHORTS_FULL_WATCH_MAX_S,
+) -> bool:
+    """Ждёт просмотра Short до конца. True — остановка по запросу."""
+    _studio_dismiss_shorts_player_overlays(page)
+    paused = _studio_is_shorts_paused(page)
+    if paused is True:
+        _studio_resume_shorts_playback(page)
+    deadline = time.monotonic() + max(5.0, float(max_wait_s))
+    last_pct = -1.0
+    stall_rounds = 0
+    logged_progress = False
+    _log("Shorts: смотрим ролик до конца…")
+
+    while time.monotonic() < deadline:
+        if should_stop and should_stop():
+            return True
+
+        pct = _studio_read_shorts_playback_pct(page)
+        if pct is not None:
+            if (
+                last_pct >= complete_pct - 5
+                and pct <= _SHORTS_FULL_WATCH_LOOP_RESET_PCT
+            ):
+                _log("Shorts: ролик просмотрен до конца (повтор ленты).")
+                return False
+            if pct >= complete_pct:
+                _log(f"Shorts: ролик просмотрен ({pct:.0f}%).")
+                return False
+            if pct > last_pct + 4 or (not logged_progress and pct > 1):
+                _log(f"Shorts: прогресс {pct:.0f}%…")
+                logged_progress = True
+            if abs(pct - last_pct) < 0.4:
+                stall_rounds += 1
+            else:
+                stall_rounds = 0
+            last_pct = pct
+            if stall_rounds >= _SHORTS_FULL_WATCH_STALL_ROUNDS:
+                _log("Shorts: прогресс застыл — пробуем возобновить воспроизведение.")
+                if _studio_is_shorts_paused(page) is not False:
+                    _studio_resume_shorts_playback(page)
+                stall_rounds = 0
+
+        if _studio_wait_ms_with_stop(
+            page,
+            int(_SHORTS_FULL_WATCH_POLL_S * 1000),
+            should_stop=should_stop,
+        ):
+            return True
+
+    _log(f"Shorts: таймаут просмотра ({max_wait_s:.0f} с) — перелистываем.")
+    return False
+
+
+def _studio_wait_ms_with_stop(
+    page,
+    total_ms: int,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+    chunk_ms: int = 500,
+) -> bool:
+    """Ждёт total_ms; возвращает True, если сработал should_stop."""
+    if total_ms <= 0:
+        return bool(should_stop and should_stop())
+    remaining = int(total_ms)
+    step_ms = max(100, int(chunk_ms))
+    while remaining > 0:
+        if should_stop and should_stop():
+            return True
+        step = min(step_ms, remaining)
+        page.wait_for_timeout(step)
+        remaining -= step
+    return bool(should_stop and should_stop())
+
+
 def _studio_browse_youtube_shorts(
     page,
     *,
@@ -8083,8 +8467,10 @@ def _studio_browse_youtube_shorts(
     subscribe_probability_pct: float = _SHORTS_WARMUP_DEFAULT_SUBSCRIBE_PROB_PCT,
     min_watch_s: float = _SHORTS_WARMUP_MIN_WATCH_S,
     max_watch_s: float = _SHORTS_WARMUP_MAX_WATCH_S,
+    watch_full_video: bool = False,
+    should_stop: Callable[[], bool] | None = None,
 ) -> None:
-    """Просмотр count Shorts со случайной паузой min_watch_s–max_watch_s на каждом."""
+    """Просмотр count Shorts: фиксированное время или до конца каждого ролика."""
     n = max(1, int(count))
     like_prob = min(100.0, max(0.0, float(like_probability_pct)))
     subscribe_prob = min(100.0, max(0.0, float(subscribe_probability_pct)))
@@ -8096,9 +8482,13 @@ def _studio_browse_youtube_shorts(
         log_extra += f", лайк {like_prob:g}%"
     if subscribe_prob > 0:
         log_extra += f", подписка {subscribe_prob:g}%"
+    if watch_full_video:
+        watch_note = "до конца каждого ролика"
+    else:
+        watch_note = f"{watch_min:.0f}–{watch_max:.0f} с на каждом"
     _log(
         f"Shorts: просмотр {n} роликов, "
-        f"{watch_min:.0f}–{watch_max:.0f} с на каждом"
+        f"{watch_note}"
         f" (лайк/подписка после просмотра{log_extra})…"
     )
     _studio_wait_shorts_feed_ready(page)
@@ -8109,6 +8499,10 @@ def _studio_browse_youtube_shorts(
     max_skip_attempts = max(n * 5, 10)
 
     while watched < n:
+        if should_stop and should_stop():
+            _log(f"Shorts: остановка по запросу (просмотрено {watched} из {n}).")
+            return
+
         _studio_dismiss_shorts_player_overlays(page)
 
         if _studio_is_current_short_an_ad(page):
@@ -8131,9 +8525,22 @@ def _studio_browse_youtube_shorts(
             + (f" ({prev_id})" if prev_id else "")
         )
 
-        watch_s = random.uniform(watch_min, watch_max)
-        _log(f"Shorts: смотрим ~{watch_s:.0f} с…")
-        page.wait_for_timeout(int(watch_s * 1000))
+        if watch_full_video:
+            if _studio_wait_for_short_full_watch(
+                page,
+                should_stop=should_stop,
+                max_wait_s=max(watch_max, _SHORTS_FULL_WATCH_MAX_S),
+            ):
+                _log(f"Shorts: остановка по запросу (просмотрено {watched} из {n}).")
+                return
+        else:
+            watch_s = random.uniform(watch_min, watch_max)
+            _log(f"Shorts: смотрим ~{watch_s:.0f} с…")
+            if _studio_wait_ms_with_stop(
+                page, int(watch_s * 1000), should_stop=should_stop
+            ):
+                _log(f"Shorts: остановка по запросу (просмотрено {watched} из {n}).")
+                return
         if like_prob > 0 and random.random() * 100.0 < like_prob:
             if _studio_try_like_current_short(page):
                 page.wait_for_timeout(2_000)
@@ -8252,6 +8659,108 @@ def _studio_search_youtube(page, query: str) -> bool:
     page.wait_for_timeout(_HORIZONTAL_SEARCH_RESULTS_WAIT_MS)
     _log(f"Горизонтальные видео: поиск «{q}» выполнен, выдача загружена.")
     return True
+
+
+_SHORTS_SEARCH_CHIP_LABELS = ("Shorts", "Шортс")
+
+
+def _studio_click_search_shorts_chip(page) -> bool:
+    """Фильтр Shorts на странице результатов поиска YouTube."""
+    for label in _SHORTS_SEARCH_CHIP_LABELS:
+        for sel in (
+            f'yt-chip-cloud-chip-renderer button:has-text("{label}")',
+            f'#chips button[role="tab"]:has-text("{label}")',
+            f'yt-chip-cloud-renderer button:has-text("{label}")',
+        ):
+            try:
+                btn = page.locator(sel).first
+                if btn.is_visible(timeout=2_000):
+                    btn.click(timeout=5_000)
+                    page.wait_for_timeout(1_500)
+                    _log(f"Shorts: фильтр «{label}» в поиске выбран.")
+                    return True
+            except Exception:
+                continue
+    _log("Shorts: не удалось выбрать фильтр Shorts в поиске.")
+    return False
+
+
+def _studio_collect_search_shorts_links(page) -> list:
+    """Ссылки на Shorts в ytd-video-renderer (выдача поиска)."""
+    renderers = page.locator("ytd-video-renderer")
+    count = renderers.count()
+    links: list = []
+    for i in range(count):
+        renderer = renderers.nth(i)
+        try:
+            link_loc = renderer.locator(
+                'a#thumbnail[href*="/shorts/"], '
+                'a#video-title[href*="/shorts/"], '
+                'a[href*="/shorts/"]'
+            )
+            if link_loc.count() == 0:
+                continue
+            link = link_loc.first
+            if not link.is_visible(timeout=500):
+                continue
+            href = (link.get_attribute("href") or "").strip()
+            if "/shorts/" not in href:
+                continue
+            links.append(link)
+        except Exception:
+            continue
+    return links
+
+
+def _studio_open_first_search_short(page) -> bool:
+    """Открыть первый Short из выдачи поиска и перейти в ленту."""
+    links = _studio_collect_search_shorts_links(page)
+    if not links:
+        _log("Shorts: в выдаче поиска нет Shorts.")
+        return False
+    link = links[0]
+    try:
+        href = (link.get_attribute("href") or "").strip()
+        link.click(timeout=10_000)
+        page.wait_for_timeout(2_000)
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
+        except Exception:
+            pass
+        _studio_wait_shorts_feed_ready(page)
+        _log(f"Shorts: открыт первый Short из поиска ({href!r}).")
+        return True
+    except Exception as e:
+        _log(
+            "Shorts: не удалось открыть первый Short из поиска: "
+            f"{type(e).__name__}"
+        )
+        return False
+
+
+def _studio_goto_shorts_from_search(
+    page, query: str, *, login_credentials=None
+) -> bool:
+    """Главная YouTube → поиск → фильтр Shorts → первый ролик."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    _log(f"Shorts: прогрев по поиску «{q}»…")
+    _studio_goto_youtube_home(
+        page, login_credentials=login_credentials, for_channel_scan=False
+    )
+    if not _studio_search_youtube(page, q):
+        return False
+    if not _studio_click_search_shorts_chip(page):
+        return False
+    try:
+        page.locator("ytd-video-renderer a[href*='/shorts/']").first.wait_for(
+            state="attached", timeout=15_000
+        )
+    except Exception:
+        pass
+    page.wait_for_timeout(1_000)
+    return _studio_open_first_search_short(page)
 
 
 def _studio_collect_search_video_links(page) -> list:
@@ -8456,4 +8965,69 @@ def run_youtube_shorts_warmup(
                 page,
                 count=horizontal_videos_count,
             )
+
+
+_SCHEDULE_PARALLEL_WARMUP_BATCH_COUNT = 5
+
+
+@_studio_entrypoint
+def run_youtube_shorts_warmup_during_upload(
+    page,
+    *,
+    should_stop: Callable[[], bool],
+    login_credentials=None,
+    shorts_recommendations: bool = True,
+    search_query: str | None = None,
+    shorts_batch_count: int = _SCHEDULE_PARALLEL_WARMUP_BATCH_COUNT,
+    like_probability_pct: float = _SHORTS_WARMUP_DEFAULT_LIKE_PROB_PCT,
+    subscribe_probability_pct: float = _SHORTS_WARMUP_DEFAULT_SUBSCRIBE_PROB_PCT,
+    shorts_watch_min_s: float = _SHORTS_WARMUP_MIN_WATCH_S,
+    shorts_watch_max_s: float = _SHORTS_WARMUP_MAX_WATCH_S,
+) -> None:
+    """Прогрев Shorts на отдельной вкладке, пока на другой идёт отложенная заливка."""
+    _log(
+        "Shorts (параллельно с отложкой): открываем ленту на отдельной вкладке "
+        "(без переключения канала в Studio)…"
+    )
+    search_q = (search_query or "").strip()
+    opened_from_search = False
+    if not shorts_recommendations and search_q:
+        opened_from_search = _studio_goto_shorts_from_search(
+            page, search_q, login_credentials=login_credentials
+        )
+        if should_stop():
+            return
+    if not opened_from_search:
+        if not shorts_recommendations and search_q:
+            _log(
+                "Shorts (параллельно с отложкой): поиск не удался — "
+                "открываем рекомендации."
+            )
+        _studio_goto_youtube_home(
+            page, login_credentials=login_credentials, for_channel_scan=False
+        )
+        if should_stop():
+            return
+        _studio_goto_youtube_shorts_feed(page, login_credentials=login_credentials)
+    batch_n = max(1, int(shorts_batch_count))
+    batch_idx = 0
+    while not should_stop():
+        batch_idx += 1
+        _log(
+            f"Shorts (параллельно с отложкой): пакет {batch_idx}, "
+            f"до {batch_n} роликов…"
+        )
+        _studio_browse_youtube_shorts(
+            page,
+            count=batch_n,
+            like_probability_pct=like_probability_pct,
+            subscribe_probability_pct=subscribe_probability_pct,
+            min_watch_s=shorts_watch_min_s,
+            max_watch_s=shorts_watch_max_s,
+            watch_full_video=True,
+            should_stop=should_stop,
+        )
+        if should_stop():
+            break
+    _log("Shorts (параллельно с отложкой): залив профиля завершён — останавливаем прогрев.")
 

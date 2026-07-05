@@ -16,7 +16,6 @@ try:
 except ImportError:
     MSK = timezone(timedelta(hours=3))
 _MIN_SCHEDULE_GAP = timedelta(hours=5)
-_MAX_SCHEDULE_SLOTS = 3
 _YT_TIME_STEP_MIN = 15
 
 
@@ -53,6 +52,24 @@ def studio_time_label_en(dt: datetime) -> str:
     return f"{h12}:{minute:02d} {ampm}"
 
 
+def studio_time_label_en_variants(dt: datetime) -> list[str]:
+    """Варианты 12-часовой метки для англ. списка Studio (1:00 PM / 01:00 PM)."""
+    dt = dt.astimezone(MSK)
+    minute = snap_studio_time_minutes(dt.minute)
+    hour = dt.hour
+    h12 = hour % 12 or 12
+    ampm = "AM" if hour < 12 else "PM"
+    out = [
+        f"{h12}:{minute:02d} {ampm}",
+        f"{h12:02d}:{minute:02d} {ampm}",
+    ]
+    deduped: list[str] = []
+    for item in out:
+        if item not in deduped:
+            deduped.append(item)
+    return deduped
+
+
 def studio_time_label_ru(dt: datetime) -> str:
     """Метка времени для русского UI (24 ч, шаг 15 мин)."""
     dt = dt.astimezone(MSK)
@@ -60,18 +77,43 @@ def studio_time_label_ru(dt: datetime) -> str:
     return f"{dt.hour:02d}:{minute:02d}"
 
 
-def studio_time_match_patterns(dt: datetime) -> list[re.Pattern[str]]:
+def studio_time_match_patterns(
+    dt: datetime,
+    *,
+    locale: str = "en",
+) -> list[re.Pattern[str]]:
     dt = dt.astimezone(MSK)
     minute = snap_studio_time_minutes(dt.minute)
     hour = dt.hour
+    if locale == "ru":
+        return [
+            re.compile(rf"^{re.escape(f'{hour:02d}:{minute:02d}')}$"),
+            re.compile(rf"^{re.escape(f'{hour}:{minute:02d}')}$"),
+        ]
     h12 = hour % 12 or 12
     ampm = "AM" if hour < 12 else "PM"
-    patterns = [
-        re.compile(rf"^{re.escape(f'{h12}:{minute:02d}')}\s*{ampm}$", re.I),
-        re.compile(rf"^{re.escape(f'{hour:02d}:{minute:02d}')}$"),
-        re.compile(rf"^{re.escape(f'{hour}:{minute:02d}')}$"),
-    ]
+    patterns: list[re.Pattern[str]] = []
+    for h_text in (str(h12), f"{h12:02d}"):
+        label = f"{h_text}:{minute:02d} {ampm}"
+        patterns.append(re.compile(rf"^{re.escape(label)}$", re.I))
+        patterns.append(
+            re.compile(rf"^{re.escape(h_text)}:{minute:02d}\s*{ampm}$", re.I)
+        )
     return patterns
+
+
+def studio_time_picker_locale_from_text(text: str) -> str:
+    """en — список в 12 ч (AM/PM), иначе ru (24 ч)."""
+    raw = (text or "").strip()
+    if re.search(r"\b\d{1,2}:\d{2}\s*(AM|PM)\b", raw, re.I):
+        return "en"
+    return "ru"
+
+
+def studio_time_input_label(dt: datetime, *, locale: str) -> str:
+    if locale == "ru":
+        return studio_time_label_ru(dt)
+    return studio_time_label_en(dt)
 
 
 _RU_DATE_MONTH_PARTS: dict[int, tuple[str, ...]] = {
@@ -140,8 +182,6 @@ def validate_schedule_times(
     """Возвращает текст ошибки или None, если всё ок."""
     if not times:
         return "Укажите хотя бы одно время отложенной публикации."
-    if len(times) > _MAX_SCHEDULE_SLOTS:
-        return f"Не более {_MAX_SCHEDULE_SLOTS} времён отложенной публикации."
     cur = now or datetime.now(tz=MSK)
     normalized: list[datetime] = []
     for t in times:

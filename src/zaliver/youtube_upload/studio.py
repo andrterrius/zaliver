@@ -6593,11 +6593,19 @@ def _studio_capture_uploads_review_video_link(page, *, max_wait_sec: float = 30)
     return ""
 
 
+def _schedule_publish_at_to_unix(schedule_at: datetime | None) -> int | None:
+    dt = parse_msk_datetime(schedule_at)
+    if dt is None:
+        return None
+    return int(dt.timestamp())
+
+
 def _studio_try_notify_stats_server(
     video_id: str,
     *,
     profile_id: str | None,
     username: str | None,
+    schedule_at: datetime | None = None,
 ) -> bool:
     user = (username or "").strip()
     vid = (video_id or "").strip()
@@ -6613,6 +6621,7 @@ def _studio_try_notify_stats_server(
             video_id=vid,
             username=user,
             profile_id=(profile_id or "").strip(),
+            scheduled=_schedule_publish_at_to_unix(schedule_at),
         )
         if ok:
             _log(f"Studio: stats_server — уведомление отправлено (videoId={vid}).")
@@ -7799,6 +7808,7 @@ def _studio_click_publish_when_enabled(
     max_wait_sec: float,
     *,
     schedule: bool = False,
+    schedule_at: datetime | None = None,
     stats_server_username: str | None = None,
     profile_id: str | None = None,
 ) -> tuple[str, bool]:
@@ -7827,6 +7837,7 @@ def _studio_click_publish_when_enabled(
                                     vid,
                                     profile_id=profile_id,
                                     username=stats_server_username,
+                                    schedule_at=schedule_at,
                                 )
                     btn.first.click(timeout=60_000)
                     _log(f"Studio: {label} нажата.")
@@ -7889,6 +7900,7 @@ def _studio_publish_flow_before_checks(
         page,
         max_wait_sec,
         schedule=schedule_at is not None,
+        schedule_at=schedule_at,
         stats_server_username=stats_server_username,
         profile_id=profile_id,
     )
@@ -7967,6 +7979,7 @@ def _studio_publish_flow_after_upload(
         page,
         _POST_UPLOAD_STUDIO_OUTCOME_MAX_S,
         schedule=schedule_at is not None,
+        schedule_at=schedule_at,
         stats_server_username=stats_server_username,
         profile_id=profile_id,
     )

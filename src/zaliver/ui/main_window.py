@@ -7211,7 +7211,14 @@ class MainWindow(QWidget):
                         **open_kw,
                     )
 
-                def _record_one(*, video_path: str, title: str, description: str, one_res) -> None:
+                def _record_one(
+                    *,
+                    video_path: str,
+                    title: str,
+                    description: str,
+                    one_res,
+                    schedule_publish_at: datetime | None = None,
+                ) -> None:
                     vid = ""
                     url = ""
                     if isinstance(one_res, dict):
@@ -7256,10 +7263,15 @@ class MainWindow(QWidget):
                             isinstance(one_res, dict) and one_res.get("stats_notified")
                         )
                         if guser and not stats_notified:
+                            scheduled_unix = None
+                            sched_dt = parse_msk_datetime(schedule_publish_at)
+                            if sched_dt is not None:
+                                scheduled_unix = int(sched_dt.timestamp())
                             ok = notify_uploaded_video(
                                 video_id=vid,
                                 username=guser,
                                 profile_id=profile_id,
+                                scheduled=scheduled_unix,
                             )
                             try:
                                 if ok:
@@ -7312,6 +7324,7 @@ class MainWindow(QWidget):
                             title=item.title,
                             description=item.description,
                             one_res=item_res,
+                            schedule_publish_at=item.schedule_publish_at,
                         )
                 else:
                     _record_one(
@@ -7319,6 +7332,7 @@ class MainWindow(QWidget):
                         title=task.title,
                         description=task.description,
                         one_res=res,
+                        schedule_publish_at=task.schedule_publish_at,
                     )
 
             def _on_profile_upload_attempt(pid: str, ok: bool, err: str) -> None:

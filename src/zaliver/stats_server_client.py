@@ -20,11 +20,13 @@ def notify_uploaded_video(
     video_id: str,
     username: str,
     profile_id: str = "",
+    scheduled: int | None = None,
     timeout_s: float = 25.0,
 ) -> bool:
     """
-    POST JSON ``{ "username", "video_id", "profile_id" }`` на stats_server.
+    POST JSON ``{ "username", "video_id", "profile_id", "scheduled"? }`` на stats_server.
     ``profile_id`` — id профиля антидетект-браузера или пустая строка.
+    ``scheduled`` — unix-время отложенной публикации (только для schedule).
     Не бросает исключения наружу (ошибки только в лог).
     """
     vid = (video_id or "").strip()
@@ -38,6 +40,8 @@ def notify_uploaded_video(
             "video_id": vid,
             "profile_id": (profile_id or "").strip(),
         }
+        if scheduled is not None:
+            payload["scheduled"] = int(scheduled)
         resp = requests.post(url, json=payload, timeout=timeout_s)
         code = int(resp.status_code)
         ok = 200 <= code < 300
@@ -49,10 +53,11 @@ def notify_uploaded_video(
             )
         else:
             _LOG.info(
-                "stats_server notify ok: video_id=%s username=%s profile_id=%s",
+                "stats_server notify ok: video_id=%s username=%s profile_id=%s scheduled=%s",
                 vid,
                 user,
                 (profile_id or "").strip(),
+                scheduled,
             )
         return ok
     except requests.RequestException as e:

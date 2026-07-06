@@ -8517,16 +8517,53 @@ def _studio_goto_youtube_shorts_feed(page, *, login_credentials=None) -> None:
     _studio_wait_shorts_feed_ready(page)
 
 
-def _studio_wait_shorts_feed_ready(page) -> None:
-    _log("Shorts: ожидание ленты…")
-    container = page.locator("#shorts-container")
-    container.first.wait_for(state="visible", timeout=120_000)
-    player = page.locator(
-        "#shorts-player, video.html5-main-video, ytd-reel-video-renderer"
-    )
-    player.first.wait_for(state="visible", timeout=120_000)
-    page.wait_for_timeout(1_500)
-    _studio_dismiss_shorts_player_overlays(page)
+def _studio_is_shorts_player_ready(page) -> bool:
+    """Плеер Shorts готов к просмотру (новый и старый UI)."""
+    if not _studio_page_on_youtube_shorts(page):
+        return False
+    for sel in (
+        "#shorts-container",
+        "ytd-shorts",
+        "ytd-reel-video-renderer",
+        "#shorts-player",
+        "video.html5-main-video",
+        "video",
+    ):
+        try:
+            if page.locator(sel).first.is_visible(timeout=300):
+                return True
+        except Exception:
+            continue
+    try:
+        return bool(
+            page.evaluate(
+                """() => {
+                if (!String(location.pathname).includes('/shorts')) return false;
+                const v = document.querySelector('video');
+                return !!(v && (v.readyState >= 2 || v.videoWidth > 0));
+            }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+def _studio_wait_shorts_feed_ready(page, *, timeout_ms: int = 120_000) -> None:
+    _log("Shorts: ожидание плеера…")
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        if _studio_is_shorts_player_ready(page):
+            page.wait_for_timeout(800)
+            _studio_dismiss_shorts_player_overlays(page)
+            _log(f"Shorts: плеер готов — {page.url!r}")
+            return
+        page.wait_for_timeout(250)
+    if _studio_is_shorts_player_ready(page):
+        page.wait_for_timeout(800)
+        _studio_dismiss_shorts_player_overlays(page)
+        _log(f"Shorts: плеер готов — {page.url!r}")
+        return
+    raise TimeoutError(f"Shorts player not ready (URL={page.url!r})")
 
 
 def _studio_focus_shorts_player(page) -> None:
@@ -9024,18 +9061,21 @@ def _studio_type_youtube_search_input(page, search_input, query: str) -> bool:
         return False
 
 
-def _studio_search_youtube(page, query: str) -> bool:
+def _studio_search_youtube(
+    page, query: str, *, skip_home_goto: bool = False
+) -> bool:
     """Главная YouTube → последовательный ввод запроса → клик по лупе."""
     q = (query or "").strip()
     if not q:
         return False
-    _log(f"Горизонтальные видео: переход на {_YOUTUBE_HOME_URL}…")
-    page.goto(
-        _YOUTUBE_HOME_URL,
-        wait_until="domcontentloaded",
-        timeout=120_000,
-    )
-    page.wait_for_timeout(1_000)
+    if not skip_home_goto:
+        _log(f"Горизонтальные видео: переход на {_YOUTUBE_HOME_URL}…")
+        page.goto(
+            _YOUTUBE_HOME_URL,
+            wait_until="domcontentloaded",
+            timeout=120_000,
+        )
+        page.wait_for_timeout(1_000)
 
     search_input = None
     for sel in _YOUTUBE_SEARCH_INPUT_SELECTORS:
@@ -9089,6 +9129,12 @@ def _studio_search_youtube(page, query: str) -> bool:
 
 
 _SHORTS_SEARCH_CHIP_LABELS = ("Shorts", "Шортс")
+_SEARCH_SHORTS_SHELF_ITEM_SEL = (
+    "grid-shelf-view-model .ytGridShelfViewModelGridShelfItem "
+    "ytm-shorts-lockup-view-model-v2, "
+    "grid-shelf-view-model .ytGridShelfViewModelGridShelfItem "
+    "ytm-shorts-lockup-view-model"
+)
 
 
 def _studio_click_search_shorts_chip(page) -> bool:
@@ -9112,12 +9158,51 @@ def _studio_click_search_shorts_chip(page) -> bool:
     return False
 
 
-def _studio_collect_search_shorts_links(page) -> list:
-    """Ссылки на Shorts в ytd-video-renderer (выдача поиска)."""
+def _studio_collect_search_short_targets(page) -> list[tuple]:
+    """Кликабельные цели Shorts на странице поиска: (locator, href)."""
+    targets: list[tuple] = []
+    seen: set[str] = set()
+
+    def _add(loc, href: str) -> None:
+        h = (href or "").strip()
+        if "/shorts/" not in h:
+            return
+        key = h.split("?")[0]
+        if key in seen:
+            return
+        try:
+            if not loc.is_visible(timeout=500):
+                return
+        except Exception:
+            return
+        seen.add(key)
+        targets.append((loc, h))
+
+    shelf_items = page.locator(_SEARCH_SHORTS_SHELF_ITEM_SEL)
+    for i in range(shelf_items.count()):
+        item = shelf_items.nth(i)
+        try:
+            href = (
+                item.locator(
+                    "a.shortsLockupViewModelHostEndpoint[href*='/shorts/']"
+                )
+                .first.get_attribute("href")
+                or ""
+            ).strip()
+            if not href:
+                continue
+            thumb = item.locator(
+                ".shortsLockupViewModelHostThumbnailParentContainer, "
+                "a.shortsLockupViewModelHostEndpoint[href*='/shorts/']"
+            ).first
+            _add(thumb, href)
+        except Exception:
+            continue
+    if targets:
+        return targets
+
     renderers = page.locator("ytd-video-renderer")
-    count = renderers.count()
-    links: list = []
-    for i in range(count):
+    for i in range(renderers.count()):
         renderer = renderers.nth(i)
         try:
             link_loc = renderer.locator(
@@ -9128,15 +9213,71 @@ def _studio_collect_search_shorts_links(page) -> list:
             if link_loc.count() == 0:
                 continue
             link = link_loc.first
-            if not link.is_visible(timeout=500):
-                continue
             href = (link.get_attribute("href") or "").strip()
-            if "/shorts/" not in href:
-                continue
-            links.append(link)
+            _add(link, href)
         except Exception:
             continue
-    return links
+    return targets
+
+
+def _studio_wait_youtube_shorts_url(page, *, timeout_ms: int = 15_000) -> bool:
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        if _studio_page_on_youtube_shorts(page):
+            return True
+        page.wait_for_timeout(200)
+    return False
+
+
+def _studio_click_search_short_target(page, target, href: str) -> bool:
+    """Клик по превью Short в выдаче (полка aria-hidden — нужен JS fallback)."""
+    resolved = _studio_resolve_youtube_href(href)
+    try:
+        page.bring_to_front()
+    except Exception:
+        pass
+    target.scroll_into_view_if_needed(timeout=5_000)
+    page.wait_for_timeout(300)
+
+    for attempt, use_js in enumerate((False, True), start=1):
+        try:
+            if use_js:
+                target.evaluate(
+                    """(node) => {
+                    const root = node.closest(
+                        'ytm-shorts-lockup-view-model-v2, ytm-shorts-lockup-view-model, ytd-video-renderer'
+                    ) || node;
+                    const thumb = root.querySelector(
+                        '.shortsLockupViewModelHostThumbnailParentContainer'
+                    );
+                    const link = root.querySelector(
+                        'a.shortsLockupViewModelHostEndpoint[href*="/shorts/"], '
+                        + 'a#thumbnail[href*="/shorts/"], a[href*="/shorts/"]'
+                    );
+                    const clickTarget = thumb || link || node;
+                    clickTarget.dispatchEvent(
+                        new MouseEvent('click', { bubbles: true, cancelable: true, view: window })
+                    );
+                    if (link) link.click();
+                    }"""
+                )
+            else:
+                try:
+                    target.click(timeout=5_000)
+                except Exception:
+                    target.click(timeout=5_000, force=True)
+        except Exception:
+            if attempt == 2:
+                return False
+            continue
+        if _studio_wait_youtube_shorts_url(page, timeout_ms=12_000):
+            return True
+    return False
+
+
+def _studio_collect_search_shorts_links(page) -> list:
+    """Обратная совместимость: locators из _studio_collect_search_short_targets."""
+    return [loc for loc, _href in _studio_collect_search_short_targets(page)]
 
 
 def _studio_resolve_youtube_href(href: str) -> str:
@@ -9151,41 +9292,41 @@ def _studio_resolve_youtube_href(href: str) -> str:
 
 
 def _studio_open_first_search_short(page) -> bool:
-    """Открыть первый Short из выдачи поиска и перейти в полноценную ленту /shorts/."""
-    links = _studio_collect_search_shorts_links(page)
-    if not links:
+    """Открыть первый Short из выдачи поиска кликом по превью."""
+    targets = _studio_collect_search_short_targets(page)
+    if not targets:
         _log("Shorts: в выдаче поиска нет Shorts.")
         return False
+    target, href = targets[0]
+    resolved = _studio_resolve_youtube_href(href)
+    if "/shorts/" not in resolved:
+        _log("Shorts: в выдаче поиска нет корректной ссылки на Short.")
+        return False
+    _log(f"Shorts: клик по превью первого Short ({resolved!r})…")
     try:
-        href = _studio_resolve_youtube_href(links[0].get_attribute("href") or "")
-        if "/shorts/" not in href:
-            _log("Shorts: в выдаче поиска нет корректной ссылки на Short.")
-            return False
-        _log(f"Shorts: переход в ленту по ссылке из поиска ({href!r})…")
-        try:
-            page.bring_to_front()
-        except Exception:
-            pass
-        page.goto(href, wait_until="domcontentloaded", timeout=60_000)
-        page.wait_for_timeout(1_500)
-        if not _studio_page_on_youtube_shorts(page):
+        if not _studio_click_search_short_target(page, target, href):
             _log(
-                "Shorts: goto не открыл /shorts/ — пробуем клик по превью в выдаче…"
-            )
-            links[0].click(timeout=10_000)
-            page.wait_for_timeout(2_000)
-            try:
-                page.wait_for_load_state("domcontentloaded", timeout=30_000)
-            except Exception:
-                pass
-        _studio_wait_shorts_feed_ready(page)
-        _studio_ensure_shorts_playing(page)
-        if not _studio_page_on_youtube_shorts(page):
-            _log(
-                "Shorts: не удалось открыть ленту Shorts "
+                "Shorts: клик по превью не открыл /shorts/ "
                 f"(URL={page.url!r})."
             )
             return False
+        if not _studio_wait_youtube_shorts_url(page, timeout_ms=5_000):
+            _log(
+                "Shorts: после клика URL не содержит /shorts/ "
+                f"({page.url!r})."
+            )
+            return False
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=10_000)
+        except Exception:
+            pass
+        try:
+            _studio_wait_shorts_feed_ready(page, timeout_ms=15_000)
+        except Exception:
+            if not _studio_is_shorts_player_ready(page):
+                raise
+            _studio_dismiss_shorts_player_overlays(page)
+        _studio_ensure_shorts_playing(page)
         vid = _studio_read_active_short_video_id(page)
         _log(
             "Shorts: открыт первый Short из поиска"
@@ -9204,7 +9345,7 @@ def _studio_open_first_search_short(page) -> bool:
 def _studio_goto_shorts_from_search(
     page, query: str, *, login_credentials=None
 ) -> bool:
-    """Главная YouTube → поиск → фильтр Shorts → первый ролик."""
+    """Главная YouTube → поиск → первый Short из полки на странице выдачи."""
     q = (query or "").strip()
     if not q:
         return False
@@ -9212,17 +9353,19 @@ def _studio_goto_shorts_from_search(
     _studio_goto_youtube_home(
         page, login_credentials=login_credentials, for_channel_scan=False
     )
-    if not _studio_search_youtube(page, q):
-        return False
-    if not _studio_click_search_shorts_chip(page):
+    if not _studio_search_youtube(page, q, skip_home_goto=True):
         return False
     try:
-        page.locator("ytd-video-renderer a[href*='/shorts/']").first.wait_for(
-            state="attached", timeout=15_000
+        page.locator(_SEARCH_SHORTS_SHELF_ITEM_SEL).first.wait_for(
+            state="visible", timeout=5_000
         )
     except Exception:
-        pass
-    page.wait_for_timeout(1_000)
+        try:
+            page.locator(
+                "ytd-video-renderer a[href*='/shorts/']"
+            ).first.wait_for(state="visible", timeout=3_000)
+        except Exception:
+            pass
     return _studio_open_first_search_short(page)
 
 
@@ -9482,6 +9625,12 @@ def run_youtube_shorts_warmup_during_upload(
         )
         if should_stop():
             return
+        if not opened_from_search and _studio_page_on_youtube_shorts(page):
+            _log(
+                "Shorts (параллельно с отложкой): после поиска уже на Shorts — "
+                "продолжаем прогрев без перехода на главную."
+            )
+            opened_from_search = True
     if not opened_from_search:
         if not shorts_recommendations and search_q:
             _log(

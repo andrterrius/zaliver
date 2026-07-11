@@ -299,6 +299,8 @@ def google_auth_interaction_visible(page) -> bool:
             txt = (h.inner_text(timeout=500) or "").strip()
             if _IDENTITY_HEADING_RE.search(txt):
                 return True
+            if _2FA_AUTHENTICATOR_CHALLENGE_RE.search(txt):
+                return True
             if _PASSKEY_ENROLLMENT_HEADING_RE.search(txt):
                 return True
     except Exception:
@@ -503,17 +505,52 @@ def _identifier_step_visible(page) -> bool:
     return False
 
 
+def _auth_heading_text(page) -> str:
+    for scope in _google_auth_scopes(page):
+        try:
+            h = scope.locator("#headingText").first
+            if h.count() > 0 and h.is_visible(timeout=200):
+                return (h.inner_text(timeout=400) or "").strip()
+        except Exception:
+            pass
+    return ""
+
+
+def _totp_input_locator(scope):
+    return (
+        scope.locator('input[name="totpPin"], #totpPin')
+        .or_(scope.locator('input[name="idvPin"], #idvPin'))
+        .or_(scope.locator('input[autocomplete="one-time-code"]'))
+        .or_(scope.locator('input[type="tel"][aria-label]'))
+        .or_(scope.locator('[data-challengeid] input[type="tel"]'))
+    )
+
+
 def _identity_confirm_visible(page) -> bool:
+    if _totp_step_visible(page):
+        return False
+    if _2fa_challenge_picker_visible(page):
+        return False
+    heading = _auth_heading_text(page)
+    if _2FA_AUTHENTICATOR_CHALLENGE_RE.search(heading):
+        return False
+    if _2FA_HEADING_RE.search(heading):
+        return False
     url = _page_url_lower(page)
+    if any(
+        token in url
+        for token in (
+            "challenge/totp",
+            "challenge/ipp",
+            "totpauthorization",
+            "challenge/az",
+        )
+    ):
+        return False
     if "confirmidentifier" in url or "confirm-identifier" in url:
         return True
-    try:
-        h = page.locator("#headingText").first
-        if h.is_visible(timeout=400):
-            if _IDENTITY_HEADING_RE.search((h.inner_text(timeout=500) or "").strip()):
-                return True
-    except Exception:
-        pass
+    if heading and _IDENTITY_HEADING_RE.search(heading):
+        return True
     try:
         if page.locator('[data-p*="identity-signin-confirm-identifier"]').count() > 0:
             return True
@@ -530,10 +567,47 @@ def _password_step_visible(page) -> bool:
 
 
 def _totp_step_visible(page) -> bool:
-    try:
-        return page.locator('input[name="totpPin"], #totpPin').first.is_visible(timeout=400)
-    except Exception:
-        return False
+    url = _page_url_lower(page)
+    if any(
+        token in url
+        for token in (
+            "challenge/totp",
+            "challenge/ipp",
+            "totpauthorization",
+        )
+    ):
+        return True
+    for scope in _google_auth_scopes(page):
+        try:
+            loc = _totp_input_locator(scope)
+            if loc.count() > 0 and loc.first.is_visible(timeout=400):
+                return True
+        except Exception:
+            pass
+        try:
+            if scope.locator("#totpNext").count() > 0 and scope.locator(
+                "#totpNext"
+            ).first.is_visible(timeout=200):
+                heading = _auth_heading_text(page)
+                if _2FA_AUTHENTICATOR_CHALLENGE_RE.search(heading):
+                    return True
+        except Exception:
+            pass
+    heading = _auth_heading_text(page)
+    if _2FA_AUTHENTICATOR_CHALLENGE_RE.search(heading):
+        return True
+    for scope in _google_auth_scopes(page):
+        try:
+            if scope.get_by_text(_2FA_AUTHENTICATOR_CHALLENGE_RE).first.is_visible(
+                timeout=300
+            ):
+                if _totp_input_locator(scope).count() > 0:
+                    return True
+                if scope.locator("#totpNext").count() > 0:
+                    return True
+        except Exception:
+            pass
+    return False
 
 
 def _google_authenticator_challenge_locator(scope):
@@ -1261,26 +1335,32 @@ def handle_channel_switcher_if_present(page) -> bool:
     return True
 
 
-def _google_next_button_locator(page):
-    return (
+def _google_next_button_locator(page, *, include_totp: bool = True):
+    loc = (
         page.locator("#identifierNext button")
         .or_(page.locator("#passwordNext button"))
-        .or_(page.locator("#totpNext button"))
         .or_(
             page.locator('div[jsname="Njthtb"] button[jsname="LgbsSe"]')
         )
         .or_(page.get_by_role("button", name=_NEXT_BTN_RE))
     )
+    if include_totp:
+        loc = loc.or_(page.locator("#totpNext button"))
+    return loc
 
 
-def _click_google_next(page) -> None:
-    btn = _google_next_button_locator(page)
+def _click_google_next(page, *, include_totp: bool = True) -> None:
+    btn = _google_next_button_locator(page, include_totp=include_totp)
     btn.first.wait_for(state="visible", timeout=60_000)
     try:
         btn.first.click(timeout=15_000)
     except Exception:
         btn.first.click(timeout=15_000, force=True)
     page.wait_for_timeout(1000)
+
+
+def _click_identity_confirm_next(page) -> None:
+    _click_google_next(page, include_totp=False)
 
 
 def _wait_after_identifier_submit(page, *, timeout_s: float = 30.0) -> None:
@@ -1297,7 +1377,9 @@ def _wait_after_identifier_submit(page, *, timeout_s: float = 30.0) -> None:
         page.wait_for_timeout(250)
 
 
-def _fill_input_and_click_next(page, locator, value: str) -> None:
+def _fill_input_and_click_next(
+    page, locator, value: str, *, use_totp_next: bool = False
+) -> None:
     field = locator.first
     field.wait_for(state="visible", timeout=20_000)
     field.fill(value, timeout=15_000)
@@ -1306,11 +1388,11 @@ def _fill_input_and_click_next(page, locator, value: str) -> None:
         field.press("Enter")
         page.wait_for_timeout(800)
     except Exception:
-        _click_google_next(page)
+        _click_google_next(page, include_totp=use_totp_next)
         return
     try:
         if field.is_visible(timeout=400):
-            _click_google_next(page)
+            _click_google_next(page, include_totp=use_totp_next)
     except Exception:
         pass
 
@@ -1650,10 +1732,45 @@ def attempt_google_login_for_studio(
             _click_use_another_account(page)
             continue
 
+        if _2fa_challenge_picker_visible(page):
+            steps += 1
+            idle_rounds = 0
+            _log(f"Google: выбор способа 2FA — Google Authenticator (шаг {steps})…")
+            _click_google_authenticator_challenge(page)
+            continue
+
+        if _totp_step_visible(page):
+            token = (credentials.twofa_token or "").strip()
+            if not token:
+                raise GoogleLoginCredentialsMissingError(
+                    "YouTube/Google: требуется 2FA, но yt_2fa не задан в данных учётки профиля."
+                )
+            steps += 1
+            otp = _generate_totp_code(token)
+            _log(f"Google: ввод кода 2FA и «Далее» (шаг {steps})…")
+            totp_field = None
+            for scope in _google_auth_scopes(page):
+                loc = _totp_input_locator(scope)
+                try:
+                    if loc.count() > 0 and loc.first.is_visible(timeout=400):
+                        totp_field = loc
+                        break
+                except Exception:
+                    pass
+            if totp_field is None:
+                totp_field = page.locator('input[name="totpPin"], #totpPin')
+            _fill_input_and_click_next(
+                page,
+                totp_field,
+                otp,
+                use_totp_next=True,
+            )
+            continue
+
         if _identity_confirm_visible(page):
             steps += 1
             _log(f"Google: «Подтвердите личность» — «Далее» (шаг {steps})…")
-            _click_google_next(page)
+            _click_identity_confirm_next(page)
             continue
 
         if _password_step_visible(page):
@@ -1723,29 +1840,6 @@ def attempt_google_login_for_studio(
             idle_rounds = 0
             _log(f"Google: дата рождения (шаг {steps})…")
             _fill_birthday_and_save(page)
-            continue
-
-        if _2fa_challenge_picker_visible(page):
-            steps += 1
-            idle_rounds = 0
-            _log(f"Google: выбор способа 2FA — Google Authenticator (шаг {steps})…")
-            _click_google_authenticator_challenge(page)
-            continue
-
-        if _totp_step_visible(page):
-            token = (credentials.twofa_token or "").strip()
-            if not token:
-                raise GoogleLoginCredentialsMissingError(
-                    "YouTube/Google: требуется 2FA, но yt_2fa не задан в данных учётки профиля."
-                )
-            steps += 1
-            otp = _generate_totp_code(token)
-            _log(f"Google: ввод кода 2FA и «Далее» (шаг {steps})…")
-            _fill_input_and_click_next(
-                page,
-                page.locator('input[name="totpPin"], #totpPin'),
-                otp,
-            )
             continue
 
         if _studio_login_required(page) or "accounts.google.com" in _page_url_lower(page):

@@ -60,6 +60,8 @@ _AADC_HEADING_RE = re.compile(
 )
 _VERIFY_IT_IS_YOU_TITLE_RE = re.compile(
     r"verify\s+it[''\u2019]?s?\s+you|"
+    r"identity\s+confirmation|"
+    r"подтверждение\s+личности|"
     r"подтвердите,?\s*что\s+это\s+вы|"
     r"подтвердите\s+свою\s+личность",
     re.I,
@@ -67,8 +69,11 @@ _VERIFY_IT_IS_YOU_TITLE_RE = re.compile(
 _VERIFY_IT_IS_YOU_BODY_RE = re.compile(
     r"confirm\s+it[''\u2019]?s?\s+really\s+you|"
     r"extra\s+layer\s+of\s+security|"
+    r"protect\s+your\s+account|"
     r"подтвердите,?\s*что\s+это\s+действительно\s+вы|"
-    r"дополнительный\s+уровень\s+защиты",
+    r"подтвердите\s+личность|"
+    r"дополнительный\s+уровень\s+защиты|"
+    r"защит[аы]\s+вашего\s+аккаунта",
     re.I,
 )
 _NOT_FOR_KIDS_RADIO_NAME = "VIDEO_MADE_FOR_KIDS_NOT_MFK"
@@ -3168,11 +3173,23 @@ def _studio_handle_aadc_notice_dialog_if_present(page) -> bool:
     return True
 
 
-def _studio_verify_identity_dialog_locator(page):
-    """Studio: «Verify it's you» / ytcp-auth-confirmation-dialog."""
-    by_auth = page.locator("tp-yt-paper-dialog").filter(
-        has=page.locator("ytcp-auth-confirmation-dialog")
+def _studio_auth_confirmation_marker_locator(page):
+    """Маркер диалога подтверждения личности (элемент или CSS-класс)."""
+    return (
+        page.locator("ytcp-auth-confirmation-dialog")
+        .or_(page.locator('[class*="ytcp-auth-confirmation-dialog"]'))
+        .or_(
+            page.locator("p[slot='dialog-content']").filter(
+                has_text=_VERIFY_IT_IS_YOU_BODY_RE
+            )
+        )
     )
+
+
+def _studio_verify_identity_dialog_locator(page):
+    """Studio: «Verify it's you» / «Подтверждение личности»."""
+    auth_marker = _studio_auth_confirmation_marker_locator(page)
+    by_auth = page.locator("tp-yt-paper-dialog").filter(has=auth_marker)
     by_title = page.locator("tp-yt-paper-dialog").filter(
         has=page.locator(
             "h1.dialog-title, [id^='dialog-title']"
@@ -3181,8 +3198,14 @@ def _studio_verify_identity_dialog_locator(page):
     by_confirm_in_modal = page.locator('tp-yt-paper-dialog[aria-modal="true"]').filter(
         has=page.locator("ytcp-button#confirm-button, #confirm-button")
     ).filter(
-        has=page.locator(
-            "ytcp-auth-confirmation-dialog, ytcp-confirmation-dialog"
+        has=auth_marker.or_(
+            page.locator(
+                "ytcp-confirmation-dialog, [class*='ytcp-confirmation-dialog']"
+            )
+        ).or_(
+            page.locator("h1.dialog-title, [id^='dialog-title']").filter(
+                has_text=_VERIFY_IT_IS_YOU_TITLE_RE
+            )
         )
     )
     return by_auth.or_(by_title).or_(by_confirm_in_modal)
@@ -3228,12 +3251,30 @@ def _studio_verify_identity_dialog_present_in_dom(page) -> bool:
         return bool(
             page.evaluate(
                 """() => {
-                    const auth = document.querySelector(
-                        'ytcp-auth-confirmation-dialog'
-                    );
-                    if (!auth) return false;
-                    const paper = auth.closest('tp-yt-paper-dialog')
-                        || auth.closest('ytcp-dialog');
+                    const auth =
+                        document.querySelector('ytcp-auth-confirmation-dialog')
+                        || document.querySelector(
+                            '[class*="ytcp-auth-confirmation-dialog"]'
+                        );
+                    let paper = auth
+                        ? (auth.closest('tp-yt-paper-dialog')
+                            || auth.closest('ytcp-dialog'))
+                        : null;
+                    if (!paper) {
+                        const title = Array.from(
+                            document.querySelectorAll(
+                                'tp-yt-paper-dialog h1.dialog-title, '
+                                + 'tp-yt-paper-dialog [id^="dialog-title"]'
+                            )
+                        ).find((node) => {
+                            const text = (node.textContent || '').trim();
+                            return /подтверждение\\s+личности|подтвердите\\s+свою\\s+личность|verify\\s+it'?s?\\s+you|identity\\s+confirmation/i.test(text);
+                        });
+                        if (title) {
+                            paper = title.closest('tp-yt-paper-dialog')
+                                || title.closest('ytcp-dialog');
+                        }
+                    }
                     if (!paper) return false;
                     const style = window.getComputedStyle(paper);
                     if (style.display === 'none' || style.visibility === 'hidden') {
@@ -3257,24 +3298,42 @@ def _studio_verify_identity_dialog_text_matches(page) -> bool:
     try:
         text = page.evaluate(
             """() => {
-                const auth = document.querySelector(
-                    'ytcp-auth-confirmation-dialog'
-                );
-                if (!auth) return '';
-                const paper = auth.closest('tp-yt-paper-dialog')
-                    || auth.closest('ytcp-dialog');
-                const title = paper
-                    ? paper.querySelector(
-                        'h1.dialog-title, [id^="dialog-title"]'
-                      )
+                const auth =
+                    document.querySelector('ytcp-auth-confirmation-dialog')
+                    || document.querySelector(
+                        '[class*="ytcp-auth-confirmation-dialog"]'
+                    );
+                let paper = auth
+                    ? (auth.closest('tp-yt-paper-dialog')
+                        || auth.closest('ytcp-dialog'))
                     : null;
-                const body = auth.querySelector(
+                if (!paper) {
+                    const title = Array.from(
+                        document.querySelectorAll(
+                            'tp-yt-paper-dialog h1.dialog-title, '
+                            + 'tp-yt-paper-dialog [id^="dialog-title"]'
+                        )
+                    ).find((node) => {
+                        const text = (node.textContent || '').trim();
+                        return /подтверждение\\s+личности|подтвердите\\s+свою\\s+личность|verify\\s+it'?s?\\s+you|identity\\s+confirmation/i.test(text);
+                    });
+                    if (title) {
+                        paper = title.closest('tp-yt-paper-dialog')
+                            || title.closest('ytcp-dialog');
+                    }
+                }
+                if (!paper) return '';
+                const title = paper.querySelector(
+                    'h1.dialog-title, [id^="dialog-title"]'
+                );
+                const body = paper.querySelector(
                     "p[slot='dialog-content'], #dialog-content-text"
                 );
                 return [
                     title ? (title.textContent || '') : '',
                     body ? (body.textContent || '') : '',
-                    auth.textContent || '',
+                    auth ? (auth.textContent || '') : '',
+                    paper.textContent || '',
                 ].join('\\n');
             }"""
         )
@@ -3309,9 +3368,9 @@ def _studio_verify_identity_dialog_visible(page) -> bool:
     if _studio_verify_identity_dialog_present_in_dom(page):
         return True
     if _studio_verify_identity_dialog_text_matches(page):
-        btn = page.locator("ytcp-auth-confirmation-dialog").locator(
-            "xpath=ancestor::tp-yt-paper-dialog | ancestor::ytcp-dialog"
-        ).locator("#confirm-button button")
+        btn = _studio_verify_identity_dialog_locator(page).locator(
+            "#confirm-button button, ytcp-button#confirm-button button"
+        )
         return btn.count() > 0 and _studio_element_has_layout(btn)
     return False
 
@@ -3320,10 +3379,8 @@ def _studio_resolve_verify_identity_next_button(page):
     btn = _studio_verify_identity_next_button_locator(page)
     if btn.count() > 0:
         return btn
-    return (
-        page.locator("ytcp-auth-confirmation-dialog")
-        .locator("xpath=ancestor::tp-yt-paper-dialog | ancestor::ytcp-dialog")
-        .locator("#confirm-button button, ytcp-button#confirm-button button")
+    return _studio_verify_identity_dialog_locator(page).locator(
+        "#confirm-button button, ytcp-button#confirm-button button"
     )
 
 
@@ -3401,7 +3458,7 @@ def _studio_handle_verify_identity_dialog_if_present(
     )
 
     _log(
-        "Studio: «Verify it's you» — нажимаем «Next» "
+        "Studio: «Подтверждение личности» — нажимаем «Далее» "
         "(откроется вкладка входа Google)…"
     )
     context = page.context
@@ -3736,6 +3793,7 @@ def _studio_goto_studio_if_needed(
     elif _studio_on_google_auth_page(page) or _studio_login_required(page, fast=True):
         _studio_try_google_login_if_needed(page, login_credentials)
     _studio_handle_channel_removed_if_present(page)
+    _studio_handle_onboarding_dialogs_if_present(page, login_credentials=login_credentials)
 
 
 def _studio_goto_studio_home_ready(page, *, login_credentials=None):
@@ -3837,6 +3895,12 @@ def _studio_click_create_then_add_video(
     upload_item.first.click(timeout=30_000)
     page.wait_for_timeout(500)
     _log(f"Studio: после «Добавить видео» URL: {page.url!r}")
+    for _ in range(5):
+        if not _studio_handle_interrupt_dialogs_if_present(
+            page, login_credentials=login_credentials
+        ):
+            break
+        page.wait_for_timeout(300)
     if wait_for_upload_picker:
         _studio_wait_upload_file_picker_visible(
             page, timeout_ms=_STUDIO_UI_MS, login_credentials=login_credentials
@@ -3854,8 +3918,8 @@ def _studio_wait_upload_file_picker_visible(
     page, *, timeout_ms: int = 120_000, login_credentials=None
 ) -> None:
     """
-    Ждём ytcp-uploads-file-picker, параллельно закрывая диалоги создания канала
-    и приветствия «Далее» — те же шаги, что при заливе.
+    Ждём ytcp-uploads-file-picker, параллельно закрывая прерывающие диалоги Studio
+    (создание канала, приветствие «Далее», «Подтверждение личности» и т.д.).
     """
     picker = _studio_upload_file_picker_locator(page)
     _log("Studio: ожидание окна загрузки видео (ytcp-uploads-file-picker)…")
@@ -3882,7 +3946,8 @@ def _studio_wait_upload_file_picker_visible(
 
     raise YoutubeStudioError(
         "YouTube Studio: не дождались окна загрузки (ytcp-uploads-file-picker). "
-        "Возможны диалог создания канала, приветствие «Далее» или блокировка аккаунта."
+        "Возможны диалог создания канала, приветствие «Далее», "
+        "«Подтверждение личности» или блокировка аккаунта."
     )
 
 
@@ -6132,7 +6197,15 @@ def _studio_upload_pick_file(
             title=title,
             description=description,
             keep_studio_title=keep_studio_title,
+            login_credentials=login_credentials,
         )
+
+    for _ in range(5):
+        if not _studio_handle_interrupt_dialogs_if_present(
+            page, login_credentials=login_credentials
+        ):
+            break
+        page.wait_for_timeout(300)
 
     try:
         sz_log = p.stat().st_size
@@ -6199,7 +6272,6 @@ def _studio_wizard_next_button_locator(page):
         .or_(
             dialog.get_by_role("button", name=re.compile(r"^далее$|^next$", re.I))
         )
-        .or_(page.get_by_role("button", name=re.compile(r"^далее$|^next$", re.I)))
     )
 
 
@@ -6209,6 +6281,7 @@ def _studio_prepare_upload_details_during_transfer(
     title: str | None,
     description: str | None,
     keep_studio_title: bool = False,
+    login_credentials=None,
     timeout_sec: float = 180.0,
 ) -> tuple[bool, bool, bool]:
     """
@@ -6233,7 +6306,13 @@ def _studio_prepare_upload_details_during_transfer(
     while time.monotonic() < deadline:
         poll_n += 1
         if poll_n % _STUDIO_INTERRUPT_DIALOG_EVERY_N_POLLS == 1:
-            _studio_handle_interrupt_dialogs_if_present(page)
+            _studio_handle_interrupt_dialogs_if_present(
+                page, login_credentials=login_credentials
+            )
+        elif _studio_verify_identity_dialog_visible(page):
+            _studio_handle_interrupt_dialogs_if_present(
+                page, login_credentials=login_credentials
+            )
 
         if not title_done:
             title_box = _studio_upload_title_box_locator(page)
@@ -6292,6 +6371,7 @@ def _studio_set_title_and_description(
     description: str | None,
     metadata_state: tuple[bool, bool, bool] | None = None,
     keep_studio_title: bool = False,
+    login_credentials=None,
 ) -> bool:
     """
     Заполнение полей «Название» и «Описание» в диалоге загрузки Studio.
@@ -6311,6 +6391,7 @@ def _studio_set_title_and_description(
             title=title,
             description=description,
             keep_studio_title=keep_studio_title,
+            login_credentials=login_credentials,
         )
     else:
         title_done, desc_done, kids_done = metadata_state
@@ -6385,7 +6466,9 @@ def _studio_set_title_and_description(
     return kids_done
 
 
-def _studio_select_not_for_kids(page, *, skip_if_done: bool = False) -> None:
+def _studio_select_not_for_kids(
+    page, *, skip_if_done: bool = False, login_credentials=None
+) -> None:
     """«Нет, это видео не для детей» / «No, it's not made for kids»."""
     if skip_if_done:
         return
@@ -6400,7 +6483,13 @@ def _studio_select_not_for_kids(page, *, skip_if_done: bool = False) -> None:
     while time.monotonic() < deadline:
         poll_n += 1
         if poll_n % _STUDIO_INTERRUPT_DIALOG_EVERY_N_POLLS == 1:
-            _studio_handle_interrupt_dialogs_if_present(page)
+            _studio_handle_interrupt_dialogs_if_present(
+                page, login_credentials=login_credentials
+            )
+        elif _studio_verify_identity_dialog_visible(page):
+            _studio_handle_interrupt_dialogs_if_present(
+                page, login_credentials=login_credentials
+            )
         try:
             if btn.is_visible(timeout=0):
                 break
@@ -6468,24 +6557,35 @@ def _studio_goto_visibility_step(
     *,
     kids_already_selected: bool = False,
     fast_if_upload_done: bool = False,
+    login_credentials=None,
 ) -> None:
     """После метаданных — вкладка «Доступ»; при ошибке «Не для детей» и повтор."""
     _log("Studio: переход на вкладку «Доступ»…")
-    _studio_handle_interrupt_dialogs_if_present(page)
+    _studio_handle_interrupt_dialogs_if_present(
+        page, login_credentials=login_credentials
+    )
     if _studio_try_goto_access_tab(page):
         return
     _log(
         "Studio: экран «Доступ» не открылся — "
         "«Не для детей» и повторный переход…"
     )
-    _studio_select_not_for_kids(page, skip_if_done=kids_already_selected)
+    _studio_select_not_for_kids(
+        page, skip_if_done=kids_already_selected, login_credentials=login_credentials
+    )
     if _studio_try_goto_access_tab(page):
         return
     _log("Studio: вкладка «Доступ» недоступна — проход «Далее»…")
-    _studio_click_next_until_visibility(page, fast_if_upload_done=fast_if_upload_done)
+    _studio_click_next_until_visibility(
+        page,
+        fast_if_upload_done=fast_if_upload_done,
+        login_credentials=login_credentials,
+    )
 
 
-def _studio_click_next_until_visibility(page, *, fast_if_upload_done: bool = False) -> None:
+def _studio_click_next_until_visibility(
+    page, *, fast_if_upload_done: bool = False, login_credentials=None
+) -> None:
     """«Далее» / Next пока не появится выбор доступа (#privacy-radios / PUBLIC)."""
     _log("Studio: «Далее» до экрана доступа…")
     public_radio = _studio_public_visibility_radio_locator(page)
@@ -6494,7 +6594,13 @@ def _studio_click_next_until_visibility(page, *, fast_if_upload_done: bool = Fal
     for i in range(_STUDIO_WIZARD_NEXT_MAX):
         poll_n += 1
         if poll_n % _STUDIO_INTERRUPT_DIALOG_EVERY_N_POLLS == 1:
-            _studio_handle_interrupt_dialogs_if_present(page)
+            _studio_handle_interrupt_dialogs_if_present(
+                page, login_credentials=login_credentials
+            )
+        elif _studio_verify_identity_dialog_visible(page):
+            _studio_handle_interrupt_dialogs_if_present(
+                page, login_credentials=login_credentials
+            )
         try:
             if public_radio.first.is_visible(timeout=0):
                 _log(f"Studio: экран доступа виден (шаг {i}).")
@@ -7916,6 +8022,7 @@ def _studio_publish_flow_before_checks(
     schedule_at: datetime | None = None,
     stats_server_username: str | None = None,
     profile_id: str | None = None,
+    login_credentials=None,
 ) -> tuple[str, bool]:
     """
     Публикация до проверок: сразу после названия — мастер до «Открытый доступ»
@@ -7930,6 +8037,7 @@ def _studio_publish_flow_before_checks(
         page,
         kids_already_selected=kids_already_selected,
         fast_if_upload_done=True,
+        login_credentials=login_credentials,
     )
     _studio_poll_upload_fatal(page, browser)
     href = _studio_select_public_visibility(page, schedule_at=schedule_at)
@@ -7960,6 +8068,8 @@ def _studio_wait_after_upload_studio_outcome(
     page,
     browser,
     max_wait_sec: float,
+    *,
+    login_credentials=None,
 ) -> None:
     """
     После передачи файла ждём один из исходов Studio:
@@ -7973,7 +8083,9 @@ def _studio_wait_after_upload_studio_outcome(
     deadline = time.monotonic() + max_wait_sec
     last_label: str = ""
     while time.monotonic() < deadline:
-        _studio_handle_interrupt_dialogs_if_present(page)
+        _studio_handle_interrupt_dialogs_if_present(
+            page, login_credentials=login_credentials
+        )
         fatal = _studio_fatal_error_text(page)
         if fatal:
             _studio_abort_fatal_error(page, browser, fatal)
@@ -8018,11 +8130,13 @@ def _studio_publish_flow_after_upload(
     schedule_at: datetime | None = None,
     stats_server_username: str | None = None,
     profile_id: str | None = None,
+    login_credentials=None,
 ) -> tuple[str, bool]:
     """После паузы: «Доступ» → открытый доступ → Опубликовать."""
     _studio_goto_visibility_step(
         page,
         kids_already_selected=kids_already_selected,
+        login_credentials=login_credentials,
     )
     href = _studio_select_public_visibility(page, schedule_at=schedule_at)
     schedule_href, stats_notified = _studio_click_publish_when_enabled(
@@ -8118,6 +8232,7 @@ def _studio_upload_single_video(
         description=description,
         metadata_state=metadata_state,
         keep_studio_title=keep_studio_title,
+        login_credentials=login_credentials,
     )
     href_before_public = ""
     stats_notified = False
@@ -8130,6 +8245,7 @@ def _studio_upload_single_video(
             schedule_at=schedule_publish_at,
             stats_server_username=stats_server_username,
             profile_id=profile_id,
+            login_credentials=login_credentials,
         )
     else:
         _log(
@@ -8137,7 +8253,10 @@ def _studio_upload_single_video(
             f"(опрос ~каждые {_POST_UPLOAD_QUOTA_POLL_S:.0f} с)…"
         )
         _studio_wait_after_upload_studio_outcome(
-            page, browser, _POST_UPLOAD_STUDIO_OUTCOME_MAX_S
+            page,
+            browser,
+            _POST_UPLOAD_STUDIO_OUTCOME_MAX_S,
+            login_credentials=login_credentials,
         )
         try:
             u0 = _studio_try_extract_video_url(page)
@@ -8154,6 +8273,7 @@ def _studio_upload_single_video(
             schedule_at=schedule_publish_at,
             stats_server_username=stats_server_username,
             profile_id=profile_id,
+            login_credentials=login_credentials,
         )
     if href_before_public:
         best_url = href_before_public
@@ -9540,6 +9660,43 @@ def run_youtube_interface_language_to_russian(
 
 
 @_studio_entrypoint
+def _studio_open_shorts_for_warmup(
+    page,
+    *,
+    login_credentials=None,
+    shorts_recommendations: bool = True,
+    search_query: str | None = None,
+    log_prefix: str = "Shorts",
+    should_stop: Callable[[], bool] | None = None,
+) -> None:
+    """Открыть ленту Shorts: рекомендации или первый ролик из поиска."""
+    search_q = (search_query or "").strip()
+    opened_from_search = False
+    if not shorts_recommendations and search_q:
+        if should_stop and should_stop():
+            return
+        opened_from_search = _studio_goto_shorts_from_search(
+            page, search_q, login_credentials=login_credentials
+        )
+        if should_stop and should_stop():
+            return
+        if not opened_from_search and _studio_page_on_youtube_shorts(page):
+            _log(
+                f"{log_prefix}: после поиска уже на Shorts — "
+                "продолжаем прогрев без перехода на главную."
+            )
+            opened_from_search = True
+    if not opened_from_search:
+        if not shorts_recommendations and search_q:
+            _log(f"{log_prefix}: поиск не удался — открываем рекомендации.")
+        _studio_goto_youtube_home(
+            page, login_credentials=login_credentials, for_channel_scan=False
+        )
+        if should_stop and should_stop():
+            return
+        _studio_goto_youtube_shorts_feed(page, login_credentials=login_credentials)
+
+
 def run_youtube_shorts_warmup(
     page,
     *,
@@ -9553,6 +9710,8 @@ def run_youtube_shorts_warmup(
     subscribe_probability_pct: float = _SHORTS_WARMUP_DEFAULT_SUBSCRIBE_PROB_PCT,
     shorts_watch_min_s: float = _SHORTS_WARMUP_MIN_WATCH_S,
     shorts_watch_max_s: float = _SHORTS_WARMUP_MAX_WATCH_S,
+    shorts_recommendations: bool = True,
+    search_query: str | None = None,
     watch_horizontal_videos: bool = False,
     horizontal_search_query: str | None = None,
     horizontal_videos_count: int = _HORIZONTAL_WARMUP_DEFAULT_COUNT,
@@ -9574,7 +9733,12 @@ def run_youtube_shorts_warmup(
         _studio_goto_youtube_home(
             page, login_credentials=login_credentials, for_channel_scan=False
         )
-    _studio_goto_youtube_shorts_feed(page, login_credentials=login_credentials)
+    _studio_open_shorts_for_warmup(
+        page,
+        login_credentials=login_credentials,
+        shorts_recommendations=shorts_recommendations,
+        search_query=search_query,
+    )
     _studio_browse_youtube_shorts(
         page,
         count=shorts_count,
@@ -9617,32 +9781,16 @@ def run_youtube_shorts_warmup_during_upload(
         "Shorts (параллельно с отложкой): открываем ленту на отдельной вкладке "
         "(без переключения канала в Studio)…"
     )
-    search_q = (search_query or "").strip()
-    opened_from_search = False
-    if not shorts_recommendations and search_q:
-        opened_from_search = _studio_goto_shorts_from_search(
-            page, search_q, login_credentials=login_credentials
-        )
-        if should_stop():
-            return
-        if not opened_from_search and _studio_page_on_youtube_shorts(page):
-            _log(
-                "Shorts (параллельно с отложкой): после поиска уже на Shorts — "
-                "продолжаем прогрев без перехода на главную."
-            )
-            opened_from_search = True
-    if not opened_from_search:
-        if not shorts_recommendations and search_q:
-            _log(
-                "Shorts (параллельно с отложкой): поиск не удался — "
-                "открываем рекомендации."
-            )
-        _studio_goto_youtube_home(
-            page, login_credentials=login_credentials, for_channel_scan=False
-        )
-        if should_stop():
-            return
-        _studio_goto_youtube_shorts_feed(page, login_credentials=login_credentials)
+    _studio_open_shorts_for_warmup(
+        page,
+        login_credentials=login_credentials,
+        shorts_recommendations=shorts_recommendations,
+        search_query=search_query,
+        log_prefix="Shorts (параллельно с отложкой)",
+        should_stop=should_stop,
+    )
+    if should_stop():
+        return
     batch_n = max(1, int(shorts_batch_count))
     batch_idx = 0
     while not should_stop():

@@ -5,20 +5,18 @@ import time
 from queue import Empty, Queue
 from typing import Callable
 
+from zaliver.antydetect.browser_concurrency import (
+    DEFAULT_MAX_CONCURRENT_BROWSERS,
+    MAX_CONCURRENT_BROWSERS_MAX,
+    clamp_max_concurrent_browsers,
+)
 from zaliver.log_format import log_profile_context
-from zaliver.youtube_upload.multi_uploader import _MAX_CONCURRENT_UPLOADS
-
-# Проверка доступности Studio — отдельный лимит параллельных профилей.
-_MAX_CONCURRENT_AVAILABILITY_CHECKS = 4
-# Смена языка интерфейса YouTube — до 3 профилей одновременно.
-_MAX_CONCURRENT_LANGUAGE_CHANGES = 3
 
 
 class MultiProfileAvailabilityChecker:
     """
-    Параллельная проверка доступности Studio: до max_concurrent профилей одновременно.
-    По умолчанию для заливки/прочих сценариев — лимит MultiProfileUploader;
-    для проверки доступности передайте max_concurrent=_MAX_CONCURRENT_AVAILABILITY_CHECKS.
+    Параллельная обработка профилей: до max_concurrent браузеров одновременно.
+    Лимит задаётся в настройках приложения (1–10).
     """
 
     def __init__(
@@ -29,11 +27,18 @@ class MultiProfileAvailabilityChecker:
         on_profile_done: Callable[[str, bool, str], None] | None = None,
         on_progress: Callable[[int, int, str], None] | None = None,
         log_sink: Callable[[str], None] | None = None,
-        max_concurrent: int = _MAX_CONCURRENT_UPLOADS,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT_BROWSERS,
     ) -> None:
         self._profiles = [p.strip() for p in (profile_ids or []) if (p or "").strip()]
         n_prof = len(self._profiles)
-        cap = max(1, min(int(max_concurrent), max(1, n_prof)))
+        cap = max(
+            1,
+            min(
+                clamp_max_concurrent_browsers(max_concurrent),
+                MAX_CONCURRENT_BROWSERS_MAX,
+                max(1, n_prof),
+            ),
+        )
         self._max_parallel = cap
         self._check_one = check_one
         self._on_profile_done = on_profile_done

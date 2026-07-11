@@ -66,6 +66,13 @@ from PyQt6.QtWidgets import (
 
 from zaliver.db.video_store import VideoStore
 from zaliver.db.upload_store import UploadedVideo, UploadStore, uploaded_at_sort_ts
+from zaliver.antydetect.browser_concurrency import (
+    DEFAULT_MAX_CONCURRENT_BROWSERS,
+    MAX_CONCURRENT_BROWSERS_MAX,
+    MAX_CONCURRENT_BROWSERS_MIN,
+    clamp_max_concurrent_browsers,
+    max_concurrent_browsers_from_settings,
+)
 from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI, DolphinAntyPublicAPI
 from zaliver.antydetect.local_antidetect_api import (
     DEFAULT_LOCAL_API_BASE_URL,
@@ -758,12 +765,23 @@ def _apply_thread_slider_fd_cap(slider: "SmoothSlider") -> None:
         slider.setValue(cap_max)
 
 
+def _max_concurrent_browsers_label_text(value: int) -> str:
+    n = clamp_max_concurrent_browsers(value)
+    if n == 1:
+        return "1 браузер"
+    if 2 <= n <= 4:
+        return f"{n} браузера"
+    return f"{n} браузеров"
+
+
 class ShortsWarmupSettings(NamedTuple):
     shorts_count: int
     like_probability_pct: float
     subscribe_probability_pct: float
     shorts_watch_min_s: int
     shorts_watch_max_s: int
+    shorts_recommendations: bool
+    shorts_search_query: str
     watch_horizontal_videos: bool
     horizontal_search_query: str
     horizontal_videos_count: int
@@ -1777,7 +1795,7 @@ class MainWindow(QWidget):
         self._btn_profiles_check_availability.setDefault(False)
         self._btn_profiles_check_availability.setToolTip(
             "Только для отмеченных профилей (квадратики): режим Headless из настроек, "
-            "до 4 одновременно, создание канала и «Далее» при "
+            "число параллельных браузеров — в разделе «Настройки», создание канала и «Далее» при "
             "необходимости, ожидание URL studio.youtube.com/channel/{id} "
             "или channel-appeal."
         )
@@ -1804,7 +1822,7 @@ class MainWindow(QWidget):
             "Только для отмеченных профилей: Studio → «Настройка канала» — "
             "описание, ссылка, аватарки и/или названия. "
             "Можно заполнить один или несколько разделов сразу. "
-            "Браузер всегда с окном (не headless), до 5 параллельно."
+            "Браузер всегда с окном (не headless); параллельность — в «Настройках»."
         )
         self._btn_profiles_channel_setup.clicked.connect(
             self._open_profiles_channel_setup_dialog
@@ -1815,9 +1833,9 @@ class MainWindow(QWidget):
         self._btn_profiles_warmup.setDefault(False)
         self._btn_profiles_warmup.setToolTip(
             "Только для отмеченных профилей: авторизация, выбор канала, "
-            "затем просмотр ленты YouTube Shorts (пауза на каждом ролике, "
-            "случайные лайки, подписки и прокрутка вниз). "
-            "Режим Headless из настроек, до 5 параллельно."
+            "затем просмотр YouTube Shorts — лента рекомендаций или по поисковому "
+            "запросу (пауза на каждом ролике, случайные лайки, подписки и прокрутка). "
+            "Режим Headless из настроек; параллельность — в «Настройках»."
         )
         self._btn_profiles_warmup.clicked.connect(self._start_profiles_warmup)
         self._btn_profiles_change_language = QPushButton("Поменять язык")
@@ -1825,8 +1843,9 @@ class MainWindow(QWidget):
         self._btn_profiles_change_language.setAutoDefault(False)
         self._btn_profiles_change_language.setDefault(False)
         self._btn_profiles_change_language.setToolTip(
-            "Открывает отмеченные профили (до 3 параллельно), заходит на главную YouTube, "
-            "переключает язык интерфейса на «Русский» и закрывает профиль."
+            "Открывает отмеченные профили, заходит на главную YouTube, "
+            "переключает язык интерфейса на «Русский» и закрывает профиль. "
+            "Число параллельных браузеров — в разделе «Настройки»."
         )
         self._btn_profiles_change_language.clicked.connect(
             self._start_profiles_language_change
@@ -1940,6 +1959,39 @@ class MainWindow(QWidget):
             "Dolphin и свой антидетект (локальный или удалённый API)."
         )
 
+        self._gb_max_concurrent_browsers = QGroupBox("Параллельные браузеры")
+        gmc = QVBoxLayout(self._gb_max_concurrent_browsers)
+        browsers_hint = QLabel(
+            "Максимум одновременно открытых браузеров при заливке, проверке Studio, "
+            "настройке канала, прогреве и смене языка."
+        )
+        browsers_hint.setObjectName("hint")
+        browsers_hint.setWordWrap(True)
+        gmc.addWidget(browsers_hint)
+        browsers_row = QHBoxLayout()
+        browsers_row.addWidget(QLabel("Одновременно:"))
+        self._max_concurrent_browsers_slider = SmoothSlider(Qt.Orientation.Horizontal)
+        self._max_concurrent_browsers_slider.setMinimum(MAX_CONCURRENT_BROWSERS_MIN)
+        self._max_concurrent_browsers_slider.setMaximum(MAX_CONCURRENT_BROWSERS_MAX)
+        self._max_concurrent_browsers_slider.setValue(
+            max_concurrent_browsers_from_settings(self._settings)
+        )
+        self._max_concurrent_browsers_label = QLabel()
+        self._update_max_concurrent_browsers_label(
+            self._max_concurrent_browsers_slider.value()
+        )
+        self._max_concurrent_browsers_slider.valueChanged.connect(
+            self._update_max_concurrent_browsers_label
+        )
+        self._max_concurrent_browsers_slider.valueChanged.connect(
+            lambda *_: self._save_max_concurrent_browsers_setting()
+        )
+        browsers_row.addWidget(self._max_concurrent_browsers_slider, 1)
+        browsers_row.addWidget(self._max_concurrent_browsers_label)
+        w_browsers_row = QWidget()
+        w_browsers_row.setLayout(browsers_row)
+        gmc.addWidget(w_browsers_row)
+
         self._gb_antydetect_dolphin = QGroupBox("Dolphin Anty")
         gg = QGridLayout(self._gb_antydetect_dolphin)
         public_host = QLabel("Public API: https://dolphin-anty-api.com")
@@ -2046,6 +2098,7 @@ class MainWindow(QWidget):
         settings_l.addWidget(self._gb_stats_username)
         settings_l.addLayout(browser_pick)
         settings_l.addWidget(self._dolphin_headless)
+        settings_l.addWidget(self._gb_max_concurrent_browsers)
         settings_l.addWidget(self._gb_antydetect_dolphin)
         settings_l.addWidget(self._gb_antydetect_local)
         settings_l.addWidget(self._gb_antydetect_remote)
@@ -3920,6 +3973,15 @@ class MainWindow(QWidget):
                 self._settings.value("antydetect/remote_cdp_public_host", "", type=str) or ""
             ).strip()
             self._remote_cdp_public_host.setText(remote_host)
+        if hasattr(self, "_max_concurrent_browsers_slider"):
+            self._max_concurrent_browsers_slider.blockSignals(True)
+            self._max_concurrent_browsers_slider.setValue(
+                max_concurrent_browsers_from_settings(self._settings)
+            )
+            self._max_concurrent_browsers_slider.blockSignals(False)
+            self._update_max_concurrent_browsers_label(
+                self._max_concurrent_browsers_slider.value()
+            )
         self._sync_antydetect_settings_groups_visibility()
 
     def _save_antydetect_settings(self) -> None:
@@ -3950,12 +4012,38 @@ class MainWindow(QWidget):
                 "antydetect/remote_cdp_public_host",
                 (self._remote_cdp_public_host.text() or "").strip(),
             )
+        self._save_max_concurrent_browsers_setting()
         try:
             self._settings.sync()
         except Exception:
             pass
         if hasattr(self, "_settings_status"):
             self._settings_status.setText("Сохранено.")
+
+    def _update_max_concurrent_browsers_label(self, value: int) -> None:
+        if hasattr(self, "_max_concurrent_browsers_label"):
+            self._max_concurrent_browsers_label.setText(
+                _max_concurrent_browsers_label_text(value)
+            )
+
+    def _save_max_concurrent_browsers_setting(self) -> None:
+        if not hasattr(self, "_max_concurrent_browsers_slider"):
+            return
+        self._settings.setValue(
+            "antydetect/max_concurrent_browsers",
+            self._max_concurrent_browsers(),
+        )
+        try:
+            self._settings.sync()
+        except Exception:
+            pass
+
+    def _max_concurrent_browsers(self) -> int:
+        if hasattr(self, "_max_concurrent_browsers_slider"):
+            return clamp_max_concurrent_browsers(
+                self._max_concurrent_browsers_slider.value()
+            )
+        return max_concurrent_browsers_from_settings(self._settings)
 
     def _load_youtube_settings(self) -> None:
         if not hasattr(self, "_youtube_api_key"):
@@ -4453,14 +4541,12 @@ class MainWindow(QWidget):
             f"Проверка доступности Studio: 0 / {len(profile_ids)}…"
         )
         headless_label = "headless" if headless else "с окном браузера"
-        from zaliver.youtube_upload.multi_availability_checker import (
-            _MAX_CONCURRENT_AVAILABILITY_CHECKS,
-        )
+        max_concurrent = self._max_concurrent_browsers()
 
         try:
             self._append_log(
                 f"[availability] Старт проверки {len(profile_ids)} профилей "
-                f"({headless_label}, до {_MAX_CONCURRENT_AVAILABILITY_CHECKS} параллельно)…"
+                f"({headless_label}, до {max_concurrent} параллельно)…"
             )
 
             threading.Thread(
@@ -4472,6 +4558,7 @@ class MainWindow(QWidget):
                     "base_url": base_url,
                     "headless": headless,
                     "remote_cdp": remote_cdp,
+                    "max_concurrent": max_concurrent,
                 },
                 daemon=True,
             ).start()
@@ -4494,6 +4581,7 @@ class MainWindow(QWidget):
         base_url: str,
         headless: bool,
         remote_cdp: RemoteCdpLaunchOptions | None = None,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT_BROWSERS,
     ) -> None:
         from zaliver.antydetect.antic_open import (
             check_studio_availability_in_local_antidetect_profile,
@@ -4502,7 +4590,6 @@ class MainWindow(QWidget):
         )
         from zaliver.youtube_upload.multi_availability_checker import (
             MultiProfileAvailabilityChecker,
-            _MAX_CONCURRENT_AVAILABILITY_CHECKS,
         )
         from zaliver.antydetect.profile_tags import (
             STUDIO_AVAILABILITY_ERROR_TAG,
@@ -4567,7 +4654,7 @@ class MainWindow(QWidget):
             on_profile_done=_on_profile_done,
             on_progress=_on_progress,
             log_sink=self._ui_log_line.emit,
-            max_concurrent=_MAX_CONCURRENT_AVAILABILITY_CHECKS,
+            max_concurrent=max_concurrent,
         )
         try:
             ok_n, fail_n, failed_ids = mgr.run()
@@ -4702,9 +4789,10 @@ class MainWindow(QWidget):
         self._profiles_status.setText(
             f"Настройка канала в Studio: 0 / {len(work_profile_ids)}…"
         )
+        max_concurrent = self._max_concurrent_browsers()
         self._append_log(
             f"[channel_setup] Старт для {len(work_profile_ids)} профилей "
-            f"(с окном браузера, до 5 параллельно)…"
+            f"(с окном браузера, до {max_concurrent} параллельно)…"
         )
 
         threading.Thread(
@@ -4721,6 +4809,7 @@ class MainWindow(QWidget):
                 "assignments": assignments,
                 "has_text_fill": has_text_fill,
                 "remote_cdp": remote_cdp,
+                "max_concurrent": max_concurrent,
             },
             daemon=True,
         ).start()
@@ -4739,6 +4828,7 @@ class MainWindow(QWidget):
         assignments: list[dict[str, object]],
         has_text_fill: bool,
         remote_cdp: RemoteCdpLaunchOptions | None = None,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT_BROWSERS,
     ) -> None:
         from zaliver.antydetect.antic_open import (
             set_log_sink,
@@ -4894,6 +4984,7 @@ class MainWindow(QWidget):
             on_profile_done=_on_profile_done,
             on_progress=_on_progress,
             log_sink=self._ui_log_line.emit,
+            max_concurrent=max_concurrent,
         )
         ok_n, fail_n, failed_ids = mgr.run()
         self._last_channel_setup_failed_ids = list(failed_ids)
@@ -4951,6 +5042,33 @@ class MainWindow(QWidget):
         watch_range_row.addWidget(watch_max_spin)
         watch_range_row.addStretch()
         form.addRow("Длительность просмотра Short:", watch_range_row)
+
+        shorts_recommend_cb = QCheckBox("Рекомендации Shorts")
+        shorts_recommend_cb.setChecked(True)
+        shorts_recommend_cb.setToolTip(
+            "Открыть ленту рекомендаций Shorts. Если снять галочку — "
+            "можно указать поисковый запрос и смотреть Shorts из выдачи."
+        )
+        form.addRow("", shorts_recommend_cb)
+
+        shorts_search_row = QWidget()
+        shorts_search_row_l = QHBoxLayout(shorts_search_row)
+        shorts_search_row_l.setContentsMargins(0, 0, 0, 0)
+        shorts_search_row_l.setSpacing(8)
+        shorts_search_lbl = QLabel("Поисковый запрос:")
+        shorts_search_edit = QLineEdit()
+        shorts_search_edit.setPlaceholderText("Текст для поиска Shorts на YouTube")
+        shorts_search_row_l.addWidget(shorts_search_lbl)
+        shorts_search_row_l.addWidget(shorts_search_edit, 1)
+        form.addRow("", shorts_search_row)
+
+        def _sync_shorts_source_fields(checked: bool) -> None:
+            use_search = not checked
+            shorts_search_row.setVisible(use_search)
+
+        shorts_recommend_cb.toggled.connect(_sync_shorts_source_fields)
+        _sync_shorts_source_fields(shorts_recommend_cb.isChecked())
+
         v.addLayout(form)
 
         horizontal_group = QGroupBox("Горизонтальные видео")
@@ -5009,6 +5127,18 @@ class MainWindow(QWidget):
                     "больше максимальной.",
                 )
                 return
+            use_shorts_search = (
+                not shorts_recommend_cb.isChecked()
+                and not shorts_search_edit.text().strip()
+            )
+            if use_shorts_search:
+                QMessageBox.warning(
+                    dlg,
+                    "Прогрев YouTube",
+                    "Укажите поисковый запрос для прогрева Shorts "
+                    "или включите «Рекомендации Shorts».",
+                )
+                return
             if watch_horizontal_cb.isChecked() and not search_edit.text().strip():
                 QMessageBox.warning(
                     dlg,
@@ -5029,6 +5159,8 @@ class MainWindow(QWidget):
             subscribe_probability_pct=subscribe_spin.value(),
             shorts_watch_min_s=watch_min_spin.value(),
             shorts_watch_max_s=watch_max_spin.value(),
+            shorts_recommendations=shorts_recommend_cb.isChecked(),
+            shorts_search_query=(shorts_search_edit.text() or "").strip(),
             watch_horizontal_videos=watch_horizontal_cb.isChecked(),
             horizontal_search_query=(search_edit.text() or "").strip(),
             horizontal_videos_count=horizontal_count_spin.value(),
@@ -5092,6 +5224,7 @@ class MainWindow(QWidget):
             f"Прогрев Shorts: 0 / {len(profile_ids)}…"
         )
         headless_label = "headless" if headless else "с окном браузера"
+        max_concurrent = self._max_concurrent_browsers()
         self._append_log(
             f"[warmup] Старт для {len(profile_ids)} профилей "
             f"(Shorts: {warmup_settings.shorts_count}, "
@@ -5100,12 +5233,17 @@ class MainWindow(QWidget):
             f"лайк {warmup_settings.like_probability_pct:g}%, "
             f"подписка {warmup_settings.subscribe_probability_pct:g}%"
             + (
+                ", Shorts: рекомендации"
+                if warmup_settings.shorts_recommendations
+                else f", Shorts: поиск «{warmup_settings.shorts_search_query}»"
+            )
+            + (
                 f", горизонтальные: {warmup_settings.horizontal_videos_count}, "
                 f"поиск «{warmup_settings.horizontal_search_query}»"
                 if warmup_settings.watch_horizontal_videos
                 else ""
             )
-            + f", {headless_label}, до 5 параллельно)…"
+            + f", {headless_label}, до {max_concurrent} параллельно)…"
         )
 
         threading.Thread(
@@ -5118,6 +5256,7 @@ class MainWindow(QWidget):
                 "headless": headless,
                 "warmup_settings": warmup_settings,
                 "remote_cdp": remote_cdp,
+                "max_concurrent": max_concurrent,
             },
             daemon=True,
         ).start()
@@ -5132,6 +5271,7 @@ class MainWindow(QWidget):
         headless: bool,
         warmup_settings: ShortsWarmupSettings,
         remote_cdp: RemoteCdpLaunchOptions | None = None,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT_BROWSERS,
     ) -> None:
         from zaliver.antydetect.antic_open import (
             set_log_sink,
@@ -5156,6 +5296,12 @@ class MainWindow(QWidget):
                 "subscribe_probability_pct": warmup_settings.subscribe_probability_pct,
                 "shorts_watch_min_s": warmup_settings.shorts_watch_min_s,
                 "shorts_watch_max_s": warmup_settings.shorts_watch_max_s,
+                "shorts_recommendations": warmup_settings.shorts_recommendations,
+                "search_query": (
+                    warmup_settings.shorts_search_query or None
+                    if not warmup_settings.shorts_recommendations
+                    else None
+                ),
                 "watch_horizontal_videos": warmup_settings.watch_horizontal_videos,
                 "horizontal_search_query": warmup_settings.horizontal_search_query or None,
                 "horizontal_videos_count": warmup_settings.horizontal_videos_count,
@@ -5211,6 +5357,7 @@ class MainWindow(QWidget):
             on_profile_done=_on_profile_done,
             on_progress=_on_progress,
             log_sink=self._ui_log_line.emit,
+            max_concurrent=max_concurrent,
         )
         ok_n, fail_n, failed_ids = mgr.run()
         self._last_warmup_failed_ids = list(failed_ids)
@@ -5264,9 +5411,7 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "Смена языка", str(e))
             return
 
-        from zaliver.youtube_upload.multi_availability_checker import (
-            _MAX_CONCURRENT_LANGUAGE_CHANGES,
-        )
+        max_concurrent = self._max_concurrent_browsers()
 
         self._profiles_language_running = True
         self._sync_profiles_tab_action_buttons()
@@ -5276,7 +5421,7 @@ class MainWindow(QWidget):
         headless_label = "headless" if headless else "с окном браузера"
         self._append_log(
             f"[language] Старт для {len(profile_ids)} профилей "
-            f"({headless_label}, до {_MAX_CONCURRENT_LANGUAGE_CHANGES} параллельно)…"
+            f"({headless_label}, до {max_concurrent} параллельно)…"
         )
 
         threading.Thread(
@@ -5288,6 +5433,7 @@ class MainWindow(QWidget):
                 "base_url": base_url,
                 "headless": headless,
                 "remote_cdp": remote_cdp,
+                "max_concurrent": max_concurrent,
             },
             daemon=True,
         ).start()
@@ -5301,6 +5447,7 @@ class MainWindow(QWidget):
         base_url: str,
         headless: bool,
         remote_cdp: RemoteCdpLaunchOptions | None = None,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT_BROWSERS,
     ) -> None:
         from zaliver.antydetect.antic_open import (
             set_log_sink,
@@ -5310,7 +5457,6 @@ class MainWindow(QWidget):
         from zaliver.antydetect.local_antidetect_api import LocalAntidetectError
         from zaliver.youtube_upload.multi_availability_checker import (
             MultiProfileAvailabilityChecker,
-            _MAX_CONCURRENT_LANGUAGE_CHANGES,
         )
 
         set_log_sink(self._ui_log_line.emit)
@@ -5366,7 +5512,7 @@ class MainWindow(QWidget):
             on_profile_done=_on_profile_done,
             on_progress=_on_progress,
             log_sink=self._ui_log_line.emit,
-            max_concurrent=_MAX_CONCURRENT_LANGUAGE_CHANGES,
+            max_concurrent=max_concurrent,
         )
         ok_n, fail_n, failed_ids = mgr.run()
         self._last_language_failed_ids = list(failed_ids)
@@ -7366,7 +7512,7 @@ class MainWindow(QWidget):
                 profile_ids=profile_ids,
                 cooldown_s=10.0,
                 max_attempts_per_profile=2,
-                max_concurrent_uploads=3,
+                max_concurrent_uploads=self._max_concurrent_browsers(),
                 profile_upload_pause_remaining_s=self._upload_store.profile_upload_pause_remaining_seconds,
                 log_sink=self._ui_log_line.emit,
                 upload_one=_upload_one,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import signal
-import sys
 import threading
 import time
 from collections import deque
@@ -11,6 +10,11 @@ from queue import Empty, Queue
 from typing import Callable, Dict, Iterable, Optional
 
 
+from zaliver.antydetect.browser_concurrency import (
+    DEFAULT_MAX_CONCURRENT_BROWSERS,
+    MAX_CONCURRENT_BROWSERS_MAX,
+    clamp_max_concurrent_browsers,
+)
 from zaliver.log_format import log_timestamp
 
 
@@ -38,8 +42,8 @@ class VideoTask:
     last_failed_profile: str = ""
 
 
-# Глобальный лимит одновременных upload_one (остальные ждут семафор).
-_MAX_CONCURRENT_UPLOADS = 3 if sys.platform == "darwin" else 5
+# Лимит по умолчанию, если вызывающий код не передал max_concurrent_uploads.
+_MAX_CONCURRENT_UPLOADS = DEFAULT_MAX_CONCURRENT_BROWSERS
 # Последние N завершённых загрузок — не назначаем им новое видео, пока есть другие свободные очереди.
 _RECENT_COMPLETED_MAX = 5
 # Если «свободны» только недавно отработавшие профили — пауза диспетчера перед повторным назначением.
@@ -53,7 +57,7 @@ class MultiProfileUploader:
     Queue-based multi-threaded uploader.
 
     - One profile = one thread.
-    - At most `_MAX_CONCURRENT_UPLOADS` profiles run `upload_one` at the same time (RAM);
+    - At most `max_concurrent_uploads` profiles run `upload_one` at the same time (RAM);
       others wait on a semaphore until a slot frees.
     - Round-robin assignment via dispatcher thread; среди профилей с пустой per-profile
       очередью сначала выбираются те, кто не входит в последние `_RECENT_COMPLETED_MAX`
@@ -87,7 +91,14 @@ class MultiProfileUploader:
         self._cooldown_s = float(cooldown_s)
         self._max_attempts = int(max(1, max_attempts_per_profile))
         n_prof = max(1, len(self._profiles))
-        cap = max(1, min(int(max_concurrent_uploads), _MAX_CONCURRENT_UPLOADS, n_prof))
+        cap = max(
+            1,
+            min(
+                clamp_max_concurrent_browsers(max_concurrent_uploads),
+                MAX_CONCURRENT_BROWSERS_MAX,
+                n_prof,
+            ),
+        )
         self._max_parallel = cap
         self._upload_slots = threading.Semaphore(cap)
         self._log = log_sink

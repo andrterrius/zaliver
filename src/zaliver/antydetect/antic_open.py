@@ -1200,6 +1200,8 @@ def warmup_youtube_shorts_in_profile(
     subscribe_probability_pct: float | None = None,
     shorts_watch_min_s: float | None = None,
     shorts_watch_max_s: float | None = None,
+    shorts_recommendations: bool = True,
+    search_query: str | None = None,
     watch_horizontal_videos: bool = False,
     horizontal_search_query: str | None = None,
     horizontal_videos_count: int | None = None,
@@ -1242,6 +1244,9 @@ def warmup_youtube_shorts_in_profile(
                     kw["shorts_watch_min_s"] = shorts_watch_min_s
                 if shorts_watch_max_s is not None:
                     kw["shorts_watch_max_s"] = shorts_watch_max_s
+                kw["shorts_recommendations"] = shorts_recommendations
+                if search_query is not None:
+                    kw["search_query"] = search_query
                 if watch_horizontal_videos:
                     kw["watch_horizontal_videos"] = True
                     kw["horizontal_search_query"] = horizontal_search_query
@@ -1278,6 +1283,8 @@ def warmup_youtube_shorts_in_local_antidetect_profile(
     subscribe_probability_pct: float | None = None,
     shorts_watch_min_s: float | None = None,
     shorts_watch_max_s: float | None = None,
+    shorts_recommendations: bool = True,
+    search_query: str | None = None,
     watch_horizontal_videos: bool = False,
     horizontal_search_query: str | None = None,
     horizontal_videos_count: int | None = None,
@@ -1334,6 +1341,9 @@ def warmup_youtube_shorts_in_local_antidetect_profile(
                     studio_kw["shorts_watch_min_s"] = shorts_watch_min_s
                 if shorts_watch_max_s is not None:
                     studio_kw["shorts_watch_max_s"] = shorts_watch_max_s
+                studio_kw["shorts_recommendations"] = shorts_recommendations
+                if search_query is not None:
+                    studio_kw["search_query"] = search_query
                 if watch_horizontal_videos:
                     studio_kw["watch_horizontal_videos"] = True
                     studio_kw["horizontal_search_query"] = horizontal_search_query

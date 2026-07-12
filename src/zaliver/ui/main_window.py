@@ -103,6 +103,7 @@ from zaliver.ui.profile_account_data_dialog import (
 )
 from zaliver.ui.profile_accounts_import_dialog import ProfileAccountsImportDialog
 from zaliver.ui.profile_tags_clear_dialog import ProfileTagsClearDialog
+from zaliver.ui.profile_cookie_farm_dialog import ProfileCookieFarmDialog
 from zaliver.ui.profile_preview_dialog import ProfileCdpPreviewDialog
 from zaliver.ui.profiles_list_interaction import ProfilesListInteraction
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
@@ -803,6 +804,8 @@ class MainWindow(QWidget):
     _studio_warmup_finished = pyqtSignal(int, int)
     _studio_language_progress = pyqtSignal(int, int, str)
     _studio_language_finished = pyqtSignal(int, int)
+    _studio_cookie_farm_progress = pyqtSignal(int, int, str)
+    _studio_cookie_farm_finished = pyqtSignal(int, int)
     _zaliver_profile_tags_clear_progress = pyqtSignal(int, int, str)
     _zaliver_profile_tags_clear_finished = pyqtSignal(int, int)
     _profile_zaliver_tags_cache_update = pyqtSignal(str, object)
@@ -841,12 +844,14 @@ class MainWindow(QWidget):
         self._profiles_availability_running = False
         self._profiles_channel_setup_running = False
         self._profiles_warmup_running = False
+        self._profiles_cookie_farm_running = False
         self._profiles_language_running = False
         self._profiles_tags_clear_running = False
         self._profiles_refresh_running = False
         self._last_availability_failed_ids: list[str] = []
         self._last_channel_setup_failed_ids: list[str] = []
         self._last_warmup_failed_ids: list[str] = []
+        self._last_cookie_farm_failed_ids: list[str] = []
         self._last_language_failed_ids: list[str] = []
         self._build_ui()
         self._bootstrap_fd_limits()
@@ -881,6 +886,8 @@ class MainWindow(QWidget):
         self._studio_channel_setup_finished.connect(self._on_studio_channel_setup_finished)
         self._studio_warmup_progress.connect(self._on_studio_warmup_progress)
         self._studio_warmup_finished.connect(self._on_studio_warmup_finished)
+        self._studio_cookie_farm_progress.connect(self._on_studio_cookie_farm_progress)
+        self._studio_cookie_farm_finished.connect(self._on_studio_cookie_farm_finished)
         self._studio_language_progress.connect(self._on_studio_language_progress)
         self._studio_language_finished.connect(self._on_studio_language_finished)
         self._zaliver_profile_tags_clear_progress.connect(
@@ -1837,6 +1844,16 @@ class MainWindow(QWidget):
             "Режим Headless из настроек; параллельность — в «Настройках»."
         )
         self._btn_profiles_warmup.clicked.connect(self._start_profiles_warmup)
+        self._btn_profiles_cookie_farm = QPushButton("Фарм Cookie")
+        self._btn_profiles_cookie_farm.setObjectName("secondary")
+        self._btn_profiles_cookie_farm.setAutoDefault(False)
+        self._btn_profiles_cookie_farm.setDefault(False)
+        self._btn_profiles_cookie_farm.setToolTip(
+            "Только для отмеченных профилей: по очереди открывает сайты из списка "
+            "и медленно прокручивает страницу заданное время (10–30 с). "
+            "Режим Headless из настроек; параллельность — в «Настройках»."
+        )
+        self._btn_profiles_cookie_farm.clicked.connect(self._start_profiles_cookie_farm)
         self._btn_profiles_change_language = QPushButton("Поменять язык")
         self._btn_profiles_change_language.setObjectName("secondary")
         self._btn_profiles_change_language.setAutoDefault(False)
@@ -1856,7 +1873,7 @@ class MainWindow(QWidget):
         self._btn_profiles_clear_zaliver_tags.setToolTip(
             "С отмеченных профилей снимает служебные теги Zaliver "
             "(ошибки залива, проверки Studio, смены аватарки/названия, прогрева, "
-            "смены языка "
+            "фарма Cookie, смены языка "
             "и заполнения канала и т.д.). Только свой антидетект."
         )
         self._btn_profiles_clear_zaliver_tags.clicked.connect(
@@ -1864,6 +1881,7 @@ class MainWindow(QWidget):
         )
         profiles_actions_row.addWidget(self._btn_profiles_channel_setup)
         profiles_actions_row.addWidget(self._btn_profiles_warmup)
+        profiles_actions_row.addWidget(self._btn_profiles_cookie_farm)
         profiles_actions_row.addWidget(self._btn_profiles_change_language)
         profiles_actions_row.addWidget(self._btn_profiles_check_availability)
         profiles_actions_row.addWidget(self._btn_profiles_import_accounts)
@@ -3931,6 +3949,7 @@ class MainWindow(QWidget):
             self._profiles_availability_running
             or self._profiles_channel_setup_running
             or self._profiles_warmup_running
+            or self._profiles_cookie_farm_running
             or self._profiles_language_running
             or self._profiles_tags_clear_running
             or self._profiles_refresh_running
@@ -3943,6 +3962,8 @@ class MainWindow(QWidget):
             self._btn_profiles_channel_setup.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_warmup"):
             self._btn_profiles_warmup.setEnabled(not busy)
+        if hasattr(self, "_btn_profiles_cookie_farm"):
+            self._btn_profiles_cookie_farm.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_change_language"):
             self._btn_profiles_change_language.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_refresh"):
@@ -5593,6 +5614,184 @@ class MainWindow(QWidget):
         self._last_warmup_failed_ids = list(failed_ids)
         self._studio_warmup_finished.emit(ok_n, fail_n)
 
+    def _start_profiles_cookie_farm(self) -> None:
+        if self._profiles_cookie_farm_running:
+            QMessageBox.information(
+                self,
+                "Фарм Cookie",
+                "Фарм Cookie уже выполняется. Дождитесь завершения.",
+            )
+            return
+        if self._profiles_raw is None:
+            QMessageBox.warning(
+                self,
+                "Фарм Cookie",
+                "Сначала загрузите список профилей (кнопка «Обновить»).",
+            )
+            return
+        profile_ids = self._collect_checked_profile_ids()
+        if not profile_ids:
+            QMessageBox.warning(
+                self,
+                "Фарм Cookie",
+                "Отметьте квадратиками профили, для которых нужен фарм Cookie.",
+            )
+            return
+
+        dlg = ProfileCookieFarmDialog(parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        farm_settings = dlg.settings()
+
+        token = (self._dolphin_token.text() or "").strip()
+        if not token:
+            token = (
+                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
+            ).strip()
+        kind = self._default_browser_combo.currentData()
+        if not isinstance(kind, str) or not kind.strip():
+            kind = "dolphin"
+        base_url = self._own_antidetect_base_url_from_settings(kind)
+
+        headless = True
+        if hasattr(self, "_dolphin_headless"):
+            headless = bool(self._dolphin_headless.isChecked())
+        else:
+            headless = bool(
+                self._settings.value("antydetect/dolphin_headless", True, type=bool)
+            )
+
+        try:
+            remote_cdp = self._remote_cdp_launch_options_for_kind(kind)
+        except LocalAntidetectError as e:
+            QMessageBox.warning(self, "Фарм Cookie", str(e))
+            return
+
+        self._profiles_cookie_farm_running = True
+        self._sync_profiles_tab_action_buttons()
+        self._profiles_status.setText(
+            f"Фарм Cookie: 0 / {len(profile_ids)}…"
+        )
+        headless_label = "headless" if headless else "с окном браузера"
+        max_concurrent = self._max_concurrent_browsers()
+        if farm_settings.use_preset_domains:
+            preset_labels = {"intl": "международный список", "ru": "RU список"}
+            source_label = preset_labels.get(
+                (farm_settings.preset_kind or "").strip().lower(),
+                "заготовленный список",
+            )
+        else:
+            source_label = f"свой список ({len(farm_settings.domains)} доменов)"
+        self._append_log(
+            f"[cookie_farm] Старт для {len(profile_ids)} профилей "
+            f"({farm_settings.sites_count} сайтов, "
+            f"{farm_settings.watch_min_s}–{farm_settings.watch_max_s} с на сайт, "
+            f"источник: {source_label}, {headless_label}, "
+            f"до {max_concurrent} параллельно)…"
+        )
+
+        threading.Thread(
+            target=self._profiles_cookie_farm_worker,
+            kwargs={
+                "profile_ids": profile_ids,
+                "kind": kind,
+                "token": token,
+                "base_url": base_url,
+                "headless": headless,
+                "farm_settings": farm_settings,
+                "remote_cdp": remote_cdp,
+                "max_concurrent": max_concurrent,
+            },
+            daemon=True,
+        ).start()
+
+    def _profiles_cookie_farm_worker(
+        self,
+        *,
+        profile_ids: list[str],
+        kind: str,
+        token: str,
+        base_url: str,
+        headless: bool,
+        farm_settings,
+        remote_cdp: RemoteCdpLaunchOptions | None = None,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT_BROWSERS,
+    ) -> None:
+        from zaliver.antydetect.antic_open import (
+            farm_cookies_in_local_antidetect_profile,
+            farm_cookies_in_profile,
+            set_log_sink,
+        )
+        from zaliver.antydetect.cookie_farm import set_log_sink as set_cookie_farm_log_sink
+        from zaliver.antydetect.local_antidetect_api import LocalAntidetectError
+        from zaliver.youtube_upload.multi_availability_checker import (
+            MultiProfileAvailabilityChecker,
+        )
+
+        set_log_sink(self._ui_log_line.emit)
+        set_cookie_farm_log_sink(self._ui_log_line.emit)
+        kind_s = (kind or "").strip()
+
+        farm_kw = {
+            "domains": list(farm_settings.domains),
+            "sites_count": farm_settings.sites_count,
+            "watch_min_s": float(farm_settings.watch_min_s),
+            "watch_max_s": float(farm_settings.watch_max_s),
+        }
+
+        def _farm_one(pid: str) -> None:
+            if _is_own_antidetect_kind(kind_s):
+                u = (base_url or "").strip()
+                if not u:
+                    raise LocalAntidetectError(
+                        f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
+                    )
+                farm_cookies_in_local_antidetect_profile(
+                    pid,
+                    base_url=u,
+                    headless=headless,
+                    remote_cdp=remote_cdp,
+                    **farm_kw,
+                )
+            else:
+                farm_cookies_in_profile(
+                    pid,
+                    local_token=token or None,
+                    headless=headless,
+                    **farm_kw,
+                )
+
+        def _on_progress(done: int, total: int, profile_id: str) -> None:
+            self._studio_cookie_farm_progress.emit(done, total, profile_id)
+
+        def _on_profile_done(pid: str, ok: bool, err: str) -> None:
+            if not _is_own_antidetect_kind(kind_s):
+                return
+            from zaliver.antydetect.profile_tags import (
+                COOKIE_FARM_ERROR_TAG,
+                COOKIE_FARM_SUCCESS_TAG,
+            )
+
+            self._apply_zaliver_profile_tags_from_worker(
+                profile_id=pid,
+                kind=kind_s,
+                base_url=base_url,
+                updates=[(ok, COOKIE_FARM_SUCCESS_TAG, COOKIE_FARM_ERROR_TAG)],
+                log_prefix="cookie_farm",
+            )
+
+        mgr = MultiProfileAvailabilityChecker(
+            profile_ids=profile_ids,
+            check_one=_farm_one,
+            on_profile_done=_on_profile_done,
+            on_progress=_on_progress,
+            log_sink=self._ui_log_line.emit,
+            max_concurrent=max_concurrent,
+        )
+        ok_n, fail_n, failed_ids = mgr.run()
+        self._last_cookie_farm_failed_ids = list(failed_ids)
+        self._studio_cookie_farm_finished.emit(ok_n, fail_n)
+
     def _start_profiles_language_change(self) -> None:
         if self._profiles_language_running:
             QMessageBox.information(
@@ -6360,6 +6559,41 @@ class MainWindow(QWidget):
         QMessageBox.information(
             self,
             "Прогрев Shorts",
+            f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
+        )
+
+    def _on_studio_cookie_farm_progress(
+        self, current: int, total: int, profile_id: str
+    ) -> None:
+        pid = (profile_id or "").strip()
+        self._profiles_status.setText(
+            f"Фарм Cookie: {current} / {total}"
+            + (f" — профиль {pid}" if pid else "…")
+        )
+
+    def _on_studio_cookie_farm_finished(self, ok_n: int, fail_n: int) -> None:
+        self._profiles_cookie_farm_running = False
+        self._sync_profiles_tab_action_buttons()
+        total = int(ok_n) + int(fail_n)
+        self._profiles_status.setText(
+            f"Фарм Cookie завершён: успешно {ok_n}, с ошибкой {fail_n} "
+            f"(всего {total})."
+        )
+        self._append_log(
+            f"[cookie_farm] Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}."
+        )
+        if int(fail_n) > 0:
+            failed = getattr(self, "_last_cookie_farm_failed_ids", None) or []
+            if failed:
+                self._append_log(
+                    "[cookie_farm] Ошибки (ID): " + ", ".join(failed)
+                )
+        kind = self._default_browser_combo.currentData()
+        if _is_own_antidetect_kind((kind or "").strip()) and total > 0:
+            self._refresh_profiles_list_after_zaliver_tags()
+        QMessageBox.information(
+            self,
+            "Фарм Cookie",
             f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
         )
 

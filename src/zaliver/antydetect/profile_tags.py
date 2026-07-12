@@ -42,6 +42,14 @@ LANGUAGE_CHANGE_RESULT_TAGS: tuple[str, ...] = (
     LANGUAGE_CHANGE_SUCCESS_TAG,
 )
 
+# Фарм Cookie.
+COOKIE_FARM_ERROR_TAG = "ОШИБКА ФАРМА КУКИ"
+COOKIE_FARM_SUCCESS_TAG = "УСПЕШНО ЗАФАРМИЛ КУКИ"
+COOKIE_FARM_RESULT_TAGS: tuple[str, ...] = (
+    COOKIE_FARM_ERROR_TAG,
+    COOKIE_FARM_SUCCESS_TAG,
+)
+
 # Заполнение описания канала.
 DESCRIPTION_FILL_ERROR_TAG = "ОШИБКА ЗАПОЛНЕНИЯ ОПИСАНИЯ"
 DESCRIPTION_FILL_SUCCESS_TAG = "УСПЕШНОЕ ЗАПОЛНЕНИЕ ОПИСАНИЯ"
@@ -89,6 +97,8 @@ ZALIVER_PROFILE_TAGS: tuple[str, ...] = (
     WARMUP_SUCCESS_TAG,
     LANGUAGE_CHANGE_ERROR_TAG,
     LANGUAGE_CHANGE_SUCCESS_TAG,
+    COOKIE_FARM_ERROR_TAG,
+    COOKIE_FARM_SUCCESS_TAG,
     DESCRIPTION_FILL_ERROR_TAG,
     DESCRIPTION_FILL_SUCCESS_TAG,
     LINK_FILL_ERROR_TAG,

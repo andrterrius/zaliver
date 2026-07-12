@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QResizeEvent, QShowEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -15,6 +16,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -40,7 +42,13 @@ from zaliver.ui.channel_setup_helpers import (
 )
 from zaliver.ui.widgets import AnimatedProgressBar, ToggleSwitch
 
-_TEXT_FIELD_H = 250
+_TEXT_MIN_H = 120
+_TEXT_MAX_H = 250
+_TEXT_FIELD_H = _TEXT_MAX_H
+_BP_DESC_NAMES = 880
+_BP_LINK = 680
+_BP_AVATAR = 560
+_BP_HEADER = 520
 
 
 def _section_layout(box: QGroupBox) -> QVBoxLayout:
@@ -48,6 +56,21 @@ def _section_layout(box: QGroupBox) -> QVBoxLayout:
     lay.setSpacing(2)
     lay.setContentsMargins(0, 0, 0, 0)
     return lay
+
+
+def _detach_layout(layout) -> None:
+    sink = QWidget()
+    sink.setLayout(layout)
+
+
+def _take_layout_widgets(layout) -> list[QWidget]:
+    widgets: list[QWidget] = []
+    while layout.count():
+        item = layout.takeAt(0)
+        widget = item.widget()
+        if widget is not None:
+            widgets.append(widget)
+    return widgets
 
 
 class ChannelEditTabPane(QWidget):
@@ -88,6 +111,11 @@ class ChannelEditTabPane(QWidget):
         self._recent_link_urls = list(recent_link_urls or [])
         self._recent_video_titles = list(recent_video_default_titles or [])
 
+        self._desc_names_horizontal: bool | None = None
+        self._link_horizontal: bool | None = None
+        self._avatar_horizontal: bool | None = None
+        self._header_horizontal: bool | None = None
+
         self._build_ui()
         self._connect_section_toggles()
         self._on_section_toggle()
@@ -110,36 +138,184 @@ class ChannelEditTabPane(QWidget):
         edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         edit.setSizePolicy(
             QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Preferred,
         )
         return edit
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._apply_responsive_layout()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self) -> None:
+        width = self.width()
+        self._layout_header(width >= _BP_HEADER)
+        self._layout_avatar_row(width >= _BP_AVATAR)
+        self._layout_desc_names(width >= _BP_DESC_NAMES)
+        self._layout_link_row(width >= _BP_LINK)
+        self._sync_text_field_heights()
+
+    def _layout_header(self, horizontal: bool) -> None:
+        if self._header_horizontal == horizontal:
+            return
+        self._header_horizontal = horizontal
+        host = self._header_host
+        old = host.layout()
+        if old is not None:
+            widgets = _take_layout_widgets(old)
+            _detach_layout(old)
+        else:
+            widgets = []
+        title = self._header_title
+        btn = self._btn_select_profiles
+        if horizontal:
+            lay = QHBoxLayout(host)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(8)
+            lay.addWidget(title, 1)
+            lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignRight)
+        else:
+            lay = QVBoxLayout(host)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(6)
+            lay.addWidget(title)
+            lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignLeft)
+        for w in widgets:
+            if w not in (title, btn):
+                lay.addWidget(w)
+
+    def _layout_avatar_row(self, horizontal: bool) -> None:
+        if self._avatar_horizontal == horizontal:
+            return
+        self._avatar_horizontal = horizontal
+        host = self._avatar_row_host
+        old = host.layout()
+        if old is not None:
+            _take_layout_widgets(old)
+            _detach_layout(old)
+        path = self._avatar_path
+        btn_pick = self._btn_avatar_pick
+        btn_preview = self._btn_avatar_preview
+        if horizontal:
+            lay = QHBoxLayout(host)
+            lay.setSpacing(8)
+            lay.addWidget(path, 1)
+            lay.addWidget(btn_pick)
+            lay.addWidget(btn_preview)
+        else:
+            lay = QVBoxLayout(host)
+            lay.setSpacing(6)
+            lay_row = QHBoxLayout()
+            btn_row = QHBoxLayout()
+            lay_row.addWidget(path, 1)
+            lay.addLayout(lay_row)
+            btn_row.addWidget(btn_pick)
+            btn_row.addWidget(btn_preview)
+            btn_row.addStretch()
+            lay.addLayout(btn_row)
+
+    def _layout_desc_names(self, horizontal: bool) -> None:
+        if self._desc_names_horizontal == horizontal:
+            return
+        self._desc_names_horizontal = horizontal
+        host = self._desc_names_host
+        old = host.layout()
+        if old is not None:
+            _take_layout_widgets(old)
+            _detach_layout(old)
+        if horizontal:
+            lay = QHBoxLayout(host)
+            lay.setSpacing(8)
+            lay.addWidget(self._desc_box, 1)
+            lay.addWidget(self._names_box, 1)
+        else:
+            lay = QVBoxLayout(host)
+            lay.setSpacing(8)
+            lay.addWidget(self._desc_box)
+            lay.addWidget(self._names_box)
+
+    def _layout_link_row(self, horizontal: bool) -> None:
+        if self._link_horizontal == horizontal:
+            return
+        self._link_horizontal = horizontal
+        host = self._link_row_host
+        old = host.layout()
+        if old is not None:
+            _take_layout_widgets(old)
+            _detach_layout(old)
+        icon = self._link_icon
+        url_row = self._link_url_row
+        title_row = self._link_title_row
+        if horizontal:
+            lay = QHBoxLayout(host)
+            lay.setSpacing(8)
+            lay.addWidget(icon)
+            lay.addWidget(url_row, 1)
+            lay.addWidget(title_row, 1)
+        else:
+            lay = QVBoxLayout(host)
+            lay.setSpacing(6)
+            url_line = QHBoxLayout()
+            url_line.addWidget(icon)
+            url_line.addWidget(url_row, 1)
+            lay.addLayout(url_line)
+            lay.addWidget(title_row)
+
+    def _sync_text_field_heights(self) -> None:
+        viewport_h = (
+            self._scroll.viewport().height()
+            if hasattr(self, "_scroll")
+            else self.height()
+        )
+        fixed_estimate = 320
+        if self._toggle_video_title.isChecked():
+            text_slots = 3
+        else:
+            text_slots = 2
+        if not self._desc_names_horizontal:
+            text_slots += 1
+        available = max(0, viewport_h - fixed_estimate)
+        per_field = available // max(1, text_slots) if available > 0 else _TEXT_MAX_H
+        height = max(_TEXT_MIN_H, min(_TEXT_MAX_H, per_field))
+        for edit in (self._desc_edit, self._names_edit, self._video_title_edit):
+            edit.setMinimumHeight(height)
+            edit.setMaximumHeight(height)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setSpacing(6)
         root.setContentsMargins(8, 8, 8, 8)
 
-        header = QHBoxLayout()
-        title = QLabel("Редактирование канала")
-        title.setObjectName("title")
-        title.setStyleSheet("font-size: 18px; font-weight: 700; color: #f1f5f9;")
-        header.addWidget(title)
-        header.addStretch()
+        self._header_host = QWidget()
+        self._header_title = QLabel("Редактирование канала")
+        self._header_title.setObjectName("title")
+        self._header_title.setStyleSheet("font-size: 18px; font-weight: 700; color: #f1f5f9;")
+        self._header_title.setWordWrap(True)
         self._btn_select_profiles = QPushButton("Выбрать профили")
         self._btn_select_profiles.setEnabled(False)
         self._btn_select_profiles.clicked.connect(self._on_select_profiles)
-        header.addWidget(self._btn_select_profiles)
-        root.addLayout(header)
+        root.addWidget(self._header_host)
 
-        form = QVBoxLayout()
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        form_host = QWidget()
+        form = QVBoxLayout(form_host)
         form.setSpacing(6)
+        form.setContentsMargins(0, 0, 0, 0)
 
         form.addWidget(self._build_media_section())
-        form.addLayout(self._build_desc_names_row())
+        form.addWidget(self._build_desc_names_row())
         form.addWidget(self._build_link_section())
         self._video_title_box = self._build_video_title_section()
         form.addWidget(self._video_title_box)
-        root.addLayout(form, 1)
+        form.addStretch()
+        self._scroll.setWidget(form_host)
+        root.addWidget(self._scroll, 1)
 
         footer = QHBoxLayout()
         footer.setSpacing(8)
@@ -151,10 +327,12 @@ class ChannelEditTabPane(QWidget):
         self._progress_bar.setVisible(False)
         self._status = QLabel("")
         self._status.setObjectName("hint")
-        self._status.setWordWrap(False)
+        self._status.setWordWrap(True)
         footer.addWidget(self._progress_bar, 1)
         footer.addWidget(self._status, 1)
         root.addLayout(footer)
+
+        self._apply_responsive_layout()
 
     def _section_header(self, toggle: ToggleSwitch, label: str, hint: str = "") -> QHBoxLayout:
         row = QHBoxLayout()
@@ -183,20 +361,17 @@ class ChannelEditTabPane(QWidget):
         self._avatar_path = QLineEdit()
         self._avatar_path.setReadOnly(True)
         self._avatar_path.setPlaceholderText("Файлы не выбраны")
-        btn_avatar = QPushButton("Выбрать")
-        btn_avatar.setObjectName("secondary")
-        btn_avatar.setToolTip("Выбрать файлы с аватарками")
-        btn_avatar.clicked.connect(self._pick_avatar_files)
-        avatar_row = QHBoxLayout()
-        avatar_row.addWidget(self._avatar_path, 1)
-        avatar_row.addWidget(btn_avatar)
+        self._btn_avatar_pick = QPushButton("Выбрать")
+        self._btn_avatar_pick.setObjectName("secondary")
+        self._btn_avatar_pick.setToolTip("Выбрать файлы с аватарками")
+        self._btn_avatar_pick.clicked.connect(self._pick_avatar_files)
+        self._avatar_row_host = QWidget()
+        lay.addWidget(self._avatar_row_host)
         self._btn_avatar_preview = QPushButton("Предпросмотр")
         self._btn_avatar_preview.setObjectName("secondary")
         self._btn_avatar_preview.setEnabled(False)
         self._btn_avatar_preview.setToolTip("Показать, как обрезаны аватарки")
         self._btn_avatar_preview.clicked.connect(self._show_avatar_preview)
-        avatar_row.addWidget(self._btn_avatar_preview)
-        lay.addLayout(avatar_row)
 
         opts = QHBoxLayout()
         self._no_crop = QCheckBox("Не обрезать")
@@ -214,17 +389,20 @@ class ChannelEditTabPane(QWidget):
 
         return box
 
-    def _build_desc_names_row(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.setSpacing(8)
-
-        desc_box = QGroupBox()
-        desc_box.setObjectName("channelEditSection")
-        desc_box.setSizePolicy(
+    def _build_desc_names_row(self) -> QWidget:
+        self._desc_names_host = QWidget()
+        self._desc_names_host.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Preferred,
         )
-        desc_l = _section_layout(desc_box)
+
+        self._desc_box = QGroupBox()
+        self._desc_box.setObjectName("channelEditSection")
+        self._desc_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        desc_l = _section_layout(self._desc_box)
         self._toggle_desc = ToggleSwitch()
         self._toggle_desc.setChecked(True)
         desc_l.addLayout(
@@ -245,13 +423,13 @@ class ChannelEditTabPane(QWidget):
         )
         desc_l.addWidget(desc_field_row)
 
-        names_box = QGroupBox()
-        names_box.setObjectName("channelEditSection")
-        names_box.setSizePolicy(
+        self._names_box = QGroupBox()
+        self._names_box.setObjectName("channelEditSection")
+        self._names_box.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Preferred,
         )
-        names_l = _section_layout(names_box)
+        names_l = _section_layout(self._names_box)
         self._toggle_names = ToggleSwitch()
         self._toggle_names.setChecked(True)
         names_l.addLayout(
@@ -288,9 +466,7 @@ class ChannelEditTabPane(QWidget):
         self._names_source_label_widget.setVisible(False)
         names_l.addWidget(self._names_source_label_widget)
 
-        row.addWidget(desc_box, 1)
-        row.addWidget(names_box, 1)
-        return row
+        return self._desc_names_host
 
     def _build_link_section(self) -> QGroupBox:
         box = QGroupBox()
@@ -300,15 +476,15 @@ class ChannelEditTabPane(QWidget):
         self._toggle_link.setChecked(True)
         lay.addLayout(self._section_header(self._toggle_link, "Ссылка"))
 
-        link_row = QHBoxLayout()
-        link_icon = QLabel("🔗")
-        link_icon.setFixedWidth(24)
+        self._link_row_host = QWidget()
+        self._link_icon = QLabel("🔗")
+        self._link_icon.setFixedWidth(24)
         self._link_url_edit = QLineEdit()
         self._link_url_edit.setPlaceholderText("https://…")
         if self._recent_link_urls:
             self._link_url_edit.setText(self._recent_link_urls[0])
         self._link_url_edit.textChanged.connect(self._on_channel_fields_changed)
-        link_url_row, self._link_url_recent_combo = field_with_recent_picker(
+        self._link_url_row, self._link_url_recent_combo = field_with_recent_picker(
             self._link_url_edit,
             recent=self._recent_link_urls,
             tooltip="Недавние URL ссылок",
@@ -319,16 +495,13 @@ class ChannelEditTabPane(QWidget):
         if self._recent_link_titles:
             self._link_title_edit.setText(self._recent_link_titles[0])
         self._link_title_edit.textChanged.connect(self._on_channel_fields_changed)
-        link_title_row, self._link_title_recent_combo = field_with_recent_picker(
+        self._link_title_row, self._link_title_recent_combo = field_with_recent_picker(
             self._link_title_edit,
             recent=self._recent_link_titles,
             tooltip="Недавние названия ссылок",
             on_filled=self._on_channel_fields_changed,
         )
-        link_row.addWidget(link_icon)
-        link_row.addWidget(link_url_row, 1)
-        link_row.addWidget(link_title_row, 1)
-        lay.addLayout(link_row)
+        lay.addWidget(self._link_row_host)
         return box
 
     def _build_video_title_section(self) -> QGroupBox:
@@ -423,6 +596,7 @@ class ChannelEditTabPane(QWidget):
         self._btn_pick_video_titles.setEnabled(vt_on and not self._is_detecting())
         self._shuffle_video_titles.setEnabled(vt_on)
 
+        self._sync_text_field_heights()
         self._refresh_assignment()
         self._update_select_button()
 

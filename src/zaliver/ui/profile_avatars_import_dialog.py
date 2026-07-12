@@ -33,77 +33,15 @@ from zaliver.ui.avatar_import_parser import (
     parse_channel_names_file,
     parse_channel_names_text,
 )
+from zaliver.ui.channel_setup_helpers import (
+    fit_preview_pixmap,
+    format_source_files,
+    pixmap_from_png,
+    recent_editable_combo,
+)
 from zaliver.ui.widgets import AnimatedProgressBar, CollapsibleSection
 
-# Длинная сторона меньше порога — в превью показываем заметно меньше натурального размера.
-_SMALL_PREVIEW_MAX_SIDE = 520
 _PREVIEW_VIEWPORT_MARGIN = 20
-
-
-def _recent_editable_combo(*, placeholder: str, recent: list[str]) -> QComboBox:
-    combo = QComboBox()
-    combo.setEditable(True)
-    combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-    line_edit = combo.lineEdit()
-    if line_edit is not None:
-        line_edit.setPlaceholderText(placeholder)
-    for value in recent:
-        combo.addItem(value)
-    combo.setCurrentIndex(-1)
-    if line_edit is not None:
-        line_edit.clear()
-    return combo
-
-
-def _fit_preview_pixmap(pix: QPixmap, max_w: int, max_h: int) -> QPixmap:
-    if pix.isNull() or max_w < 1 or max_h < 1:
-        return pix
-    w, h = pix.width(), pix.height()
-    if w < 1 or h < 1:
-        return pix
-
-    # Вписать в область просмотра, никогда не увеличивать.
-    scale = min(max_w / w, max_h / h, 1.0)
-    max_side = max(w, h)
-    if max_side < _SMALL_PREVIEW_MAX_SIDE:
-        small_cap = 0.32 + 0.5 * (max_side / _SMALL_PREVIEW_MAX_SIDE)
-        scale = min(scale, small_cap)
-
-    target_w = max(1, int(w * scale))
-    target_h = max(1, int(h * scale))
-    if target_w == w and target_h == h:
-        return pix
-    return pix.scaled(
-        target_w,
-        target_h,
-        Qt.AspectRatioMode.KeepAspectRatio,
-        Qt.TransformationMode.SmoothTransformation,
-    )
-
-
-def _pixmap_from_png(png_bytes: bytes, size: int = 48) -> QPixmap:
-    pix = QPixmap()
-    if not png_bytes:
-        return pix
-    if not pix.loadFromData(png_bytes, "PNG"):
-        return pix
-    return pix.scaled(
-        size,
-        size,
-        Qt.AspectRatioMode.KeepAspectRatio,
-        Qt.TransformationMode.SmoothTransformation,
-    )
-
-
-def _format_source_files(paths: list[str]) -> str:
-    if not paths:
-        return "Файлы не выбраны"
-    if len(paths) == 1:
-        return paths[0]
-    names = [Path(p).name for p in paths]
-    if len(names) <= 3:
-        return f"{len(paths)} файла: {', '.join(names)}"
-    return f"{len(paths)} файлов: {', '.join(names[:2])}, …"
 
 
 class ProfileChannelSetupDialog(QDialog):
@@ -167,7 +105,7 @@ class ProfileChannelSetupDialog(QDialog):
 
         desc_section = CollapsibleSection("Описание")
         desc_section.set_expanded(True)
-        self._desc_edit = _recent_editable_combo(
+        self._desc_edit = recent_editable_combo(
             placeholder="Описание канала…",
             recent=list(recent_channel_descriptions or []),
         )
@@ -176,14 +114,14 @@ class ProfileChannelSetupDialog(QDialog):
         sections.addWidget(desc_section)
 
         link_section = CollapsibleSection("Ссылка")
-        self._link_title_edit = _recent_editable_combo(
+        self._link_title_edit = recent_editable_combo(
             placeholder="Название ссылки…",
             recent=list(recent_link_titles or []),
         )
         self._link_title_edit.currentTextChanged.connect(self._on_channel_fields_changed)
         link_section.content_layout().addWidget(QLabel("Название ссылки"))
         link_section.content_layout().addWidget(self._link_title_edit)
-        self._link_url_edit = _recent_editable_combo(
+        self._link_url_edit = recent_editable_combo(
             placeholder="https://…",
             recent=list(recent_link_urls or []),
         )
@@ -193,7 +131,7 @@ class ProfileChannelSetupDialog(QDialog):
         sections.addWidget(link_section)
 
         video_title_section = CollapsibleSection("Название для видео")
-        self._video_title_edit = _recent_editable_combo(
+        self._video_title_edit = recent_editable_combo(
             placeholder="Название или несколько через запятую, ; или с новой строки…",
             recent=list(recent_video_default_titles or []),
         )
@@ -262,7 +200,7 @@ class ProfileChannelSetupDialog(QDialog):
         sections.addWidget(avatars_section)
 
         names_section = CollapsibleSection("Названия")
-        self._names_edit = _recent_editable_combo(
+        self._names_edit = recent_editable_combo(
             placeholder="Название или несколько через запятую, ; или с новой строки…",
             recent=list(recent_channel_names or []),
         )
@@ -663,7 +601,7 @@ class ProfileChannelSetupDialog(QDialog):
         self._detect_aborted = False
         self._detect_cancel = AvatarDetectionCancel()
         self._source_paths = [str(p) for p in paths]
-        self._source_label.setText(_format_source_files(self._source_paths))
+        self._source_label.setText(format_source_files(self._source_paths))
         self._clear_preview(placeholder="Обработка изображений…")
         self._status.setText("Подготовка к обработке…")
         self._progress_bar.setRange(0, max(1, len(paths)))
@@ -759,7 +697,7 @@ class ProfileChannelSetupDialog(QDialog):
             preview_pix.loadFromData(preview_png, "PNG")
         max_w, max_h = self._preview_bounds()
         if not preview_pix.isNull():
-            preview_pix = _fit_preview_pixmap(preview_pix, max_w, max_h)
+            preview_pix = fit_preview_pixmap(preview_pix, max_w, max_h)
         if preview_pix.isNull():
             self._clear_preview(placeholder="Превью недоступно")
             return
@@ -802,7 +740,7 @@ class ProfileChannelSetupDialog(QDialog):
             return
         if isinstance(source_paths, list):
             self._source_paths = [str(p) for p in source_paths if str(p).strip()]
-            self._source_label.setText(_format_source_files(self._source_paths))
+            self._source_label.setText(format_source_files(self._source_paths))
 
         avatar_pngs = [bytes(p) for p in pngs if p]
         if not avatar_pngs:
@@ -879,7 +817,7 @@ class ProfileChannelSetupDialog(QDialog):
 
             thumb_label = QLabel()
             thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            pix = _pixmap_from_png(png_bytes, size=56)
+            pix = pixmap_from_png(png_bytes, size=56)
             if not pix.isNull():
                 thumb_label.setPixmap(pix)
             else:

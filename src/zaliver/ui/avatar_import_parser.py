@@ -16,6 +16,11 @@ from zaliver.ui.profile_avatar_data import (
 _NAME_SPLIT_RE = re.compile(r"[,;\n]+")
 
 
+def parse_cycling_field_lines(data_text: str) -> list[str]:
+    """Элементы многострочного поля: одна строка — один элемент, зацикливание по профилям."""
+    return [line.strip() for line in (data_text or "").splitlines() if line.strip()]
+
+
 def parse_channel_names_text(data_text: str) -> list[str]:
     """Названия каналов, разделённые запятой, точкой с запятой или новой строкой."""
     names: list[str] = []
@@ -56,6 +61,8 @@ def _empty_row(profile: dict[str, object], *, status: str) -> dict[str, object]:
         "avatar_index": 0,
         "channel_name": "",
         "name_index": 0,
+        "channel_description": "",
+        "description_index": 0,
         "video_default_title": "",
         "video_title_index": 0,
         "skip_name_change": blocked,
@@ -91,10 +98,12 @@ def assign_avatars_to_selected_profiles(
     shuffle: bool = False,
     channel_names: list[str] | None = None,
     shuffle_names: bool = False,
+    channel_descriptions: list[str] | None = None,
+    shuffle_descriptions: bool = False,
     video_default_titles: list[str] | None = None,
     shuffle_video_titles: bool = False,
 ) -> list[dict[str, object]]:
-    """Сопоставляет аватарки, названия каналов и названия для видео с профилями по порядку.
+    """Сопоставляет аватарки, описания, названия каналов и названия для видео с профилями.
 
     Если элементов меньше, чем профилей, список зацикливается (10 аватарок на 30 профилей
     — каждая аватарка назначается трём профилям подряд).
@@ -106,6 +115,10 @@ def assign_avatars_to_selected_profiles(
     names = list(channel_names or [])
     if shuffle_names and len(names) > 1:
         random.shuffle(names)
+
+    descriptions = list(channel_descriptions or [])
+    if shuffle_descriptions and len(descriptions) > 1:
+        random.shuffle(descriptions)
 
     video_titles = list(video_default_titles or [])
     if shuffle_video_titles and len(video_titles) > 1:
@@ -119,6 +132,8 @@ def assign_avatars_to_selected_profiles(
         has_avatar = bool(png)
         channel_name = str(_cycle_pick(names, i) or "")
         has_name = bool(channel_name)
+        channel_description = str(_cycle_pick(descriptions, i) or "")
+        has_description = bool(channel_description)
         video_title = str(_cycle_pick(video_titles, i) or "")
         has_video_title = bool(video_title)
 
@@ -129,10 +144,17 @@ def assign_avatars_to_selected_profiles(
             f"Лимит 14 дн. (до {blocked_label})" if skip_name and has_name else ""
         )
 
-        can_save = has_avatar or (has_name and not skip_name) or has_video_title
+        can_save = (
+            has_avatar
+            or (has_name and not skip_name)
+            or has_video_title
+            or has_description
+        )
         status_parts: list[str] = []
         if has_avatar:
             status_parts.append("Аватарка")
+        if has_description:
+            status_parts.append("Описание")
         if has_name:
             if skip_name:
                 status_parts.append("Название не будет изменено")
@@ -151,6 +173,8 @@ def assign_avatars_to_selected_profiles(
                 "avatar_index": (i % len(pngs)) + 1 if pngs else 0,
                 "channel_name": channel_name,
                 "name_index": (i % len(names)) + 1 if names else 0,
+                "channel_description": channel_description,
+                "description_index": (i % len(descriptions)) + 1 if descriptions else 0,
                 "video_default_title": video_title,
                 "video_title_index": (i % len(video_titles)) + 1 if video_titles else 0,
                 "skip_name_change": skip_name,
@@ -170,11 +194,33 @@ def assign_avatars_to_selected_profiles(
                     "avatar_index": j,
                     "channel_name": "",
                     "name_index": 0,
+                    "channel_description": "",
+                    "description_index": 0,
                     "video_default_title": "",
                     "video_title_index": 0,
                     "skip_name_change": False,
                     "name_change_reason": "",
                     "status": "Лишняя аватарка (нет профиля)",
+                    "can_save": False,
+                }
+            )
+    if profile_count > 0 and len(descriptions) > profile_count:
+        for j, desc in enumerate(descriptions[profile_count:], start=profile_count + 1):
+            rows.append(
+                {
+                    "profile_id": "",
+                    "profile_name": "",
+                    "avatar_png": b"",
+                    "avatar_index": 0,
+                    "channel_name": "",
+                    "name_index": 0,
+                    "channel_description": desc,
+                    "description_index": j,
+                    "video_default_title": "",
+                    "video_title_index": 0,
+                    "skip_name_change": False,
+                    "name_change_reason": "",
+                    "status": "Лишнее описание (нет профиля)",
                     "can_save": False,
                 }
             )
@@ -188,6 +234,8 @@ def assign_avatars_to_selected_profiles(
                     "avatar_index": 0,
                     "channel_name": name,
                     "name_index": j,
+                    "channel_description": "",
+                    "description_index": 0,
                     "video_default_title": "",
                     "video_title_index": 0,
                     "skip_name_change": False,
@@ -206,6 +254,8 @@ def assign_avatars_to_selected_profiles(
                     "avatar_index": 0,
                     "channel_name": "",
                     "name_index": 0,
+                    "channel_description": "",
+                    "description_index": 0,
                     "video_default_title": title,
                     "video_title_index": j,
                     "skip_name_change": False,

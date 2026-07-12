@@ -46,7 +46,7 @@ def _process_avatar_file(
         if crop_sprites:
             pngs, _boxes, preview_image = extract_avatar_pngs_from_path(
                 path,
-                padding=2,
+                padding=4,
                 square=True,
             )
             if not pngs:

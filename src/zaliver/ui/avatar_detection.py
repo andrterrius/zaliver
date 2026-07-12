@@ -40,6 +40,35 @@ class AvatarBox:
         return (self.left, self.top, self.right + 1, self.bottom + 1)
 
 
+def _center_square_box(box: AvatarBox, w: int, h: int, *, extra: int = 4) -> AvatarBox:
+    """Квадрат вокруг иконки; extra — небольшой запас, чтобы не срезать верх/низ."""
+    side = max(box.width, box.height) + extra * 2
+    cx = (box.left + box.right) / 2.0
+    cy = (box.top + box.bottom) / 2.0
+    half = side / 2.0
+    left = int(round(cx - half))
+    top = int(round(cy - half))
+    right = left + side - 1
+    bottom = top + side - 1
+
+    if left < 0:
+        right -= left
+        left = 0
+    if top < 0:
+        bottom -= top
+        top = 0
+    if right >= w:
+        shift = right - (w - 1)
+        left = max(0, left - shift)
+        right = w - 1
+    if bottom >= h:
+        shift = bottom - (h - 1)
+        top = max(0, top - shift)
+        bottom = h - 1
+
+    return AvatarBox(left, top, right, bottom)
+
+
 def load_rgba_image(path: Path) -> Image.Image:
     with Image.open(path) as img:
         return img.convert("RGBA")
@@ -319,16 +348,18 @@ def _image_to_png_bytes(image: Image.Image) -> bytes:
 def extract_avatar_pngs(
     image: Image.Image,
     *,
-    padding: int = 2,
+    padding: int = 4,
     square: bool = True,
     **detect_kwargs,
 ) -> tuple[list[bytes], list[AvatarBox], Image.Image]:
     """Вырезает аватарки; возвращает PNG-байты, bbox и превью с рамками."""
     rgba = np.array(image.convert("RGBA"))
     h, w = rgba.shape[:2]
-    boxes = detect_avatars(rgba, square=square, **detect_kwargs)
+    boxes = detect_avatars(rgba, square=False, **detect_kwargs)
     if padding > 0:
         boxes = [box.with_padding(padding, w, h) for box in boxes]
+    if square:
+        boxes = [_center_square_box(box, w, h) for box in boxes]
     boxes = _filter_by_mean_size(boxes)
 
     pngs: list[bytes] = []
@@ -343,7 +374,7 @@ def extract_avatar_pngs(
 def extract_avatar_pngs_from_path(
     path: Path,
     *,
-    padding: int = 2,
+    padding: int = 4,
     square: bool = True,
     **detect_kwargs,
 ) -> tuple[list[bytes], list[AvatarBox], Image.Image]:

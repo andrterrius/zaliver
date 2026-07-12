@@ -102,7 +102,6 @@ from zaliver.ui.profile_account_data_dialog import (
     YT_LOGIN_KEY,
 )
 from zaliver.ui.profile_accounts_import_dialog import ProfileAccountsImportDialog
-from zaliver.ui.profile_avatars_import_dialog import ProfileChannelSetupDialog
 from zaliver.ui.profile_tags_clear_dialog import ProfileTagsClearDialog
 from zaliver.ui.profile_preview_dialog import ProfileCdpPreviewDialog
 from zaliver.ui.profiles_list_interaction import ProfilesListInteraction
@@ -120,6 +119,7 @@ from zaliver.ui.widgets import (
 )
 from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
 from zaliver.ui.slicing_tab_pane import SlicingTabPane
+from zaliver.ui.channel_edit_tab_pane import ChannelEditTabPane
 
 from zaliver.processing.ffmpeg_merge import (
     MACOS_BREW_FFMPEG_FORMULA,
@@ -1814,18 +1814,17 @@ class MainWindow(QWidget):
         self._btn_profiles_import_accounts.clicked.connect(
             self._open_profiles_accounts_import_dialog
         )
-        self._btn_profiles_channel_setup = QPushButton("Настройка канала")
+        self._btn_profiles_channel_setup = QPushButton("Редактирование канала")
         self._btn_profiles_channel_setup.setObjectName("secondary")
         self._btn_profiles_channel_setup.setAutoDefault(False)
         self._btn_profiles_channel_setup.setDefault(False)
         self._btn_profiles_channel_setup.setToolTip(
-            "Только для отмеченных профилей: Studio → «Настройка канала» — "
-            "описание, ссылка, аватарки и/или названия. "
-            "Можно заполнить один или несколько разделов сразу. "
-            "Браузер всегда с окном (не headless); параллельность — в «Настройках»."
+            "Переход в раздел «Редактирование каналов» для настройки YouTube Studio "
+            "(описание, ссылка, аватарки, названия). "
+            "Профили выбираются кнопкой «Выбрать профили», как при заливе."
         )
         self._btn_profiles_channel_setup.clicked.connect(
-            self._open_profiles_channel_setup_dialog
+            self._open_channel_edit_tab
         )
         self._btn_profiles_warmup = QPushButton("Прогрев")
         self._btn_profiles_warmup.setObjectName("secondary")
@@ -1909,6 +1908,17 @@ class MainWindow(QWidget):
         profiles_l.addWidget(self._profiles_status)
         profiles_l.addWidget(self._profiles_list, 1)
 
+        self._channel_edit_tab = ChannelEditTabPane(
+            recent_channel_names=self._upload_store.list_recent_channel_name_fields(),
+            recent_channel_descriptions=self._upload_store.list_recent_channel_descriptions(),
+            recent_link_titles=self._upload_store.list_recent_channel_link_titles(),
+            recent_link_urls=self._upload_store.list_recent_channel_link_urls(),
+            recent_video_default_titles=self._upload_store.list_recent_video_default_title_fields(),
+        )
+        self._channel_edit_tab.select_profiles_requested.connect(
+            self._start_channel_setup_from_tab
+        )
+
         settings = QWidget()
         settings_l = QVBoxLayout(settings)
         settings_l.setSpacing(12)
@@ -1963,7 +1973,7 @@ class MainWindow(QWidget):
         gmc = QVBoxLayout(self._gb_max_concurrent_browsers)
         browsers_hint = QLabel(
             "Максимум одновременно открытых браузеров при заливке, проверке Studio, "
-            "настройке канала, прогреве и смене языка."
+            "редактировании каналов, прогреве и смене языка."
         )
         browsers_hint.setObjectName("hint")
         browsers_hint.setWordWrap(True)
@@ -2112,6 +2122,7 @@ class MainWindow(QWidget):
         self._stack.addWidget(ready)
         self._stack.addWidget(uploaded)
         self._stack.addWidget(profiles)
+        self._stack.addWidget(self._channel_edit_tab)
         self._stack.addWidget(settings)
 
         self._nav = QListWidget()
@@ -2124,6 +2135,7 @@ class MainWindow(QWidget):
                 "Готовые видео",
                 "Залитые видео",
                 "Профили",
+                "Редактирование каналов",
                 "Настройки",
             ]
         )
@@ -2144,6 +2156,8 @@ class MainWindow(QWidget):
             self._refresh_uploaded_list()
         if row == 4:
             self._refresh_antydetect_profiles()
+        if row == 5:
+            self._sync_channel_edit_tab()
 
     def _sorted_uploaded_videos(
         self, videos: list[UploadedVideo], mode: str
@@ -4315,6 +4329,165 @@ class MainWindow(QWidget):
         _sync_count()
         return row, lbl
 
+    def _prompt_profiles_selection_dialog(
+        self,
+        *,
+        window_title: str,
+        ok_text: str = "Применить",
+        count_label_prefix: str = "Выбрано профилей",
+        preselect: set[str] | None = None,
+    ) -> list[str] | None:
+        """Диалог выбора профилей (как при заливе): поиск, фильтры, чекбоксы."""
+        profiles = self._profiles_raw or []
+        if not profiles:
+            return None
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(window_title)
+        dlg.setModal(True)
+        dlg.setMinimumSize(QSize(720, 620))
+        dlg.resize(860, 720)
+
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(10)
+
+        lw = QListWidget()
+        lw.setObjectName("uploadProfilesList")
+        lw.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        lw.setSpacing(4)
+        lw.setMinimumHeight(420)
+        lw.setMouseTracking(True)
+
+        ids: list[str] = []
+        dlg_profiles: list[dict[str, object]] = []
+        for p in profiles:
+            if not isinstance(p, dict):
+                continue
+            pid = str(
+                p.get("id") or p.get("browserProfileId") or p.get("profile_id") or ""
+            ).strip()
+            if not pid:
+                continue
+            ids.append(pid)
+            dlg_profiles.append(p)
+
+        if not ids:
+            QMessageBox.warning(
+                self,
+                window_title,
+                "В загруженных профилях не найдено ни одного валидного ID.",
+            )
+            return None
+
+        last_upload_map = self._upload_store.last_uploaded_at_by_profiles(ids)
+        total_dlg_profiles = len(dlg_profiles)
+
+        dlg_query = QLineEdit()
+        dlg_query.setPlaceholderText("Поиск по профилям (имя, ID, теги)…")
+        dlg_filter_timer = QTimer(dlg)
+        dlg_filter_timer.setSingleShot(True)
+
+        def _dlg_profiles_matched(q_raw: str) -> list[dict[str, object]]:
+            tokens = profile_search_tokens(q_raw)
+            matched: list[tuple[int, dict[str, object]]] = []
+            for i, p in enumerate(dlg_profiles):
+                if isinstance(p, dict) and profile_matches_search(p, tokens):
+                    matched.append((i, p))
+            matched.sort(key=lambda ip: profile_search_rank(ip[1], tokens, q_raw, ip[0]))
+            return [p for _i, p in matched]
+
+        def _dlg_upload_pause_click(pid: str) -> None:
+            self._ask_reset_upload_cooldown_for_profile(
+                pid,
+                dialog_parent=dlg,
+                dialog_profiles_interaction=dlg_interaction,
+            )
+
+        dlg_interaction = ProfilesListInteraction(
+            lw,
+            self._upload_store,
+            on_upload_pause_click=_dlg_upload_pause_click,
+            on_account_data_click=self._open_profile_account_data_dialog,
+            on_preview_click=self._open_profile_cdp_preview,
+        )
+        dlg_interaction.populate(
+            dlg_profiles,
+            last_upload_map,
+            preserve_checked=preselect or set(),
+        )
+
+        def _apply_dlg_profiles_filter() -> None:
+            visible = _dlg_profiles_matched(dlg_query.text())
+            pids = [_profile_id(p) for p in visible]
+            pids = [x for x in pids if x]
+            filtered_last = {k: last_upload_map[k] for k in pids if k in last_upload_map}
+            dlg_interaction.populate(visible, filtered_last, prune_checked_to_existing=False)
+
+        def _schedule_dlg_profiles_filter() -> None:
+            dlg_filter_timer.start(150)
+
+        dlg_filter_timer.timeout.connect(_apply_dlg_profiles_filter)
+        dlg_query.textChanged.connect(_schedule_dlg_profiles_filter)
+
+        def _dlg_select_filter(mode: str) -> None:
+            visible = _dlg_profiles_matched(dlg_query.text())
+            by_id = self._profiles_by_id_map(visible)
+            pids = list(by_id.keys())
+            filtered_last = {k: last_upload_map[k] for k in pids if k in last_upload_map}
+            dlg_interaction.select_checked_by_filter(mode, by_id, filtered_last)
+
+        dlg_profile_count_lbl = QLabel("")
+        dlg_profile_count_lbl.setObjectName("hint")
+        dlg_profile_count_lbl.setWordWrap(True)
+
+        def _update_dlg_profile_count() -> None:
+            n = dlg_interaction.checked_count()
+            shown = dlg_interaction.lw.count()
+            q = dlg_query.text().strip()
+            lines = [f"{count_label_prefix}: {n}"]
+            if q:
+                lines.append(f"Показано профилей: {shown} из {total_dlg_profiles}")
+            dlg_profile_count_lbl.setText("\n".join(lines))
+
+        dlg_interaction.selection_changed.connect(_update_dlg_profile_count)
+        _update_dlg_profile_count()
+
+        dlg_sel_row, _dlg_checked_lbl = self._build_profiles_selection_toolbar(
+            dlg,
+            dlg_interaction,
+            on_select_filter=_dlg_select_filter,
+            on_clear=dlg_interaction.clear_checked_selection,
+        )
+
+        layout.addWidget(dlg_profile_count_lbl)
+        layout.addWidget(dlg_query)
+        layout.addLayout(dlg_sel_row)
+        layout.addWidget(lw, 1)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText(ok_text)
+        btn_dlg_cancel = btns.button(QDialogButtonBox.StandardButton.Cancel)
+        btn_dlg_cancel.setText("Отмена")
+        btn_dlg_cancel.setObjectName("danger")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        profile_ids = dlg_interaction.batch_profile_ids()
+        if not profile_ids:
+            QMessageBox.warning(
+                self,
+                window_title,
+                "Отметьте хотя бы один профиль.",
+            )
+            return None
+        return profile_ids
+
     def _refresh_profiles_list_view(self) -> int:
         if self._profiles_interaction is None:
             return 0
@@ -4666,9 +4839,28 @@ class MainWindow(QWidget):
             self._studio_availability_finished.emit(0, len(profile_ids))
 
     def _profiles_channel_setup_dialog_title(self) -> str:
-        return "Настройка канала"
+        return "Редактирование канала"
 
-    def _open_profiles_channel_setup_dialog(self) -> None:
+    def _open_channel_edit_tab(self) -> None:
+        for i in range(self._nav.count()):
+            if self._nav.item(i).text() == "Редактирование каналов":
+                self._nav.setCurrentRow(i)
+                break
+        self._sync_channel_edit_tab()
+
+    def _sync_channel_edit_tab(self) -> None:
+        if not hasattr(self, "_channel_edit_tab"):
+            return
+        self._channel_edit_tab.load_recent_values(
+            channel_names=self._upload_store.list_recent_channel_name_fields(),
+            descriptions=self._upload_store.list_recent_channel_descriptions(),
+            link_titles=self._upload_store.list_recent_channel_link_titles(),
+            link_urls=self._upload_store.list_recent_channel_link_urls(),
+            video_titles=self._upload_store.list_recent_video_default_title_fields(),
+        )
+        self._channel_edit_tab.set_running(self._profiles_channel_setup_running)
+
+    def _start_channel_setup_from_tab(self) -> None:
         title = self._profiles_channel_setup_dialog_title()
         if self._profiles_channel_setup_running:
             QMessageBox.information(
@@ -4681,63 +4873,81 @@ class MainWindow(QWidget):
             QMessageBox.information(
                 self,
                 title,
-                "Сначала загрузите список профилей (кнопка «Обновить»).",
+                "Сначала загрузите список профилей (вкладка «Профили» → «Обновить»).",
             )
             return
-        if self._profiles_interaction is None:
+
+        tab = self._channel_edit_tab
+        form_err = tab.validate_form()
+        if form_err:
+            QMessageBox.warning(self, title, form_err)
             return
-        profile_ids = self._profiles_interaction.batch_profile_ids()
+
+        preselect: set[str] = set()
+        if self._profiles_interaction is not None:
+            preselect = set(self._profiles_interaction.checked_profile_ids)
+
+        profile_ids = self._prompt_profiles_selection_dialog(
+            window_title=title,
+            ok_text="Применить в Studio",
+            count_label_prefix="Выбрано профилей для редактирования",
+            preselect=preselect,
+        )
         if not profile_ids:
-            QMessageBox.warning(
-                self,
-                title,
-                "Отметьте квадратиками профили, для которых нужна настройка канала.",
-            )
             return
+
         by_id = self._profiles_by_id_map(self._profiles_raw)
         selected_profiles = [by_id[pid] for pid in profile_ids if pid in by_id]
         if not selected_profiles:
             QMessageBox.warning(
                 self,
                 title,
-                "Не удалось найти отмеченные профили в загруженном списке.",
+                "Не удалось найти выбранные профили в загруженном списке.",
             )
             return
 
-        dlg = ProfileChannelSetupDialog(
-            selected_profiles=selected_profiles,
-            recent_channel_names=self._upload_store.list_recent_channel_names(),
-            recent_channel_descriptions=self._upload_store.list_recent_channel_descriptions(),
-            recent_link_titles=self._upload_store.list_recent_channel_link_titles(),
-            recent_link_urls=self._upload_store.list_recent_channel_link_urls(),
-            recent_video_default_titles=self._upload_store.list_recent_video_default_titles(),
-            parent=self,
-        )
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
+        tab.set_selected_profiles(selected_profiles)
 
-        description = dlg.channel_description()
-        link_title = dlg.channel_link_title()
-        link_url = dlg.channel_link_url()
-        if description:
-            self._upload_store.remember_channel_description(description)
+        description = tab.channel_description()
+        description_lines = tab.channel_description_lines()
+        link_title = tab.channel_link_title()
+        link_url = tab.channel_link_url()
+        if description.strip():
+            self._upload_store.remember_channel_description(tab.channel_description_field_text())
         if link_title:
             self._upload_store.remember_channel_link_title(link_title)
         if link_url:
             self._upload_store.remember_channel_link_url(link_url)
-        video_default_titles = dlg.video_default_titles_for_remember()
+        video_default_titles = tab.video_default_titles_for_remember()
         if video_default_titles:
-            for title in video_default_titles:
-                self._upload_store.remember_video_default_title(title)
-        channel_names = dlg.channel_names_for_remember()
+            for vt in video_default_titles:
+                self._upload_store.remember_video_default_title(vt)
+        video_titles_field = tab.video_default_titles_field_text()
+        if video_titles_field.strip():
+            self._upload_store.remember_video_default_title_field(video_titles_field)
+        channel_names = tab.channel_names_for_remember()
         if channel_names:
             self._upload_store.remember_channel_names(channel_names)
-        assignments = dlg.profile_assignments()
-        has_text_fill = dlg.has_channel_text_fill()
-        has_video_title_fill = dlg.has_video_default_title()
-        has_customization = dlg.has_profile_customization()
+        channel_names_field = tab.channel_names_field_text()
+        if channel_names_field.strip():
+            self._upload_store.remember_channel_name_field(channel_names_field)
+        assignments = tab.profile_assignments()
+        has_text_fill = tab.has_channel_text_fill()
+        has_video_title_fill = tab.has_video_default_title()
+        has_customization = tab.has_profile_customization()
 
         if not has_text_fill and not has_video_title_fill and not has_customization:
+            return
+
+        confirm_msg = tab.confirm_message_for_profiles(len(selected_profiles))
+        answer = QMessageBox.question(
+            self,
+            title,
+            confirm_msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
             return
 
         kind = self._default_browser_combo.currentData()
@@ -4786,9 +4996,10 @@ class MainWindow(QWidget):
 
         self._profiles_channel_setup_running = True
         self._sync_profiles_tab_action_buttons()
-        self._profiles_status.setText(
-            f"Настройка канала в Studio: 0 / {len(work_profile_ids)}…"
-        )
+        self._channel_edit_tab.set_running(True)
+        status_line = f"Настройка канала в Studio: 0 / {len(work_profile_ids)}…"
+        self._profiles_status.setText(status_line)
+        self._channel_edit_tab.set_status(status_line)
         max_concurrent = self._max_concurrent_browsers()
         self._append_log(
             f"[channel_setup] Старт для {len(work_profile_ids)} профилей "
@@ -4804,6 +5015,7 @@ class MainWindow(QWidget):
                 "base_url": base_url,
                 "headless": headless,
                 "description": description,
+                "description_lines": description_lines,
                 "link_title": link_title,
                 "link_url": link_url,
                 "assignments": assignments,
@@ -4814,6 +5026,9 @@ class MainWindow(QWidget):
             daemon=True,
         ).start()
 
+    def _open_profiles_channel_setup_dialog(self) -> None:
+        self._open_channel_edit_tab()
+
     def _profiles_channel_setup_worker(
         self,
         *,
@@ -4823,6 +5038,7 @@ class MainWindow(QWidget):
         base_url: str,
         headless: bool,
         description: str,
+        description_lines: list[str],
         link_title: str,
         link_url: str,
         assignments: list[dict[str, object]],
@@ -4847,6 +5063,19 @@ class MainWindow(QWidget):
             pid = str(item.get("profile_id") or "").strip()
             if pid:
                 by_id[pid] = item
+        profile_index = {pid: i for i, pid in enumerate(profile_ids)}
+
+        def _description_for_profile(pid: str) -> str:
+            item = by_id.get(pid)
+            if item:
+                row_desc = str(item.get("channel_description") or "").strip()
+                if row_desc:
+                    return row_desc
+            if description_lines:
+                return description_lines[
+                    profile_index.get(pid, 0) % len(description_lines)
+                ]
+            return (description or "").strip()
 
         def _setup_one(pid: str) -> None:
             creds = self._profile_login_credentials(pid)
@@ -4870,6 +5099,7 @@ class MainWindow(QWidget):
                 else None
             )
             has_video_title_fill = bool(video_default_title)
+            profile_description = _description_for_profile(pid) if has_text_fill else ""
 
             try:
                 if _is_own_antidetect_kind(kind_s):
@@ -4880,7 +5110,7 @@ class MainWindow(QWidget):
                         )
                     setup_channel_in_local_antidetect_profile(
                         pid,
-                        description=description if has_text_fill else None,
+                        description=profile_description or None if has_text_fill else None,
                         link_title=link_title if has_text_fill else None,
                         link_url=link_url if has_text_fill else None,
                         video_default_title=video_default_title if has_video_title_fill else None,
@@ -4897,7 +5127,7 @@ class MainWindow(QWidget):
                 else:
                     setup_channel_in_profile(
                         pid,
-                        description=description if has_text_fill else None,
+                        description=profile_description or None if has_text_fill else None,
                         link_title=link_title if has_text_fill else None,
                         link_url=link_url if has_text_fill else None,
                         video_default_title=video_default_title if has_video_title_fill else None,
@@ -4938,7 +5168,7 @@ class MainWindow(QWidget):
 
             updates: list[tuple[bool, str, str]] = []
             if has_text_fill:
-                if (description or "").strip():
+                if _description_for_profile(pid):
                     updates.append(
                         (ok, DESCRIPTION_FILL_SUCCESS_TAG, DESCRIPTION_FILL_ERROR_TAG)
                     )
@@ -6063,20 +6293,27 @@ class MainWindow(QWidget):
         self, current: int, total: int, profile_id: str
     ) -> None:
         pid = (profile_id or "").strip()
-        self._profiles_status.setText(
+        status_line = (
             f"Настройка канала в Studio: {current} / {total}"
             + (f" — профиль {pid}" if pid else "…")
         )
+        self._profiles_status.setText(status_line)
+        if hasattr(self, "_channel_edit_tab"):
+            self._channel_edit_tab.set_status(status_line)
 
     def _on_studio_channel_setup_finished(self, ok_n: int, fail_n: int) -> None:
         self._profiles_channel_setup_running = False
         self._sync_profiles_tab_action_buttons()
         total = int(ok_n) + int(fail_n)
         title = self._profiles_channel_setup_dialog_title()
-        self._profiles_status.setText(
+        status_line = (
             f"Настройка канала завершена: успешно {ok_n}, с ошибкой {fail_n} "
             f"(всего {total})."
         )
+        self._profiles_status.setText(status_line)
+        if hasattr(self, "_channel_edit_tab"):
+            self._channel_edit_tab.set_running(False)
+            self._channel_edit_tab.set_status(status_line)
         self._append_log(
             f"[channel_setup] Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}."
         )

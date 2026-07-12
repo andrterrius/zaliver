@@ -279,6 +279,30 @@ class UploadStore:
                 "CREATE INDEX IF NOT EXISTS idx_recent_video_default_titles_used_at "
                 "ON recent_video_default_titles(used_at DESC);"
             )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS recent_channel_name_fields (
+                    content TEXT PRIMARY KEY,
+                    used_at TEXT NOT NULL
+                );
+                """
+            )
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_recent_channel_name_fields_used_at "
+                "ON recent_channel_name_fields(used_at DESC);"
+            )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS recent_video_default_title_fields (
+                    content TEXT PRIMARY KEY,
+                    used_at TEXT NOT NULL
+                );
+                """
+            )
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_recent_video_default_title_fields_used_at "
+                "ON recent_video_default_title_fields(used_at DESC);"
+            )
 
     def _list_recent_text_values(
         self,
@@ -309,10 +333,12 @@ class UploadStore:
         column: str,
         value: str,
         keep: int,
+        preserve_whitespace: bool = False,
     ) -> None:
-        v = (value or "").strip()
-        if not v:
+        raw = value or ""
+        if not raw.strip():
             return
+        v = raw if preserve_whitespace else raw.strip()
         now = _utc_now_iso()
         with self._connect() as con:
             con.execute(
@@ -497,6 +523,26 @@ class UploadStore:
                 keep=_RECENT_CHANNEL_SETUP_KEEP,
             )
 
+    def list_recent_channel_name_fields(
+        self, limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT
+    ) -> list[str]:
+        """Последние полные списки названий каналов (многострочное поле)."""
+        return self._list_recent_text_values(
+            table="recent_channel_name_fields",
+            column="content",
+            limit=limit,
+        )
+
+    def remember_channel_name_field(self, content: str) -> None:
+        """Запомнить содержимое поля «Название» целиком."""
+        self._remember_recent_text_value(
+            table="recent_channel_name_fields",
+            column="content",
+            value=content,
+            keep=_RECENT_CHANNEL_SETUP_KEEP,
+            preserve_whitespace=True,
+        )
+
     def list_recent_channel_link_titles(
         self, limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT
     ) -> list[str]:
@@ -571,6 +617,26 @@ class UploadStore:
             column="title",
             value=title,
             keep=_RECENT_CHANNEL_SETUP_KEEP,
+        )
+
+    def list_recent_video_default_title_fields(
+        self, limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT
+    ) -> list[str]:
+        """Последние полные списки названий для видео (многострочное поле)."""
+        return self._list_recent_text_values(
+            table="recent_video_default_title_fields",
+            column="content",
+            limit=limit,
+        )
+
+    def remember_video_default_title_field(self, content: str) -> None:
+        """Запомнить содержимое поля «Название для видео» целиком."""
+        self._remember_recent_text_value(
+            table="recent_video_default_title_fields",
+            column="content",
+            value=content,
+            keep=_RECENT_CHANNEL_SETUP_KEEP,
+            preserve_whitespace=True,
         )
 
     def delete_uploaded_videos_by_ids(self, database_row_ids: Iterable[int]) -> int:

@@ -907,3 +907,53 @@ QComboBox#uploadedSessionFilter QAbstractItemView {
     selection-color: #f8fafc;
     font-weight: 600;
 }
+
+QGroupBox#channelEditSection {
+    margin-top: 0;
+    padding: 8px 10px 10px 10px;
+}
+
+QGroupBox#channelEditPanel {
+    margin-top: 6px;
+    padding: 10px 10px 10px 10px;
+}
+
+QToolButton#recentValuesPicker {
+    background-color: #1a1d28;
+    border: 1px solid #2d3142;
+    border-radius: 8px;
+    color: #a8b0d4;
+    padding: 0;
+}
+
+QToolButton#recentValuesPicker::menu-indicator {
+    subcontrol-origin: padding;
+    subcontrol-position: center;
+    width: 14px;
+    height: 14px;
+}
+
+QToolButton#recentValuesPicker:hover:enabled {
+    border-color: #4a5070;
+    color: #e4e6ef;
+}
+
+QToolButton#recentValuesPicker:disabled {
+    color: #555a70;
+    background-color: #14161e;
+}
+
+QMenu#recentValuesMenu {
+    background-color: #1a1d28;
+    border: 1px solid #2d3142;
+    color: #e4e6ef;
+    padding: 4px 0;
+}
+
+QMenu#recentValuesMenu::item {
+    padding: 6px 24px 6px 12px;
+}
+
+QMenu#recentValuesMenu::item:selected {
+    background-color: #2d3142;
+}

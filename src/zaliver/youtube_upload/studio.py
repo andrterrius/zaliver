@@ -9710,6 +9710,7 @@ def run_youtube_shorts_warmup(
     subscribe_probability_pct: float = _SHORTS_WARMUP_DEFAULT_SUBSCRIBE_PROB_PCT,
     shorts_watch_min_s: float = _SHORTS_WARMUP_MIN_WATCH_S,
     shorts_watch_max_s: float = _SHORTS_WARMUP_MAX_WATCH_S,
+    watch_full_video: bool = False,
     shorts_recommendations: bool = True,
     search_query: str | None = None,
     watch_horizontal_videos: bool = False,
@@ -9746,6 +9747,7 @@ def run_youtube_shorts_warmup(
         subscribe_probability_pct=subscribe_probability_pct,
         min_watch_s=shorts_watch_min_s,
         max_watch_s=shorts_watch_max_s,
+        watch_full_video=watch_full_video,
     )
     if watch_horizontal_videos:
         query = (horizontal_search_query or "").strip()

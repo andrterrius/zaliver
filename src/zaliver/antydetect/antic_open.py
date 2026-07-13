@@ -1201,6 +1201,7 @@ def warmup_youtube_shorts_in_profile(
     subscribe_probability_pct: float | None = None,
     shorts_watch_min_s: float | None = None,
     shorts_watch_max_s: float | None = None,
+    watch_full_video: bool = False,
     shorts_recommendations: bool = True,
     search_query: str | None = None,
     watch_horizontal_videos: bool = False,
@@ -1245,6 +1246,8 @@ def warmup_youtube_shorts_in_profile(
                     kw["shorts_watch_min_s"] = shorts_watch_min_s
                 if shorts_watch_max_s is not None:
                     kw["shorts_watch_max_s"] = shorts_watch_max_s
+                if watch_full_video:
+                    kw["watch_full_video"] = True
                 kw["shorts_recommendations"] = shorts_recommendations
                 if search_query is not None:
                     kw["search_query"] = search_query
@@ -1284,6 +1287,7 @@ def warmup_youtube_shorts_in_local_antidetect_profile(
     subscribe_probability_pct: float | None = None,
     shorts_watch_min_s: float | None = None,
     shorts_watch_max_s: float | None = None,
+    watch_full_video: bool = False,
     shorts_recommendations: bool = True,
     search_query: str | None = None,
     watch_horizontal_videos: bool = False,
@@ -1342,6 +1346,8 @@ def warmup_youtube_shorts_in_local_antidetect_profile(
                     studio_kw["shorts_watch_min_s"] = shorts_watch_min_s
                 if shorts_watch_max_s is not None:
                     studio_kw["shorts_watch_max_s"] = shorts_watch_max_s
+                if watch_full_video:
+                    studio_kw["watch_full_video"] = True
                 studio_kw["shorts_recommendations"] = shorts_recommendations
                 if search_query is not None:
                     studio_kw["search_query"] = search_query

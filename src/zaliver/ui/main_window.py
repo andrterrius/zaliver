@@ -787,6 +787,7 @@ class ShortsWarmupSettings(NamedTuple):
     subscribe_probability_pct: float
     shorts_watch_min_s: int
     shorts_watch_max_s: int
+    watch_full_video: bool
     shorts_recommendations: bool
     shorts_search_query: str
     watch_horizontal_videos: bool
@@ -5351,7 +5352,25 @@ class MainWindow(QWidget):
         watch_range_row.addWidget(QLabel("—"))
         watch_range_row.addWidget(watch_max_spin)
         watch_range_row.addStretch()
-        form.addRow("Длительность просмотра Short:", watch_range_row)
+        watch_range_w = QWidget()
+        watch_range_w.setLayout(watch_range_row)
+        watch_range_lbl = QLabel("Длительность просмотра Short:")
+        form.addRow(watch_range_lbl, watch_range_w)
+
+        watch_full_cb = QCheckBox("Смотреть каждый Short до конца")
+        watch_full_cb.setToolTip(
+            "Как при прогреве во время отложки: дождаться конца ролика "
+            "(прогресс в логе в процентах), затем листать дальше. "
+            "Если снять галочку — случайное время в указанном диапазоне."
+        )
+        form.addRow("", watch_full_cb)
+
+        def _sync_watch_mode(full_watch: bool) -> None:
+            watch_range_lbl.setVisible(not full_watch)
+            watch_range_w.setVisible(not full_watch)
+
+        watch_full_cb.toggled.connect(_sync_watch_mode)
+        _sync_watch_mode(watch_full_cb.isChecked())
 
         shorts_recommend_cb = QCheckBox("Рекомендации Shorts")
         shorts_recommend_cb.setChecked(True)
@@ -5429,7 +5448,10 @@ class MainWindow(QWidget):
         v.addLayout(row)
 
         def _try_accept() -> None:
-            if watch_min_spin.value() > watch_max_spin.value():
+            if (
+                not watch_full_cb.isChecked()
+                and watch_min_spin.value() > watch_max_spin.value()
+            ):
                 QMessageBox.warning(
                     dlg,
                     "Прогрев YouTube",
@@ -5469,6 +5491,7 @@ class MainWindow(QWidget):
             subscribe_probability_pct=subscribe_spin.value(),
             shorts_watch_min_s=watch_min_spin.value(),
             shorts_watch_max_s=watch_max_spin.value(),
+            watch_full_video=watch_full_cb.isChecked(),
             shorts_recommendations=shorts_recommend_cb.isChecked(),
             shorts_search_query=(shorts_search_edit.text() or "").strip(),
             watch_horizontal_videos=watch_horizontal_cb.isChecked(),
@@ -5535,11 +5558,18 @@ class MainWindow(QWidget):
         )
         headless_label = "headless" if headless else "с окном браузера"
         max_concurrent = self._max_concurrent_browsers()
+        watch_note = (
+            "до конца каждого ролика (прогресс в %)"
+            if warmup_settings.watch_full_video
+            else (
+                f"{warmup_settings.shorts_watch_min_s}–"
+                f"{warmup_settings.shorts_watch_max_s} с"
+            )
+        )
         self._append_log(
             f"[warmup] Старт для {len(profile_ids)} профилей "
             f"(Shorts: {warmup_settings.shorts_count}, "
-            f"просмотр {warmup_settings.shorts_watch_min_s}–"
-            f"{warmup_settings.shorts_watch_max_s} с, "
+            f"просмотр {watch_note}, "
             f"лайк {warmup_settings.like_probability_pct:g}%, "
             f"подписка {warmup_settings.subscribe_probability_pct:g}%"
             + (
@@ -5606,6 +5636,7 @@ class MainWindow(QWidget):
                 "subscribe_probability_pct": warmup_settings.subscribe_probability_pct,
                 "shorts_watch_min_s": warmup_settings.shorts_watch_min_s,
                 "shorts_watch_max_s": warmup_settings.shorts_watch_max_s,
+                "watch_full_video": warmup_settings.watch_full_video,
                 "shorts_recommendations": warmup_settings.shorts_recommendations,
                 "search_query": (
                     warmup_settings.shorts_search_query or None

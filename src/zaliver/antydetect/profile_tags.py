@@ -34,6 +34,14 @@ WARMUP_RESULT_TAGS: tuple[str, ...] = (
     WARMUP_SUCCESS_TAG,
 )
 
+# Продвижение (открытие чужих видео / подписка).
+PROMOTE_ERROR_TAG = "ОШИБКА ПРОДВИЖЕНИЯ"
+PROMOTE_SUCCESS_TAG = "УСПЕШНОЕ ПРОДВИЖЕНИЕ"
+PROMOTE_RESULT_TAGS: tuple[str, ...] = (
+    PROMOTE_ERROR_TAG,
+    PROMOTE_SUCCESS_TAG,
+)
+
 # Смена языка интерфейса YouTube.
 LANGUAGE_CHANGE_ERROR_TAG = "ОШИБКА СМЕНЫ ЯЗЫКА"
 LANGUAGE_CHANGE_SUCCESS_TAG = "УСПЕШНАЯ СМЕНА ЯЗЫКА"
@@ -95,6 +103,8 @@ ZALIVER_PROFILE_TAGS: tuple[str, ...] = (
     NAME_CHANGE_SUCCESS_TAG,
     WARMUP_ERROR_TAG,
     WARMUP_SUCCESS_TAG,
+    PROMOTE_ERROR_TAG,
+    PROMOTE_SUCCESS_TAG,
     LANGUAGE_CHANGE_ERROR_TAG,
     LANGUAGE_CHANGE_SUCCESS_TAG,
     COOKIE_FARM_ERROR_TAG,

@@ -104,6 +104,10 @@ from zaliver.ui.profile_account_data_dialog import (
 from zaliver.ui.profile_accounts_import_dialog import ProfileAccountsImportDialog
 from zaliver.ui.profile_tags_clear_dialog import ProfileTagsClearDialog
 from zaliver.ui.profile_cookie_farm_dialog import ProfileCookieFarmDialog
+from zaliver.ui.profile_promote_dialog import (
+    ProfilePromoteDialog,
+    ProfilePromoteSettings,
+)
 from zaliver.ui.profile_preview_dialog import ProfileCdpPreviewDialog
 from zaliver.ui.profiles_list_interaction import ProfilesListInteraction
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
@@ -809,6 +813,8 @@ class MainWindow(QWidget):
     _studio_channel_setup_finished = pyqtSignal(int, int)
     _studio_warmup_progress = pyqtSignal(int, int, str)
     _studio_warmup_finished = pyqtSignal(int, int)
+    _studio_promote_progress = pyqtSignal(int, int, str)
+    _studio_promote_finished = pyqtSignal(int, int)
     _studio_cookie_farm_progress = pyqtSignal(int, int, str)
     _studio_cookie_farm_finished = pyqtSignal(int, int)
     _zaliver_profile_tags_clear_progress = pyqtSignal(int, int, str)
@@ -849,12 +855,14 @@ class MainWindow(QWidget):
         self._profiles_availability_running = False
         self._profiles_channel_setup_running = False
         self._profiles_warmup_running = False
+        self._profiles_promote_running = False
         self._profiles_cookie_farm_running = False
         self._profiles_tags_clear_running = False
         self._profiles_refresh_running = False
         self._last_availability_failed_ids: list[str] = []
         self._last_channel_setup_failed_ids: list[str] = []
         self._last_warmup_failed_ids: list[str] = []
+        self._last_promote_failed_ids: list[str] = []
         self._last_cookie_farm_failed_ids: list[str] = []
         self._build_ui()
         self._bootstrap_fd_limits()
@@ -889,6 +897,8 @@ class MainWindow(QWidget):
         self._studio_channel_setup_finished.connect(self._on_studio_channel_setup_finished)
         self._studio_warmup_progress.connect(self._on_studio_warmup_progress)
         self._studio_warmup_finished.connect(self._on_studio_warmup_finished)
+        self._studio_promote_progress.connect(self._on_studio_promote_progress)
+        self._studio_promote_finished.connect(self._on_studio_promote_finished)
         self._studio_cookie_farm_progress.connect(self._on_studio_cookie_farm_progress)
         self._studio_cookie_farm_finished.connect(self._on_studio_cookie_farm_finished)
         self._zaliver_profile_tags_clear_progress.connect(
@@ -1864,13 +1874,24 @@ class MainWindow(QWidget):
             "Режим Headless из настроек; параллельность — в «Настройках»."
         )
         self._btn_profiles_warmup.clicked.connect(self._start_profiles_warmup)
+        self._btn_profiles_promote = QPushButton("Продвижение")
+        self._btn_profiles_promote.setObjectName("secondary")
+        self._btn_profiles_promote.setAutoDefault(False)
+        self._btn_profiles_promote.setDefault(False)
+        self._btn_profiles_promote.setToolTip(
+            "Только для отмеченных профилей: Studio → проверка аккаунта; "
+            "опционально подписка на каналы по одному видео; затем "
+            "лента подписок → Shorts (просмотр, лайки/комментарии). "
+            "Headless и параллельность — в настройках."
+        )
+        self._btn_profiles_promote.clicked.connect(self._start_profiles_promote)
         self._btn_profiles_cookie_farm = QPushButton("Фарм Cookie")
         self._btn_profiles_cookie_farm.setObjectName("secondary")
         self._btn_profiles_cookie_farm.setAutoDefault(False)
         self._btn_profiles_cookie_farm.setDefault(False)
         self._btn_profiles_cookie_farm.setToolTip(
             "Только для отмеченных профилей: по очереди открывает сайты из списка "
-            "и медленно прокручивает страницу заданное время (10–30 с). "
+            "и медленно прокручивает страницу заданное время. "
             "Режим Headless из настроек; параллельность — в «Настройках»."
         )
         self._btn_profiles_cookie_farm.clicked.connect(self._start_profiles_cookie_farm)
@@ -1881,7 +1902,7 @@ class MainWindow(QWidget):
         self._btn_profiles_clear_zaliver_tags.setToolTip(
             "С отмеченных профилей снимает служебные теги Zaliver "
             "(ошибки залива, проверки Studio, смены аватарки/названия, прогрева, "
-            "фарма Cookie "
+            "продвижения, фарма Cookie "
             "и заполнения канала и т.д.). Только свой антидетект."
         )
         self._btn_profiles_clear_zaliver_tags.clicked.connect(
@@ -1889,6 +1910,7 @@ class MainWindow(QWidget):
         )
         profiles_actions_row.addWidget(self._btn_profiles_channel_setup)
         profiles_actions_row.addWidget(self._btn_profiles_warmup)
+        profiles_actions_row.addWidget(self._btn_profiles_promote)
         profiles_actions_row.addWidget(self._btn_profiles_cookie_farm)
         profiles_actions_row.addWidget(self._btn_profiles_check_availability)
         profiles_actions_row.addWidget(self._btn_profiles_import_accounts)
@@ -3965,6 +3987,7 @@ class MainWindow(QWidget):
             self._profiles_availability_running
             or self._profiles_channel_setup_running
             or self._profiles_warmup_running
+            or self._profiles_promote_running
             or self._profiles_cookie_farm_running
             or self._profiles_tags_clear_running
             or self._profiles_refresh_running
@@ -3977,6 +4000,8 @@ class MainWindow(QWidget):
             self._btn_profiles_channel_setup.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_warmup"):
             self._btn_profiles_warmup.setEnabled(not busy)
+        if hasattr(self, "_btn_profiles_promote"):
+            self._btn_profiles_promote.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_cookie_farm"):
             self._btn_profiles_cookie_farm.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_refresh"):
@@ -5726,6 +5751,256 @@ class MainWindow(QWidget):
         self._last_warmup_failed_ids = list(failed_ids)
         self._studio_warmup_finished.emit(ok_n, fail_n)
 
+    def _prompt_profiles_promote_settings(self) -> ProfilePromoteSettings | None:
+        dlg = ProfilePromoteDialog(
+            parent=self,
+            recent_comments=self._upload_store.list_recent_promote_comment_fields(),
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        settings = dlg.settings()
+        if settings.enable_comments:
+            try:
+                self._upload_store.remember_promote_comment_field(
+                    dlg.comments_field_text()
+                )
+            except Exception:
+                pass
+        return settings
+
+    def _start_profiles_promote(self) -> None:
+        if self._profiles_promote_running:
+            QMessageBox.information(
+                self,
+                "Продвижение",
+                "Продвижение уже выполняется. Дождитесь завершения.",
+            )
+            return
+        if self._profiles_raw is None:
+            QMessageBox.warning(
+                self,
+                "Продвижение",
+                "Сначала загрузите список профилей (кнопка «Обновить»).",
+            )
+            return
+        profile_ids = self._collect_checked_profile_ids()
+        if not profile_ids:
+            QMessageBox.warning(
+                self,
+                "Продвижение",
+                "Отметьте квадратиками профили для продвижения.",
+            )
+            return
+
+        promote_settings = self._prompt_profiles_promote_settings()
+        if promote_settings is None:
+            return
+
+        targets: list = []
+        if promote_settings.subscribe_to_channels:
+            visible = self._profiles_visible_matched()
+            visible_ids = [
+                pid for p in visible if (pid := _profile_id(p))
+            ]
+            if not visible_ids:
+                QMessageBox.warning(
+                    self,
+                    "Продвижение",
+                    "В списке нет видимых профилей для подбора видео на подписку.",
+                )
+                return
+            videos = self._upload_store.list_promotable_videos_for_profiles(
+                visible_ids
+            )
+            if not videos:
+                QMessageBox.warning(
+                    self,
+                    "Продвижение",
+                    "Нет подходящих видео для подписки: нужны ролики с просмотрами "
+                    "у видимых профилей (не заблокированные и не в отложке). "
+                    "Сначала залейте и прочекайте статистику, либо снимите "
+                    "«Подписаться на каналы».",
+                )
+                return
+            from zaliver.youtube_upload.studio import PromotionTargetVideo
+
+            targets = [
+                PromotionTargetVideo(
+                    profile_id=v.profile_id,
+                    video_id=v.video_id,
+                    url=v.url,
+                    title=v.title,
+                )
+                for v in videos
+            ]
+
+        token = (self._dolphin_token.text() or "").strip()
+        if not token:
+            token = (
+                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
+            ).strip()
+        kind = self._default_browser_combo.currentData()
+        if not isinstance(kind, str) or not kind.strip():
+            kind = "dolphin"
+        base_url = self._own_antidetect_base_url_from_settings(kind)
+
+        headless = True
+        if hasattr(self, "_dolphin_headless"):
+            headless = bool(self._dolphin_headless.isChecked())
+        else:
+            headless = bool(
+                self._settings.value("antydetect/dolphin_headless", True, type=bool)
+            )
+
+        try:
+            remote_cdp = self._remote_cdp_launch_options_for_kind(kind)
+        except LocalAntidetectError as e:
+            QMessageBox.warning(self, "Продвижение", str(e))
+            return
+
+        self._profiles_promote_running = True
+        self._sync_profiles_tab_action_buttons()
+        self._profiles_status.setText(
+            f"Продвижение: 0 / {len(profile_ids)}…"
+        )
+        headless_label = "headless" if headless else "с окном браузера"
+        max_concurrent = self._max_concurrent_browsers()
+        sub_note = (
+            f"подписка на {len(targets)} каналов, "
+            if promote_settings.subscribe_to_channels
+            else ""
+        )
+        comments_note = (
+            f", комментарии {promote_settings.comment_probability_pct:g}%"
+            if promote_settings.enable_comments
+            else ""
+        )
+        self._append_log(
+            f"[promote] Старт для {len(profile_ids)} профилей "
+            f"({sub_note}Shorts: {promote_settings.shorts_count}, "
+            f"лайк {promote_settings.like_probability_pct:g}%"
+            f"{comments_note}, {headless_label}, "
+            f"до {max_concurrent} параллельно)…"
+        )
+
+        threading.Thread(
+            target=self._profiles_promote_worker,
+            kwargs={
+                "profile_ids": profile_ids,
+                "kind": kind,
+                "token": token,
+                "base_url": base_url,
+                "headless": headless,
+                "videos": targets,
+                "promote_settings": promote_settings,
+                "remote_cdp": remote_cdp,
+                "max_concurrent": max_concurrent,
+            },
+            daemon=True,
+        ).start()
+
+    def _profiles_promote_worker(
+        self,
+        *,
+        profile_ids: list[str],
+        kind: str,
+        token: str,
+        base_url: str,
+        headless: bool,
+        videos: list,
+        promote_settings: ProfilePromoteSettings,
+        remote_cdp: RemoteCdpLaunchOptions | None = None,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT_BROWSERS,
+    ) -> None:
+        from zaliver.antydetect.antic_open import (
+            promote_youtube_videos_in_local_antidetect_profile,
+            promote_youtube_videos_in_profile,
+            set_log_sink,
+        )
+        from zaliver.antydetect.local_antidetect_api import LocalAntidetectError
+        from zaliver.youtube_upload.multi_availability_checker import (
+            MultiProfileAvailabilityChecker,
+        )
+
+        set_log_sink(self._ui_log_line.emit)
+        kind_s = (kind or "").strip()
+        promote_kw = {
+            "subscribe_to_channels": promote_settings.subscribe_to_channels,
+            "shorts_count": promote_settings.shorts_count,
+            "like_probability_pct": promote_settings.like_probability_pct,
+            "subscribe_probability_pct": 0.0,
+            "shorts_watch_min_s": promote_settings.shorts_watch_min_s,
+            "shorts_watch_max_s": promote_settings.shorts_watch_max_s,
+            "watch_full_video": promote_settings.watch_full_video,
+            "enable_comments": promote_settings.enable_comments,
+            "comments": list(promote_settings.comments),
+            "comment_probability_pct": promote_settings.comment_probability_pct,
+        }
+
+        def _promote_one(pid: str) -> None:
+            creds = self._profile_login_credentials(pid)
+            yt_oldest = self._profile_yt_oldest_name(pid) or None
+            search_oldest = self._youtube_search_oldest_channel()
+            if _is_own_antidetect_kind(kind_s):
+                u = (base_url or "").strip()
+                if not u:
+                    raise LocalAntidetectError(
+                        f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
+                    )
+                promote_youtube_videos_in_local_antidetect_profile(
+                    pid,
+                    base_url=u,
+                    videos=videos,
+                    headless=headless,
+                    login_credentials=creds,
+                    yt_oldest_name=yt_oldest,
+                    search_oldest_channel=search_oldest,
+                    remote_cdp=remote_cdp,
+                    **promote_kw,
+                )
+            else:
+                promote_youtube_videos_in_profile(
+                    pid,
+                    videos=videos,
+                    local_token=token or None,
+                    headless=headless,
+                    login_credentials=creds,
+                    yt_oldest_name=yt_oldest,
+                    search_oldest_channel=search_oldest,
+                    **promote_kw,
+                )
+
+        def _on_progress(done: int, total: int, profile_id: str) -> None:
+            self._studio_promote_progress.emit(done, total, profile_id)
+
+        def _on_profile_done(pid: str, ok: bool, err: str) -> None:
+            if not _is_own_antidetect_kind(kind_s):
+                return
+            from zaliver.antydetect.profile_tags import (
+                PROMOTE_ERROR_TAG,
+                PROMOTE_SUCCESS_TAG,
+            )
+
+            self._apply_zaliver_profile_tags_from_worker(
+                profile_id=pid,
+                kind=kind_s,
+                base_url=base_url,
+                updates=[(ok, PROMOTE_SUCCESS_TAG, PROMOTE_ERROR_TAG)],
+                log_prefix="promote",
+            )
+
+        mgr = MultiProfileAvailabilityChecker(
+            profile_ids=profile_ids,
+            check_one=_promote_one,
+            on_profile_done=_on_profile_done,
+            on_progress=_on_progress,
+            log_sink=self._ui_log_line.emit,
+            max_concurrent=max_concurrent,
+        )
+        ok_n, fail_n, failed_ids = mgr.run()
+        self._last_promote_failed_ids = list(failed_ids)
+        self._studio_promote_finished.emit(ok_n, fail_n)
+
     def _start_profiles_cookie_farm(self) -> None:
         if self._profiles_cookie_farm_running:
             QMessageBox.information(
@@ -6516,6 +6791,39 @@ class MainWindow(QWidget):
         QMessageBox.information(
             self,
             "Прогрев Shorts",
+            f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
+        )
+
+    def _on_studio_promote_progress(
+        self, current: int, total: int, profile_id: str
+    ) -> None:
+        pid = (profile_id or "").strip()
+        self._profiles_status.setText(
+            f"Продвижение: {current} / {total}"
+            + (f" — профиль {pid}" if pid else "…")
+        )
+
+    def _on_studio_promote_finished(self, ok_n: int, fail_n: int) -> None:
+        self._profiles_promote_running = False
+        self._sync_profiles_tab_action_buttons()
+        total = int(ok_n) + int(fail_n)
+        self._profiles_status.setText(
+            f"Продвижение завершено: успешно {ok_n}, с ошибкой {fail_n} "
+            f"(всего {total})."
+        )
+        self._append_log(
+            f"[promote] Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}."
+        )
+        if int(fail_n) > 0:
+            failed = getattr(self, "_last_promote_failed_ids", None) or []
+            if failed:
+                self._append_log(
+                    "[promote] Ошибки (ID): " + ", ".join(failed)
+                )
+        self._refresh_profiles_list_after_zaliver_tags()
+        QMessageBox.information(
+            self,
+            "Продвижение",
             f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
         )
 

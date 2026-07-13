@@ -303,6 +303,18 @@ class UploadStore:
                 "CREATE INDEX IF NOT EXISTS idx_recent_video_default_title_fields_used_at "
                 "ON recent_video_default_title_fields(used_at DESC);"
             )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS recent_promote_comment_fields (
+                    content TEXT PRIMARY KEY,
+                    used_at TEXT NOT NULL
+                );
+                """
+            )
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_recent_promote_comment_fields_used_at "
+                "ON recent_promote_comment_fields(used_at DESC);"
+            )
 
     def _list_recent_text_values(
         self,
@@ -639,6 +651,26 @@ class UploadStore:
             preserve_whitespace=True,
         )
 
+    def list_recent_promote_comment_fields(
+        self, limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT
+    ) -> list[str]:
+        """Последние списки комментариев для продвижения (многострочное поле)."""
+        return self._list_recent_text_values(
+            table="recent_promote_comment_fields",
+            column="content",
+            limit=limit,
+        )
+
+    def remember_promote_comment_field(self, content: str) -> None:
+        """Запомнить содержимое поля комментариев продвижения целиком."""
+        self._remember_recent_text_value(
+            table="recent_promote_comment_fields",
+            column="content",
+            value=content,
+            keep=_RECENT_CHANNEL_SETUP_KEEP,
+            preserve_whitespace=True,
+        )
+
     def delete_uploaded_videos_by_ids(self, database_row_ids: Iterable[int]) -> int:
         """
         Удаляет строки из ``uploaded_videos`` по первичному ключу ``id``.
@@ -935,6 +967,94 @@ class UploadStore:
             if pid and la:
                 out[pid] = la
         return out
+
+    def list_promotable_videos_for_profiles(
+        self, profile_ids: Iterable[str]
+    ) -> list[UploadedVideo]:
+        """
+        По одному уникальному видео на каждый профиль (порядок как в profile_ids).
+
+        Берётся самое свежее залитое видео профиля (любые прошлые сессии), у которого:
+        - есть video_id;
+        - в БД есть просмотры (view_count > 0) — уже опубликовано, не в отложке;
+        - статистика доступна (не stats_unavailable: блок/приват/удалено).
+
+        Профили без подходящего видео пропускаются. Дубликаты video_id — тоже.
+        """
+        ordered: list[str] = []
+        seen_pids: set[str] = set()
+        for x in profile_ids:
+            pid = (x or "").strip()
+            if not pid or pid in seen_pids:
+                continue
+            seen_pids.add(pid)
+            ordered.append(pid)
+        if not ordered:
+            return []
+        ph = ",".join("?" for _ in ordered)
+        with self._connect() as con:
+            rows = con.execute(
+                f"""
+                SELECT
+                    v.id, v.session_id, s.started_at AS session_started_at,
+                    v.uploaded_at, v.title, v.description, v.url, v.video_id,
+                    COALESCE(v.profile_id, '') AS profile_id,
+                    v.view_count, v.like_count, v.comment_count, v.stats_updated_at,
+                    COALESCE(v.stats_unavailable, 0) AS stats_unavailable,
+                    COALESCE(v.stats_unavailable_data_api, 0) AS stats_unavailable_data_api,
+                    v.age_restricted AS age_restricted
+                FROM uploaded_videos v
+                LEFT JOIN upload_sessions s ON s.id = v.session_id
+                WHERE v.profile_id IN ({ph})
+                  AND trim(v.video_id) <> ''
+                  AND COALESCE(v.stats_unavailable, 0) = 0
+                  AND v.view_count IS NOT NULL
+                  AND v.view_count > 0
+                ORDER BY v.uploaded_at DESC, v.id DESC;
+                """,
+                tuple(ordered),
+            ).fetchall()
+        by_profile: dict[str, UploadedVideo] = {}
+        used_vids: set[str] = set()
+        for r in rows:
+            pid = str(r["profile_id"] or "").strip()
+            if not pid or pid in by_profile:
+                continue
+            vid = str(r["video_id"] or "").strip()
+            if not vid or vid in used_vids:
+                continue
+            used_vids.add(vid)
+            by_profile[pid] = UploadedVideo(
+                id=int(r["id"]),
+                session_id=int(r["session_id"]),
+                session_started_at=str(r["session_started_at"])
+                if r["session_started_at"]
+                else None,
+                uploaded_at=str(r["uploaded_at"]),
+                title=str(r["title"] or ""),
+                description=str(r["description"] or ""),
+                url=str(r["url"] or ""),
+                video_id=vid,
+                profile_id=pid,
+                view_count=int(r["view_count"]) if r["view_count"] is not None else None,
+                like_count=int(r["like_count"]) if r["like_count"] is not None else None,
+                comment_count=int(r["comment_count"])
+                if r["comment_count"] is not None
+                else None,
+                stats_updated_at=str(r["stats_updated_at"])
+                if r["stats_updated_at"]
+                else None,
+                stats_unavailable=bool(int(r["stats_unavailable"] or 0)),
+                stats_unavailable_data_api=bool(
+                    int(r["stats_unavailable_data_api"] or 0)
+                ),
+                age_restricted=(
+                    None
+                    if r["age_restricted"] is None
+                    else bool(int(r["age_restricted"]))
+                ),
+            )
+        return [by_profile[pid] for pid in ordered if pid in by_profile]
 
     def profile_upload_pause_remaining_seconds(self, profile_id: str) -> float:
         """

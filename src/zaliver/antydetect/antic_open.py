@@ -10,6 +10,7 @@ from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI
 from zaliver.antydetect.cookie_farm import run_cookie_farm
 from zaliver.log_format import with_log_profile
 from zaliver.youtube_upload.studio import (
+    PromotionTargetVideo,
     YoutubeAllChannelsRemovedError,
     YoutubeStudioError,
     run_studio_channel_description_and_link,
@@ -18,6 +19,7 @@ from zaliver.youtube_upload.studio import (
     run_studio_upload_default_title,
     run_upload_latest_ready_video,
     run_youtube_interface_language_to_russian,
+    run_youtube_profiles_promotion,
     run_youtube_shorts_warmup,
     run_youtube_shorts_warmup_during_upload,
     set_log_sink,
@@ -1440,6 +1442,202 @@ def warmup_youtube_shorts_in_local_antidetect_profile(
             pass
         api.close()
 
+
+@with_log_profile
+def promote_youtube_videos_in_profile(
+    profile_id: str,
+    *,
+    videos: list[PromotionTargetVideo],
+    subscribe_to_channels: bool = False,
+    local_token: str | None = None,
+    headless: bool = True,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    search_oldest_channel: bool = True,
+    shorts_count: int | None = None,
+    like_probability_pct: float | None = None,
+    subscribe_probability_pct: float | None = None,
+    shorts_watch_min_s: float | None = None,
+    shorts_watch_max_s: float | None = None,
+    watch_full_video: bool = False,
+    enable_comments: bool = False,
+    comments: list[str] | None = None,
+    comment_probability_pct: float | None = None,
+) -> None:
+    """Dolphin → Studio → опц. подписки → лента подписок Shorts."""
+    _log(
+        "Dolphin: продвижение. "
+        f"profile_id={profile_id!r}, headless={headless}, "
+        f"videos={len(videos)}, subscribe={subscribe_to_channels}"
+    )
+    api = DolphinAntyLocalAPI()
+    try:
+        tok = (local_token or "").strip()
+        if tok:
+            _log("Dolphin: login_with_token…")
+            api.login_with_token(tok)
+        _log("Dolphin: start_profile…")
+        conn = api.start_profile(profile_id, headless=headless)
+        _log(
+            "Dolphin: профиль запущен. "
+            f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+        )
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_cdp(
+                p, (conn.ws_url(), conn.http_url())
+            )
+            try:
+                kw: dict = {
+                    "videos": videos,
+                    "subscribe_to_channels": subscribe_to_channels,
+                    "viewer_profile_id": profile_id,
+                    "profile_id": profile_id,
+                    "login_credentials": login_credentials,
+                    "yt_oldest_name": yt_oldest_name,
+                    "search_oldest_channel": search_oldest_channel,
+                    "watch_full_video": watch_full_video,
+                    "enable_comments": enable_comments,
+                    "comments": comments,
+                }
+                if shorts_count is not None:
+                    kw["shorts_count"] = shorts_count
+                if like_probability_pct is not None:
+                    kw["like_probability_pct"] = like_probability_pct
+                if subscribe_probability_pct is not None:
+                    kw["subscribe_probability_pct"] = subscribe_probability_pct
+                if shorts_watch_min_s is not None:
+                    kw["shorts_watch_min_s"] = shorts_watch_min_s
+                if shorts_watch_max_s is not None:
+                    kw["shorts_watch_max_s"] = shorts_watch_max_s
+                if comment_probability_pct is not None:
+                    kw["comment_probability_pct"] = comment_probability_pct
+                run_youtube_profiles_promotion(page, **kw)
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        _log(f"Ошибка продвижения: {type(e).__name__}: {e!r}")
+        raise _wrap_exc(e) from e
+    finally:
+        try:
+            api.stop_profile(profile_id)
+        except Exception as e:
+            _log(f"Dolphin: stop_profile: {e!r}")
+        api.close()
+
+
+@with_log_profile
+def promote_youtube_videos_in_local_antidetect_profile(
+    profile_id: str,
+    *,
+    base_url: str,
+    videos: list[PromotionTargetVideo],
+    subscribe_to_channels: bool = False,
+    headless: bool = True,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    search_oldest_channel: bool = True,
+    remote_cdp=None,
+    shorts_count: int | None = None,
+    like_probability_pct: float | None = None,
+    subscribe_probability_pct: float | None = None,
+    shorts_watch_min_s: float | None = None,
+    shorts_watch_max_s: float | None = None,
+    watch_full_video: bool = False,
+    enable_comments: bool = False,
+    comments: list[str] | None = None,
+    comment_probability_pct: float | None = None,
+) -> None:
+    """Локальный антидетект → Studio → опц. подписки → лента подписок Shorts."""
+    _log(
+        "Local antidetect: продвижение. "
+        f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}, "
+        f"videos={len(videos)}, subscribe={subscribe_to_channels}"
+    )
+    from zaliver.antydetect.local_antidetect_api import (
+        LocalAntidetectError,
+        LocalAntidetectHttpAPI,
+    )
+    from zaliver.antydetect.local_active_sessions import (
+        register_local_session,
+        unregister_local_session,
+    )
+
+    api = LocalAntidetectHttpAPI(base_url)
+    session_id: str | None = None
+    started_at = time.perf_counter()
+    try:
+        acc = api.launch_profile(
+            profile_id, headless=headless, expose_cdp=True, remote_cdp=remote_cdp
+        )
+        sid = acc.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+        session_id = sid.strip()
+        bu = (base_url or "").strip() or "http://127.0.0.1:18765"
+        register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
+        ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+        _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_local_session_cdp(
+                p, api, session_id, ws_url
+            )
+            try:
+                studio_kw = _local_studio_workflow_kwargs(
+                    api,
+                    profile_id,
+                    login_credentials=login_credentials,
+                    yt_oldest_name=yt_oldest_name,
+                    search_oldest_channel=search_oldest_channel,
+                )
+                if shorts_count is not None:
+                    studio_kw["shorts_count"] = shorts_count
+                if like_probability_pct is not None:
+                    studio_kw["like_probability_pct"] = like_probability_pct
+                if subscribe_probability_pct is not None:
+                    studio_kw["subscribe_probability_pct"] = subscribe_probability_pct
+                if shorts_watch_min_s is not None:
+                    studio_kw["shorts_watch_min_s"] = shorts_watch_min_s
+                if shorts_watch_max_s is not None:
+                    studio_kw["shorts_watch_max_s"] = shorts_watch_max_s
+                if watch_full_video:
+                    studio_kw["watch_full_video"] = True
+                studio_kw["enable_comments"] = enable_comments
+                studio_kw["comments"] = comments
+                if comment_probability_pct is not None:
+                    studio_kw["comment_probability_pct"] = comment_probability_pct
+                run_youtube_profiles_promotion(
+                    page,
+                    videos=videos,
+                    subscribe_to_channels=subscribe_to_channels,
+                    viewer_profile_id=profile_id,
+                    **studio_kw,
+                )
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        _log(f"Ошибка продвижения: {type(e).__name__}: {e!r}")
+        raise LocalAntidetectError(f"Ошибка продвижения: {e}") from e
+    finally:
+        if session_id:
+            unregister_local_session(profile_id=profile_id)
+            try:
+                api.stop_session(session_id)
+            except Exception:
+                pass
+        try:
+            _log(
+                "Local antidetect: продвижение завершено за "
+                f"{time.perf_counter() - started_at:.1f} с."
+            )
+        except Exception:
+            pass
+        api.close()
 
 @with_log_profile
 def set_youtube_interface_language_in_profile(

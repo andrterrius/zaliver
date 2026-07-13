@@ -120,11 +120,11 @@ class ProfileCookieFarmDialog(QDialog):
 
         watch_row = QHBoxLayout()
         self._watch_min_spin = QSpinBox()
-        self._watch_min_spin.setRange(10, 30)
+        self._watch_min_spin.setRange(10, 600)
         self._watch_min_spin.setValue(10)
         self._watch_min_spin.setSuffix(" с")
         self._watch_max_spin = QSpinBox()
-        self._watch_max_spin.setRange(10, 30)
+        self._watch_max_spin.setRange(10, 600)
         self._watch_max_spin.setValue(30)
         self._watch_max_spin.setSuffix(" с")
         watch_row.addWidget(self._watch_min_spin)

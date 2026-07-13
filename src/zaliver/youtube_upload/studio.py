@@ -8535,6 +8535,28 @@ _SHORTS_SUBSCRIBE_BTN_SELECTORS = (
     "ytd-subscribe-button-renderer button",
     "ytd-reel-player-overlay-renderer #subscribe-button button",
 )
+_YOUTUBE_SUBSCRIPTIONS_FEED_URL = "https://www.youtube.com/feed/subscriptions"
+_SHORTS_COMMENTS_BTN_RE = re.compile(
+    r"view\s+comments|"
+    r"посмотреть\s+комментарии|"
+    r"^comments$|"
+    r"^комментарии$",
+    re.I,
+)
+_SHORTS_COMMENT_PLACEHOLDER_RE = re.compile(
+    r"add\s+a\s+comment|"
+    r"введите\s+комментарий|"
+    r"добавить\s+комментарий",
+    re.I,
+)
+_SHORTS_COMMENT_SUBMIT_RE = re.compile(
+    r"^comment$|"
+    r"leave\s+a\s+comment|"
+    r"оставить\s+комментарий|"
+    r"отправить|"
+    r"^комментировать$",
+    re.I,
+)
 _SHORTS_AD_SELECTORS = (
     "reels-ad-card-buttoned-view-model",
     "yt-ad-metadata-shape",
@@ -8882,12 +8904,209 @@ def _studio_try_subscribe_current_short(page) -> bool:
     return False
 
 
+def _studio_try_comment_current_short(page, comments: list[str]) -> bool:
+    """Открыть комментарии Short, ввести случайный текст и отправить."""
+    texts = [c.strip() for c in (comments or []) if (c or "").strip()]
+    if not texts:
+        _log("Shorts: нет текстов для комментария — пропуск.")
+        return False
+    text = random.choice(texts)
+
+    opened = False
+    # Сначала точные aria-label, иначе легко попасть на лайк/шеринг в action bar.
+    comment_btn_candidates = [
+        page.locator('button[aria-label="Посмотреть комментарии"]'),
+        page.locator('button[aria-label="View comments"]'),
+        page.locator(
+            'button-view-model.ytwReelActionBarViewModelHostDesktopActionButton '
+            'button[aria-label*="комментари" i]'
+        ),
+        page.locator(
+            'button-view-model.ytwReelActionBarViewModelHostDesktopActionButton '
+            'button[aria-label*="comment" i]'
+        ),
+        page.locator(
+            'ytd-reel-player-overlay-renderer button[aria-label*="комментари" i], '
+            'ytd-reel-player-overlay-renderer button[aria-label*="comment" i]'
+        ),
+        page.get_by_role("button", name=_SHORTS_COMMENTS_BTN_RE),
+    ]
+    for loc in comment_btn_candidates:
+        try:
+            count = min(loc.count(), 6)
+        except Exception:
+            count = 1
+        for i in range(max(1, count)):
+            try:
+                btn = loc.nth(i) if count > 1 else loc.first
+                if not btn.is_visible(timeout=1_200):
+                    continue
+                label = (btn.get_attribute("aria-label") or "").strip()
+                if label and (
+                    "коммент" not in label.lower() and "comment" not in label.lower()
+                ):
+                    continue
+                btn.scroll_into_view_if_needed(timeout=2_000)
+                btn.click(timeout=3_000)
+                opened = True
+                _log(f"Shorts: открыли панель комментариев ({label or 'button'}).")
+                page.wait_for_timeout(1_200)
+                break
+            except Exception:
+                continue
+        if opened:
+            break
+    if not opened:
+        _log("Shorts: кнопка комментариев не найдена.")
+        return False
+
+    # Активация поля ввода.
+    activated = False
+    for sel in (
+        "#simplebox-placeholder",
+        "ytd-comment-simplebox-renderer #simplebox-placeholder",
+        "ytd-comments-header-renderer #simplebox-placeholder",
+        "#placeholder-area",
+    ):
+        try:
+            placeholder = page.locator(sel).first
+            if placeholder.is_visible(timeout=2_500):
+                placeholder.click(timeout=3_000)
+                page.wait_for_timeout(500)
+                activated = True
+                break
+        except Exception:
+            continue
+    if not activated:
+        try:
+            page.get_by_role("textbox", name=_SHORTS_COMMENT_PLACEHOLDER_RE).first.click(
+                timeout=3_000
+            )
+            page.wait_for_timeout(500)
+            activated = True
+        except Exception:
+            pass
+
+    typed = False
+    for sel in (
+        "ytd-commentbox #contenteditable-root[contenteditable='true']",
+        "ytd-comment-simplebox-renderer #contenteditable-root",
+        "#contenteditable-root[contenteditable='true']",
+        "ytd-commentbox div#contenteditable-root",
+        'ytd-commentbox div[contenteditable="true"]',
+        'div[contenteditable="true"][aria-label*="комментар" i]',
+        'div[contenteditable="true"][aria-label*="comment" i]',
+    ):
+        try:
+            box = page.locator(sel).first
+            if not box.is_visible(timeout=1_800):
+                continue
+            box.click(timeout=2_000)
+            page.wait_for_timeout(200)
+            try:
+                box.evaluate(
+                    """(el, value) => {
+                        el.focus();
+                        el.textContent = '';
+                        el.dispatchEvent(new InputEvent('input', {bubbles: true}));
+                        el.textContent = value;
+                        el.dispatchEvent(new InputEvent('input', {bubbles: true}));
+                    }""",
+                    text,
+                )
+            except Exception:
+                try:
+                    box.fill("")
+                    box.type(text, delay=20)
+                except Exception:
+                    page.keyboard.type(text, delay=20)
+            typed = True
+            break
+        except Exception:
+            continue
+    if not typed:
+        _log("Shorts: поле ввода комментария не найдено.")
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return False
+
+    page.wait_for_timeout(500)
+    submitted = False
+    submit_candidates = [
+        page.locator('#submit-button button[aria-label="Оставить комментарий"]'),
+        page.locator('#submit-button button[aria-label="Comment"]'),
+        page.locator("ytd-commentbox #submit-button button"),
+        page.locator("#submit-button button"),
+        page.get_by_role("button", name=_SHORTS_COMMENT_SUBMIT_RE),
+    ]
+    for loc in submit_candidates:
+        try:
+            btn = loc.first
+            if not btn.is_visible(timeout=1_800):
+                continue
+            disabled = (btn.get_attribute("aria-disabled") or "").strip().lower()
+            if disabled in ("true", "1"):
+                # текст мог не активировать кнопку — ещё раз input
+                page.wait_for_timeout(300)
+                disabled = (btn.get_attribute("aria-disabled") or "").strip().lower()
+                if disabled in ("true", "1"):
+                    continue
+            btn.click(timeout=3_000)
+            submitted = True
+            page.wait_for_timeout(900)
+            break
+        except Exception:
+            continue
+    if not submitted:
+        _log("Shorts: кнопка отправки комментария не найдена.")
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return False
+
+    _log(f"Shorts: комментарий отправлен ({text!r}).")
+    page.wait_for_timeout(2_000)
+    closed = False
+    for sel in (
+        'button[aria-label="Закрыть"]',
+        'button[aria-label="Close"]',
+        'yt-button-shape button[aria-label="Закрыть"]',
+        'yt-button-shape button[aria-label="Close"]',
+        '#visibility-button button[aria-label="Закрыть"]',
+        'ytd-engagement-panel-title-header-renderer button[aria-label="Закрыть"]',
+        'ytd-engagement-panel-title-header-renderer button[aria-label="Close"]',
+    ):
+        try:
+            btn = page.locator(sel).first
+            if not btn.is_visible(timeout=1_200):
+                continue
+            btn.click(timeout=3_000)
+            closed = True
+            page.wait_for_timeout(500)
+            _log("Shorts: панель комментариев закрыта.")
+            break
+        except Exception:
+            continue
+    if not closed:
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(400)
+            _log("Shorts: панель комментариев — закрыли через Escape.")
+        except Exception:
+            pass
+    return True
+
+
 def _studio_read_shorts_playback_pct(page) -> float | None:
     """Процент просмотра текущего Short (0–100) из scrubber или video."""
     for sel in (
         'yt-progress-bar [role="slider"][aria-valuenow]',
         '#scrubber [role="slider"][aria-valuenow]',
         'desktop-shorts-player-controls [role="slider"][aria-valuenow]',
+        'ytd-reel-video-renderer[is-active] [role="slider"][aria-valuenow]',
     ):
         try:
             loc = page.locator(sel)
@@ -8900,8 +9119,26 @@ def _studio_read_shorts_playback_pct(page) -> float | None:
     try:
         pct = page.evaluate(
             """() => {
-            const v = document.querySelector('#shorts-player video.html5-main-video')
-                || document.querySelector('video.html5-main-video');
+            const pickVideo = () => {
+                const active = document.querySelector(
+                    'ytd-reel-video-renderer[is-active] video, '
+                    + 'ytd-reel-video-renderer[active] video'
+                );
+                if (active) return active;
+                const player = document.querySelector(
+                    '#shorts-player video.html5-main-video, '
+                    + 'video.html5-main-video'
+                );
+                if (player) return player;
+                const all = [...document.querySelectorAll('ytd-reel-video-renderer video, video')];
+                for (const v of all) {
+                    if (!v) continue;
+                    const r = v.getBoundingClientRect();
+                    if (r.width > 80 && r.height > 80 && !v.paused) return v;
+                }
+                return all[0] || null;
+            };
+            const v = pickVideo();
             if (!v || !v.duration || !isFinite(v.duration) || v.duration <= 0) return null;
             return (v.currentTime / v.duration) * 100;
         }"""
@@ -8913,7 +9150,10 @@ def _studio_read_shorts_playback_pct(page) -> float | None:
     try:
         pct = page.evaluate(
             """() => {
-            const el = document.querySelector('.ytProgressBarLineProgressBarPlayed');
+            const el = document.querySelector(
+                'ytd-reel-video-renderer[is-active] .ytProgressBarLineProgressBarPlayed, '
+                + '.ytProgressBarLineProgressBarPlayed'
+            );
             if (!el || !el.style || !el.style.width) return null;
             const m = String(el.style.width).match(/([\\d.]+)%/);
             return m ? parseFloat(m[1]) : null;
@@ -8994,8 +9234,12 @@ def _studio_wait_for_short_full_watch(
     should_stop: Callable[[], bool] | None = None,
     complete_pct: float = _SHORTS_FULL_WATCH_COMPLETE_PCT,
     max_wait_s: float = _SHORTS_FULL_WATCH_MAX_S,
+    expect_video_id: str = "",
 ) -> bool:
     """Ждёт просмотра Short до конца. True — остановка по запросу."""
+    start_id = (expect_video_id or "").strip() or _studio_read_active_short_video_id(
+        page
+    )
     _studio_dismiss_shorts_player_overlays(page)
     paused = _studio_is_shorts_paused(page)
     if paused is True:
@@ -9004,11 +9248,22 @@ def _studio_wait_for_short_full_watch(
     last_pct = -1.0
     stall_rounds = 0
     logged_progress = False
-    _log("Shorts: смотрим ролик до конца…")
+    _log(
+        "Shorts: смотрим ролик до конца…"
+        + (f" ({start_id})" if start_id else "")
+    )
 
     while time.monotonic() < deadline:
         if should_stop and should_stop():
             return True
+
+        cur_id = _studio_read_active_short_video_id(page)
+        if start_id and cur_id and cur_id != start_id:
+            _log(
+                f"Shorts: лента уже перешла на другой ролик "
+                f"({start_id} → {cur_id}) — считаем просмотренным."
+            )
+            return False
 
         pct = _studio_read_shorts_playback_pct(page)
         if pct is not None:
@@ -9085,12 +9340,16 @@ def _studio_browse_youtube_shorts(
     min_watch_s: float = _SHORTS_WARMUP_MIN_WATCH_S,
     max_watch_s: float = _SHORTS_WARMUP_MAX_WATCH_S,
     watch_full_video: bool = False,
+    comment_probability_pct: float = 0.0,
+    comments: list[str] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> None:
     """Просмотр count Shorts: фиксированное время или до конца каждого ролика."""
     n = max(1, int(count))
     like_prob = min(100.0, max(0.0, float(like_probability_pct)))
     subscribe_prob = min(100.0, max(0.0, float(subscribe_probability_pct)))
+    comment_prob = min(100.0, max(0.0, float(comment_probability_pct)))
+    comment_texts = [c.strip() for c in (comments or []) if (c or "").strip()]
     watch_min = max(0.1, float(min_watch_s))
     watch_max = max(watch_min, float(max_watch_s))
 
@@ -9099,6 +9358,8 @@ def _studio_browse_youtube_shorts(
         log_extra += f", лайк {like_prob:g}%"
     if subscribe_prob > 0:
         log_extra += f", подписка {subscribe_prob:g}%"
+    if comment_prob > 0 and comment_texts:
+        log_extra += f", комментарий {comment_prob:g}%"
     if watch_full_video:
         watch_note = "до конца каждого ролика"
     else:
@@ -9106,7 +9367,7 @@ def _studio_browse_youtube_shorts(
     _log(
         f"Shorts: просмотр {n} роликов, "
         f"{watch_note}"
-        f" (лайк/подписка после просмотра{log_extra})…"
+        f" (лайк/подписка/комментарий после просмотра{log_extra})…"
     )
     _studio_wait_shorts_feed_ready(page)
 
@@ -9114,6 +9375,8 @@ def _studio_browse_youtube_shorts(
     watched = 0
     skip_attempts = 0
     max_skip_attempts = max(n * 5, 10)
+    seen_ids: set[str] = set()
+    advance_fail_streak = 0
 
     while watched < n:
         if should_stop and should_stop():
@@ -9121,6 +9384,25 @@ def _studio_browse_youtube_shorts(
             return
 
         _studio_dismiss_shorts_player_overlays(page)
+        cur_id = _studio_read_active_short_video_id(page) or prev_id
+
+        if cur_id and cur_id in seen_ids:
+            skip_attempts += 1
+            if skip_attempts > max_skip_attempts:
+                _log("Shorts: зациклились на уже просмотренных роликах — остановка.")
+                break
+            _log(f"Shorts: уже смотрели {cur_id} — листаем дальше.")
+            next_id = _studio_advance_shorts_feed(
+                page, prev_video_id=cur_id, log_label=""
+            )
+            if next_id and next_id != cur_id:
+                prev_id = next_id
+            else:
+                advance_fail_streak += 1
+                if advance_fail_streak >= 3:
+                    _log("Shorts: не удаётся перейти к новому ролику — остановка.")
+                    break
+            continue
 
         if _studio_is_current_short_an_ad(page):
             skip_attempts += 1
@@ -9129,24 +9411,30 @@ def _studio_browse_youtube_shorts(
                 break
             _log("Shorts: реклама — пролистываем без просмотра.")
             next_id = _studio_advance_shorts_feed(
-                page, prev_video_id=prev_id, log_label=""
+                page, prev_video_id=cur_id or prev_id, log_label=""
             )
             if next_id:
                 prev_id = next_id
             continue
 
         skip_attempts = 0
+        advance_fail_streak = 0
         watched += 1
+        if cur_id:
+            seen_ids.add(cur_id)
+            prev_id = cur_id
         _log(
             f"Shorts: ролик {watched}/{n}"
-            + (f" ({prev_id})" if prev_id else "")
+            + (f" ({cur_id})" if cur_id else "")
         )
 
+        _studio_ensure_shorts_playing(page)
         if watch_full_video:
             if _studio_wait_for_short_full_watch(
                 page,
                 should_stop=should_stop,
                 max_wait_s=max(watch_max, _SHORTS_FULL_WATCH_MAX_S),
+                expect_video_id=cur_id,
             ):
                 _log(f"Shorts: остановка по запросу (просмотрено {watched} из {n}).")
                 return
@@ -9163,17 +9451,38 @@ def _studio_browse_youtube_shorts(
                 page.wait_for_timeout(2_000)
         if subscribe_prob > 0 and random.random() * 100.0 < subscribe_prob:
             _studio_try_subscribe_current_short(page)
+        if (
+            comment_prob > 0
+            and comment_texts
+            and random.random() * 100.0 < comment_prob
+        ):
+            _studio_try_comment_current_short(page, comment_texts)
+            page.wait_for_timeout(600)
 
         if watched >= n:
             break
 
-        next_id = _studio_advance_shorts_feed(
-            page,
-            prev_video_id=prev_id,
-            log_label=f"ролик {watched + 1}/{n}",
-        )
+        next_id = ""
+        for _try in range(4):
+            next_id = _studio_advance_shorts_feed(
+                page,
+                prev_video_id=prev_id,
+                log_label=f"ролик {watched + 1}/{n}" if _try == 0 else "",
+            )
+            if next_id and next_id != prev_id and next_id not in seen_ids:
+                break
+            next_id = ""
         if next_id:
             prev_id = next_id
+            advance_fail_streak = 0
+        else:
+            advance_fail_streak += 1
+            _log(
+                "Shorts: после просмотра не удалось перейти к новому ролику"
+                + (f" (streak={advance_fail_streak})" if advance_fail_streak else "")
+            )
+            if advance_fail_streak >= 3:
+                break
 
     _log(f"Shorts: прогрев завершён (просмотрено {watched} из {n}).")
 
@@ -9847,4 +10156,289 @@ def run_youtube_shorts_warmup_during_upload(
         if should_stop():
             break
     _log("Shorts (параллельно с отложкой): залив профиля завершён — останавливаем прогрев.")
+
+
+@dataclass(frozen=True, slots=True)
+class PromotionTargetVideo:
+    """Одно залитое видео чужого профиля для продвижения."""
+
+    profile_id: str
+    video_id: str
+    url: str = ""
+    title: str = ""
+
+
+def _studio_promotion_open_url(*, url: str, video_id: str) -> str:
+    """URL для открытия: сохранённая ссылка или Shorts/watch по video_id."""
+    u = (url or "").strip()
+    if u and _studio_is_probably_youtube_video_url(u):
+        return u
+    vid = (video_id or "").strip()
+    if not vid:
+        return u
+    # Заливы Zaliver — в основном Shorts; селекторы подписки покрывают и watch.
+    return f"https://www.youtube.com/shorts/{vid}"
+
+
+def run_youtube_profiles_promotion(
+    page,
+    *,
+    videos: list[PromotionTargetVideo],
+    subscribe_to_channels: bool = False,
+    viewer_profile_id: str | None = None,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    on_oldest_channel_name=None,
+    search_oldest_channel: bool = True,
+    profile_id: str | None = None,
+    shorts_count: int = _SHORTS_WARMUP_DEFAULT_COUNT,
+    like_probability_pct: float = _SHORTS_WARMUP_DEFAULT_LIKE_PROB_PCT,
+    subscribe_probability_pct: float = _SHORTS_WARMUP_DEFAULT_SUBSCRIBE_PROB_PCT,
+    shorts_watch_min_s: float = _SHORTS_WARMUP_MIN_WATCH_S,
+    shorts_watch_max_s: float = _SHORTS_WARMUP_MAX_WATCH_S,
+    watch_full_video: bool = False,
+    enable_comments: bool = False,
+    comments: list[str] | None = None,
+    comment_probability_pct: float = 0.0,
+) -> None:
+    """
+    Сначала Creative Studio (аккаунт не заблокирован), затем опционально
+    подписка на каналы по одному видео, затем лента подписок → Shorts
+    (просмотр как при прогреве + опциональные комментарии).
+    """
+    _ = profile_id  # совместимость с studio_kw из antic_open
+    targets = [
+        v
+        for v in videos
+        if (v.video_id or "").strip() or (v.url or "").strip()
+    ]
+
+    _log(
+        "Продвижение: сначала YouTube Studio — проверка, "
+        "что аккаунт не заблокирован…"
+    )
+    _studio_ensure_correct_studio_channel(
+        page,
+        yt_oldest_name=yt_oldest_name,
+        login_credentials=login_credentials,
+        on_oldest_channel_name=on_oldest_channel_name,
+        search_oldest_channel=search_oldest_channel,
+    )
+    # ensure_correct может остаться на youtube.com без Studio — всегда
+    # заходим в Studio и ждём channel/{id} или channel-appeal.
+    _studio_goto_studio_if_needed(page, login_credentials=login_credentials)
+    state = _studio_wait_for_availability_url(
+        page, login_credentials=login_credentials
+    )
+    if state == "appeal":
+        raise YoutubeStudioError(
+            "Продвижение: YouTube Studio открыл channel-appeal — "
+            "канал удалён или заблокирован."
+        )
+    _log(
+        f"Продвижение: Studio OK ({page.url!r}) — переходим на главную YouTube…"
+    )
+    _studio_goto_youtube_home(
+        page, login_credentials=login_credentials, for_channel_scan=False
+    )
+
+    if subscribe_to_channels:
+        if not targets:
+            _log(
+                "Продвижение: галочка подписки включена, но нет целевых видео — "
+                "пропускаем этап подписок."
+            )
+        else:
+            viewer = (viewer_profile_id or "").strip()
+            seen_vids: set[str] = set()
+            opened = 0
+            for idx, target in enumerate(targets, start=1):
+                owner = (target.profile_id or "").strip()
+                if viewer and owner and viewer == owner:
+                    _log(
+                        f"Продвижение [{idx}/{len(targets)}]: своё видео профиля "
+                        f"{owner!r} — пропуск."
+                    )
+                    continue
+                vid = (target.video_id or "").strip()
+                if vid and vid in seen_vids:
+                    _log(
+                        f"Продвижение [{idx}/{len(targets)}]: "
+                        f"дубликат video_id={vid!r} — пропуск."
+                    )
+                    continue
+                if vid:
+                    seen_vids.add(vid)
+                open_url = _studio_promotion_open_url(url=target.url, video_id=vid)
+                if not open_url:
+                    _log(
+                        f"Продвижение [{idx}/{len(targets)}]: пустой URL — пропуск."
+                    )
+                    continue
+                title_note = (target.title or "").strip()
+                _log(
+                    f"Продвижение [{idx}/{len(targets)}]: открываем "
+                    f"video_id={vid!r} (канал профиля {owner!r}"
+                    + (f", «{title_note[:60]}»" if title_note else "")
+                    + f") → {open_url}"
+                )
+                try:
+                    page.goto(
+                        open_url, wait_until="domcontentloaded", timeout=120_000
+                    )
+                except Exception as e:
+                    _log(
+                        f"Продвижение: не удалось открыть {open_url!r}: "
+                        f"{type(e).__name__}: {e!r}"
+                    )
+                    continue
+                page.wait_for_timeout(2_500)
+                opened += 1
+                _studio_try_subscribe_current_short(page)
+                page.wait_for_timeout(800)
+            _log(
+                f"Продвижение: подписки — открыто {opened} из {len(targets)}."
+            )
+
+    _log("Продвижение: лента подписок → полка Shorts → просмотр…")
+    _studio_open_subscriptions_shorts_shelf(page, login_credentials=login_credentials)
+    comment_list = comments if enable_comments else None
+    comment_prob = comment_probability_pct if enable_comments else 0.0
+    _studio_browse_youtube_shorts(
+        page,
+        count=shorts_count,
+        like_probability_pct=like_probability_pct,
+        subscribe_probability_pct=0.0,  # уже лента своих подписок
+        min_watch_s=shorts_watch_min_s,
+        max_watch_s=shorts_watch_max_s,
+        watch_full_video=watch_full_video,
+        comment_probability_pct=comment_prob,
+        comments=comment_list,
+    )
+    _log("Продвижение завершено.")
+
+
+def _studio_open_subscriptions_shorts_shelf(page, *, login_credentials=None) -> None:
+    """
+    https://www.youtube.com/feed/subscriptions → полка Shorts → клик по первому ролику.
+    """
+    _log(f"Продвижение: открываем {_YOUTUBE_SUBSCRIPTIONS_FEED_URL} …")
+    try:
+        page.goto(
+            _YOUTUBE_SUBSCRIPTIONS_FEED_URL,
+            wait_until="domcontentloaded",
+            timeout=120_000,
+        )
+    except Exception as e:
+        raise YoutubeStudioError(
+            f"Продвижение: не удалось открыть ленту подписок: {e}"
+        ) from e
+    if _studio_on_google_auth_page(page) or _studio_login_required(page, fast=True):
+        _studio_try_google_login_if_needed(page, login_credentials)
+    page.wait_for_timeout(1_500)
+
+    shelf = None
+    for attempt in range(8):
+        try:
+            candidates = page.locator(
+                "ytd-rich-shelf-renderer[is-shorts], "
+                "ytd-rich-section-renderer ytd-rich-shelf-renderer"
+            )
+            n = candidates.count()
+            for i in range(min(n, 20)):
+                cand = candidates.nth(i)
+                try:
+                    if not cand.is_visible(timeout=500):
+                        continue
+                except Exception:
+                    continue
+                is_shorts_attr = cand.get_attribute("is-shorts")
+                title = ""
+                try:
+                    title = (
+                        cand.locator("#title").first.inner_text(timeout=800) or ""
+                    ).strip()
+                except Exception:
+                    pass
+                if is_shorts_attr is not None or title.lower() in ("shorts", "short"):
+                    shelf = cand
+                    break
+            if shelf is not None:
+                break
+        except Exception:
+            pass
+        # Подскролл, чтобы полка Shorts подгрузилась.
+        try:
+            page.mouse.wheel(0, 900)
+        except Exception:
+            pass
+        page.wait_for_timeout(800)
+        if attempt == 3:
+            # запасной прямой URL полки Shorts подписок
+            try:
+                page.goto(
+                    "https://www.youtube.com/feed/subscriptions/shorts",
+                    wait_until="domcontentloaded",
+                    timeout=90_000,
+                )
+                page.wait_for_timeout(1_200)
+                # если открылась сетка Shorts — кликнем первый
+                first = page.locator(
+                    'a[href*="/shorts/"].shortsLockupViewModelHostEndpoint, '
+                    'a.reel-item-endpoint[href*="/shorts/"]'
+                ).first
+                if first.is_visible(timeout=3_000):
+                    first.click(timeout=5_000)
+                    page.wait_for_timeout(1_500)
+                    _log("Продвижение: открыли Shorts через /feed/subscriptions/shorts.")
+                    return
+            except Exception:
+                pass
+
+    if shelf is None:
+        raise YoutubeStudioError(
+            "Продвижение: на ленте подписок не найдена полка Shorts."
+        )
+
+    try:
+        shelf.scroll_into_view_if_needed(timeout=5_000)
+    except Exception:
+        pass
+    page.wait_for_timeout(400)
+
+    first_link = shelf.locator(
+        'a[href*="/shorts/"].shortsLockupViewModelHostEndpoint, '
+        'a.reel-item-endpoint[href*="/shorts/"], '
+        'a[href*="/shorts/"]'
+    ).first
+    try:
+        if not first_link.is_visible(timeout=4_000):
+            raise YoutubeStudioError("Первый Short в полке не виден.")
+        first_link.click(timeout=5_000)
+    except Exception as e:
+        # запасной клик «Посмотреть все» и затем первый short
+        try:
+            more = shelf.locator(
+                'a[href*="/feed/subscriptions/shorts"], '
+                'a[aria-label*="Посмотреть все" i], '
+                'a[aria-label*="Show more" i], '
+                'a[aria-label*="View all" i]'
+            ).first
+            if more.is_visible(timeout=1_500):
+                more.click(timeout=4_000)
+                page.wait_for_timeout(1_200)
+                first_link = page.locator(
+                    'a[href*="/shorts/"].shortsLockupViewModelHostEndpoint, '
+                    'a.reel-item-endpoint[href*="/shorts/"]'
+                ).first
+                first_link.click(timeout=5_000)
+            else:
+                raise e
+        except Exception as e2:
+            raise YoutubeStudioError(
+                f"Продвижение: не удалось открыть первый Short из полки: {e2}"
+            ) from e2
+
+    page.wait_for_timeout(1_500)
+    _log("Продвижение: открыт первый Short из полки подписок.")
 

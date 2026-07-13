@@ -957,3 +957,34 @@ QMenu#recentValuesMenu::item {
 QMenu#recentValuesMenu::item:selected {
     background-color: #2d3142;
 }
+
+QLabel#titleVariableToken {
+    color: #a5b4fc;
+    font-weight: 600;
+    font-family: Consolas, "Cascadia Mono", monospace;
+}
+
+QLabel#titleVariableToken:hover {
+    color: #c7d2fe;
+    text-decoration: underline;
+}
+
+QLabel#titleVariableExample {
+    color: #a8b0d4;
+}
+
+QLabel#titleVariableExampleText {
+    color: #c7d2fe;
+    font-family: Consolas, "Cascadia Mono", monospace;
+}
+
+QFrame#titleVariablesExample {
+    background-color: #0f1118;
+    border: 1px solid #6366f1;
+    border-radius: 10px;
+}
+
+QFrame#titleVariableSeparator {
+    color: #2d3142;
+    max-height: 1px;
+}

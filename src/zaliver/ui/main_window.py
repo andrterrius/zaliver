@@ -121,6 +121,12 @@ from zaliver.ui.widgets import (
 from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
 from zaliver.ui.slicing_tab_pane import SlicingTabPane
 from zaliver.ui.channel_edit_tab_pane import ChannelEditTabPane
+from zaliver.ui.title_variables_ui import show_youtube_title_warnings, title_field_with_variables_hint
+from zaliver.title_variables import (
+    TitleVariableContext,
+    expand_and_limit_title,
+    expand_title_variables,
+)
 
 from zaliver.processing.ffmpeg_merge import (
     MACOS_BREW_FFMPEG_FORMULA,
@@ -3013,7 +3019,8 @@ class MainWindow(QWidget):
         title_le = title_edit.lineEdit()
         if title_le is not None:
             title_le.setPlaceholderText(
-                "Название видео (обязательное для загрузки в YouTube)…"
+                "Название видео (обязательное для загрузки в YouTube). "
+                "Можно использовать переменные: {date}, {profile}, {video}, {index}…"
             )
         for recent_title in self._upload_store.list_recent_upload_titles():
             title_edit.addItem(recent_title)
@@ -3044,15 +3051,22 @@ class MainWindow(QWidget):
             "остаётся значение из настроек канала или имени файла."
         )
 
+        title_row, btn_title_hints = title_field_with_variables_hint(
+            title_edit,
+            parent=dlg,
+        )
+
         def _sync_keep_studio_title_ui(checked: bool) -> None:
             title_edit.setEnabled(not checked)
+            btn_title_hints.setEnabled(not checked)
             if checked and title_le is not None:
                 title_le.setPlaceholderText(
                     "Название не вводится — берётся из Studio (настройки канала или имя файла)…"
                 )
             elif title_le is not None:
                 title_le.setPlaceholderText(
-                    "Название видео (обязательное для загрузки в YouTube)…"
+                    "Название видео (обязательное для загрузки в YouTube). "
+                    "Можно использовать переменные: {date}, {profile}, {video}, {index}…"
                 )
 
         keep_studio_title_cb.toggled.connect(_sync_keep_studio_title_ui)
@@ -3439,7 +3453,7 @@ class MainWindow(QWidget):
         btns.rejected.connect(dlg.reject)
 
         grid.addWidget(QLabel("Название:"), 0, 0)
-        grid.addWidget(title_edit, 0, 1)
+        grid.addWidget(title_row, 0, 1)
         grid.addWidget(
             QLabel("Описание:"),
             1,
@@ -3515,6 +3529,7 @@ class MainWindow(QWidget):
             schedule_times_iso = [t.isoformat() for t in sorted(schedule_times_msk)]
         title = (title_edit.currentText() or "").strip()
         if title and not keep_studio_title:
+            show_youtube_title_warnings(self, [title])
             self._upload_store.remember_upload_title(title)
         description = (desc_edit.toPlainText() or "").strip()
         picked = dlg_interaction.batch_profile_ids()
@@ -4957,6 +4972,13 @@ class MainWindow(QWidget):
         has_video_title_fill = tab.has_video_default_title()
         has_customization = tab.has_profile_customization()
 
+        if has_video_title_fill:
+            show_youtube_title_warnings(
+                self,
+                tab.video_default_titles_for_remember(),
+                window_title="Редактирование канала",
+            )
+
         if not has_text_fill and not has_video_title_fill and not has_customization:
             return
 
@@ -5086,17 +5108,47 @@ class MainWindow(QWidget):
                 by_id[pid] = item
         profile_index = {pid: i for i, pid in enumerate(profile_ids)}
 
+        def _profile_name_for(pid: str) -> str:
+            item = by_id.get(pid)
+            if item:
+                name = str(item.get("profile_name") or "").strip()
+                if name:
+                    return name
+            for p in self._profiles_raw or []:
+                if isinstance(p, dict) and _profile_id(p) == pid:
+                    return _profile_name(p)
+            return pid
+
+        def _expand_channel_field(
+            text: str | None,
+            pid: str,
+            *,
+            limit_title: bool = False,
+        ) -> str:
+            raw = (text or "").strip()
+            if not raw:
+                return ""
+            ctx = TitleVariableContext(
+                profile_name=_profile_name_for(pid),
+                video_path="",
+                index=profile_index.get(pid, 0) + 1,
+            )
+            if limit_title:
+                return expand_and_limit_title(raw, ctx).title
+            return expand_title_variables(raw, ctx)
+
         def _description_for_profile(pid: str) -> str:
             item = by_id.get(pid)
             if item:
                 row_desc = str(item.get("channel_description") or "").strip()
                 if row_desc:
-                    return row_desc
+                    return _expand_channel_field(row_desc, pid)
             if description_lines:
-                return description_lines[
+                line = description_lines[
                     profile_index.get(pid, 0) % len(description_lines)
                 ]
-            return (description or "").strip()
+                return _expand_channel_field(line, pid)
+            return _expand_channel_field(description, pid)
 
         def _setup_one(pid: str) -> None:
             creds = self._profile_login_credentials(pid)
@@ -5111,11 +5163,18 @@ class MainWindow(QWidget):
                     tf.write(bytes(png))
                     avatar_path = Path(tf.name)
             channel_name = (
-                str(item.get("channel_name") or "").strip() or None if item else None
+                _expand_channel_field(str(item.get("channel_name") or ""), pid) or None
+                if item
+                else None
             )
             skip_name_change = bool(item.get("skip_name_change")) if item else False
             video_default_title = (
-                str(item.get("video_default_title") or "").strip() or None
+                _expand_channel_field(
+                    str(item.get("video_default_title") or ""),
+                    pid,
+                    limit_title=True,
+                )
+                or None
                 if item
                 else None
             )
@@ -7723,6 +7782,7 @@ class MainWindow(QWidget):
 
             from zaliver.youtube_upload.multi_uploader import (
                 MultiProfileUploader,
+                ScheduledUploadItem,
                 VideoTask,
             )
             from zaliver.youtube_upload.studio import _studio_canonical_watch_url
@@ -7762,6 +7822,22 @@ class MainWindow(QWidget):
                 pending.get("schedule_warmup_search_query") or ""
             ).strip()
 
+            upload_var_index = {"n": 0}
+            upload_var_index_lock = threading.Lock()
+
+            def _next_upload_var_index() -> int:
+                with upload_var_index_lock:
+                    upload_var_index["n"] += 1
+                    return upload_var_index["n"]
+
+            def _profile_display_name(profile_id: str) -> str:
+                for p in self._profiles_raw or []:
+                    if not isinstance(p, dict):
+                        continue
+                    if _profile_id(p) == profile_id:
+                        return _profile_name(p)
+                return profile_id
+
             def _upload_one(profile_id: str, task: VideoTask) -> None:
                 from zaliver.antydetect.antic_open import (
                     open_google_in_local_antidetect_profile,
@@ -7787,6 +7863,50 @@ class MainWindow(QWidget):
                 task_scheduled = (
                     task.schedule_publish_at is not None or task.scheduled_batch
                 )
+                var_ctx = TitleVariableContext(
+                    profile_name=_profile_display_name(profile_id),
+                    video_path=task.video_path,
+                    index=_next_upload_var_index(),
+                )
+                title_result = expand_and_limit_title(task.title, var_ctx)
+                resolved_title = title_result.title
+                if title_result.truncated:
+                    try:
+                        self._ui_log_line.emit(
+                            "[upload] Название обрезано до 100 символов "
+                            f"(было {title_result.original_length})."
+                        )
+                    except Exception:
+                        pass
+                resolved_description = expand_title_variables(task.description, var_ctx)
+                resolved_scheduled_batch = None
+                if task.scheduled_batch:
+                    resolved_scheduled_batch = []
+                    for item in task.scheduled_batch:
+                        item_ctx = TitleVariableContext(
+                            profile_name=_profile_display_name(profile_id),
+                            video_path=item.video_path,
+                            index=_next_upload_var_index(),
+                        )
+                        item_title_result = expand_and_limit_title(item.title, item_ctx)
+                        if item_title_result.truncated:
+                            try:
+                                self._ui_log_line.emit(
+                                    "[upload] Название обрезано до 100 символов "
+                                    f"(было {item_title_result.original_length})."
+                                )
+                            except Exception:
+                                pass
+                        resolved_scheduled_batch.append(
+                            ScheduledUploadItem(
+                                video_path=item.video_path,
+                                title=item_title_result.title,
+                                description=expand_title_variables(
+                                    item.description, item_ctx
+                                ),
+                                schedule_publish_at=item.schedule_publish_at,
+                            )
+                        )
                 warmup_kw = {}
                 if schedule_warmup_shorts and task_scheduled:
                     warmup_kw = dict(
@@ -7802,15 +7922,15 @@ class MainWindow(QWidget):
                 open_kw = dict(
                     headless=headless,
                     video_path=task.video_path,
-                    title=task.title,
-                    description=task.description,
+                    title=resolved_title,
+                    description=resolved_description,
                     login_credentials=creds,
                     yt_oldest_name=yt_oldest,
                     search_oldest_channel=search_oldest,
                     publish_before_checks=publish_before_checks,
                     keep_studio_title=keep_studio_title,
                     schedule_publish_at=task.schedule_publish_at,
-                    scheduled_batch=task.scheduled_batch,
+                    scheduled_batch=resolved_scheduled_batch,
                     stats_server_username=guser or None,
                     **warmup_kw,
                 )
@@ -7935,7 +8055,8 @@ class MainWindow(QWidget):
                             f"{len(batch_results)} results vs "
                             f"{len(task.scheduled_batch)} tasks"
                         )
-                    for item, item_res in zip(task.scheduled_batch, batch_results):
+                    items_for_record = resolved_scheduled_batch or task.scheduled_batch
+                    for item, item_res in zip(items_for_record, batch_results):
                         _record_one(
                             video_path=item.video_path,
                             title=item.title,
@@ -7946,8 +8067,8 @@ class MainWindow(QWidget):
                 else:
                     _record_one(
                         video_path=task.video_path,
-                        title=task.title,
-                        description=task.description,
+                        title=resolved_title,
+                        description=resolved_description,
                         one_res=res,
                         schedule_publish_at=task.schedule_publish_at,
                     )

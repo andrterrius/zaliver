@@ -39,6 +39,7 @@ from zaliver.ui.channel_setup_helpers import (
     pixmap_from_png,
     recent_editable_combo,
 )
+from zaliver.ui.title_variables_ui import show_youtube_title_warnings, title_field_with_variables_hint
 from zaliver.ui.widgets import AnimatedProgressBar, CollapsibleSection
 
 _PREVIEW_VIEWPORT_MARGIN = 20
@@ -110,7 +111,11 @@ class ProfileChannelSetupDialog(QDialog):
             recent=list(recent_channel_descriptions or []),
         )
         self._desc_edit.currentTextChanged.connect(self._on_channel_fields_changed)
-        desc_section.content_layout().addWidget(self._desc_edit)
+        desc_row, self._btn_desc_hints = title_field_with_variables_hint(
+            self._desc_edit,
+            parent=self,
+        )
+        desc_section.content_layout().addWidget(desc_row)
         sections.addWidget(desc_section)
 
         link_section = CollapsibleSection("Ссылка")
@@ -132,11 +137,18 @@ class ProfileChannelSetupDialog(QDialog):
 
         video_title_section = CollapsibleSection("Название для видео")
         self._video_title_edit = recent_editable_combo(
-            placeholder="Название или несколько через запятую, ; или с новой строки…",
+            placeholder=(
+                "Название или несколько через запятую, ; или с новой строки. "
+                "Переменные: {date}, {profile}, {video}, {index}…"
+            ),
             recent=list(recent_video_default_titles or []),
         )
         self._video_title_edit.currentTextChanged.connect(self._on_video_titles_text_changed)
-        video_title_section.content_layout().addWidget(self._video_title_edit)
+        video_title_row, self._btn_video_title_hints = title_field_with_variables_hint(
+            self._video_title_edit,
+            parent=self,
+        )
+        video_title_section.content_layout().addWidget(video_title_row)
 
         video_titles_row = QHBoxLayout()
         self._video_titles_source_label_widget = QLabel("Список не задан")
@@ -205,7 +217,11 @@ class ProfileChannelSetupDialog(QDialog):
             recent=list(recent_channel_names or []),
         )
         self._names_edit.currentTextChanged.connect(self._on_names_text_changed)
-        names_section.content_layout().addWidget(self._names_edit)
+        names_row, self._btn_names_hints = title_field_with_variables_hint(
+            self._names_edit,
+            parent=self,
+        )
+        names_section.content_layout().addWidget(names_row)
 
         names_row = QHBoxLayout()
         self._names_source_label_widget = QLabel("Список не задан")
@@ -873,6 +889,13 @@ class ProfileChannelSetupDialog(QDialog):
                 "Для ссылки нужны и название, и URL.",
             )
             return
+
+        if video_titles:
+            show_youtube_title_warnings(
+                self,
+                video_titles,
+                window_title=self._dialog_title(),
+            )
 
         msg_parts: list[str] = []
         if desc or (link_title and link_url):

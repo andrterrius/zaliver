@@ -40,6 +40,7 @@ from zaliver.ui.channel_setup_helpers import (
     format_source_files,
     recent_picker_has_items,
 )
+from zaliver.ui.title_variables_ui import attach_variables_hint_button
 from zaliver.ui.widgets import AnimatedProgressBar, ToggleSwitch
 
 _TEXT_MIN_H = 120
@@ -421,6 +422,11 @@ class ChannelEditTabPane(QWidget):
             tooltip="Недавние описания канала",
             on_filled=self._on_channel_fields_changed,
         )
+        self._btn_desc_hints = attach_variables_hint_button(
+            desc_field_row,
+            parent=self,
+            field=self._desc_edit,
+        )
         desc_l.addWidget(desc_field_row)
 
         self._names_box = QGroupBox()
@@ -445,6 +451,11 @@ class ChannelEditTabPane(QWidget):
             recent=self._recent_channel_names,
             tooltip="Недавние названия каналов",
             on_filled=self._on_names_text_changed,
+        )
+        self._btn_names_hints = attach_variables_hint_button(
+            names_field_row,
+            parent=self,
+            field=self._names_edit,
         )
         names_l.addWidget(names_field_row)
 
@@ -520,7 +531,7 @@ class ChannelEditTabPane(QWidget):
         body_l.setSpacing(2)
         body_l.setContentsMargins(0, 0, 0, 0)
         self._video_title_edit = self._compact_text_edit(
-            "Название по умолчанию при загрузке…",
+            "Название по умолчанию при загрузке. Переменные: {date}, {profile}, {video}, {index}…",
             fixed_height=_TEXT_FIELD_H,
         )
         self._video_title_edit.textChanged.connect(self._on_video_titles_text_changed)
@@ -529,6 +540,11 @@ class ChannelEditTabPane(QWidget):
             recent=self._recent_video_titles,
             tooltip="Недавние названия для видео",
             on_filled=self._on_video_titles_text_changed,
+        )
+        self._btn_video_title_hints = attach_variables_hint_button(
+            video_field_row,
+            parent=self,
+            field=self._video_title_edit,
         )
         body_l.addWidget(video_field_row, 1)
 
@@ -569,12 +585,14 @@ class ChannelEditTabPane(QWidget):
         self._desc_recent_combo.setEnabled(
             self._toggle_desc.isChecked() and recent_picker_has_items(self._desc_recent_combo)
         )
+        self._btn_desc_hints.setEnabled(self._toggle_desc.isChecked())
 
         names_on = self._toggle_names.isChecked()
         self._names_edit.setEnabled(names_on)
         self._names_recent_combo.setEnabled(
             names_on and recent_picker_has_items(self._names_recent_combo)
         )
+        self._btn_names_hints.setEnabled(names_on)
         self._btn_pick_names.setEnabled(names_on and not self._is_detecting())
         self._shuffle_names.setEnabled(names_on)
 
@@ -593,6 +611,7 @@ class ChannelEditTabPane(QWidget):
         self._video_title_recent_combo.setEnabled(
             vt_on and recent_picker_has_items(self._video_title_recent_combo)
         )
+        self._btn_video_title_hints.setEnabled(vt_on)
         self._btn_pick_video_titles.setEnabled(vt_on and not self._is_detecting())
         self._shuffle_video_titles.setEnabled(vt_on)
 

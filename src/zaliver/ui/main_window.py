@@ -809,8 +809,6 @@ class MainWindow(QWidget):
     _studio_channel_setup_finished = pyqtSignal(int, int)
     _studio_warmup_progress = pyqtSignal(int, int, str)
     _studio_warmup_finished = pyqtSignal(int, int)
-    _studio_language_progress = pyqtSignal(int, int, str)
-    _studio_language_finished = pyqtSignal(int, int)
     _studio_cookie_farm_progress = pyqtSignal(int, int, str)
     _studio_cookie_farm_finished = pyqtSignal(int, int)
     _zaliver_profile_tags_clear_progress = pyqtSignal(int, int, str)
@@ -852,14 +850,12 @@ class MainWindow(QWidget):
         self._profiles_channel_setup_running = False
         self._profiles_warmup_running = False
         self._profiles_cookie_farm_running = False
-        self._profiles_language_running = False
         self._profiles_tags_clear_running = False
         self._profiles_refresh_running = False
         self._last_availability_failed_ids: list[str] = []
         self._last_channel_setup_failed_ids: list[str] = []
         self._last_warmup_failed_ids: list[str] = []
         self._last_cookie_farm_failed_ids: list[str] = []
-        self._last_language_failed_ids: list[str] = []
         self._build_ui()
         self._bootstrap_fd_limits()
         self._ui_log_line.connect(self._route_ui_log_line)
@@ -895,8 +891,6 @@ class MainWindow(QWidget):
         self._studio_warmup_finished.connect(self._on_studio_warmup_finished)
         self._studio_cookie_farm_progress.connect(self._on_studio_cookie_farm_progress)
         self._studio_cookie_farm_finished.connect(self._on_studio_cookie_farm_finished)
-        self._studio_language_progress.connect(self._on_studio_language_progress)
-        self._studio_language_finished.connect(self._on_studio_language_finished)
         self._zaliver_profile_tags_clear_progress.connect(
             self._on_zaliver_profile_tags_clear_progress
         )
@@ -959,20 +953,34 @@ class MainWindow(QWidget):
 
         io = QGroupBox("Файлы и папка результата")
         io_grid = QGridLayout(io)
-        btn_pick_files = QPushButton("Выбрать файлы…")
-        btn_pick_files.setObjectName("secondary")
-        btn_pick_files.clicked.connect(self._browse_input_files)
+        self._btn_pick_input_files = QPushButton("Выбрать файлы…")
+        self._btn_pick_input_files.setObjectName("secondary")
+        self._btn_pick_input_files.clicked.connect(self._browse_input_files)
+        self._btn_add_input_files = QPushButton("Добавить еще файлы…")
+        self._btn_add_input_files.setObjectName("secondary")
+        self._btn_add_input_files.clicked.connect(self._add_input_files)
+        self._btn_clear_input_files = QPushButton("Очистить")
+        self._btn_clear_input_files.setObjectName("secondary")
+        self._btn_clear_input_files.clicked.connect(self._clear_input_files)
+        input_files_btns = QHBoxLayout()
+        input_files_btns.setContentsMargins(0, 0, 0, 0)
+        input_files_btns.setSpacing(6)
+        input_files_btns.addWidget(self._btn_pick_input_files)
+        input_files_btns.addWidget(self._btn_add_input_files)
+        input_files_btns.addWidget(self._btn_clear_input_files)
+        input_files_btns_w = QWidget()
+        input_files_btns_w.setLayout(input_files_btns)
         self._input_files_hint = QLabel("")
         self._input_files_hint.setObjectName("hint")
         self._input_files_hint.setWordWrap(True)
         self.output_dir_edit = QLineEdit()
         self.output_dir_edit.setPlaceholderText("Папка для уникализированных файлов…")
-        btn_out = QPushButton("Обзор…")
+        btn_out = QPushButton("Выходная папка…")
         btn_out.setObjectName("secondary")
         btn_out.clicked.connect(self._browse_output_dir)
         io_grid.addWidget(QLabel("Исходные видео:"), 0, 0)
         io_grid.addWidget(self._input_files_hint, 0, 1)
-        io_grid.addWidget(btn_pick_files, 0, 2)
+        io_grid.addWidget(input_files_btns_w, 0, 2)
         io_grid.addWidget(QLabel("Выходная папка:"), 1, 0)
         io_grid.addWidget(self.output_dir_edit, 1, 1)
         io_grid.addWidget(btn_out, 1, 2)
@@ -1028,8 +1036,13 @@ class MainWindow(QWidget):
         self.btn_remove_music.setObjectName("secondary")
         self.btn_remove_music.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_remove_music.clicked.connect(self._remove_selected_music)
+        self.btn_clear_music = QPushButton("Очистить")
+        self.btn_clear_music.setObjectName("secondary")
+        self.btn_clear_music.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_clear_music.clicked.connect(self._clear_background_music)
         music_btns.addWidget(self.btn_add_music)
         music_btns.addWidget(self.btn_remove_music)
+        music_btns.addWidget(self.btn_clear_music)
         music_btns.addStretch()
         mw_music = QWidget()
         mw_music.setLayout(music_btns)
@@ -1861,18 +1874,6 @@ class MainWindow(QWidget):
             "Режим Headless из настроек; параллельность — в «Настройках»."
         )
         self._btn_profiles_cookie_farm.clicked.connect(self._start_profiles_cookie_farm)
-        self._btn_profiles_change_language = QPushButton("Поменять язык")
-        self._btn_profiles_change_language.setObjectName("secondary")
-        self._btn_profiles_change_language.setAutoDefault(False)
-        self._btn_profiles_change_language.setDefault(False)
-        self._btn_profiles_change_language.setToolTip(
-            "Открывает отмеченные профили, заходит на главную YouTube, "
-            "переключает язык интерфейса на «Русский» и закрывает профиль. "
-            "Число параллельных браузеров — в разделе «Настройки»."
-        )
-        self._btn_profiles_change_language.clicked.connect(
-            self._start_profiles_language_change
-        )
         self._btn_profiles_clear_zaliver_tags = QPushButton("Очистить теги залива")
         self._btn_profiles_clear_zaliver_tags.setObjectName("secondary")
         self._btn_profiles_clear_zaliver_tags.setAutoDefault(False)
@@ -1880,7 +1881,7 @@ class MainWindow(QWidget):
         self._btn_profiles_clear_zaliver_tags.setToolTip(
             "С отмеченных профилей снимает служебные теги Zaliver "
             "(ошибки залива, проверки Studio, смены аватарки/названия, прогрева, "
-            "фарма Cookie, смены языка "
+            "фарма Cookie "
             "и заполнения канала и т.д.). Только свой антидетект."
         )
         self._btn_profiles_clear_zaliver_tags.clicked.connect(
@@ -1889,7 +1890,6 @@ class MainWindow(QWidget):
         profiles_actions_row.addWidget(self._btn_profiles_channel_setup)
         profiles_actions_row.addWidget(self._btn_profiles_warmup)
         profiles_actions_row.addWidget(self._btn_profiles_cookie_farm)
-        profiles_actions_row.addWidget(self._btn_profiles_change_language)
         profiles_actions_row.addWidget(self._btn_profiles_check_availability)
         profiles_actions_row.addWidget(self._btn_profiles_import_accounts)
         profiles_actions_row.addStretch()
@@ -1998,7 +1998,7 @@ class MainWindow(QWidget):
         gmc = QVBoxLayout(self._gb_max_concurrent_browsers)
         browsers_hint = QLabel(
             "Максимум одновременно открытых браузеров при заливке, проверке Studio, "
-            "редактировании каналов, прогреве и смене языка."
+            "редактировании каналов и прогреве."
         )
         browsers_hint.setObjectName("hint")
         browsers_hint.setWordWrap(True)
@@ -3966,7 +3966,6 @@ class MainWindow(QWidget):
             or self._profiles_channel_setup_running
             or self._profiles_warmup_running
             or self._profiles_cookie_farm_running
-            or self._profiles_language_running
             or self._profiles_tags_clear_running
             or self._profiles_refresh_running
         )
@@ -3980,8 +3979,6 @@ class MainWindow(QWidget):
             self._btn_profiles_warmup.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_cookie_farm"):
             self._btn_profiles_cookie_farm.setEnabled(not busy)
-        if hasattr(self, "_btn_profiles_change_language"):
-            self._btn_profiles_change_language.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_refresh"):
             self._btn_profiles_refresh.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_import_accounts"):
@@ -4947,14 +4944,14 @@ class MainWindow(QWidget):
 
         description = tab.channel_description()
         description_lines = tab.channel_description_lines()
+        channel_links = tab.channel_links()
         link_title = tab.channel_link_title()
         link_url = tab.channel_link_url()
         if description.strip():
             self._upload_store.remember_channel_description(tab.channel_description_field_text())
-        if link_title:
-            self._upload_store.remember_channel_link_title(link_title)
-        if link_url:
-            self._upload_store.remember_channel_link_url(link_url)
+        for lt, lu in channel_links:
+            self._upload_store.remember_channel_link_title(lt)
+            self._upload_store.remember_channel_link_url(lu)
         video_default_titles = tab.video_default_titles_for_remember()
         if video_default_titles:
             for vt in video_default_titles:
@@ -4972,6 +4969,7 @@ class MainWindow(QWidget):
         has_text_fill = tab.has_channel_text_fill()
         has_video_title_fill = tab.has_video_default_title()
         has_customization = tab.has_profile_customization()
+        change_language = tab.change_language_before_edit()
 
         if has_video_title_fill:
             show_youtube_title_warnings(
@@ -4980,7 +4978,12 @@ class MainWindow(QWidget):
                 window_title="Редактирование канала",
             )
 
-        if not has_text_fill and not has_video_title_fill and not has_customization:
+        if (
+            not has_text_fill
+            and not has_video_title_fill
+            and not has_customization
+            and not change_language
+        ):
             return
 
         confirm_msg = tab.confirm_message_for_profiles(len(selected_profiles))
@@ -5028,12 +5031,13 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, title, str(e))
             return
 
+        assignment_ids = {
+            str(a.get("profile_id") or "").strip() for a in assignments
+        }
         work_profile_ids = [
             pid
             for pid in profile_ids
-            if has_text_fill
-            or pid
-            in {str(a.get("profile_id") or "").strip() for a in assignments}
+            if has_text_fill or change_language or pid in assignment_ids
         ]
         if not work_profile_ids:
             return
@@ -5047,7 +5051,9 @@ class MainWindow(QWidget):
         max_concurrent = self._max_concurrent_browsers()
         self._append_log(
             f"[channel_setup] Старт для {len(work_profile_ids)} профилей "
-            f"(с окном браузера, до {max_concurrent} параллельно)…"
+            f"(с окном браузера, до {max_concurrent} параллельно"
+            + (", со сменой языка" if change_language else "")
+            + ")…"
         )
 
         threading.Thread(
@@ -5062,8 +5068,10 @@ class MainWindow(QWidget):
                 "description_lines": description_lines,
                 "link_title": link_title,
                 "link_url": link_url,
+                "channel_links": channel_links,
                 "assignments": assignments,
                 "has_text_fill": has_text_fill,
+                "change_language": change_language,
                 "remote_cdp": remote_cdp,
                 "max_concurrent": max_concurrent,
             },
@@ -5085,8 +5093,10 @@ class MainWindow(QWidget):
         description_lines: list[str],
         link_title: str,
         link_url: str,
+        channel_links: list[tuple[str, str]] | None = None,
         assignments: list[dict[str, object]],
         has_text_fill: bool,
+        change_language: bool = False,
         remote_cdp: RemoteCdpLaunchOptions | None = None,
         max_concurrent: int = DEFAULT_MAX_CONCURRENT_BROWSERS,
     ) -> None:
@@ -5194,10 +5204,12 @@ class MainWindow(QWidget):
                         description=profile_description or None if has_text_fill else None,
                         link_title=link_title if has_text_fill else None,
                         link_url=link_url if has_text_fill else None,
+                        channel_links=channel_links if has_text_fill else None,
                         video_default_title=video_default_title if has_video_title_fill else None,
                         avatar_path=avatar_path,
                         channel_name=channel_name,
                         skip_name_change=skip_name_change,
+                        change_language=change_language,
                         base_url=u,
                         headless=headless,
                         login_credentials=creds,
@@ -5211,10 +5223,12 @@ class MainWindow(QWidget):
                         description=profile_description or None if has_text_fill else None,
                         link_title=link_title if has_text_fill else None,
                         link_url=link_url if has_text_fill else None,
+                        channel_links=channel_links if has_text_fill else None,
                         video_default_title=video_default_title if has_video_title_fill else None,
                         avatar_path=avatar_path,
                         channel_name=channel_name,
                         skip_name_change=skip_name_change,
+                        change_language=change_language,
                         local_token=token or None,
                         headless=headless,
                         login_credentials=creds,
@@ -5239,6 +5253,8 @@ class MainWindow(QWidget):
                 AVATAR_CHANGE_SUCCESS_TAG,
                 DESCRIPTION_FILL_ERROR_TAG,
                 DESCRIPTION_FILL_SUCCESS_TAG,
+                LANGUAGE_CHANGE_ERROR_TAG,
+                LANGUAGE_CHANGE_SUCCESS_TAG,
                 LINK_FILL_ERROR_TAG,
                 LINK_FILL_SUCCESS_TAG,
                 NAME_CHANGE_ERROR_TAG,
@@ -5248,12 +5264,18 @@ class MainWindow(QWidget):
             )
 
             updates: list[tuple[bool, str, str]] = []
+            if change_language:
+                updates.append(
+                    (ok, LANGUAGE_CHANGE_SUCCESS_TAG, LANGUAGE_CHANGE_ERROR_TAG)
+                )
             if has_text_fill:
                 if _description_for_profile(pid):
                     updates.append(
                         (ok, DESCRIPTION_FILL_SUCCESS_TAG, DESCRIPTION_FILL_ERROR_TAG)
                     )
-                if (link_title or "").strip() and (link_url or "").strip():
+                if (channel_links or []) or (
+                    (link_title or "").strip() and (link_url or "").strip()
+                ):
                     updates.append((ok, LINK_FILL_SUCCESS_TAG, LINK_FILL_ERROR_TAG))
 
             item = by_id.get(pid)
@@ -5881,161 +5903,6 @@ class MainWindow(QWidget):
         ok_n, fail_n, failed_ids = mgr.run()
         self._last_cookie_farm_failed_ids = list(failed_ids)
         self._studio_cookie_farm_finished.emit(ok_n, fail_n)
-
-    def _start_profiles_language_change(self) -> None:
-        if self._profiles_language_running:
-            QMessageBox.information(
-                self,
-                "Смена языка",
-                "Смена языка уже выполняется. Дождитесь завершения.",
-            )
-            return
-        if self._profiles_raw is None:
-            QMessageBox.warning(
-                self,
-                "Смена языка",
-                "Сначала загрузите список профилей (кнопка «Обновить»).",
-            )
-            return
-        profile_ids = self._collect_checked_profile_ids()
-        if not profile_ids:
-            QMessageBox.warning(
-                self,
-                "Смена языка",
-                "Отметьте квадратиками профили, для которых нужно сменить язык YouTube.",
-            )
-            return
-
-        token = (self._dolphin_token.text() or "").strip()
-        if not token:
-            token = (
-                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
-            ).strip()
-        kind = self._default_browser_combo.currentData()
-        if not isinstance(kind, str) or not kind.strip():
-            kind = "dolphin"
-        base_url = self._own_antidetect_base_url_from_settings(kind)
-
-        headless = True
-        if hasattr(self, "_dolphin_headless"):
-            headless = bool(self._dolphin_headless.isChecked())
-        else:
-            headless = bool(
-                self._settings.value("antydetect/dolphin_headless", True, type=bool)
-            )
-
-        try:
-            remote_cdp = self._remote_cdp_launch_options_for_kind(kind)
-        except LocalAntidetectError as e:
-            QMessageBox.warning(self, "Смена языка", str(e))
-            return
-
-        max_concurrent = self._max_concurrent_browsers()
-
-        self._profiles_language_running = True
-        self._sync_profiles_tab_action_buttons()
-        self._profiles_status.setText(
-            f"Смена языка YouTube: 0 / {len(profile_ids)}…"
-        )
-        headless_label = "headless" if headless else "с окном браузера"
-        self._append_log(
-            f"[language] Старт для {len(profile_ids)} профилей "
-            f"({headless_label}, до {max_concurrent} параллельно)…"
-        )
-
-        threading.Thread(
-            target=self._profiles_language_worker,
-            kwargs={
-                "profile_ids": profile_ids,
-                "kind": kind,
-                "token": token,
-                "base_url": base_url,
-                "headless": headless,
-                "remote_cdp": remote_cdp,
-                "max_concurrent": max_concurrent,
-            },
-            daemon=True,
-        ).start()
-
-    def _profiles_language_worker(
-        self,
-        *,
-        profile_ids: list[str],
-        kind: str,
-        token: str,
-        base_url: str,
-        headless: bool,
-        remote_cdp: RemoteCdpLaunchOptions | None = None,
-        max_concurrent: int = DEFAULT_MAX_CONCURRENT_BROWSERS,
-    ) -> None:
-        from zaliver.antydetect.antic_open import (
-            set_log_sink,
-            set_youtube_interface_language_in_local_antidetect_profile,
-            set_youtube_interface_language_in_profile,
-        )
-        from zaliver.antydetect.local_antidetect_api import LocalAntidetectError
-        from zaliver.youtube_upload.multi_availability_checker import (
-            MultiProfileAvailabilityChecker,
-        )
-
-        set_log_sink(self._ui_log_line.emit)
-        kind_s = (kind or "").strip()
-
-        def _change_language_one(pid: str) -> None:
-            creds = self._profile_login_credentials(pid)
-            if _is_own_antidetect_kind(kind_s):
-                u = (base_url or "").strip()
-                if not u:
-                    raise LocalAntidetectError(
-                        f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
-                    )
-                set_youtube_interface_language_in_local_antidetect_profile(
-                    pid,
-                    base_url=u,
-                    headless=headless,
-                    login_credentials=creds,
-                    remote_cdp=remote_cdp,
-                )
-            else:
-                set_youtube_interface_language_in_profile(
-                    pid,
-                    local_token=token or None,
-                    headless=headless,
-                    login_credentials=creds,
-                )
-
-        def _on_progress(done: int, total: int, profile_id: str) -> None:
-            self._studio_language_progress.emit(done, total, profile_id)
-
-        def _on_profile_done(pid: str, ok: bool, err: str) -> None:
-            if not _is_own_antidetect_kind(kind_s):
-                return
-            from zaliver.antydetect.profile_tags import (
-                LANGUAGE_CHANGE_ERROR_TAG,
-                LANGUAGE_CHANGE_SUCCESS_TAG,
-            )
-
-            self._apply_zaliver_profile_tags_from_worker(
-                profile_id=pid,
-                kind=kind_s,
-                base_url=base_url,
-                updates=[
-                    (ok, LANGUAGE_CHANGE_SUCCESS_TAG, LANGUAGE_CHANGE_ERROR_TAG)
-                ],
-                log_prefix="language",
-            )
-
-        mgr = MultiProfileAvailabilityChecker(
-            profile_ids=profile_ids,
-            check_one=_change_language_one,
-            on_profile_done=_on_profile_done,
-            on_progress=_on_progress,
-            log_sink=self._ui_log_line.emit,
-            max_concurrent=max_concurrent,
-        )
-        ok_n, fail_n, failed_ids = mgr.run()
-        self._last_language_failed_ids = list(failed_ids)
-        self._studio_language_finished.emit(ok_n, fail_n)
 
     def _collect_checked_profile_ids(self) -> list[str]:
         if self._profiles_interaction is None:
@@ -6687,41 +6554,6 @@ class MainWindow(QWidget):
             f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
         )
 
-    def _on_studio_language_progress(
-        self, current: int, total: int, profile_id: str
-    ) -> None:
-        pid = (profile_id or "").strip()
-        self._profiles_status.setText(
-            f"Смена языка YouTube: {current} / {total}"
-            + (f" — профиль {pid}" if pid else "…")
-        )
-
-    def _on_studio_language_finished(self, ok_n: int, fail_n: int) -> None:
-        self._profiles_language_running = False
-        self._sync_profiles_tab_action_buttons()
-        total = int(ok_n) + int(fail_n)
-        self._profiles_status.setText(
-            f"Смена языка завершена: успешно {ok_n}, с ошибкой {fail_n} "
-            f"(всего {total})."
-        )
-        self._append_log(
-            f"[language] Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}."
-        )
-        if int(fail_n) > 0:
-            failed = getattr(self, "_last_language_failed_ids", None) or []
-            if failed:
-                self._append_log(
-                    "[language] Ошибки (ID): " + ", ".join(failed)
-                )
-        kind = self._default_browser_combo.currentData()
-        if _is_own_antidetect_kind((kind or "").strip()) and total > 0:
-            self._refresh_profiles_list_after_zaliver_tags()
-        QMessageBox.information(
-            self,
-            "Смена языка",
-            f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
-        )
-
     def _on_profiles_load_failed(self, message: str) -> None:
         self._profiles_refresh_running = False
         self._sync_profiles_tab_action_buttons()
@@ -6952,26 +6784,82 @@ class MainWindow(QWidget):
             f"{hint}{message}"
         )
 
-    def _browse_input_files(self) -> None:
+    def _input_files_dialog_filter(self) -> str:
+        return "Видео (*.mp4 *.mkv *.mov *.avi *.webm *.m4v *.ts);;Все файлы (*)"
+
+    def _normalize_input_path_key(self, p: str) -> str:
+        try:
+            return os.path.normcase(str(Path(p).resolve()))
+        except OSError:
+            return os.path.normcase(os.path.normpath(str(p)))
+
+    def _merge_unique_input_paths(
+        self, existing: list[str], new_files: list[str]
+    ) -> list[str]:
+        seen = {self._normalize_input_path_key(p) for p in existing}
+        merged = list(existing)
+        for f in new_files:
+            raw = str(f).strip()
+            if not raw:
+                continue
+            try:
+                p = str(Path(raw).resolve())
+            except OSError:
+                p = raw
+            key = self._normalize_input_path_key(p)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(p)
+        return merged
+
+    def _input_files_start_dir(self) -> str:
         if self._selected_input_files:
-            start_dir = str(Path(self._selected_input_files[0]).parent)
-        else:
-            start_dir = str(Path.home())
+            return str(Path(self._selected_input_files[0]).parent)
+        return str(Path.home())
+
+    def _browse_input_files(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
             self,
             "Выберите видеофайлы для обработки (можно несколько)",
-            start_dir,
-            "Видео (*.mp4 *.mkv *.mov *.avi *.webm *.m4v *.ts);;Все файлы (*)",
+            self._input_files_start_dir(),
+            self._input_files_dialog_filter(),
         )
         if files:
-            self._selected_input_files = [f for f in files if str(f).strip()]
+            self._selected_input_files = self._merge_unique_input_paths([], files)
             self._sync_input_files_hint()
             self._save_folder_settings()
+
+    def _add_input_files(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Добавить видеофайлы к списку",
+            self._input_files_start_dir(),
+            self._input_files_dialog_filter(),
+        )
+        if files:
+            self._selected_input_files = self._merge_unique_input_paths(
+                self._selected_input_files, files
+            )
+            self._sync_input_files_hint()
+            self._save_folder_settings()
+
+    def _clear_input_files(self) -> None:
+        if not self._selected_input_files:
+            return
+        self._selected_input_files = []
+        self._sync_input_files_hint()
+        self._save_folder_settings()
 
     def _sync_input_files_hint(self) -> None:
         if not hasattr(self, "_input_files_hint"):
             return
         n = len(self._selected_input_files or [])
+        has_files = n > 0
+        if hasattr(self, "_btn_add_input_files"):
+            self._btn_add_input_files.setVisible(has_files)
+        if hasattr(self, "_btn_clear_input_files"):
+            self._btn_clear_input_files.setVisible(has_files)
         if n <= 0:
             self._input_files_hint.setText("Не выбрано — нажмите «Выбрать файлы…»")
             self._input_files_hint.setToolTip("")
@@ -7033,6 +6921,13 @@ class MainWindow(QWidget):
             it.setToolTip(p)
             it.setData(Qt.ItemDataRole.UserRole, p)
             self._music_list.addItem(it)
+        has_files = bool(self._background_music_files)
+        if hasattr(self, "btn_add_music"):
+            self.btn_add_music.setText(
+                "Добавить еще файлы…" if has_files else "Добавить треки…"
+            )
+        if hasattr(self, "btn_clear_music"):
+            self.btn_clear_music.setVisible(has_files)
         self._sync_music_hint()
 
     def _browse_background_music(self) -> None:
@@ -7047,12 +6942,36 @@ class MainWindow(QWidget):
         )
         if not files:
             return
-        seen = {str(Path(x).resolve()) for x in self._background_music_files}
-        for f in files:
-            p = str(Path(f).resolve())
-            if p not in seen:
-                seen.add(p)
-                self._background_music_files.append(p)
+        self._background_music_files = self._merge_unique_music_paths(
+            self._background_music_files, files
+        )
+        self._sync_music_list_widget()
+        self._save_folder_settings()
+
+    def _merge_unique_music_paths(
+        self, existing: list[str], new_files: list[str]
+    ) -> list[str]:
+        seen = {self._normalize_music_path_key(p) for p in existing}
+        merged = list(existing)
+        for f in new_files:
+            raw = str(f).strip()
+            if not raw:
+                continue
+            try:
+                p = str(Path(raw).resolve())
+            except OSError:
+                p = raw
+            key = self._normalize_music_path_key(p)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(p)
+        return merged
+
+    def _clear_background_music(self) -> None:
+        if not self._background_music_files:
+            return
+        self._background_music_files = []
         self._sync_music_list_widget()
         self._save_folder_settings()
 

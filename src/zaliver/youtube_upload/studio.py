@@ -4519,10 +4519,10 @@ def _studio_remove_all_channel_links(page, links_root) -> None:
             break
 
 
-def _studio_click_add_channel_link(page, links_root) -> None:
-    """Клик «Add link» только если строки ещё нет."""
+def _studio_click_add_channel_link(page, links_root, *, force: bool = False) -> None:
+    """Клик «Add link». Если force=False — только когда строки ещё нет."""
     st = _studio_link_row_state(page)
-    if st.get("items", 0) > 0:
+    if not force and st.get("items", 0) > 0:
         _log(
             "Studio: «Add link» не нужен — ytcp-channel-link-item уже на экране "
             f"(ready={st.get('ready')}, urlError={st.get('urlError')})."
@@ -4801,33 +4801,25 @@ def _studio_fill_channel_link_fields(
 
 
 def _studio_open_channel_link_row(page, links_root) -> tuple[object, object]:
-    """Открыть пустую строку ссылки или использовать уже открытую."""
+    """Использовать существующую строку ссылки (в т.ч. уже заполненную) или добавить новую."""
     _studio_ensure_channel_profile_tab(page)
     _studio_scroll_channel_links_into_view(page, links_root)
 
     st = _studio_link_row_state(page)
     if st.get("items", 0) > 0:
-        if st.get("ready"):
-            title_v = (st.get("title") or "").strip()
-            url_v = (st.get("url") or "").strip()
-            if not title_v and not url_v:
-                _log(
-                    "Studio: используем открытую пустую строку ссылки "
-                    f"(urlError={st.get('urlError')} — нормально до ввода URL)."
-                )
-                return _studio_channel_link_input_locators(page)
+        title_v = (st.get("title") or "").strip()
+        url_v = (st.get("url") or "").strip()
+        if title_v or url_v:
             _log(
-                "Studio: удаляем заполненную строку ссылки "
-                f"(title={title_v!r}, url={url_v!r})…"
+                "Studio: правим существующую строку ссылки на месте "
+                f"(title={title_v!r}, url={url_v!r})."
             )
-            _studio_remove_all_channel_links(page, links_root)
-            page.wait_for_timeout(300)
         else:
             _log(
-                "Studio: ytcp-channel-link-item уже есть "
-                f"(items={st.get('items')}) — заполняем без «Add link»."
+                "Studio: используем открытую пустую строку ссылки "
+                f"(urlError={st.get('urlError')} — нормально до ввода URL)."
             )
-            return _studio_wait_channel_link_row(page, links_root, timeout_s=15.0)
+        return _studio_wait_channel_link_row(page, links_root, timeout_s=15.0)
 
     _log("Studio: клик «Add link»…")
     _studio_click_add_channel_link(page, links_root)
@@ -4949,22 +4941,53 @@ def _studio_click_channel_customization_publish(page) -> bool:
     )
 
 
+def _studio_normalize_channel_links(
+    *,
+    link_title: str | None = None,
+    link_url: str | None = None,
+    channel_links: list[tuple[str, str]] | list[list[str]] | None = None,
+) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for item in channel_links or []:
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            lt = str(item[0] or "").strip()
+            lu = str(item[1] or "").strip()
+        else:
+            continue
+        if lt and lu:
+            out.append((lt, lu))
+    if out:
+        return out
+    lt = (link_title or "").strip()
+    lu = (link_url or "").strip()
+    if lt and lu:
+        return [(lt, lu)]
+    return []
+
+
 def _studio_fill_channel_description_and_link(
     page,
     *,
     description: str | None,
-    link_title: str | None,
-    link_url: str | None,
+    link_title: str | None = None,
+    link_url: str | None = None,
+    channel_links: list[tuple[str, str]] | list[list[str]] | None = None,
 ) -> None:
     d = (description or "").strip()
-    lt = (link_title or "").strip()
-    lu = (link_url or "").strip()
-    if not d and not (lt and lu):
+    links = _studio_normalize_channel_links(
+        link_title=link_title,
+        link_url=link_url,
+        channel_links=channel_links,
+    )
+    if not d and not links:
         raise YoutubeStudioError(
             "Укажите описание канала и/или пару «название ссылки + URL»."
         )
-    if (lt and not lu) or (lu and not lt):
-        raise YoutubeStudioError("Название ссылки и URL нужно указать оба.")
+    if not links:
+        lt = (link_title or "").strip()
+        lu = (link_url or "").strip()
+        if (lt and not lu) or (lu and not lt):
+            raise YoutubeStudioError("Название ссылки и URL нужно указать оба.")
 
     _studio_handle_interrupt_dialogs_if_present(page)
 
@@ -4987,18 +5010,26 @@ def _studio_fill_channel_description_and_link(
                 pass
         page.wait_for_timeout(250)
 
-    if lt and lu:
-        _log("Studio: добавление ссылки на канал…")
+    if links:
+        _log(f"Studio: добавление ссылок на канал ({len(links)})…")
         links_root = _studio_channel_links_root(page)
-        title_loc, url_loc = _studio_open_channel_link_row(page, links_root)
-        _studio_fill_channel_link_fields(
-            page,
-            links_root,
-            title_loc,
-            url_loc,
-            link_title=lt,
-            link_url=lu,
-        )
+        for index, (lt, lu) in enumerate(links):
+            if index == 0:
+                title_loc, url_loc = _studio_open_channel_link_row(page, links_root)
+            else:
+                _log(f"Studio: клик «Add link» для ссылки #{index + 1}…")
+                _studio_click_add_channel_link(page, links_root, force=True)
+                title_loc, url_loc = _studio_wait_channel_link_row(
+                    page, links_root, timeout_s=30.0
+                )
+            _studio_fill_channel_link_fields(
+                page,
+                links_root,
+                title_loc,
+                url_loc,
+                link_title=lt,
+                link_url=lu,
+            )
 
     _studio_click_channel_customization_publish(page)
 
@@ -5010,6 +5041,7 @@ def run_studio_channel_description_and_link(
     description: str | None = None,
     link_title: str | None = None,
     link_url: str | None = None,
+    channel_links: list[tuple[str, str]] | list[list[str]] | None = None,
     login_credentials=None,
     yt_oldest_name: str | None = None,
     on_oldest_channel_name=None,
@@ -5029,6 +5061,7 @@ def run_studio_channel_description_and_link(
         description=description,
         link_title=link_title,
         link_url=link_url,
+        channel_links=channel_links,
     )
 
 

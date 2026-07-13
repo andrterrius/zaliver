@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QTimer, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QResizeEvent, QShowEvent
 from PyQt6.QtWidgets import (
+    QAbstractScrollArea,
     QCheckBox,
     QFileDialog,
     QGroupBox,
@@ -31,7 +32,6 @@ from zaliver.ui.avatar_import_parser import (
     assign_avatars_to_selected_profiles,
     build_selected_profile_avatar_rows,
     parse_channel_names_file,
-    parse_channel_names_text,
     parse_cycling_field_lines,
 )
 from zaliver.ui.channel_setup_helpers import (
@@ -40,15 +40,12 @@ from zaliver.ui.channel_setup_helpers import (
     format_source_files,
     recent_picker_has_items,
 )
-from zaliver.ui.title_variables_ui import attach_variables_hint_button
+from zaliver.ui.title_variables_ui import make_variables_hint_button
 from zaliver.ui.widgets import AnimatedProgressBar, ToggleSwitch
 
-_TEXT_MIN_H = 120
-_TEXT_MAX_H = 250
-_TEXT_FIELD_H = _TEXT_MAX_H
-_BP_DESC_NAMES = 880
-_BP_LINK = 680
-_BP_AVATAR = 560
+_TEXT_MIN_H = 64
+_TEXT_FIELD_H = 110
+_BP_AVATAR_NAMES = 720
 _BP_HEADER = 520
 
 
@@ -100,6 +97,7 @@ class ChannelEditTabPane(QWidget):
         self._names_source_label = ""
         self._video_titles: list[str] = []
         self._video_titles_source_label = ""
+        self._desc_source_label = ""
         self._detect_thread: QThread | None = None
         self._detect_worker: AvatarDetectionWorker | None = None
         self._detect_cancel = AvatarDetectionCancel()
@@ -112,9 +110,8 @@ class ChannelEditTabPane(QWidget):
         self._recent_link_urls = list(recent_link_urls or [])
         self._recent_video_titles = list(recent_video_default_titles or [])
 
-        self._desc_names_horizontal: bool | None = None
-        self._link_horizontal: bool | None = None
-        self._avatar_horizontal: bool | None = None
+        self._avatar_names_horizontal: bool | None = None
+        self._avatar_controls_horizontal: bool | None = None
         self._header_horizontal: bool | None = None
 
         self._build_ui()
@@ -146,6 +143,8 @@ class ChannelEditTabPane(QWidget):
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         self._apply_responsive_layout()
+        # После layout окна высота уже реальная.
+        QTimer.singleShot(0, self._sync_text_field_heights)
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -154,9 +153,8 @@ class ChannelEditTabPane(QWidget):
     def _apply_responsive_layout(self) -> None:
         width = self.width()
         self._layout_header(width >= _BP_HEADER)
-        self._layout_avatar_row(width >= _BP_AVATAR)
-        self._layout_desc_names(width >= _BP_DESC_NAMES)
-        self._layout_link_row(width >= _BP_LINK)
+        self._layout_avatar_names(width >= _BP_AVATAR_NAMES)
+        self._layout_avatar_controls(width >= _BP_AVATAR_NAMES)
         self._sync_text_field_heights()
 
     def _layout_header(self, horizontal: bool) -> None:
@@ -188,10 +186,30 @@ class ChannelEditTabPane(QWidget):
             if w not in (title, btn):
                 lay.addWidget(w)
 
-    def _layout_avatar_row(self, horizontal: bool) -> None:
-        if self._avatar_horizontal == horizontal:
+    def _layout_avatar_names(self, horizontal: bool) -> None:
+        if self._avatar_names_horizontal == horizontal:
             return
-        self._avatar_horizontal = horizontal
+        self._avatar_names_horizontal = horizontal
+        host = self._avatar_names_host
+        old = host.layout()
+        if old is not None:
+            _take_layout_widgets(old)
+            _detach_layout(old)
+        if horizontal:
+            lay = QHBoxLayout(host)
+            lay.setSpacing(8)
+            lay.addWidget(self._avatar_box, 1)
+            lay.addWidget(self._names_box, 1)
+        else:
+            lay = QVBoxLayout(host)
+            lay.setSpacing(8)
+            lay.addWidget(self._avatar_box)
+            lay.addWidget(self._names_box)
+
+    def _layout_avatar_controls(self, horizontal: bool) -> None:
+        if self._avatar_controls_horizontal == horizontal:
+            return
+        self._avatar_controls_horizontal = horizontal
         host = self._avatar_row_host
         old = host.layout()
         if old is not None:
@@ -202,90 +220,108 @@ class ChannelEditTabPane(QWidget):
         btn_preview = self._btn_avatar_preview
         if horizontal:
             lay = QHBoxLayout(host)
+            lay.setContentsMargins(0, 0, 0, 0)
             lay.setSpacing(8)
             lay.addWidget(path, 1)
             lay.addWidget(btn_pick)
             lay.addWidget(btn_preview)
         else:
             lay = QVBoxLayout(host)
+            lay.setContentsMargins(0, 0, 0, 0)
             lay.setSpacing(6)
             lay_row = QHBoxLayout()
-            btn_row = QHBoxLayout()
             lay_row.addWidget(path, 1)
             lay.addLayout(lay_row)
+            btn_row = QHBoxLayout()
             btn_row.addWidget(btn_pick)
             btn_row.addWidget(btn_preview)
             btn_row.addStretch()
             lay.addLayout(btn_row)
 
-    def _layout_desc_names(self, horizontal: bool) -> None:
-        if self._desc_names_horizontal == horizontal:
-            return
-        self._desc_names_horizontal = horizontal
-        host = self._desc_names_host
-        old = host.layout()
-        if old is not None:
-            _take_layout_widgets(old)
-            _detach_layout(old)
-        if horizontal:
-            lay = QHBoxLayout(host)
-            lay.setSpacing(8)
-            lay.addWidget(self._desc_box, 1)
-            lay.addWidget(self._names_box, 1)
-        else:
-            lay = QVBoxLayout(host)
-            lay.setSpacing(8)
-            lay.addWidget(self._desc_box)
-            lay.addWidget(self._names_box)
+    def _pane_window_height(self) -> int:
+        """Доступная высота вкладки / окна для расчёта полей."""
+        h = self.height()
+        if h >= 120:
+            return h
+        win = self.window()
+        if win is not None and win.height() >= 120:
+            # Минус полоса навигации слева/сверху — грубо, stack почти на всю высоту.
+            return max(120, win.height() - 48)
+        return 720
 
-    def _layout_link_row(self, horizontal: bool) -> None:
-        if self._link_horizontal == horizontal:
-            return
-        self._link_horizontal = horizontal
-        host = self._link_row_host
-        old = host.layout()
-        if old is not None:
-            _take_layout_widgets(old)
-            _detach_layout(old)
-        icon = self._link_icon
-        url_row = self._link_url_row
-        title_row = self._link_title_row
-        if horizontal:
-            lay = QHBoxLayout(host)
-            lay.setSpacing(8)
-            lay.addWidget(icon)
-            lay.addWidget(url_row, 1)
-            lay.addWidget(title_row, 1)
-        else:
-            lay = QVBoxLayout(host)
-            lay.setSpacing(6)
-            url_line = QHBoxLayout()
-            url_line.addWidget(icon)
-            url_line.addWidget(url_row, 1)
-            lay.addLayout(url_line)
-            lay.addWidget(title_row)
+    def _form_inner_chrome_height(self) -> int:
+        """Хром внутри scroll (без шапки/футера вкладки)."""
+        # 4 заголовка секций.
+        chrome = 32 * 4
+        # Отступы между блоками формы.
+        chrome += 8 * 5
+        # Path + кнопки выбора аватарок.
+        chrome += 48
+        # Запас: frame GroupBox, «Не обрезать», подписи, округление, низ окна.
+        chrome += 64
+        if not self._avatar_names_horizontal:
+            chrome += 56
+        return chrome
+
+    def _non_text_chrome_height(self) -> int:
+        """Шапка + футер + хром внутри формы (fallback, если viewport ещё 0)."""
+        root = self.layout()
+        chrome = 0
+        if root is not None:
+            m = root.contentsMargins()
+            chrome += m.top() + m.bottom()
+            chrome += max(0, root.spacing()) * 2
+
+        header_h = self._header_host.height()
+        if header_h < 20:
+            header_h = max(36, self._header_host.sizeHint().height())
+        chrome += header_h
+
+        footer_h = max(28, self._status.sizeHint().height() + 10)
+        if self._progress_bar.isVisible():
+            footer_h = max(footer_h, 32)
+        chrome += footer_h
+        chrome += self._form_inner_chrome_height()
+        return chrome
 
     def _sync_text_field_heights(self) -> None:
-        viewport_h = (
-            self._scroll.viewport().height()
-            if hasattr(self, "_scroll")
-            else self.height()
-        )
-        fixed_estimate = 320
-        if self._toggle_video_title.isChecked():
-            text_slots = 3
+        if not hasattr(self, "_scroll") or not hasattr(self, "_link_title_edit"):
+            return
+
+        slots = 4
+        viewport_h = self._scroll.viewport().height()
+        if viewport_h >= 80:
+            available = max(0, viewport_h - self._form_inner_chrome_height())
+            pane_h = viewport_h
         else:
-            text_slots = 2
-        if not self._desc_names_horizontal:
-            text_slots += 1
-        available = max(0, viewport_h - fixed_estimate)
-        per_field = available // max(1, text_slots) if available > 0 else _TEXT_MAX_H
-        height = max(_TEXT_MIN_H, min(_TEXT_MAX_H, per_field))
-        for edit in (self._desc_edit, self._names_edit, self._video_title_edit):
+            pane_h = self._pane_window_height()
+            available = max(0, pane_h - self._non_text_chrome_height())
+
+        # Доп. отступ снизу, чтобы ряд ссылок не упирался в край.
+        available = max(0, available - 28)
+
+        height = available // slots if slots else _TEXT_MIN_H
+        if height < _TEXT_MIN_H:
+            height = max(48, height)
+        else:
+            height = min(height, max(_TEXT_MIN_H, pane_h // 2))
+
+        for edit in (
+            self._desc_edit,
+            self._names_edit,
+            self._video_title_edit,
+            self._link_title_edit,
+            self._link_url_edit,
+        ):
             edit.setMinimumHeight(height)
             edit.setMaximumHeight(height)
 
     def _build_ui(self) -> None:
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.setMinimumHeight(0)
         root = QVBoxLayout(self)
         root.setSpacing(6)
         root.setContentsMargins(8, 8, 8, 8)
@@ -300,20 +336,40 @@ class ChannelEditTabPane(QWidget):
         self._btn_select_profiles.clicked.connect(self._on_select_profiles)
         root.addWidget(self._header_host)
 
+        self._change_language = QCheckBox("Поменять язык")
+        self._change_language.setToolTip(
+            "Перед настройкой канала: главная YouTube → язык интерфейса «Русский», "
+            "затем переход в креативную студию и остальные шаги."
+        )
+        self._change_language.toggled.connect(self._on_assignment_options_changed)
+        root.addWidget(self._change_language)
+
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll.setSizeAdjustPolicy(
+            QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
+        )
+        self._scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self._scroll.setMinimumHeight(0)
         form_host = QWidget()
+        form_host.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
         form = QVBoxLayout(form_host)
         form.setSpacing(6)
         form.setContentsMargins(0, 0, 0, 0)
 
-        form.addWidget(self._build_media_section())
-        form.addWidget(self._build_desc_names_row())
+        form.addWidget(self._build_avatar_names_row())
+        form.addWidget(self._build_video_title_section())
+        form.addWidget(self._build_desc_section())
         form.addWidget(self._build_link_section())
-        self._video_title_box = self._build_video_title_section()
-        form.addWidget(self._video_title_box)
         form.addStretch()
         self._scroll.setWidget(form_host)
         root.addWidget(self._scroll, 1)
@@ -335,7 +391,12 @@ class ChannelEditTabPane(QWidget):
 
         self._apply_responsive_layout()
 
-    def _section_header(self, toggle: ToggleSwitch, label: str, hint: str = "") -> QHBoxLayout:
+    def _section_header(
+        self,
+        toggle: ToggleSwitch,
+        label: str,
+        *trailing: QWidget,
+    ) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setSpacing(6)
         row.setContentsMargins(0, 0, 0, 0)
@@ -343,91 +404,55 @@ class ChannelEditTabPane(QWidget):
         lbl = QLabel(label)
         lbl.setStyleSheet("font-size: 13px; font-weight: 600; color: #e4e6ef;")
         row.addWidget(lbl)
-        if hint:
-            hint_lbl = QLabel(hint)
-            hint_lbl.setObjectName("hint")
-            row.addWidget(hint_lbl)
         row.addStretch()
+        for widget in trailing:
+            row.addWidget(widget, 0, Qt.AlignmentFlag.AlignRight)
         return row
 
-    def _build_media_section(self) -> QGroupBox:
-        box = QGroupBox("Медиафайлы")
-        box.setObjectName("channelEditPanel")
-        lay = _section_layout(box)
+    def _make_import_button(self, slot) -> QPushButton:
+        btn = QPushButton("Импорт…")
+        btn.setObjectName("secondary")
+        btn.clicked.connect(slot)
+        return btn
 
+    def _build_avatar_names_row(self) -> QWidget:
+        self._avatar_names_host = QWidget()
+        self._avatar_names_host.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+
+        self._avatar_box = QGroupBox()
+        self._avatar_box.setObjectName("channelEditSection")
+        self._avatar_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        avatar_l = _section_layout(self._avatar_box)
         self._toggle_avatar = ToggleSwitch()
         self._toggle_avatar.setChecked(True)
-        lay.addLayout(self._section_header(self._toggle_avatar, "Аватарка"))
+        self._no_crop = QCheckBox("Не обрезать")
+        self._no_crop.setToolTip("1 файл = 1 профиль, без вырезки иконок")
+        self._no_crop.toggled.connect(self._on_assignment_options_changed)
+        self._no_crop.toggled.connect(lambda: self._file_crop_previews.clear())
+        avatar_l.addLayout(
+            self._section_header(self._toggle_avatar, "Фото профиля", self._no_crop)
+        )
 
         self._avatar_path = QLineEdit()
         self._avatar_path.setReadOnly(True)
         self._avatar_path.setPlaceholderText("Файлы не выбраны")
         self._btn_avatar_pick = QPushButton("Выбрать")
         self._btn_avatar_pick.setObjectName("secondary")
-        self._btn_avatar_pick.setToolTip("Выбрать файлы с аватарками")
+        self._btn_avatar_pick.setToolTip("Выбрать файлы с фото профиля")
         self._btn_avatar_pick.clicked.connect(self._pick_avatar_files)
-        self._avatar_row_host = QWidget()
-        lay.addWidget(self._avatar_row_host)
         self._btn_avatar_preview = QPushButton("Предпросмотр")
         self._btn_avatar_preview.setObjectName("secondary")
         self._btn_avatar_preview.setEnabled(False)
-        self._btn_avatar_preview.setToolTip("Показать, как обрезаны аватарки")
+        self._btn_avatar_preview.setToolTip("Показать, как обрезаны фото профиля")
         self._btn_avatar_preview.clicked.connect(self._show_avatar_preview)
-
-        opts = QHBoxLayout()
-        self._no_crop = QCheckBox("Не обрезать")
-        self._no_crop.setToolTip("1 файл = 1 профиль, без вырезки иконок")
-        self._no_crop.toggled.connect(self._on_assignment_options_changed)
-        self._no_crop.toggled.connect(lambda: self._file_crop_previews.clear())
-        self._shuffle = QCheckBox("Перемешать")
-        self._shuffle.setChecked(True)
-        self._shuffle.setToolTip("Перемешать аватарки перед сопоставлением")
-        self._shuffle.toggled.connect(self._on_assignment_options_changed)
-        opts.addWidget(self._no_crop)
-        opts.addWidget(self._shuffle)
-        opts.addStretch()
-        lay.addLayout(opts)
-
-        return box
-
-    def _build_desc_names_row(self) -> QWidget:
-        self._desc_names_host = QWidget()
-        self._desc_names_host.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Preferred,
-        )
-
-        self._desc_box = QGroupBox()
-        self._desc_box.setObjectName("channelEditSection")
-        self._desc_box.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Preferred,
-        )
-        desc_l = _section_layout(self._desc_box)
-        self._toggle_desc = ToggleSwitch()
-        self._toggle_desc.setChecked(True)
-        desc_l.addLayout(
-            self._section_header(self._toggle_desc, "Описание", "одно на строку")
-        )
-        self._desc_edit = self._compact_text_edit(
-            "Описание канала…",
-            fixed_height=_TEXT_FIELD_H,
-        )
-        if self._recent_descriptions:
-            self._desc_edit.setPlainText(self._recent_descriptions[0])
-        self._desc_edit.textChanged.connect(self._on_channel_fields_changed)
-        desc_field_row, self._desc_recent_combo = field_with_recent_picker(
-            self._desc_edit,
-            recent=self._recent_descriptions,
-            tooltip="Недавние описания канала",
-            on_filled=self._on_channel_fields_changed,
-        )
-        self._btn_desc_hints = attach_variables_hint_button(
-            desc_field_row,
-            parent=self,
-            field=self._desc_edit,
-        )
-        desc_l.addWidget(desc_field_row)
+        self._avatar_row_host = QWidget()
+        avatar_l.addWidget(self._avatar_row_host)
 
         self._names_box = QGroupBox()
         self._names_box.setObjectName("channelEditSection")
@@ -438,8 +463,15 @@ class ChannelEditTabPane(QWidget):
         names_l = _section_layout(self._names_box)
         self._toggle_names = ToggleSwitch()
         self._toggle_names.setChecked(True)
+        self._btn_pick_names = self._make_import_button(self._pick_names_file)
+        self._btn_names_hints = make_variables_hint_button(parent=self, field=None)
         names_l.addLayout(
-            self._section_header(self._toggle_names, "Название", "одно на строку")
+            self._section_header(
+                self._toggle_names,
+                "Название канала",
+                self._btn_pick_names,
+                self._btn_names_hints,
+            )
         )
         self._names_edit = self._compact_text_edit(
             "Название канала — по одному на строку…",
@@ -452,32 +484,76 @@ class ChannelEditTabPane(QWidget):
             tooltip="Недавние названия каналов",
             on_filled=self._on_names_text_changed,
         )
-        self._btn_names_hints = attach_variables_hint_button(
-            names_field_row,
-            parent=self,
-            field=self._names_edit,
-        )
+        self._wire_hint_button(self._btn_names_hints, self._names_edit)
         names_l.addWidget(names_field_row)
-
-        names_tools = QHBoxLayout()
-        names_tools.setSpacing(6)
-        self._btn_pick_names = QPushButton("Импорт…")
-        self._btn_pick_names.setObjectName("secondary")
-        self._btn_pick_names.clicked.connect(self._pick_names_file)
-        names_tools.addWidget(self._btn_pick_names)
-        self._shuffle_names = QCheckBox("Перемешать")
-        self._shuffle_names.setChecked(True)
-        self._shuffle_names.toggled.connect(self._on_assignment_options_changed)
-        names_tools.addWidget(self._shuffle_names)
-        names_tools.addStretch()
-        names_l.addLayout(names_tools)
 
         self._names_source_label_widget = QLabel("")
         self._names_source_label_widget.setObjectName("hint")
         self._names_source_label_widget.setVisible(False)
         names_l.addWidget(self._names_source_label_widget)
 
-        return self._desc_names_host
+        return self._avatar_names_host
+
+    def _wire_hint_button(self, btn: QPushButton, field: QPlainTextEdit) -> None:
+        from zaliver.ui.title_variables_ui import (
+            TitleVariablesDialog,
+            capture_field_cursor_state,
+            insert_text_at_field_cursor,
+        )
+
+        try:
+            btn.clicked.disconnect()
+        except TypeError:
+            pass
+
+        def _open_hints() -> None:
+            cursor_state = capture_field_cursor_state(field)
+
+            def _insert(token: str) -> None:
+                insert_text_at_field_cursor(field, token, cursor_state=cursor_state)
+
+            dlg = TitleVariablesDialog(on_insert=_insert, parent=self)
+            dlg.exec()
+
+        btn.clicked.connect(_open_hints)
+
+    def _build_desc_section(self) -> QGroupBox:
+        self._desc_box = QGroupBox()
+        self._desc_box.setObjectName("channelEditSection")
+        desc_l = _section_layout(self._desc_box)
+        self._toggle_desc = ToggleSwitch()
+        self._toggle_desc.setChecked(True)
+        self._btn_pick_desc = self._make_import_button(self._pick_desc_file)
+        self._btn_desc_hints = make_variables_hint_button(parent=self, field=None)
+        desc_l.addLayout(
+            self._section_header(
+                self._toggle_desc,
+                "Описание канала",
+                self._btn_pick_desc,
+                self._btn_desc_hints,
+            )
+        )
+        self._desc_edit = self._compact_text_edit(
+            "Описание канала — по одному на строку…",
+            fixed_height=_TEXT_FIELD_H,
+        )
+        if self._recent_descriptions:
+            self._desc_edit.setPlainText(self._recent_descriptions[0])
+        self._desc_edit.textChanged.connect(self._on_channel_fields_changed)
+        desc_field_row, self._desc_recent_combo = field_with_recent_picker(
+            self._desc_edit,
+            recent=self._recent_descriptions,
+            tooltip="Недавние описания канала",
+            on_filled=self._on_channel_fields_changed,
+        )
+        self._wire_hint_button(self._btn_desc_hints, self._desc_edit)
+        desc_l.addWidget(desc_field_row)
+
+        self._desc_source_label_widget = QLabel("")
+        self._desc_source_label_widget.setObjectName("hint")
+        self._desc_source_label_widget.setVisible(False)
+        desc_l.addWidget(self._desc_source_label_widget)
+        return self._desc_box
 
     def _build_link_section(self) -> QGroupBox:
         box = QGroupBox()
@@ -487,32 +563,40 @@ class ChannelEditTabPane(QWidget):
         self._toggle_link.setChecked(True)
         lay.addLayout(self._section_header(self._toggle_link, "Ссылка"))
 
-        self._link_row_host = QWidget()
-        self._link_icon = QLabel("🔗")
-        self._link_icon.setFixedWidth(24)
-        self._link_url_edit = QLineEdit()
-        self._link_url_edit.setPlaceholderText("https://…")
-        if self._recent_link_urls:
-            self._link_url_edit.setText(self._recent_link_urls[0])
-        self._link_url_edit.textChanged.connect(self._on_channel_fields_changed)
-        self._link_url_row, self._link_url_recent_combo = field_with_recent_picker(
-            self._link_url_edit,
-            recent=self._recent_link_urls,
-            tooltip="Недавние URL ссылок",
-            on_filled=self._on_channel_fields_changed,
+        row = QHBoxLayout()
+        row.setSpacing(8)
+
+        self._link_title_edit = self._compact_text_edit(
+            "Название ссылки — по одному на строку…",
+            fixed_height=_TEXT_FIELD_H,
         )
-        self._link_title_edit = QLineEdit()
-        self._link_title_edit.setPlaceholderText("ИГРА")
         if self._recent_link_titles:
-            self._link_title_edit.setText(self._recent_link_titles[0])
+            self._link_title_edit.setPlainText(self._recent_link_titles[0])
         self._link_title_edit.textChanged.connect(self._on_channel_fields_changed)
-        self._link_title_row, self._link_title_recent_combo = field_with_recent_picker(
+        title_field_row, self._link_title_recent_combo = field_with_recent_picker(
             self._link_title_edit,
             recent=self._recent_link_titles,
             tooltip="Недавние названия ссылок",
             on_filled=self._on_channel_fields_changed,
         )
-        lay.addWidget(self._link_row_host)
+
+        self._link_url_edit = self._compact_text_edit(
+            "https://… — по одному URL на строку (строка = название слева)",
+            fixed_height=_TEXT_FIELD_H,
+        )
+        if self._recent_link_urls:
+            self._link_url_edit.setPlainText(self._recent_link_urls[0])
+        self._link_url_edit.textChanged.connect(self._on_channel_fields_changed)
+        url_field_row, self._link_url_recent_combo = field_with_recent_picker(
+            self._link_url_edit,
+            recent=self._recent_link_urls,
+            tooltip="Недавние URL ссылок",
+            on_filled=self._on_channel_fields_changed,
+        )
+
+        row.addWidget(title_field_row, 1)
+        row.addWidget(url_field_row, 1)
+        lay.addLayout(row)
         return box
 
     def _build_video_title_section(self) -> QGroupBox:
@@ -521,9 +605,14 @@ class ChannelEditTabPane(QWidget):
         lay = _section_layout(box)
         self._toggle_video_title = ToggleSwitch()
         self._toggle_video_title.setChecked(True)
+        self._btn_pick_video_titles = self._make_import_button(self._pick_video_titles_file)
+        self._btn_video_title_hints = make_variables_hint_button(parent=self, field=None)
         lay.addLayout(
             self._section_header(
-                self._toggle_video_title, "Название для видео", "одно на строку"
+                self._toggle_video_title,
+                "Название видео",
+                self._btn_pick_video_titles,
+                self._btn_video_title_hints,
             )
         )
         self._video_title_body = QWidget()
@@ -531,41 +620,26 @@ class ChannelEditTabPane(QWidget):
         body_l.setSpacing(2)
         body_l.setContentsMargins(0, 0, 0, 0)
         self._video_title_edit = self._compact_text_edit(
-            "Название по умолчанию при загрузке. Переменные: {date}, {profile}, {video}, {index}…",
+            "Название видео — по одному на строку. "
+            "Переменные: {date}, {profile}, {video}, {index}…",
             fixed_height=_TEXT_FIELD_H,
         )
         self._video_title_edit.textChanged.connect(self._on_video_titles_text_changed)
         video_field_row, self._video_title_recent_combo = field_with_recent_picker(
             self._video_title_edit,
             recent=self._recent_video_titles,
-            tooltip="Недавние названия для видео",
+            tooltip="Недавние названия видео",
             on_filled=self._on_video_titles_text_changed,
         )
-        self._btn_video_title_hints = attach_variables_hint_button(
-            video_field_row,
-            parent=self,
-            field=self._video_title_edit,
-        )
+        self._wire_hint_button(self._btn_video_title_hints, self._video_title_edit)
         body_l.addWidget(video_field_row, 1)
 
-        vt_row = QHBoxLayout()
-        vt_row.setSpacing(6)
         self._video_titles_source_label_widget = QLabel("")
         self._video_titles_source_label_widget.setObjectName("hint")
         self._video_titles_source_label_widget.setVisible(False)
-        self._btn_pick_video_titles = QPushButton("Импорт…")
-        self._btn_pick_video_titles.setObjectName("secondary")
-        self._btn_pick_video_titles.clicked.connect(self._pick_video_titles_file)
-        self._shuffle_video_titles = QCheckBox("Перемешать")
-        self._shuffle_video_titles.setChecked(True)
-        self._shuffle_video_titles.toggled.connect(self._on_assignment_options_changed)
-        vt_row.addWidget(self._video_titles_source_label_widget, 1)
-        vt_row.addWidget(self._btn_pick_video_titles)
-        vt_row.addWidget(self._shuffle_video_titles)
-        vt_row.addStretch()
-        body_l.addLayout(vt_row)
+        body_l.addWidget(self._video_titles_source_label_widget)
+
         lay.addWidget(self._video_title_body, 1)
-        self._video_title_body.setVisible(True)
         return box
 
     def _connect_section_toggles(self) -> None:
@@ -579,13 +653,16 @@ class ChannelEditTabPane(QWidget):
         enabled = self._toggle_avatar.isChecked()
         self._avatar_path.setEnabled(enabled)
         self._no_crop.setEnabled(enabled and not self._is_detecting())
-        self._shuffle.setEnabled(enabled and not self._is_detecting())
+        self._btn_avatar_pick.setEnabled(enabled and not self._is_detecting())
 
         self._desc_edit.setEnabled(self._toggle_desc.isChecked())
         self._desc_recent_combo.setEnabled(
             self._toggle_desc.isChecked() and recent_picker_has_items(self._desc_recent_combo)
         )
         self._btn_desc_hints.setEnabled(self._toggle_desc.isChecked())
+        self._btn_pick_desc.setEnabled(
+            self._toggle_desc.isChecked() and not self._is_detecting()
+        )
 
         names_on = self._toggle_names.isChecked()
         self._names_edit.setEnabled(names_on)
@@ -594,16 +671,15 @@ class ChannelEditTabPane(QWidget):
         )
         self._btn_names_hints.setEnabled(names_on)
         self._btn_pick_names.setEnabled(names_on and not self._is_detecting())
-        self._shuffle_names.setEnabled(names_on)
 
         link_on = self._toggle_link.isChecked()
-        self._link_url_edit.setEnabled(link_on)
         self._link_title_edit.setEnabled(link_on)
-        self._link_url_recent_combo.setEnabled(
-            link_on and recent_picker_has_items(self._link_url_recent_combo)
-        )
+        self._link_url_edit.setEnabled(link_on)
         self._link_title_recent_combo.setEnabled(
             link_on and recent_picker_has_items(self._link_title_recent_combo)
+        )
+        self._link_url_recent_combo.setEnabled(
+            link_on and recent_picker_has_items(self._link_url_recent_combo)
         )
 
         vt_on = self._toggle_video_title.isChecked()
@@ -613,7 +689,6 @@ class ChannelEditTabPane(QWidget):
         )
         self._btn_video_title_hints.setEnabled(vt_on)
         self._btn_pick_video_titles.setEnabled(vt_on and not self._is_detecting())
-        self._shuffle_video_titles.setEnabled(vt_on)
 
         self._sync_text_field_heights()
         self._refresh_assignment()
@@ -627,8 +702,12 @@ class ChannelEditTabPane(QWidget):
     def set_running(self, running: bool) -> None:
         self._running = running
         self._btn_select_profiles.setEnabled(not running and self._can_select_profiles())
+        self._change_language.setEnabled(not running)
         self._btn_pick_names.setEnabled(
             not running and self._toggle_names.isChecked() and not self._is_detecting()
+        )
+        self._btn_pick_desc.setEnabled(
+            not running and self._toggle_desc.isChecked() and not self._is_detecting()
         )
         self._btn_pick_video_titles.setEnabled(
             not running
@@ -638,7 +717,8 @@ class ChannelEditTabPane(QWidget):
         self._update_avatar_preview_button()
 
     def set_status(self, text: str) -> None:
-        self._status.setText(text)
+        if hasattr(self, "_status"):
+            self._status.setText(text)
 
     def load_recent_values(
         self,
@@ -656,14 +736,18 @@ class ChannelEditTabPane(QWidget):
                 self._desc_edit.setPlainText(descriptions[0])
         if link_titles:
             self._recent_link_titles = list(link_titles)
-            fill_recent_values_picker(self._link_title_recent_combo, self._recent_link_titles)
-            if not self._link_title_edit.text().strip():
-                self._link_title_edit.setText(link_titles[0])
+            fill_recent_values_picker(
+                self._link_title_recent_combo, self._recent_link_titles
+            )
+            if not self._link_title_edit.toPlainText().strip():
+                self._link_title_edit.setPlainText(link_titles[0])
         if link_urls:
             self._recent_link_urls = list(link_urls)
-            fill_recent_values_picker(self._link_url_recent_combo, self._recent_link_urls)
-            if not self._link_url_edit.text().strip():
-                self._link_url_edit.setText(link_urls[0])
+            fill_recent_values_picker(
+                self._link_url_recent_combo, self._recent_link_urls
+            )
+            if not self._link_url_edit.toPlainText().strip():
+                self._link_url_edit.setPlainText(link_urls[0])
         if channel_names:
             self._recent_channel_names = list(channel_names)
             fill_recent_values_picker(self._names_recent_combo, self._recent_channel_names)
@@ -674,11 +758,12 @@ class ChannelEditTabPane(QWidget):
             )
         self._on_section_toggle()
 
+    def change_language_before_edit(self) -> bool:
+        return bool(self._change_language.isChecked())
+
     def validate_form(self) -> str | None:
         """Проверка формы; None — всё ок, иначе текст ошибки."""
-        desc = self.channel_description()
-        link_title = self.channel_link_title()
-        link_url = self.channel_link_url()
+        links = self.channel_links()
         video_titles = self._current_video_titles()
         has_avatar = self._toggle_avatar.isChecked() and bool(self._avatar_pngs)
         has_names = self._toggle_names.isChecked() and bool(self._current_channel_names())
@@ -688,34 +773,43 @@ class ChannelEditTabPane(QWidget):
 
         if (
             not has_descriptions
-            and not (link_title and link_url)
+            and not links
             and not video_titles
             and not has_avatar
             and not has_names
+            and not self.change_language_before_edit()
         ):
-            return "Включите и заполните хотя бы один раздел."
-        if (link_title and not link_url) or (link_url and not link_title):
-            return "Для ссылки нужны и название, и URL."
+            return "Включите и заполните хотя бы один раздел или отметьте «Поменять язык»."
+        if self._toggle_link.isChecked():
+            titles = parse_cycling_field_lines(self._link_title_edit.toPlainText())
+            urls = parse_cycling_field_lines(self._link_url_edit.toPlainText())
+            if (titles and not urls) or (urls and not titles):
+                return "Нужны и названия ссылок, и URL (названия зацикливаются по списку URL)."
         return None
 
     def confirm_message_for_profiles(self, profile_count: int) -> str:
         assignments = self.profile_assignments()
-        desc = self.channel_description()
-        link_title = self.channel_link_title()
-        link_url = self.channel_link_url()
+        links = self.channel_links()
         video_titles = self._current_video_titles()
         msg_parts: list[str] = []
+        if self.change_language_before_edit():
+            msg_parts.append(
+                f"• смена языка YouTube на русский — для всех {profile_count} профилей "
+                "(перед остальными шагами)"
+            )
         desc_count = len(self._current_channel_descriptions())
         if desc_count > 1:
-            msg_parts.append(f"• описание — {desc_count} вариантов по профилям")
+            msg_parts.append(f"• описание канала — {desc_count} вариантов по профилям")
         elif desc_count == 1:
-            msg_parts.append(f"• описание — для всех {profile_count} профилей")
-        if link_title and link_url:
-            msg_parts.append(f"• ссылка — для всех {profile_count} профилей")
+            msg_parts.append(f"• описание канала — для всех {profile_count} профилей")
+        if links:
+            msg_parts.append(
+                f"• ссылок — {len(links)} (для всех {profile_count} профилей)"
+            )
         if video_titles:
             with_video = sum(1 for a in assignments if a.get("video_default_title"))
             msg_parts.append(
-                f"• названия для видео — {with_video} из {profile_count}"
+                f"• названия видео — {with_video} из {profile_count}"
             )
         if assignments:
             msg_parts.append(f"• персональные изменения — {len(assignments)} профилей")
@@ -736,15 +830,24 @@ class ChannelEditTabPane(QWidget):
             return ""
         return self._desc_edit.toPlainText()
 
-    def channel_link_title(self) -> str:
+    def channel_links(self) -> list[tuple[str, str]]:
         if not self._toggle_link.isChecked():
-            return ""
-        return self._link_title_edit.text().strip()
+            return []
+        titles = parse_cycling_field_lines(self._link_title_edit.toPlainText())
+        urls = parse_cycling_field_lines(self._link_url_edit.toPlainText())
+        if not titles or not urls:
+            return []
+        # Длина по более длинному списку; короткий зацикливается.
+        n = max(len(titles), len(urls))
+        return [(titles[i % len(titles)], urls[i % len(urls)]) for i in range(n)]
+
+    def channel_link_title(self) -> str:
+        links = self.channel_links()
+        return links[0][0] if links else ""
 
     def channel_link_url(self) -> str:
-        if not self._toggle_link.isChecked():
-            return ""
-        return self._link_url_edit.text().strip()
+        links = self.channel_links()
+        return links[0][1] if links else ""
 
     def channel_names_field_text(self) -> str:
         if not self._toggle_names.isChecked():
@@ -764,9 +867,7 @@ class ChannelEditTabPane(QWidget):
 
     def has_channel_text_fill(self) -> bool:
         desc_lines = self.channel_description_lines()
-        lt = self.channel_link_title()
-        lu = self.channel_link_url()
-        return bool(desc_lines) or bool(lt and lu)
+        return bool(desc_lines) or bool(self.channel_links())
 
     def has_video_default_title(self) -> bool:
         if not self._toggle_video_title.isChecked():
@@ -865,12 +966,37 @@ class ChannelEditTabPane(QWidget):
         self._names_source_label_widget.setVisible(True)
         self._on_names_text_changed()
 
+    def _pick_desc_file(self) -> None:
+        if self._is_detecting():
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Импорт описаний канала",
+            "",
+            "Текстовые файлы (*.txt *.csv);;Все файлы (*.*)",
+        )
+        if not path:
+            return
+        try:
+            lines = parse_channel_names_file(path)
+        except OSError as exc:
+            QMessageBox.warning(self, "Редактирование канала", f"Не удалось прочитать файл:\n{exc}")
+            return
+        if not lines:
+            QMessageBox.warning(self, "Редактирование канала", "В файле не найдено описаний.")
+            return
+        self._desc_edit.setPlainText("\n".join(lines))
+        self._desc_source_label = path
+        self._desc_source_label_widget.setText(Path(path).name)
+        self._desc_source_label_widget.setVisible(True)
+        self._on_channel_fields_changed()
+
     def _pick_video_titles_file(self) -> None:
         if self._is_detecting():
             return
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Импорт названий для видео",
+            "Импорт названий видео",
             "",
             "Текстовые файлы (*.txt *.csv);;Все файлы (*.*)",
         )
@@ -918,7 +1044,7 @@ class ChannelEditTabPane(QWidget):
             return
         paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Выберите картинки с аватарками",
+            "Выберите картинки для фото профиля",
             "",
             "Изображения (*.png *.jpg *.jpeg *.webp *.bmp);;Все файлы (*.*)",
         )
@@ -1045,7 +1171,6 @@ class ChannelEditTabPane(QWidget):
 
     def _set_busy(self, busy: bool) -> None:
         self._no_crop.setEnabled(not busy and self._toggle_avatar.isChecked())
-        self._shuffle.setEnabled(not busy and self._toggle_avatar.isChecked())
         self._progress_bar.setVisible(busy)
         if busy:
             self._btn_select_profiles.setEnabled(False)
@@ -1106,12 +1231,12 @@ class ChannelEditTabPane(QWidget):
         self._rows = assign_avatars_to_selected_profiles(
             self._profiles,
             avatars,
-            shuffle=self._shuffle.isChecked(),
+            shuffle=False,
             channel_names=names,
-            shuffle_names=self._shuffle_names.isChecked(),
+            shuffle_names=False,
             channel_descriptions=descriptions,
             video_default_titles=titles,
-            shuffle_video_titles=self._shuffle_video_titles.isChecked(),
+            shuffle_video_titles=False,
         )
         self._update_select_button()
         self._update_status_summary()
@@ -1127,16 +1252,23 @@ class ChannelEditTabPane(QWidget):
             self._btn_select_profiles.setEnabled(self._can_select_profiles())
 
     def _update_status_summary(self) -> None:
+        if not hasattr(self, "_status"):
+            return
         parts: list[str] = []
         if self._avatar_pngs and self._toggle_avatar.isChecked():
-            parts.append(f"Аватарок: {len(self._avatar_pngs)}.")
+            parts.append(f"Фото профиля: {len(self._avatar_pngs)}.")
         if self._channel_names:
-            parts.append(f"Названий: {len(self._channel_names)}.")
+            parts.append(f"Названий каналов: {len(self._channel_names)}.")
         desc_count = len(self._current_channel_descriptions()) if self._toggle_desc.isChecked() else 0
         if desc_count:
             parts.append(f"Описаний: {desc_count}.")
+        links = self.channel_links()
+        if links:
+            parts.append(f"Ссылок: {len(links)}.")
         if self._video_titles:
-            parts.append(f"Названий для видео: {len(self._video_titles)}.")
+            parts.append(f"Названий видео: {len(self._video_titles)}.")
+        if self.change_language_before_edit():
+            parts.append("Смена языка перед редактированием.")
         if parts:
             self._status.setText(" ".join(parts))
         else:

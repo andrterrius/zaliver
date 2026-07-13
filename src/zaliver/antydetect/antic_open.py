@@ -916,6 +916,30 @@ def upload_channel_avatar_in_local_antidetect_profile(
         api.close()
 
 
+def _normalize_channel_links(
+    *,
+    link_title: str | None = None,
+    link_url: str | None = None,
+    channel_links: list[tuple[str, str]] | list[list[str]] | None = None,
+) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for item in channel_links or []:
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            lt = str(item[0] or "").strip()
+            lu = str(item[1] or "").strip()
+        else:
+            continue
+        if lt and lu:
+            out.append((lt, lu))
+    if out:
+        return out
+    lt = (link_title or "").strip()
+    lu = (link_url or "").strip()
+    if lt and lu:
+        return [(lt, lu)]
+    return []
+
+
 def _channel_setup_work_flags(
     *,
     description: str | None,
@@ -925,15 +949,20 @@ def _channel_setup_work_flags(
     avatar_path: str | Path | None,
     channel_name: str | None,
     skip_name_change: bool,
-) -> tuple[bool, bool, bool, bool]:
+    channel_links: list[tuple[str, str]] | list[list[str]] | None = None,
+    change_language: bool = False,
+) -> tuple[bool, bool, bool, bool, bool]:
     d = (description or "").strip()
-    lt = (link_title or "").strip()
-    lu = (link_url or "").strip()
-    has_text = bool(d) or bool(lt and lu)
+    links = _normalize_channel_links(
+        link_title=link_title,
+        link_url=link_url,
+        channel_links=channel_links,
+    )
+    has_text = bool(d) or bool(links)
     has_video_title = bool((video_default_title or "").strip())
     has_avatar = bool(avatar_path)
     has_name = bool((channel_name or "").strip()) and not skip_name_change
-    return has_text, has_video_title, has_avatar, has_name
+    return has_text, has_video_title, has_avatar, has_name, bool(change_language)
 
 
 @with_log_profile
@@ -943,18 +972,20 @@ def setup_channel_in_profile(
     description: str | None = None,
     link_title: str | None = None,
     link_url: str | None = None,
+    channel_links: list[tuple[str, str]] | list[list[str]] | None = None,
     video_default_title: str | None = None,
     avatar_path: str | Path | None = None,
     channel_name: str | None = None,
     skip_name_change: bool = False,
+    change_language: bool = False,
     local_token: str | None = None,
     headless: bool = True,
     login_credentials=None,
     yt_oldest_name: str | None = None,
     search_oldest_channel: bool = True,
 ) -> None:
-    """Dolphin → Studio → «Настройка канала» (один запуск профиля на все шаги)."""
-    has_text, has_video_title, has_avatar, has_name = _channel_setup_work_flags(
+    """Dolphin → (опц. смена языка) → Studio → «Настройка канала» (один запуск профиля)."""
+    has_text, has_video_title, has_avatar, has_name, do_lang = _channel_setup_work_flags(
         description=description,
         link_title=link_title,
         link_url=link_url,
@@ -962,18 +993,22 @@ def setup_channel_in_profile(
         avatar_path=avatar_path,
         channel_name=channel_name,
         skip_name_change=skip_name_change,
+        channel_links=channel_links,
+        change_language=change_language,
     )
-    if not has_text and not has_video_title and not has_avatar and not has_name:
+    if not has_text and not has_video_title and not has_avatar and not has_name and not do_lang:
         raise DolphinAntyError("Не заданы параметры настройки канала.")
     parts: list[str] = []
+    if do_lang:
+        parts.append("смена языка")
     if has_text:
         parts.append("описание/ссылка")
     if has_video_title:
-        parts.append("название для видео")
+        parts.append("название видео")
     if has_avatar:
-        parts.append("аватарка")
+        parts.append("фото профиля")
     if has_name:
-        parts.append("название")
+        parts.append("название канала")
     _log(
         "Dolphin: настройка канала ("
         + ", ".join(parts)
@@ -1002,16 +1037,25 @@ def setup_channel_in_profile(
                     "yt_oldest_name": yt_oldest_name,
                     "search_oldest_channel": search_oldest_channel,
                 }
+                if do_lang:
+                    run_youtube_interface_language_to_russian(
+                        page, login_credentials=login_credentials
+                    )
                 if has_text:
+                    if do_lang:
+                        _log(
+                            "Dolphin: переход в Studio после смены языка…"
+                        )
                     run_studio_channel_description_and_link(
                         page,
                         description=description,
                         link_title=link_title,
                         link_url=link_url,
+                        channel_links=channel_links,
                         **studio_kw,
                     )
                 if has_video_title:
-                    if has_text:
+                    if has_text or do_lang:
                         _log(
                             "Dolphin: повторный переход в Studio "
                             "для названия видео (без перезапуска профиля)…"
@@ -1022,10 +1066,10 @@ def setup_channel_in_profile(
                         **studio_kw,
                     )
                 if has_avatar or has_name:
-                    if has_text or has_video_title:
+                    if has_text or has_video_title or do_lang:
                         _log(
                             "Dolphin: повторный переход в Studio "
-                            "для аватарки/названия (без перезапуска профиля)…"
+                            "для фото профиля/названия (без перезапуска профиля)…"
                         )
                     run_studio_channel_profile_customization(
                         page,
@@ -1054,10 +1098,12 @@ def setup_channel_in_local_antidetect_profile(
     description: str | None = None,
     link_title: str | None = None,
     link_url: str | None = None,
+    channel_links: list[tuple[str, str]] | list[list[str]] | None = None,
     video_default_title: str | None = None,
     avatar_path: str | Path | None = None,
     channel_name: str | None = None,
     skip_name_change: bool = False,
+    change_language: bool = False,
     base_url: str,
     headless: bool = True,
     login_credentials=None,
@@ -1065,7 +1111,7 @@ def setup_channel_in_local_antidetect_profile(
     search_oldest_channel: bool = True,
     remote_cdp=None,
 ) -> None:
-    """Локальный антидетект → Studio → «Настройка канала» (один запуск профиля)."""
+    """Локальный антидетект → (опц. смена языка) → Studio → «Настройка канала»."""
     from zaliver.antydetect.local_antidetect_api import (
         LocalAntidetectError,
         LocalAntidetectHttpAPI,
@@ -1075,7 +1121,7 @@ def setup_channel_in_local_antidetect_profile(
         unregister_local_session,
     )
 
-    has_text, has_video_title, has_avatar, has_name = _channel_setup_work_flags(
+    has_text, has_video_title, has_avatar, has_name, do_lang = _channel_setup_work_flags(
         description=description,
         link_title=link_title,
         link_url=link_url,
@@ -1083,18 +1129,22 @@ def setup_channel_in_local_antidetect_profile(
         avatar_path=avatar_path,
         channel_name=channel_name,
         skip_name_change=skip_name_change,
+        channel_links=channel_links,
+        change_language=change_language,
     )
-    if not has_text and not has_video_title and not has_avatar and not has_name:
+    if not has_text and not has_video_title and not has_avatar and not has_name and not do_lang:
         raise LocalAntidetectError("Не заданы параметры настройки канала.")
     parts: list[str] = []
+    if do_lang:
+        parts.append("смена языка")
     if has_text:
         parts.append("описание/ссылка")
     if has_video_title:
-        parts.append("название для видео")
+        parts.append("название видео")
     if has_avatar:
-        parts.append("аватарка")
+        parts.append("фото профиля")
     if has_name:
-        parts.append("название")
+        parts.append("название канала")
     _log(
         "Local antidetect: настройка канала ("
         + ", ".join(parts)
@@ -1128,16 +1178,25 @@ def setup_channel_in_local_antidetect_profile(
                     yt_oldest_name=yt_oldest_name,
                     search_oldest_channel=search_oldest_channel,
                 )
+                if do_lang:
+                    run_youtube_interface_language_to_russian(
+                        page, login_credentials=login_credentials
+                    )
                 if has_text:
+                    if do_lang:
+                        _log(
+                            "Local antidetect: переход в Studio после смены языка…"
+                        )
                     run_studio_channel_description_and_link(
                         page,
                         description=description,
                         link_title=link_title,
                         link_url=link_url,
+                        channel_links=channel_links,
                         **studio_kw,
                     )
                 if has_video_title:
-                    if has_text:
+                    if has_text or do_lang:
                         _log(
                             "Local antidetect: повторный переход в Studio "
                             "для названия видео (без перезапуска профиля)…"
@@ -1148,10 +1207,10 @@ def setup_channel_in_local_antidetect_profile(
                         **studio_kw,
                     )
                 if has_avatar or has_name:
-                    if has_text or has_video_title:
+                    if has_text or has_video_title or do_lang:
                         _log(
                             "Local antidetect: повторный переход в Studio "
-                            "для аватарки/названия (без перезапуска профиля)…"
+                            "для фото профиля/названия (без перезапуска профиля)…"
                         )
                     profile_kw = dict(studio_kw)
                     if has_name:

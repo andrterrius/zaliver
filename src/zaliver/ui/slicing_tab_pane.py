@@ -349,20 +349,34 @@ class SlicingTabPane(QWidget):
 
         io = QGroupBox("Файлы и папка результата")
         io_grid = QGridLayout(io)
-        btn_clips = QPushButton("Выбрать клипы…")
-        btn_clips.setObjectName("secondary")
-        btn_clips.clicked.connect(self._browse_clips)
+        self._btn_pick_clips = QPushButton("Выбрать клипы…")
+        self._btn_pick_clips.setObjectName("secondary")
+        self._btn_pick_clips.clicked.connect(self._browse_clips)
+        self._btn_add_clips = QPushButton("Добавить еще файлы…")
+        self._btn_add_clips.setObjectName("secondary")
+        self._btn_add_clips.clicked.connect(self._add_clips)
+        self._btn_clear_clips = QPushButton("Очистить")
+        self._btn_clear_clips.setObjectName("secondary")
+        self._btn_clear_clips.clicked.connect(self._clear_clips)
+        clip_btns = QHBoxLayout()
+        clip_btns.setContentsMargins(0, 0, 0, 0)
+        clip_btns.setSpacing(6)
+        clip_btns.addWidget(self._btn_pick_clips)
+        clip_btns.addWidget(self._btn_add_clips)
+        clip_btns.addWidget(self._btn_clear_clips)
+        clip_btns_w = QWidget()
+        clip_btns_w.setLayout(clip_btns)
         self._clip_hint = QLabel("")
         self._clip_hint.setObjectName("hint")
         self._clip_hint.setWordWrap(True)
         self.output_dir_edit = QLineEdit()
         self.output_dir_edit.setPlaceholderText("Папка для нарезанных роликов…")
-        btn_out = QPushButton("Обзор…")
+        btn_out = QPushButton("Выходная папка…")
         btn_out.setObjectName("secondary")
         btn_out.clicked.connect(self._browse_output_dir)
         io_grid.addWidget(QLabel("Исходные клипы:"), 0, 0)
         io_grid.addWidget(self._clip_hint, 0, 1)
-        io_grid.addWidget(btn_clips, 0, 2)
+        io_grid.addWidget(clip_btns_w, 0, 2)
         io_grid.addWidget(QLabel("Выходная папка:"), 1, 0)
         io_grid.addWidget(self.output_dir_edit, 1, 1)
         io_grid.addWidget(btn_out, 1, 2)
@@ -383,15 +397,29 @@ class SlicingTabPane(QWidget):
 
         music_gb = QGroupBox("Треки для нарезки")
         music_grid = QGridLayout(music_gb)
-        btn_music = QPushButton("Выбрать треки…")
-        btn_music.setObjectName("secondary")
-        btn_music.clicked.connect(self._browse_music)
+        self._btn_pick_music = QPushButton("Выбрать треки…")
+        self._btn_pick_music.setObjectName("secondary")
+        self._btn_pick_music.clicked.connect(self._browse_music)
+        self._btn_add_music = QPushButton("Добавить еще файлы…")
+        self._btn_add_music.setObjectName("secondary")
+        self._btn_add_music.clicked.connect(self._add_music)
+        self._btn_clear_music = QPushButton("Очистить")
+        self._btn_clear_music.setObjectName("secondary")
+        self._btn_clear_music.clicked.connect(self._clear_music)
+        music_btns = QHBoxLayout()
+        music_btns.setContentsMargins(0, 0, 0, 0)
+        music_btns.setSpacing(6)
+        music_btns.addWidget(self._btn_pick_music)
+        music_btns.addWidget(self._btn_add_music)
+        music_btns.addWidget(self._btn_clear_music)
+        music_btns_w = QWidget()
+        music_btns_w.setLayout(music_btns)
         self._music_hint = QLabel("")
         self._music_hint.setObjectName("hint")
         self._music_hint.setWordWrap(True)
         music_grid.addWidget(QLabel("Аудиотреки:"), 0, 0)
         music_grid.addWidget(self._music_hint, 0, 1)
-        music_grid.addWidget(btn_music, 0, 2)
+        music_grid.addWidget(music_btns_w, 0, 2)
         music_desc = QLabel(
             "Аудио задаёт длительность и моменты смены кадра. "
             "Треки берутся по очереди и при необходимости повторяются."
@@ -735,18 +763,76 @@ class SlicingTabPane(QWidget):
         mx = self._max_workers_fn()
         self.thread_label.setText(f"{int(v)} / {mx}")
 
+    def _normalize_path_key(self, p: str) -> str:
+        try:
+            return os.path.normcase(str(Path(p).resolve()))
+        except OSError:
+            return os.path.normcase(os.path.normpath(str(p)))
+
+    def _merge_unique_paths(self, existing: list[str], new_files: list[str]) -> list[str]:
+        seen = {self._normalize_path_key(p) for p in existing}
+        merged = list(existing)
+        for f in new_files:
+            raw = str(f).strip()
+            if not raw:
+                continue
+            try:
+                p = str(Path(raw).resolve())
+            except OSError:
+                p = raw
+            key = self._normalize_path_key(p)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(p)
+        return merged
+
+    def _clips_dialog_filter(self) -> str:
+        return "Видео (*.mp4 *.mkv *.mov *.avi *.webm *.m4v);;Все файлы (*)"
+
+    def _music_dialog_filter(self) -> str:
+        return "Аудио (*.mp3 *.wav *.m4a *.aac *.flac *.ogg);;Все файлы (*)"
+
+    def _clips_start_dir(self) -> str:
+        if self._clip_files:
+            return str(Path(self._clip_files[0]).parent)
+        return str(Path.home())
+
+    def _music_start_dir(self) -> str:
+        if self._music_files:
+            return str(Path(self._music_files[0]).parent)
+        return str(Path.home())
+
     def _browse_clips(self) -> None:
-        start = str(Path(self._clip_files[0]).parent) if self._clip_files else str(Path.home())
         files, _ = QFileDialog.getOpenFileNames(
             self,
             "Выберите видеоклипы для сцен",
-            start,
-            "Видео (*.mp4 *.mkv *.mov *.avi *.webm *.m4v);;Все файлы (*)",
+            self._clips_start_dir(),
+            self._clips_dialog_filter(),
         )
         if files:
-            self._clip_files = [f for f in files if str(f).strip()]
+            self._clip_files = self._merge_unique_paths([], files)
             self._sync_clip_hint()
             self.save_settings()
+
+    def _add_clips(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Добавить видеоклипы к списку",
+            self._clips_start_dir(),
+            self._clips_dialog_filter(),
+        )
+        if files:
+            self._clip_files = self._merge_unique_paths(self._clip_files, files)
+            self._sync_clip_hint()
+            self.save_settings()
+
+    def _clear_clips(self) -> None:
+        if not self._clip_files:
+            return
+        self._clip_files = []
+        self._sync_clip_hint()
+        self.save_settings()
 
     def _browse_output_dir(self) -> None:
         start = self.output_dir_edit.text().strip() or (
@@ -758,20 +844,41 @@ class SlicingTabPane(QWidget):
             self.save_settings()
 
     def _browse_music(self) -> None:
-        start = str(Path(self._music_files[0]).parent) if self._music_files else str(Path.home())
         files, _ = QFileDialog.getOpenFileNames(
             self,
             "Выберите аудиотреки для нарезки (можно несколько)",
-            start,
-            "Аудио (*.mp3 *.wav *.m4a *.aac *.flac *.ogg);;Все файлы (*)",
+            self._music_start_dir(),
+            self._music_dialog_filter(),
         )
         if files:
-            self._music_files = [f for f in files if str(f).strip()]
+            self._music_files = self._merge_unique_paths([], files)
             self._sync_music_hint()
             self.save_settings()
 
+    def _add_music(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Добавить аудиотреки к списку",
+            self._music_start_dir(),
+            self._music_dialog_filter(),
+        )
+        if files:
+            self._music_files = self._merge_unique_paths(self._music_files, files)
+            self._sync_music_hint()
+            self.save_settings()
+
+    def _clear_music(self) -> None:
+        if not self._music_files:
+            return
+        self._music_files = []
+        self._sync_music_hint()
+        self.save_settings()
+
     def _sync_clip_hint(self) -> None:
         n = len(self._clip_files)
+        has_files = n > 0
+        self._btn_add_clips.setVisible(has_files)
+        self._btn_clear_clips.setVisible(has_files)
         if n <= 0:
             self._clip_hint.setText("Не выбрано — нажмите «Выбрать клипы…»")
             return
@@ -783,6 +890,9 @@ class SlicingTabPane(QWidget):
 
     def _sync_music_hint(self) -> None:
         n = len(self._music_files)
+        has_files = n > 0
+        self._btn_add_music.setVisible(has_files)
+        self._btn_clear_music.setVisible(has_files)
         if n <= 0:
             self._music_hint.setText("Не выбрано — нажмите «Выбрать треки…»")
             self._music_hint.setToolTip("")

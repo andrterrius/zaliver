@@ -125,6 +125,12 @@ from zaliver.ui.widgets import (
 from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
 from zaliver.ui.slicing_tab_pane import SlicingTabPane
 from zaliver.ui.channel_edit_tab_pane import ChannelEditTabPane
+from zaliver.ui.ai_tab_pane import AiTabPane
+from zaliver.ui.ai_generate_dialog import AiGenerateDialog
+from zaliver.ui.channel_setup_helpers import (
+    field_with_recent_picker,
+    make_magic_wand_button,
+)
 from zaliver.ui.title_variables_ui import show_youtube_title_warnings, title_field_with_variables_hint
 from zaliver.title_variables import (
     TitleVariableContext,
@@ -877,6 +883,7 @@ class MainWindow(QWidget):
         self._load_folder_settings()
         self._load_antydetect_settings()
         self._load_youtube_settings()
+        self._load_ai_settings()
         self._update_profiles_section_header()
         self._sync_ffmpeg_install_row()
         self._pending_upload: dict[str, str] | None = None
@@ -1961,10 +1968,13 @@ class MainWindow(QWidget):
             recent_link_titles=self._upload_store.list_recent_channel_link_titles(),
             recent_link_urls=self._upload_store.list_recent_channel_link_urls(),
             recent_video_default_titles=self._upload_store.list_recent_video_default_title_fields(),
+            ai_generate_fn=self._on_ai_magic_generate,
         )
         self._channel_edit_tab.select_profiles_requested.connect(
             self._start_channel_setup_from_tab
         )
+
+        self._ai_tab = AiTabPane(self, settings=self._settings)
 
         settings = QWidget()
         settings_l = QVBoxLayout(settings)
@@ -2150,6 +2160,54 @@ class MainWindow(QWidget):
         gy.addWidget(w_yt_btns, 3, 0, 1, 2)
         gy.addWidget(self._youtube_settings_status, 4, 0, 1, 2)
 
+        gb_ai = QGroupBox("ИИ")
+        gai = QGridLayout(gb_ai)
+        ai_hint = QLabel(
+            "OpenAI-совместимый API (например OpenAI, OpenRouter, локальный сервер). "
+            "Базовый URL без завершающего слэша, обычно с суффиксом /v1."
+        )
+        ai_hint.setObjectName("hint")
+        ai_hint.setWordWrap(True)
+        self._ai_base_url = QLineEdit()
+        self._ai_base_url.setPlaceholderText("https://api.openai.com/v1")
+        self._ai_base_url.setToolTip(
+            "Базовый URL эндпоинта OpenAI-совместимого сервиса "
+            "(например https://api.openai.com/v1 или http://127.0.0.1:1234/v1)."
+        )
+        self._ai_api_key = QLineEdit()
+        self._ai_api_key.setPlaceholderText("API key…")
+        self._ai_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._ai_api_key.setToolTip(
+            "Ключ API. Хранится локально в настройках приложения (QSettings)."
+        )
+        self._ai_show_key = QCheckBox("Показать ключ")
+        self._ai_show_key.stateChanged.connect(self._on_ai_show_key_changed)
+        self._ai_model = QLineEdit()
+        self._ai_model.setPlaceholderText("gpt-4o-mini")
+        self._ai_model.setToolTip("Название модели, как ожидает выбранный сервис.")
+        self._btn_save_ai = QPushButton("Сохранить")
+        self._btn_save_ai.setObjectName("secondary")
+        self._btn_save_ai.clicked.connect(self._save_ai_settings)
+        self._ai_settings_status = QLabel("")
+        self._ai_settings_status.setObjectName("hint")
+        self._ai_settings_status.setWordWrap(True)
+
+        gai.addWidget(ai_hint, 0, 0, 1, 2)
+        gai.addWidget(QLabel("URL эндпоинта:"), 1, 0)
+        gai.addWidget(self._ai_base_url, 1, 1)
+        gai.addWidget(QLabel("API key:"), 2, 0)
+        gai.addWidget(self._ai_api_key, 2, 1)
+        gai.addWidget(self._ai_show_key, 3, 0, 1, 2)
+        gai.addWidget(QLabel("Модель:"), 4, 0)
+        gai.addWidget(self._ai_model, 4, 1)
+        ai_btns = QHBoxLayout()
+        ai_btns.addStretch()
+        ai_btns.addWidget(self._btn_save_ai)
+        w_ai_btns = QWidget()
+        w_ai_btns.setLayout(ai_btns)
+        gai.addWidget(w_ai_btns, 5, 0, 1, 2)
+        gai.addWidget(self._ai_settings_status, 6, 0, 1, 2)
+
         settings_l.addWidget(settings_title)
         settings_l.addWidget(settings_hint)
         settings_l.addWidget(self._gb_stats_username)
@@ -2160,6 +2218,7 @@ class MainWindow(QWidget):
         settings_l.addWidget(self._gb_antydetect_local)
         settings_l.addWidget(self._gb_antydetect_remote)
         settings_l.addWidget(gb_yt)
+        settings_l.addWidget(gb_ai)
         settings_l.addStretch()
         self._sync_antydetect_settings_groups_visibility()
 
@@ -2170,6 +2229,7 @@ class MainWindow(QWidget):
         self._stack.addWidget(uploaded)
         self._stack.addWidget(profiles)
         self._stack.addWidget(self._channel_edit_tab)
+        self._stack.addWidget(self._ai_tab)
         self._stack.addWidget(settings)
 
         self._nav = QListWidget()
@@ -2183,6 +2243,7 @@ class MainWindow(QWidget):
                 "Залитые видео",
                 "Профили",
                 "Редактирование каналов",
+                "ИИ",
                 "Настройки",
             ]
         )
@@ -3057,6 +3118,23 @@ class MainWindow(QWidget):
         desc_edit.setMinimumHeight(44)
         desc_edit.setMaximumHeight(72)
         desc_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        btn_desc_wand = make_magic_wand_button(
+            tooltip="Сгенерировать описание через ИИ (промпт «Описание видео»)"
+        )
+        btn_desc_wand.clicked.connect(
+            lambda _checked=False: self._on_ai_magic_generate(
+                default_prompt_id="builtin_video_description",
+                window_title="Генерация описания",
+                apply_text=lambda text: desc_edit.setPlainText(text),
+                parent=dlg,
+            )
+        )
+        desc_row, _desc_recent = field_with_recent_picker(
+            desc_edit,
+            recent=[],
+            tooltip="Недавние описания видео",
+            side_extras=[btn_desc_wand],
+        )
 
         publish_before_checks_cb = QCheckBox("Опубликовать до проверок")
         publish_before_checks_cb.setChecked(True)
@@ -3074,14 +3152,37 @@ class MainWindow(QWidget):
             "остаётся значение из настроек канала или имени файла."
         )
 
+        btn_title_wand = make_magic_wand_button(
+            tooltip="Сгенерировать название через ИИ (промпт «Название видео»)"
+        )
         title_row, btn_title_hints = title_field_with_variables_hint(
             title_edit,
             parent=dlg,
+            side_extras=[btn_title_wand],
+        )
+
+        def _apply_ai_title(text: str) -> None:
+            value = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+            value = " ".join(line.strip() for line in value.split("\n") if line.strip())
+            le = title_edit.lineEdit()
+            if le is not None:
+                le.setText(value)
+            else:
+                title_edit.setEditText(value)
+
+        btn_title_wand.clicked.connect(
+            lambda _checked=False: self._on_ai_magic_generate(
+                default_prompt_id="builtin_video_title",
+                window_title="Генерация названия",
+                apply_text=_apply_ai_title,
+                parent=dlg,
+            )
         )
 
         def _sync_keep_studio_title_ui(checked: bool) -> None:
             title_edit.setEnabled(not checked)
             btn_title_hints.setEnabled(not checked)
+            btn_title_wand.setEnabled(not checked)
             if checked and title_le is not None:
                 title_le.setPlaceholderText(
                     "Название не вводится — берётся из Studio (настройки канала или имя файла)…"
@@ -3481,9 +3582,9 @@ class MainWindow(QWidget):
             QLabel("Описание:"),
             1,
             0,
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
         )
-        grid.addWidget(desc_edit, 1, 1)
+        grid.addWidget(desc_row, 1, 1)
         grid.addWidget(publish_before_checks_cb, 2, 1)
         grid.addWidget(keep_studio_title_cb, 3, 1)
         grid.addWidget(schedule_publish_cb, 4, 1)
@@ -4240,6 +4341,118 @@ class MainWindow(QWidget):
         self._youtube_api_key.setEchoMode(
             QLineEdit.EchoMode.Normal if show else QLineEdit.EchoMode.Password
         )
+
+    def _load_ai_settings(self) -> None:
+        if not hasattr(self, "_ai_base_url"):
+            return
+        self._ai_base_url.setText(
+            (self._settings.value("ai/base_url", "", type=str) or "").strip()
+        )
+        self._ai_api_key.setText(
+            (self._settings.value("ai/api_key", "", type=str) or "").strip()
+        )
+        self._ai_model.setText(
+            (self._settings.value("ai/model", "", type=str) or "").strip()
+        )
+
+    def _save_ai_settings(self) -> None:
+        if not hasattr(self, "_ai_base_url"):
+            return
+        base_url = (self._ai_base_url.text() or "").strip().rstrip("/")
+        api_key = (self._ai_api_key.text() or "").strip()
+        model = (self._ai_model.text() or "").strip()
+
+        if base_url:
+            self._settings.setValue("ai/base_url", base_url)
+            self._ai_base_url.setText(base_url)
+        else:
+            try:
+                self._settings.remove("ai/base_url")
+            except Exception:
+                self._settings.setValue("ai/base_url", "")
+
+        if api_key:
+            self._settings.setValue("ai/api_key", api_key)
+        else:
+            try:
+                self._settings.remove("ai/api_key")
+            except Exception:
+                self._settings.setValue("ai/api_key", "")
+
+        if model:
+            self._settings.setValue("ai/model", model)
+        else:
+            try:
+                self._settings.remove("ai/model")
+            except Exception:
+                self._settings.setValue("ai/model", "")
+
+        try:
+            self._settings.sync()
+        except Exception:
+            pass
+        if hasattr(self, "_ai_settings_status"):
+            self._ai_settings_status.setText("Настройки ИИ сохранены.")
+
+    def _on_ai_show_key_changed(self, _state: int) -> None:
+        if not hasattr(self, "_ai_api_key") or not hasattr(self, "_ai_show_key"):
+            return
+        show = bool(self._ai_show_key.isChecked())
+        self._ai_api_key.setEchoMode(
+            QLineEdit.EchoMode.Normal if show else QLineEdit.EchoMode.Password
+        )
+
+    def _on_ai_magic_generate(
+        self,
+        *,
+        default_prompt_id: str,
+        window_title: str,
+        apply_text: Callable[[str], None],
+        parent: QWidget | None = None,
+        ask_reply_lines: bool = False,
+        default_reply_lines: int = 1,
+    ) -> None:
+        """Диалог выбора промпта → генерация → вставка результата в поле."""
+        parent_w = parent or self
+        base_url = (self._settings.value("ai/base_url", "", type=str) or "").strip()
+        api_key = (self._settings.value("ai/api_key", "", type=str) or "").strip()
+        model = (self._settings.value("ai/model", "", type=str) or "").strip()
+        if not base_url or not api_key or not model:
+            QMessageBox.warning(
+                parent_w,
+                "ИИ",
+                "Заполните URL эндпоинта, API key и модель в разделе «Настройки» → «ИИ».",
+            )
+            return
+
+        prompts: list[tuple[str, str, str]] = []
+        if hasattr(self, "_ai_tab"):
+            prompts = self._ai_tab.prompts()
+        if not prompts:
+            QMessageBox.warning(
+                parent_w,
+                "ИИ",
+                "Нет промптов. Добавьте их во вкладке «ИИ».",
+            )
+            return
+
+        dlg = AiGenerateDialog(
+            prompts=prompts,
+            default_prompt_id=default_prompt_id,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            window_title=window_title,
+            ask_reply_lines=ask_reply_lines,
+            default_reply_lines=default_reply_lines,
+            parent=parent_w,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            apply_text(dlg.result_text())
+        except RuntimeError:
+            pass
 
     def _youtube_search_oldest_channel(self) -> bool:
         if hasattr(self, "_youtube_search_oldest"):

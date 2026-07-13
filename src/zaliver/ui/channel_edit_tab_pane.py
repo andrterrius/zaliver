@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from PyQt6.QtCore import QTimer, Qt, QThread, pyqtSignal
@@ -19,6 +20,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -38,6 +40,7 @@ from zaliver.ui.channel_setup_helpers import (
     field_with_recent_picker,
     fill_recent_values_picker,
     format_source_files,
+    make_magic_wand_button,
     recent_picker_has_items,
 )
 from zaliver.ui.title_variables_ui import make_variables_hint_button
@@ -85,8 +88,11 @@ class ChannelEditTabPane(QWidget):
         recent_link_titles: list[str] | None = None,
         recent_link_urls: list[str] | None = None,
         recent_video_default_titles: list[str] | None = None,
+        ai_generate_fn: Callable[..., None] | None = None,
     ) -> None:
         super().__init__(parent)
+        self._ai_generate_fn = ai_generate_fn
+        self._ai_wand_buttons: list[QToolButton] = []
         self._profiles: list[dict[str, object]] = []
         self._rows = build_selected_profile_avatar_rows([])
         self._avatar_count = 0
@@ -118,6 +124,39 @@ class ChannelEditTabPane(QWidget):
         self._connect_section_toggles()
         self._on_section_toggle()
         self._refresh_assignment()
+
+    def _make_ai_wand(
+        self,
+        *,
+        default_prompt_id: str,
+        window_title: str,
+        field: QPlainTextEdit,
+    ) -> QToolButton:
+        btn = make_magic_wand_button(
+            tooltip=f"Сгенерировать через ИИ — «{window_title}»"
+        )
+        btn.setEnabled(self._ai_generate_fn is not None)
+
+        def _on_click(_checked: bool = False) -> None:
+            fn = self._ai_generate_fn
+            if fn is None:
+                return
+
+            def _apply(text: str, target: QPlainTextEdit = field) -> None:
+                target.setPlainText(text if text is not None else "")
+
+            fn(
+                default_prompt_id=default_prompt_id,
+                window_title=window_title,
+                apply_text=_apply,
+                parent=self,
+                ask_reply_lines=True,
+                default_reply_lines=max(1, len(self._profiles)),
+            )
+
+        btn.clicked.connect(_on_click)
+        self._ai_wand_buttons.append(btn)
+        return btn
 
     def _compact_text_edit(
         self,
@@ -478,11 +517,17 @@ class ChannelEditTabPane(QWidget):
             fixed_height=_TEXT_FIELD_H,
         )
         self._names_edit.textChanged.connect(self._on_names_text_changed)
+        self._btn_names_wand = self._make_ai_wand(
+            default_prompt_id="builtin_channel_name",
+            window_title="Название канала",
+            field=self._names_edit,
+        )
         names_field_row, self._names_recent_combo = field_with_recent_picker(
             self._names_edit,
             recent=self._recent_channel_names,
             tooltip="Недавние названия каналов",
             on_filled=self._on_names_text_changed,
+            side_extras=[self._btn_names_wand],
         )
         self._wire_hint_button(self._btn_names_hints, self._names_edit)
         names_l.addWidget(names_field_row)
@@ -540,11 +585,17 @@ class ChannelEditTabPane(QWidget):
         if self._recent_descriptions:
             self._desc_edit.setPlainText(self._recent_descriptions[0])
         self._desc_edit.textChanged.connect(self._on_channel_fields_changed)
+        self._btn_desc_wand = self._make_ai_wand(
+            default_prompt_id="builtin_channel_description",
+            window_title="Описание канала",
+            field=self._desc_edit,
+        )
         desc_field_row, self._desc_recent_combo = field_with_recent_picker(
             self._desc_edit,
             recent=self._recent_descriptions,
             tooltip="Недавние описания канала",
             on_filled=self._on_channel_fields_changed,
+            side_extras=[self._btn_desc_wand],
         )
         self._wire_hint_button(self._btn_desc_hints, self._desc_edit)
         desc_l.addWidget(desc_field_row)
@@ -573,11 +624,17 @@ class ChannelEditTabPane(QWidget):
         if self._recent_link_titles:
             self._link_title_edit.setPlainText(self._recent_link_titles[0])
         self._link_title_edit.textChanged.connect(self._on_channel_fields_changed)
+        self._btn_link_title_wand = self._make_ai_wand(
+            default_prompt_id="builtin_link_title",
+            window_title="Название ссылки",
+            field=self._link_title_edit,
+        )
         title_field_row, self._link_title_recent_combo = field_with_recent_picker(
             self._link_title_edit,
             recent=self._recent_link_titles,
             tooltip="Недавние названия ссылок",
             on_filled=self._on_channel_fields_changed,
+            side_extras=[self._btn_link_title_wand],
         )
 
         self._link_url_edit = self._compact_text_edit(
@@ -625,11 +682,17 @@ class ChannelEditTabPane(QWidget):
             fixed_height=_TEXT_FIELD_H,
         )
         self._video_title_edit.textChanged.connect(self._on_video_titles_text_changed)
+        self._btn_video_title_wand = self._make_ai_wand(
+            default_prompt_id="builtin_video_title",
+            window_title="Название видео",
+            field=self._video_title_edit,
+        )
         video_field_row, self._video_title_recent_combo = field_with_recent_picker(
             self._video_title_edit,
             recent=self._recent_video_titles,
             tooltip="Недавние названия видео",
             on_filled=self._on_video_titles_text_changed,
+            side_extras=[self._btn_video_title_wand],
         )
         self._wire_hint_button(self._btn_video_title_hints, self._video_title_edit)
         body_l.addWidget(video_field_row, 1)
@@ -660,6 +723,9 @@ class ChannelEditTabPane(QWidget):
             self._toggle_desc.isChecked() and recent_picker_has_items(self._desc_recent_combo)
         )
         self._btn_desc_hints.setEnabled(self._toggle_desc.isChecked())
+        self._btn_desc_wand.setEnabled(
+            self._toggle_desc.isChecked() and self._ai_generate_fn is not None
+        )
         self._btn_pick_desc.setEnabled(
             self._toggle_desc.isChecked() and not self._is_detecting()
         )
@@ -670,6 +736,7 @@ class ChannelEditTabPane(QWidget):
             names_on and recent_picker_has_items(self._names_recent_combo)
         )
         self._btn_names_hints.setEnabled(names_on)
+        self._btn_names_wand.setEnabled(names_on and self._ai_generate_fn is not None)
         self._btn_pick_names.setEnabled(names_on and not self._is_detecting())
 
         link_on = self._toggle_link.isChecked()
@@ -681,6 +748,9 @@ class ChannelEditTabPane(QWidget):
         self._link_url_recent_combo.setEnabled(
             link_on and recent_picker_has_items(self._link_url_recent_combo)
         )
+        self._btn_link_title_wand.setEnabled(
+            link_on and self._ai_generate_fn is not None
+        )
 
         vt_on = self._toggle_video_title.isChecked()
         self._video_title_edit.setEnabled(vt_on)
@@ -688,6 +758,7 @@ class ChannelEditTabPane(QWidget):
             vt_on and recent_picker_has_items(self._video_title_recent_combo)
         )
         self._btn_video_title_hints.setEnabled(vt_on)
+        self._btn_video_title_wand.setEnabled(vt_on and self._ai_generate_fn is not None)
         self._btn_pick_video_titles.setEnabled(vt_on and not self._is_detecting())
 
         self._sync_text_field_heights()

@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QPlainTextEdit,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -112,12 +113,26 @@ def connect_recent_values_picker(
     menu.triggered.connect(on_pick)
 
 
+def make_magic_wand_button(*, tooltip: str = "") -> QToolButton:
+    """Кнопка «волшебные частички» рядом с полем (под стрелкой недавних значений)."""
+    btn = QToolButton()
+    btn.setObjectName("magicWandButton")
+    btn.setText("✨")
+    btn.setToolTip(tooltip or "Сгенерировать через ИИ")
+    btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+    btn.setFixedSize(34, 28)
+    btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    btn.setAutoRaise(False)
+    return btn
+
+
 def field_with_recent_picker(
     field: QPlainTextEdit | QLineEdit,
     *,
     recent: list[str],
     tooltip: str = "",
     on_filled=None,
+    side_extras: list[QWidget] | None = None,
 ) -> tuple[QWidget, QToolButton]:
     row = QWidget()
     lay = QHBoxLayout(row)
@@ -126,7 +141,16 @@ def field_with_recent_picker(
     lay.addWidget(field, 1)
     picker = recent_values_picker(recent=recent, tooltip=tooltip)
     connect_recent_values_picker(picker, field, on_filled=on_filled)
-    lay.addWidget(picker, 0, Qt.AlignmentFlag.AlignTop)
+
+    side = QWidget()
+    side_l = QVBoxLayout(side)
+    side_l.setContentsMargins(0, 0, 0, 0)
+    side_l.setSpacing(4)
+    side_l.addWidget(picker, 0, Qt.AlignmentFlag.AlignHCenter)
+    for extra in side_extras or []:
+        side_l.addWidget(extra, 0, Qt.AlignmentFlag.AlignHCenter)
+    side_l.addStretch(1)
+    lay.addWidget(side, 0, Qt.AlignmentFlag.AlignTop)
     return row, picker
 
 

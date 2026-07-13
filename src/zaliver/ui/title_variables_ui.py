@@ -155,6 +155,7 @@ def title_field_with_variables_hint(
     field: QComboBox,
     *,
     parent: QWidget,
+    side_extras: list[QWidget] | None = None,
 ) -> tuple[QWidget, QPushButton]:
     row = QWidget(parent)
     lay = QHBoxLayout(row)
@@ -163,6 +164,8 @@ def title_field_with_variables_hint(
     lay.addWidget(field, 1)
     btn_hints = make_variables_hint_button(parent=parent, field=field)
     lay.addWidget(btn_hints, 0, Qt.AlignmentFlag.AlignVCenter)
+    for extra in side_extras or []:
+        lay.addWidget(extra, 0, Qt.AlignmentFlag.AlignVCenter)
     return row, btn_hints
 
 

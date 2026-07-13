@@ -79,6 +79,26 @@ QPushButton#danger:hover {
     background: #e11d48;
 }
 
+QPushButton#dangerIcon {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #be123c, stop:1 #9f1239);
+    color: #f8fafc;
+    border: none;
+    border-radius: 8px;
+    padding: 0;
+    margin: 0;
+    min-width: 0;
+    min-height: 0;
+    max-width: 32px;
+    max-height: 32px;
+    font-size: 16px;
+    font-weight: 700;
+}
+
+QPushButton#dangerIcon:hover {
+    background: #e11d48;
+}
+
 QPlainTextEdit {
     background-color: #0f1118;
     border: 1px solid #2d3142;
@@ -939,6 +959,25 @@ QToolButton#recentValuesPicker:hover:enabled {
 }
 
 QToolButton#recentValuesPicker:disabled {
+    color: #555a70;
+    background-color: #14161e;
+}
+
+QToolButton#magicWandButton {
+    background-color: #1a1d28;
+    border: 1px solid #2d3142;
+    border-radius: 8px;
+    color: #e4e6ef;
+    padding: 0;
+    font-size: 14px;
+}
+
+QToolButton#magicWandButton:hover:enabled {
+    border-color: #6366f1;
+    background-color: #252836;
+}
+
+QToolButton#magicWandButton:disabled {
     color: #555a70;
     background-color: #14161e;
 }

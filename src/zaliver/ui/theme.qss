@@ -928,6 +928,11 @@ QComboBox#uploadedSessionFilter QAbstractItemView {
     font-weight: 600;
 }
 
+QGroupBox#settingsSection {
+    margin-top: 6px;
+    padding: 8px 8px 6px 8px;
+}
+
 QGroupBox#channelEditSection {
     margin-top: 0;
     padding: 8px 10px 10px 10px;

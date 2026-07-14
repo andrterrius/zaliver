@@ -1976,10 +1976,56 @@ class MainWindow(QWidget):
 
         self._ai_tab = AiTabPane(self, settings=self._settings)
 
+        def _compact_settings_vbox(box: QGroupBox) -> QVBoxLayout:
+            box.setObjectName("settingsSection")
+            lay = QVBoxLayout(box)
+            lay.setSpacing(4)
+            lay.setContentsMargins(6, 4, 6, 4)
+            return lay
+
+        def _compact_settings_grid(box: QGroupBox) -> QGridLayout:
+            box.setObjectName("settingsSection")
+            lay = QGridLayout(box)
+            lay.setHorizontalSpacing(8)
+            lay.setVerticalSpacing(4)
+            lay.setContentsMargins(6, 4, 6, 4)
+            return lay
+
+        def _settings_save_row(btn: QPushButton) -> QWidget:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(0)
+            row.addStretch()
+            row.addWidget(btn)
+            wrap = QWidget()
+            wrap.setLayout(row)
+            return wrap
+
         settings = QWidget()
-        settings_l = QVBoxLayout(settings)
-        settings_l.setSpacing(12)
-        settings_l.setContentsMargins(12, 12, 12, 12)
+        settings_outer = QVBoxLayout(settings)
+        settings_outer.setSpacing(0)
+        settings_outer.setContentsMargins(0, 0, 0, 0)
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        settings_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        settings_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        settings_scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        settings_inner = QWidget()
+        settings_inner.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
+        settings_l = QVBoxLayout(settings_inner)
+        settings_l.setSpacing(6)
+        settings_l.setContentsMargins(12, 8, 12, 8)
         settings_title = QLabel("Настройки")
         settings_title.setObjectName("title")
         settings_hint = QLabel(
@@ -1990,7 +2036,7 @@ class MainWindow(QWidget):
         settings_hint.setWordWrap(True)
 
         self._gb_stats_username = QGroupBox("Имя пользователя")
-        gsu = QVBoxLayout(self._gb_stats_username)
+        gsu = _compact_settings_vbox(self._gb_stats_username)
         self._stats_server_username = QLineEdit()
         self._btn_save_stats_username = QPushButton("Сохранить")
         self._btn_save_stats_username.setObjectName("secondary")
@@ -1999,15 +2045,12 @@ class MainWindow(QWidget):
         self._btn_save_stats_username.clicked.connect(
             self._save_stats_server_username_settings
         )
-        gsu_btns = QHBoxLayout()
-        gsu_btns.addStretch()
-        gsu_btns.addWidget(self._btn_save_stats_username)
-        w_gsu_btns = QWidget()
-        w_gsu_btns.setLayout(gsu_btns)
         gsu.addWidget(self._stats_server_username)
-        gsu.addWidget(w_gsu_btns)
+        gsu.addWidget(_settings_save_row(self._btn_save_stats_username))
 
         browser_pick = QHBoxLayout()
+        browser_pick.setContentsMargins(0, 0, 0, 0)
+        browser_pick.setSpacing(8)
         browser_pick.addWidget(QLabel("Браузер по умолчанию:"))
         self._default_browser_combo = QComboBox()
         self._default_browser_combo.setObjectName("defaultBrowserCombo")
@@ -2027,7 +2070,7 @@ class MainWindow(QWidget):
         )
 
         self._gb_max_concurrent_browsers = QGroupBox("Параллельные браузеры")
-        gmc = QVBoxLayout(self._gb_max_concurrent_browsers)
+        gmc = _compact_settings_vbox(self._gb_max_concurrent_browsers)
         browsers_hint = QLabel(
             "Максимум одновременно открытых браузеров при заливке, проверке Studio, "
             "редактировании каналов и прогреве."
@@ -2036,6 +2079,8 @@ class MainWindow(QWidget):
         browsers_hint.setWordWrap(True)
         gmc.addWidget(browsers_hint)
         browsers_row = QHBoxLayout()
+        browsers_row.setContentsMargins(0, 0, 0, 0)
+        browsers_row.setSpacing(8)
         browsers_row.addWidget(QLabel("Одновременно:"))
         self._max_concurrent_browsers_slider = SmoothSlider(Qt.Orientation.Horizontal)
         self._max_concurrent_browsers_slider.setMinimum(MAX_CONCURRENT_BROWSERS_MIN)
@@ -2060,7 +2105,7 @@ class MainWindow(QWidget):
         gmc.addWidget(w_browsers_row)
 
         self._gb_antydetect_dolphin = QGroupBox("Dolphin Anty")
-        gg = QGridLayout(self._gb_antydetect_dolphin)
+        gg = _compact_settings_grid(self._gb_antydetect_dolphin)
         public_host = QLabel("Public API: https://dolphin-anty-api.com")
         public_host.setObjectName("hint")
         public_host.setWordWrap(True)
@@ -2073,7 +2118,7 @@ class MainWindow(QWidget):
         )
 
         self._gb_antydetect_local = QGroupBox("Свой антидетект (локальный HTTP API)")
-        gl = QGridLayout(self._gb_antydetect_local)
+        gl = _compact_settings_grid(self._gb_antydetect_local)
         self._local_api_base_url = QLineEdit()
         self._local_api_base_url.setPlaceholderText(DEFAULT_LOCAL_API_BASE_URL)
         self._local_api_base_url.setToolTip(
@@ -2083,7 +2128,7 @@ class MainWindow(QWidget):
         gl.addWidget(self._local_api_base_url, 0, 1)
 
         self._gb_antydetect_remote = QGroupBox("Свой антидетект (удалённый HTTP API)")
-        gr = QGridLayout(self._gb_antydetect_remote)
+        gr = _compact_settings_grid(self._gb_antydetect_remote)
         self._remote_api_base_url = QLineEdit()
         self._remote_api_base_url.setPlaceholderText("https://example.com:18765")
         self._remote_api_base_url.setToolTip(
@@ -2112,16 +2157,11 @@ class MainWindow(QWidget):
         gg.addWidget(public_host, 0, 0, 1, 2)
         gg.addWidget(QLabel("JWT:"), 1, 0)
         gg.addWidget(self._dolphin_token, 1, 1)
-        btns = QHBoxLayout()
-        btns.addStretch()
-        btns.addWidget(self._btn_save_antydetect)
-        w_btns = QWidget()
-        w_btns.setLayout(btns)
-        gg.addWidget(w_btns, 2, 0, 1, 2)
+        gg.addWidget(_settings_save_row(self._btn_save_antydetect), 2, 0, 1, 2)
         gg.addWidget(self._settings_status, 3, 0, 1, 2)
 
         gb_yt = QGroupBox("YouTube")
-        gy = QGridLayout(gb_yt)
+        gy = _compact_settings_grid(gb_yt)
         self._youtube_api_key = QLineEdit()
         self._youtube_api_key.setPlaceholderText("YOUTUBE_API_KEY (YouTube Data API v3)…")
         self._youtube_api_key.setEchoMode(QLineEdit.EchoMode.Password)
@@ -2152,16 +2192,11 @@ class MainWindow(QWidget):
         gy.addWidget(self._youtube_api_key, 0, 1)
         gy.addWidget(self._youtube_show_key, 1, 0, 1, 2)
         gy.addWidget(self._youtube_search_oldest, 2, 0, 1, 2)
-        yt_btns = QHBoxLayout()
-        yt_btns.addStretch()
-        yt_btns.addWidget(self._btn_save_youtube)
-        w_yt_btns = QWidget()
-        w_yt_btns.setLayout(yt_btns)
-        gy.addWidget(w_yt_btns, 3, 0, 1, 2)
+        gy.addWidget(_settings_save_row(self._btn_save_youtube), 3, 0, 1, 2)
         gy.addWidget(self._youtube_settings_status, 4, 0, 1, 2)
 
         gb_ai = QGroupBox("ИИ")
-        gai = QGridLayout(gb_ai)
+        gai = _compact_settings_grid(gb_ai)
         ai_hint = QLabel(
             "OpenAI-совместимый API (например OpenAI, OpenRouter, локальный сервер). "
             "Базовый URL без завершающего слэша, обычно с суффиксом /v1."
@@ -2200,12 +2235,7 @@ class MainWindow(QWidget):
         gai.addWidget(self._ai_show_key, 3, 0, 1, 2)
         gai.addWidget(QLabel("Модель:"), 4, 0)
         gai.addWidget(self._ai_model, 4, 1)
-        ai_btns = QHBoxLayout()
-        ai_btns.addStretch()
-        ai_btns.addWidget(self._btn_save_ai)
-        w_ai_btns = QWidget()
-        w_ai_btns.setLayout(ai_btns)
-        gai.addWidget(w_ai_btns, 5, 0, 1, 2)
+        gai.addWidget(_settings_save_row(self._btn_save_ai), 5, 0, 1, 2)
         gai.addWidget(self._ai_settings_status, 6, 0, 1, 2)
 
         settings_l.addWidget(settings_title)
@@ -2220,6 +2250,8 @@ class MainWindow(QWidget):
         settings_l.addWidget(gb_yt)
         settings_l.addWidget(gb_ai)
         settings_l.addStretch()
+        settings_scroll.setWidget(settings_inner)
+        settings_outer.addWidget(settings_scroll, 1)
         self._sync_antydetect_settings_groups_visibility()
 
         self._stack = QStackedWidget()

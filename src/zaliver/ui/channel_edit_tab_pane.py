@@ -48,6 +48,8 @@ from zaliver.ui.widgets import AnimatedProgressBar, ToggleSwitch
 
 _TEXT_MIN_H = 64
 _TEXT_FIELD_H = 110
+# Компактная высота названия — вместе с фото профиля в одном ряду.
+_NAMES_FIELD_H = 100
 _BP_AVATAR_NAMES = 720
 _BP_HEADER = 520
 
@@ -237,11 +239,13 @@ class ChannelEditTabPane(QWidget):
         if horizontal:
             lay = QHBoxLayout(host)
             lay.setSpacing(8)
-            lay.addWidget(self._avatar_box, 1)
-            lay.addWidget(self._names_box, 1)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.addWidget(self._avatar_box, 1, Qt.AlignmentFlag.AlignTop)
+            lay.addWidget(self._names_box, 1, Qt.AlignmentFlag.AlignTop)
         else:
             lay = QVBoxLayout(host)
             lay.setSpacing(8)
+            lay.setContentsMargins(0, 0, 0, 0)
             lay.addWidget(self._avatar_box)
             lay.addWidget(self._names_box)
 
@@ -321,33 +325,39 @@ class ChannelEditTabPane(QWidget):
             footer_h = max(footer_h, 32)
         chrome += footer_h
         chrome += self._form_inner_chrome_height()
+        # Чекбокс «Поменять язык» внутри scroll.
+        chrome += 28
         return chrome
 
     def _sync_text_field_heights(self) -> None:
         if not hasattr(self, "_scroll") or not hasattr(self, "_link_title_edit"):
             return
 
+        # Название держим компактным (рядом с фото); остальные 4 поля делят высоту.
         slots = 4
         viewport_h = self._scroll.viewport().height()
         if viewport_h >= 80:
-            available = max(0, viewport_h - self._form_inner_chrome_height())
+            available = max(0, viewport_h - self._form_inner_chrome_height() - 28)
             pane_h = viewport_h
         else:
             pane_h = self._pane_window_height()
             available = max(0, pane_h - self._non_text_chrome_height())
 
-        # Доп. отступ снизу, чтобы ряд ссылок не упирался в край.
-        available = max(0, available - 28)
+        # Доп. отступ снизу + фиксированная высота названия канала.
+        available = max(0, available - 28 - _NAMES_FIELD_H)
 
+        # Не сжимаем поля ниже минимума — при нехватке высоты появится scroll.
         height = available // slots if slots else _TEXT_MIN_H
         if height < _TEXT_MIN_H:
-            height = max(48, height)
+            height = _TEXT_MIN_H
         else:
             height = min(height, max(_TEXT_MIN_H, pane_h // 2))
 
+        self._names_edit.setMinimumHeight(_NAMES_FIELD_H)
+        self._names_edit.setMaximumHeight(_NAMES_FIELD_H)
+
         for edit in (
             self._desc_edit,
-            self._names_edit,
             self._video_title_edit,
             self._link_title_edit,
             self._link_url_edit,
@@ -381,7 +391,6 @@ class ChannelEditTabPane(QWidget):
             "затем переход в креативную студию и остальные шаги."
         )
         self._change_language.toggled.connect(self._on_assignment_options_changed)
-        root.addWidget(self._change_language)
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
@@ -405,6 +414,7 @@ class ChannelEditTabPane(QWidget):
         form.setSpacing(6)
         form.setContentsMargins(0, 0, 0, 0)
 
+        form.addWidget(self._change_language)
         form.addWidget(self._build_avatar_names_row())
         form.addWidget(self._build_video_title_section())
         form.addWidget(self._build_desc_section())
@@ -514,7 +524,7 @@ class ChannelEditTabPane(QWidget):
         )
         self._names_edit = self._compact_text_edit(
             "Название канала — по одному на строку…",
-            fixed_height=_TEXT_FIELD_H,
+            fixed_height=_NAMES_FIELD_H,
         )
         self._names_edit.textChanged.connect(self._on_names_text_changed)
         self._btn_names_wand = self._make_ai_wand(

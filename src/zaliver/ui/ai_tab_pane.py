@@ -37,6 +37,7 @@ BUILTIN_PROMPTS: tuple[tuple[str, str, str], ...] = (
     ("builtin_channel_name", "Название канала", ""),
     ("builtin_channel_description", "Описание канала", ""),
     ("builtin_link_title", "Название ссылки", ""),
+    ("builtin_youtube_comments", "Комментарии YouTube", ""),
 )
 
 # Старые id → текущий встроенный id (для импорта)

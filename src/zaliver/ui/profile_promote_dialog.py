@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import NamedTuple
 
 from PyQt6.QtWidgets import (
@@ -19,7 +20,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from zaliver.ui.channel_setup_helpers import field_with_recent_picker
+from zaliver.ui.channel_setup_helpers import (
+    field_with_recent_picker,
+    make_magic_wand_button,
+)
 
 _DEFAULT_PROMOTE_COMMENTS = (
     "nice!\n"
@@ -55,6 +59,7 @@ class ProfilePromoteDialog(QDialog):
         *,
         parent: QWidget | None = None,
         recent_comments: list[str] | None = None,
+        ai_generate_fn: Callable[..., None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Продвижение")
@@ -165,10 +170,35 @@ class ProfilePromoteDialog(QDialog):
             self._comments_edit.setPlainText(_DEFAULT_PROMOTE_COMMENTS)
         self._comments_edit.setPlaceholderText("nice!\nwow\n🔥\ncool")
         self._comments_edit.setMinimumHeight(120)
+
+        btn_comments_wand = make_magic_wand_button(
+            tooltip="Сгенерировать через ИИ — «Комментарии YouTube»"
+        )
+        btn_comments_wand.setEnabled(ai_generate_fn is not None)
+
+        def _on_comments_wand(_checked: bool = False) -> None:
+            if ai_generate_fn is None:
+                return
+
+            def _apply(text: str) -> None:
+                self._comments_edit.setPlainText(text if text is not None else "")
+
+            ai_generate_fn(
+                default_prompt_id="builtin_youtube_comments",
+                window_title="Комментарии YouTube",
+                apply_text=_apply,
+                parent=self,
+                ask_reply_lines=True,
+                default_reply_lines=12,
+            )
+
+        btn_comments_wand.clicked.connect(_on_comments_wand)
+
         comments_field_row, self._comments_recent_combo = field_with_recent_picker(
             self._comments_edit,
             recent=recent,
             tooltip="Недавние списки комментариев",
+            side_extras=[btn_comments_wand],
         )
         comments_l.addWidget(comments_field_row)
         root.addWidget(self._comments_block)

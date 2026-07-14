@@ -6000,6 +6000,7 @@ class MainWindow(QWidget):
         dlg = ProfilePromoteDialog(
             parent=self,
             recent_comments=self._upload_store.list_recent_promote_comment_fields(),
+            ai_generate_fn=self._on_ai_magic_generate,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return None

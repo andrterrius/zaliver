@@ -628,7 +628,7 @@ class ChannelEditTabPane(QWidget):
         row.setSpacing(8)
 
         self._link_title_edit = self._compact_text_edit(
-            "Название ссылки — по одному на строку…",
+            "Название ссылки — по одному на строку (строка = профиль)…",
             fixed_height=_TEXT_FIELD_H,
         )
         if self._recent_link_titles:
@@ -648,7 +648,7 @@ class ChannelEditTabPane(QWidget):
         )
 
         self._link_url_edit = self._compact_text_edit(
-            "https://… — по одному URL на строку (строка = название слева)",
+            "https://… — по одному URL на строку (строка = профиль)",
             fixed_height=_TEXT_FIELD_H,
         )
         if self._recent_link_urls:
@@ -865,7 +865,10 @@ class ChannelEditTabPane(QWidget):
             titles = parse_cycling_field_lines(self._link_title_edit.toPlainText())
             urls = parse_cycling_field_lines(self._link_url_edit.toPlainText())
             if (titles and not urls) or (urls and not titles):
-                return "Нужны и названия ссылок, и URL (названия зацикливаются по списку URL)."
+                return (
+                    "Нужны и названия ссылок, и URL "
+                    "(строка = профиль; короткий список зацикливается)."
+                )
         return None
 
     def confirm_message_for_profiles(self, profile_count: int) -> str:
@@ -884,9 +887,15 @@ class ChannelEditTabPane(QWidget):
         elif desc_count == 1:
             msg_parts.append(f"• описание канала — для всех {profile_count} профилей")
         if links:
-            msg_parts.append(
-                f"• ссылок — {len(links)} (для всех {profile_count} профилей)"
-            )
+            if len(links) > 1:
+                msg_parts.append(
+                    f"• ссылка — {len(links)} вариантов по профилям "
+                    f"(по одной на аккаунт)"
+                )
+            else:
+                msg_parts.append(
+                    f"• ссылка — для всех {profile_count} профилей"
+                )
         if video_titles:
             with_video = sum(1 for a in assignments if a.get("video_default_title"))
             msg_parts.append(
@@ -918,7 +927,8 @@ class ChannelEditTabPane(QWidget):
         urls = parse_cycling_field_lines(self._link_url_edit.toPlainText())
         if not titles or not urls:
             return []
-        # Длина по более длинному списку; короткий зацикливается.
+        # Пары название×URL; короткий список зацикливается.
+        # Каждая пара потом идёт на свой профиль (см. worker).
         n = max(len(titles), len(urls))
         return [(titles[i % len(titles)], urls[i % len(urls)]) for i in range(n)]
 

@@ -5431,6 +5431,19 @@ class MainWindow(QWidget):
                 return _expand_channel_field(line, pid)
             return _expand_channel_field(description, pid)
 
+        def _link_for_profile(pid: str) -> tuple[str, str] | None:
+            """Одна ссылка на профиль: i-я строка → i-й аккаунт (с зацикливанием)."""
+            idx = profile_index.get(pid, 0)
+            if channel_links:
+                lt_raw, lu_raw = channel_links[idx % len(channel_links)]
+            else:
+                lt_raw, lu_raw = link_title, link_url
+            lt = _expand_channel_field(lt_raw, pid)
+            lu = _expand_channel_field(lu_raw, pid)
+            if lt and lu:
+                return (lt, lu)
+            return None
+
         def _setup_one(pid: str) -> None:
             creds = self._profile_login_credentials(pid)
             yt_oldest = self._profile_yt_oldest_name(pid) or None
@@ -5461,6 +5474,8 @@ class MainWindow(QWidget):
             )
             has_video_title_fill = bool(video_default_title)
             profile_description = _description_for_profile(pid) if has_text_fill else ""
+            profile_link = _link_for_profile(pid) if has_text_fill else None
+            profile_links = [profile_link] if profile_link else None
 
             try:
                 if _is_own_antidetect_kind(kind_s):
@@ -5472,9 +5487,9 @@ class MainWindow(QWidget):
                     setup_channel_in_local_antidetect_profile(
                         pid,
                         description=profile_description or None if has_text_fill else None,
-                        link_title=link_title if has_text_fill else None,
-                        link_url=link_url if has_text_fill else None,
-                        channel_links=channel_links if has_text_fill else None,
+                        link_title=profile_link[0] if profile_link else None,
+                        link_url=profile_link[1] if profile_link else None,
+                        channel_links=profile_links,
                         video_default_title=video_default_title if has_video_title_fill else None,
                         avatar_path=avatar_path,
                         channel_name=channel_name,
@@ -5491,9 +5506,9 @@ class MainWindow(QWidget):
                     setup_channel_in_profile(
                         pid,
                         description=profile_description or None if has_text_fill else None,
-                        link_title=link_title if has_text_fill else None,
-                        link_url=link_url if has_text_fill else None,
-                        channel_links=channel_links if has_text_fill else None,
+                        link_title=profile_link[0] if profile_link else None,
+                        link_url=profile_link[1] if profile_link else None,
+                        channel_links=profile_links,
                         video_default_title=video_default_title if has_video_title_fill else None,
                         avatar_path=avatar_path,
                         channel_name=channel_name,
@@ -5543,9 +5558,7 @@ class MainWindow(QWidget):
                     updates.append(
                         (ok, DESCRIPTION_FILL_SUCCESS_TAG, DESCRIPTION_FILL_ERROR_TAG)
                     )
-                if (channel_links or []) or (
-                    (link_title or "").strip() and (link_url or "").strip()
-                ):
+                if _link_for_profile(pid):
                     updates.append((ok, LINK_FILL_SUCCESS_TAG, LINK_FILL_ERROR_TAG))
 
             item = by_id.get(pid)

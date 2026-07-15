@@ -4229,20 +4229,21 @@ function findLinkFormInputs(scope) {
   return { titleInp, urlInp };
 }
 function linkInputsFromDocument() {
+  // Всегда берём ПОСЛЕДНЮЮ строку: иначе querySelector цепляет первую,
+  // а после лишнего «Add link» заполняется первая и остаётся пустая вторая.
   const items = document.querySelectorAll('ytcp-channel-link-item');
   const item = items.length ? items[items.length - 1] : null;
-  let titleInp =
-    document.querySelector('ytcp-channel-link-item input.ytcpChannelLinkItemTitleInput') ||
-    document.querySelector('input.ytcpChannelLinkItemFormInput.ytcpChannelLinkItemTitleInput') ||
-    document.querySelector('input.ytcpChannelLinkItemTitleInput') ||
-    document.querySelector('input[placeholder="Enter a title"]');
-  let urlInp =
-    document.querySelector(
-      'ytcp-channel-link-item input.ytcpChannelLinkItemFormInput:not(.ytcpChannelLinkItemTitleInput)'
-    ) ||
-    document.querySelector('input.ytcpChannelLinkItemFormInput[placeholder="Enter a URL"]') ||
-    document.querySelector('input[placeholder="Enter a URL"]');
+  let titleInp = null;
+  let urlInp = null;
   if (item) {
+    const found = findLinkFormInputs(item);
+    titleInp = found.titleInp;
+    urlInp = found.urlInp;
+    if (!titleInp || !urlInp) {
+      const shadowFound = findLinkFormInputs(item.shadowRoot || item);
+      titleInp = titleInp || shadowFound.titleInp;
+      urlInp = urlInp || shadowFound.urlInp;
+    }
     titleInp =
       titleInp ||
       item.querySelector('input.ytcpChannelLinkItemTitleInput') ||
@@ -4252,26 +4253,17 @@ function linkInputsFromDocument() {
       urlInp ||
       item.querySelector('input.ytcpChannelLinkItemFormInput:not(.ytcpChannelLinkItemTitleInput)') ||
       item.querySelector('input[placeholder="Enter a URL"]');
-    if (!titleInp || !urlInp) {
-      const found = findLinkFormInputs(item);
-      titleInp = titleInp || found.titleInp;
-      urlInp = urlInp || found.urlInp;
-    }
-    if (!titleInp || !urlInp) {
-      const shadowFound = findLinkFormInputs(item.shadowRoot || item);
-      titleInp = titleInp || shadowFound.titleInp;
-      urlInp = urlInp || shadowFound.urlInp;
-    }
   }
   if (!titleInp || !urlInp) {
-    const all = document.querySelectorAll('input.ytcpChannelLinkItemFormInput');
-    for (const inp of all) {
-      if (inp.classList.contains('ytcpChannelLinkItemTitleInput')) {
-        titleInp = titleInp || inp;
-      } else {
-        urlInp = urlInp || inp;
-      }
-    }
+    titleInp =
+      titleInp ||
+      document.querySelector('input.ytcpChannelLinkItemFormInput.ytcpChannelLinkItemTitleInput') ||
+      document.querySelector('input.ytcpChannelLinkItemTitleInput') ||
+      document.querySelector('input[placeholder="Enter a title"]');
+    urlInp =
+      urlInp ||
+      document.querySelector('input.ytcpChannelLinkItemFormInput[placeholder="Enter a URL"]') ||
+      document.querySelector('input[placeholder="Enter a URL"]');
   }
   if (!titleInp || !urlInp) return null;
   let urlBox = null;
@@ -4519,19 +4511,170 @@ def _studio_remove_all_channel_links(page, links_root) -> None:
             break
 
 
-def _studio_click_add_channel_link(page, links_root, *, force: bool = False) -> None:
-    """Клик «Add link». Если force=False — только когда строки ещё нет."""
+def _studio_channel_link_item_count(page) -> int:
+    try:
+        return int(_studio_link_row_state(page).get("items") or 0)
+    except Exception:
+        return 0
+
+
+def _studio_last_channel_link_row_empty(page) -> bool:
+    """True, если последняя строка есть и без title/url (лишний Add link)."""
     st = _studio_link_row_state(page)
-    if not force and st.get("items", 0) > 0:
+    if int(st.get("items") or 0) <= 0:
+        return False
+    title_v = (st.get("title") or "").strip()
+    url_v = (st.get("url") or "").strip()
+    return not title_v and not url_v
+
+
+def _studio_wait_channel_link_item_count(
+    page,
+    *,
+    min_items: int,
+    timeout_s: float = 8.0,
+) -> int:
+    deadline = time.monotonic() + timeout_s
+    last = _studio_channel_link_item_count(page)
+    while time.monotonic() < deadline:
+        last = _studio_channel_link_item_count(page)
+        if last >= min_items:
+            return last
+        page.wait_for_timeout(150)
+    return last
+
+
+def _studio_remove_empty_channel_link_rows(page, links_root) -> None:
+    """Удалить пустые строки ссылок (лишние после двойного «Add link»)."""
+    for _ in range(8):
+        before = _studio_channel_link_item_count(page)
+        if before <= 0:
+            return
+        try:
+            removed = page.evaluate(
+                _studio_links_page_eval(
+                    """
+  const items = Array.from(document.querySelectorAll('ytcp-channel-link-item'));
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    const found = findLinkFormInputs(item.shadowRoot || item) || findLinkFormInputs(item);
+    const title = String((found && found.titleInp && found.titleInp.value) || '').trim();
+    const url = String((found && found.urlInp && found.urlInp.value) || '').trim();
+    if (title || url) continue;
+    const btn =
+      item.querySelector('ytcp-icon-button.ytcpChannelLinkItemDeleteButton') ||
+      item.querySelector('ytcp-icon-button[aria-label="Remove"]') ||
+      item.querySelector('ytcp-icon-button[aria-label="Delete"]') ||
+      item.querySelector('ytcp-icon-button[aria-label="Удалить"]') ||
+      deepQuery(item, 'ytcp-icon-button.ytcpChannelLinkItemDeleteButton') ||
+      deepQuery(item, 'ytcp-icon-button[aria-label="Remove"]');
+    if (!btn) continue;
+    btn.click();
+    return true;
+  }
+  return false;
+"""
+                )
+            )
+        except Exception:
+            removed = False
+        if not removed:
+            if not _studio_last_channel_link_row_empty(page):
+                return
+            delete_btns = links_root.locator(
+                "ytcp-channel-link-item ytcp-icon-button.ytcpChannelLinkItemDeleteButton"
+            ).or_(
+                links_root.locator(
+                    'ytcp-channel-link-item ytcp-icon-button[aria-label="Remove"], '
+                    'ytcp-channel-link-item ytcp-icon-button[aria-label="Delete"], '
+                    'ytcp-channel-link-item ytcp-icon-button[aria-label="Удалить"]'
+                )
+            )
+            try:
+                if delete_btns.count() == 0:
+                    return
+                delete_btns.last.scroll_into_view_if_needed(timeout=5_000)
+                delete_btns.last.click(timeout=5_000)
+            except Exception:
+                return
+        else:
+            _log(f"Studio: удалили пустую строку ссылки (было {before})")
+        page.wait_for_timeout(400)
+        if _studio_channel_link_item_count(page) >= before:
+            return
+
+
+def _studio_trim_extra_empty_link_rows(page, *, max_items: int) -> None:
+    """Удалить хвостовые пустые строки, пока их больше max_items."""
+    for _ in range(6):
+        if _studio_channel_link_item_count(page) <= max_items:
+            return
+        if not _studio_last_channel_link_row_empty(page):
+            return
+        _log("Studio: лишняя пустая строка после «Add link» — удаляем одну.")
+        try:
+            removed = page.evaluate(
+                _studio_links_page_eval(
+                    """
+  const items = document.querySelectorAll('ytcp-channel-link-item');
+  if (!items.length) return false;
+  const item = items[items.length - 1];
+  const found = findLinkFormInputs(item.shadowRoot || item) || findLinkFormInputs(item);
+  const title = String((found && found.titleInp && found.titleInp.value) || '').trim();
+  const url = String((found && found.urlInp && found.urlInp.value) || '').trim();
+  if (title || url) return false;
+  const btn =
+    item.querySelector('ytcp-icon-button.ytcpChannelLinkItemDeleteButton') ||
+    item.querySelector('ytcp-icon-button[aria-label="Remove"]') ||
+    item.querySelector('ytcp-icon-button[aria-label="Delete"]') ||
+    item.querySelector('ytcp-icon-button[aria-label="Удалить"]') ||
+    deepQuery(item, 'ytcp-icon-button.ytcpChannelLinkItemDeleteButton') ||
+    deepQuery(item, 'ytcp-icon-button[aria-label="Remove"]');
+  if (!btn) return false;
+  btn.click();
+  return true;
+"""
+                )
+            )
+        except Exception:
+            removed = False
+        if not removed:
+            return
+        page.wait_for_timeout(350)
+
+
+def _studio_click_add_channel_link(page, links_root, *, force: bool = False) -> None:
+    """Ровно один клик «Add link». Не дублировать через JS+Playwright."""
+    st = _studio_link_row_state(page)
+    items_before = int(st.get("items") or 0)
+    if not force and items_before > 0:
         _log(
             "Studio: «Add link» не нужен — ytcp-channel-link-item уже на экране "
             f"(ready={st.get('ready')}, urlError={st.get('urlError')})."
         )
         return
+    # Лишняя пустая строка после предыдущего клика — не жмём ещё раз.
+    if force and _studio_last_channel_link_row_empty(page):
+        _log("Studio: «Add link» не нужен — последняя строка уже пустая.")
+        return
+
+    def _row_appeared() -> bool:
+        return _studio_wait_channel_link_item_count(
+            page, min_items=items_before + 1, timeout_s=2.5
+        ) > items_before
+
+    def _done_if_new_row() -> bool:
+        if _studio_channel_link_item_count(page) > items_before:
+            _studio_trim_extra_empty_link_rows(page, max_items=items_before + 1)
+            return True
+        return False
+
+    clicked = False
     try:
-        clicked = page.evaluate(
-            _studio_links_page_eval(
-                """
+        clicked = bool(
+            page.evaluate(
+                _studio_links_page_eval(
+                    """
   const root =
     document.querySelector('ytcp-channel-editing-profile-tab ytcp-channel-links') ||
     document.querySelector('ytcp-channel-links');
@@ -4540,19 +4683,40 @@ def _studio_click_add_channel_link(page, links_root, *, force: bool = False) -> 
     (root && deepQuery(root, 'button[aria-label="Добавить ссылку"]:not([disabled])')) ||
     (root && deepQuery(root, '.YtcpChannelLinksAddLinkButton button:not([disabled])')) ||
     document.querySelector('button[aria-label="Add link"]:not([disabled])') ||
+    document.querySelector('button[aria-label="Добавить ссылку"]:not([disabled])') ||
     document.querySelector('.YtcpChannelLinksAddLinkButton button:not([disabled])');
   if (!btn) return false;
   btn.scrollIntoView({ block: 'center', inline: 'nearest' });
   btn.click();
   return true;
 """
+                )
             )
         )
-        if clicked:
-            page.wait_for_timeout(800)
-            return
     except Exception:
-        pass
+        clicked = False
+
+    if clicked:
+        page.wait_for_timeout(400)
+        if _row_appeared() or _done_if_new_row():
+            _studio_trim_extra_empty_link_rows(page, max_items=items_before + 1)
+            return
+        # JS-клик сработал по кнопке, но строка ещё не появилась — ждём, без второго клика.
+        if _studio_wait_channel_link_item_count(
+            page, min_items=items_before + 1, timeout_s=5.0
+        ) > items_before:
+            _studio_trim_extra_empty_link_rows(page, max_items=items_before + 1)
+            return
+        st2 = _studio_link_row_state(page)
+        if int(st2.get("items") or 0) > items_before or st2.get("ready"):
+            _studio_trim_extra_empty_link_rows(page, max_items=items_before + 1)
+            return
+        _log("Studio: JS-клик «Add link» без новой строки — пробуем Playwright один раз.")
+
+    # Playwright только если JS не кликнул или строка так и не появилась.
+    if _done_if_new_row():
+        return
+
     add_link = links_root.locator(
         'button[aria-label="Add link"]:not([disabled]), '
         'button[aria-label="Добавить ссылку"]:not([disabled])'
@@ -4561,7 +4725,7 @@ def _studio_click_add_channel_link(page, links_root, *, force: bool = False) -> 
         add_link = links_root.locator(".YtcpChannelLinksAddLinkButton button:not([disabled])")
     if add_link.count() == 0:
         st2 = _studio_link_row_state(page)
-        if st2.get("items", 0) > 0:
+        if int(st2.get("items") or 0) > items_before or int(st2.get("items") or 0) > 0:
             _log("Studio: «Add link» disabled, но строка ссылки уже есть — продолжаем.")
             return
         raise YoutubeStudioError(
@@ -4572,13 +4736,20 @@ def _studio_click_add_channel_link(page, links_root, *, force: bool = False) -> 
     add_link.first.scroll_into_view_if_needed(timeout=10_000)
     if not add_link.first.is_enabled():
         st2 = _studio_link_row_state(page)
-        if st2.get("items", 0) > 0 and st2.get("ready"):
+        if int(st2.get("items") or 0) > items_before or (
+            int(st2.get("items") or 0) > 0 and st2.get("ready")
+        ):
             return
         raise YoutubeStudioError(
             "YouTube Studio: кнопка «Add link» / «Добавить ссылку» недоступна."
         )
     add_link.first.click(timeout=30_000)
-    page.wait_for_timeout(800)
+    page.wait_for_timeout(400)
+    if not _row_appeared():
+        _studio_wait_channel_link_item_count(
+            page, min_items=items_before + 1, timeout_s=5.0
+        )
+    _studio_trim_extra_empty_link_rows(page, max_items=items_before + 1)
 
 
 def _studio_fill_channel_link_row_js(
@@ -5016,6 +5187,14 @@ def _studio_fill_channel_description_and_link(
         for index, (lt, lu) in enumerate(links):
             if index == 0:
                 title_loc, url_loc = _studio_open_channel_link_row(page, links_root)
+            elif _studio_last_channel_link_row_empty(page):
+                _log(
+                    f"Studio: переиспользуем пустую строку для ссылки #{index + 1} "
+                    "(без повторного «Add link»)…"
+                )
+                title_loc, url_loc = _studio_wait_channel_link_row(
+                    page, links_root, timeout_s=15.0
+                )
             else:
                 _log(f"Studio: клик «Add link» для ссылки #{index + 1}…")
                 _studio_click_add_channel_link(page, links_root, force=True)
@@ -5030,6 +5209,8 @@ def _studio_fill_channel_description_and_link(
                 link_title=lt,
                 link_url=lu,
             )
+        # Подстраховка: убрать пустые строки после лишних кликов «Add link».
+        _studio_remove_empty_channel_link_rows(page, links_root)
 
     _studio_click_channel_customization_publish(page)
 

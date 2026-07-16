@@ -232,6 +232,17 @@ def profile_matches_search(profile: dict[str, object], tokens: list[str]) -> boo
     return all(t in hay for t in tokens)
 
 
+def profile_matches_tag_filter(
+    profile: dict[str, object],
+    selected_tags: frozenset[str] | set[str] | None,
+) -> bool:
+    """True if no tag filter, or profile has at least one of the selected tags."""
+    if not selected_tags:
+        return True
+    profile_tags = set(_profile_tag_list(profile, limit=10_000))
+    return bool(profile_tags & set(selected_tags))
+
+
 def profile_search_rank(profile: dict[str, object], tokens: list[str], q_raw: str, original_index: int) -> tuple[int, int]:
     if not tokens:
         return (original_index, original_index)

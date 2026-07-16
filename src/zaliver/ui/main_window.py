@@ -94,6 +94,7 @@ from zaliver.processing.slicing_worker import SlicingController
 from zaliver.ui.antic_profile_row import _profile_id, _profile_name
 from zaliver.ui.profile_list_helpers import (
     profile_matches_search,
+    profile_matches_tag_filter,
     profile_search_rank,
     profile_search_tokens,
 )
@@ -102,7 +103,11 @@ from zaliver.ui.profile_account_data_dialog import (
     YT_LOGIN_KEY,
 )
 from zaliver.ui.profile_accounts_import_dialog import ProfileAccountsImportDialog
-from zaliver.ui.profile_tags_clear_dialog import ProfileTagsClearDialog
+from zaliver.ui.profile_tags_clear_dialog import (
+    ProfileTagsClearDialog,
+    ProfileTagsFilterDialog,
+    collect_all_tags_from_profiles,
+)
 from zaliver.ui.profile_cookie_farm_dialog import ProfileCookieFarmDialog
 from zaliver.ui.profile_promote_dialog import (
     ProfilePromoteDialog,
@@ -852,6 +857,7 @@ class MainWindow(QWidget):
 
         self._settings = QSettings("Zaliver", "Zaliver")
         self._profiles_raw: list[dict[str, object]] | None = None
+        self._profiles_tag_filter: frozenset[str] = frozenset()
         self._profiles_list_render_gen: int = 0
         self._profiles_interaction: ProfilesListInteraction | None = None
         self._profile_cdp_previews: dict[str, ProfileCdpPreviewDialog] = {}
@@ -1823,13 +1829,24 @@ class MainWindow(QWidget):
         profiles_search_row.setSpacing(8)
         self._dolphin_query = QLineEdit()
         self._dolphin_query.setPlaceholderText("Поиск по загруженным профилям…")
+        self._btn_profiles_filter_tags = QPushButton("По тэгам")
+        self._btn_profiles_filter_tags.setObjectName("secondary")
+        self._btn_profiles_filter_tags.setAutoDefault(False)
+        self._btn_profiles_filter_tags.setDefault(False)
+        self._btn_profiles_filter_tags.setToolTip(
+            "Отфильтровать список по выбранным тегам "
+            "(все теги загруженных профилей, не только Zaliver)."
+        )
+        self._btn_profiles_filter_tags.clicked.connect(self._open_profiles_tag_filter_dialog)
         self._btn_profiles_refresh = QPushButton("Обновить")
         self._btn_profiles_refresh.setObjectName("secondary")
         self._btn_profiles_refresh.setAutoDefault(False)
         self._btn_profiles_refresh.setDefault(False)
         self._btn_profiles_refresh.clicked.connect(self._refresh_antydetect_profiles)
         profiles_search_row.addWidget(self._dolphin_query, 1)
+        profiles_search_row.addWidget(self._btn_profiles_filter_tags)
         profiles_search_row.addWidget(self._btn_profiles_refresh)
+        self._sync_profiles_tag_filter_button()
 
         profiles_actions_row = QHBoxLayout()
         profiles_actions_row.setSpacing(8)
@@ -4546,12 +4563,61 @@ class MainWindow(QWidget):
         raw = self._profiles_raw or []
         q_raw = (self._dolphin_query.text() if hasattr(self, "_dolphin_query") else "") or ""
         tokens = profile_search_tokens(q_raw)
+        tag_filter = getattr(self, "_profiles_tag_filter", frozenset()) or frozenset()
         matched: list[tuple[int, dict[str, object]]] = []
         for i, p in enumerate(raw):
-            if isinstance(p, dict) and profile_matches_search(p, tokens):
-                matched.append((i, p))
+            if not isinstance(p, dict):
+                continue
+            if not profile_matches_search(p, tokens):
+                continue
+            if not profile_matches_tag_filter(p, tag_filter):
+                continue
+            matched.append((i, p))
         matched.sort(key=lambda ip: profile_search_rank(ip[1], tokens, q_raw, ip[0]))
         return [p for _i, p in matched]
+
+    def _profiles_filter_active(self) -> bool:
+        q = (self._dolphin_query.text() if hasattr(self, "_dolphin_query") else "") or ""
+        if q.strip():
+            return True
+        return bool(getattr(self, "_profiles_tag_filter", frozenset()))
+
+    def _sync_profiles_tag_filter_button(self) -> None:
+        if not hasattr(self, "_btn_profiles_filter_tags"):
+            return
+        n = len(getattr(self, "_profiles_tag_filter", frozenset()) or ())
+        if n:
+            self._btn_profiles_filter_tags.setText(f"По тэгам ({n})")
+            self._btn_profiles_filter_tags.setToolTip(
+                f"Активен фильтр по {n} тег(ам). Нажмите, чтобы изменить или сбросить."
+            )
+        else:
+            self._btn_profiles_filter_tags.setText("По тэгам")
+            self._btn_profiles_filter_tags.setToolTip(
+                "Отфильтровать список по выбранным тегам "
+                "(все теги загруженных профилей, не только Zaliver)."
+            )
+
+    def _open_profiles_tag_filter_dialog(self) -> None:
+        raw = self._profiles_raw
+        if raw is None:
+            QMessageBox.information(
+                self,
+                "Фильтр по тегам",
+                "Сначала загрузите профили (кнопка «Обновить»).",
+            )
+            return
+        tags = collect_all_tags_from_profiles(raw)
+        dlg = ProfileTagsFilterDialog(
+            tags=tags,
+            initially_checked=self._profiles_tag_filter,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._profiles_tag_filter = frozenset(dlg.selected_tags())
+        self._sync_profiles_tag_filter_button()
+        self._apply_profiles_filter()
 
     def _profiles_by_id_map(self, profiles: list[dict[str, object]]) -> dict[str, dict[str, object]]:
         out: dict[str, dict[str, object]] = {}
@@ -4832,14 +4898,12 @@ class MainWindow(QWidget):
 
         shown = self._refresh_profiles_list_view()
         total = len(raw)
-        q = (self._dolphin_query.text() if hasattr(self, "_dolphin_query") else "") or ""
-        q = q.strip()
         n_checked = (
             self._profiles_interaction.checked_count()
             if self._profiles_interaction
             else 0
         )
-        if q:
+        if self._profiles_filter_active():
             base = f"Фильтр: показано {shown} из {total}"
         else:
             base = f"Загружено профилей: {total}"
@@ -4872,14 +4936,12 @@ class MainWindow(QWidget):
         raw = self._profiles_raw or []
         shown = self._profiles_list.count()
         total = len(raw)
-        q = (self._dolphin_query.text() if hasattr(self, "_dolphin_query") else "") or ""
-        q = q.strip()
         n_checked = (
             self._profiles_interaction.checked_count()
             if self._profiles_interaction
             else 0
         )
-        if q:
+        if self._profiles_filter_active():
             base = f"Фильтр: показано {shown} из {total}"
         else:
             base = f"Загружено профилей: {total}"

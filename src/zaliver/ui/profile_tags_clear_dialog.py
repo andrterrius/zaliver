@@ -1,4 +1,4 @@
-"""Диалог выбора служебных тегов Zaliver для снятия с профилей."""
+"""Диалоги выбора тегов профилей: очистка служебных Zaliver и фильтр по всем тегам."""
 
 from __future__ import annotations
 
@@ -42,6 +42,21 @@ def collect_zaliver_tags_for_profiles(
             if tag in zaliver_set:
                 found.add(tag)
     return tuple(t for t in ZALIVER_PROFILE_TAGS if t in found)
+
+
+def collect_all_tags_from_profiles(
+    profiles: list[dict[str, object]] | None,
+) -> tuple[str, ...]:
+    """Все уникальные теги из загруженных профилей (не только Zaliver), по алфавиту."""
+    found: set[str] = set()
+    for p in profiles or []:
+        if not isinstance(p, dict):
+            continue
+        for tag in _profile_tag_list(p, limit=10_000):
+            t = (tag or "").strip()
+            if t:
+                found.add(t)
+    return tuple(sorted(found, key=str.casefold))
 
 
 def _checkbox_indicator_rect(cb: QCheckBox) -> QRect:
@@ -460,5 +475,134 @@ class ProfileTagsClearDialog(QDialog):
 
     def selected_tags(self) -> list[str]:
         if self._drag_select is None:
+            return []
+        return self._drag_select.checked_tags()
+
+
+class ProfileTagsFilterDialog(QDialog):
+    """Выбор тегов для фильтра списка профилей (все теги, не только Zaliver)."""
+
+    def __init__(
+        self,
+        *,
+        tags: tuple[str, ...],
+        initially_checked: frozenset[str] | set[str] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Фильтр по тегам")
+        self.setModal(True)
+        self.setMinimumWidth(520)
+
+        self._checks: dict[str, QCheckBox] = {}
+        self._drag_select: _TagClearListDragSelect | None = None
+        self._cleared = False
+        row_items: list[tuple[str, QFrame, QCheckBox]] = []
+        prechecked = set(initially_checked or ())
+
+        root = QVBoxLayout(self)
+        root.setSpacing(12)
+
+        hint = QLabel(
+            "Показать профили, у которых есть хотя бы один выбранный тег. "
+            "Список включает все теги загруженных профилей. "
+            "Кликайте и ведите только по квадратикам слева; удерживайте ЛКМ — "
+            "отметятся все на пути (Ctrl — добавить к уже выбранным). "
+            "Пустой выбор или «Сбросить» — без фильтра по тегам."
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("hint")
+        root.addWidget(hint)
+
+        root.addWidget(QLabel("Теги для фильтра:"))
+
+        if not tags:
+            empty = QLabel("У загруженных профилей пока нет тегов.")
+            empty.setWordWrap(True)
+            empty.setObjectName("hint")
+            root.addWidget(empty)
+        else:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            inner = QWidget()
+            inner_layout = QVBoxLayout(inner)
+            inner_layout.setContentsMargins(0, 0, 0, 0)
+            inner_layout.setSpacing(6)
+            for tag in tags:
+                t = (tag or "").strip()
+                if not t:
+                    continue
+                row = QFrame()
+                row.setObjectName(_tag_chip_object_name(t))
+                row_lay = QHBoxLayout(row)
+                row_lay.setContentsMargins(10, 6, 10, 6)
+                row_lay.setSpacing(10)
+                cb = QCheckBox()
+                cb.setObjectName("zaliverTagClearCheck")
+                cb.setChecked(t in prechecked)
+                cb.setToolTip(t)
+                lbl = QLabel(t)
+                lbl.setObjectName("zaliverTagClearLabel")
+                lbl.setWordWrap(True)
+                _apply_tag_clear_label_style(lbl, t)
+                self._checks[t] = cb
+                row_items.append((t, row, cb))
+                row_lay.addWidget(cb, 0, Qt.AlignmentFlag.AlignTop)
+                row_lay.addWidget(lbl, 1)
+                inner_layout.addWidget(row)
+            inner_layout.addStretch(1)
+            scroll.setWidget(inner)
+            scroll.setMinimumHeight(min(360, 40 * max(1, len(self._checks)) + 16))
+            root.addWidget(scroll, 1)
+
+            self._drag_select = _TagClearListDragSelect(
+                viewport=inner,
+                rows=row_items,
+                parent=self,
+            )
+
+        bulk_layout = QHBoxLayout()
+        btn_all = QPushButton("Выбрать все")
+        btn_all.setObjectName("secondary")
+        btn_none = QPushButton("Снять все")
+        btn_none.setObjectName("secondary")
+        btn_reset = QPushButton("Сбросить фильтр")
+        btn_reset.setObjectName("secondary")
+        btn_all.clicked.connect(self._select_all)
+        btn_none.clicked.connect(self._select_none)
+        btn_reset.clicked.connect(self._reset_and_accept)
+        btn_all.setEnabled(bool(tags))
+        btn_none.setEnabled(bool(tags))
+        btn_reset.setEnabled(True)
+        bulk_layout.addWidget(btn_all)
+        bulk_layout.addWidget(btn_none)
+        bulk_layout.addWidget(btn_reset)
+        bulk_layout.addStretch(1)
+        root.addLayout(bulk_layout)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _select_all(self) -> None:
+        if self._drag_select is not None:
+            self._drag_select.set_all_checked(True)
+
+    def _select_none(self) -> None:
+        if self._drag_select is not None:
+            self._drag_select.set_all_checked(False)
+
+    def _reset_and_accept(self) -> None:
+        self._cleared = True
+        if self._drag_select is not None:
+            self._drag_select.set_all_checked(False)
+        self.accept()
+
+    def selected_tags(self) -> list[str]:
+        if self._cleared or self._drag_select is None:
             return []
         return self._drag_select.checked_tags()

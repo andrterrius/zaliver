@@ -3443,17 +3443,22 @@ class MainWindow(QWidget):
         dlg_profiles = [p for _pid, p in profile_rows]
         total_dlg_profiles = len(dlg_profiles)
 
-        dlg_query = QLineEdit()
-        dlg_query.setPlaceholderText("Поиск по профилям (имя, ID, теги)…")
+        dlg_tag_filter: list[frozenset[str]] = [frozenset()]
         dlg_filter_timer = QTimer(dlg)
         dlg_filter_timer.setSingleShot(True)
 
         def _dlg_profiles_matched(q_raw: str) -> list[dict[str, object]]:
             tokens = profile_search_tokens(q_raw)
+            tag_filter = dlg_tag_filter[0]
             matched: list[tuple[int, dict[str, object]]] = []
             for i, p in enumerate(dlg_profiles):
-                if isinstance(p, dict) and profile_matches_search(p, tokens):
-                    matched.append((i, p))
+                if not isinstance(p, dict):
+                    continue
+                if not profile_matches_search(p, tokens):
+                    continue
+                if not profile_matches_tag_filter(p, tag_filter):
+                    continue
+                matched.append((i, p))
             matched.sort(key=lambda ip: profile_search_rank(ip[1], tokens, q_raw, ip[0]))
             return [p for _i, p in matched]
 
@@ -3477,10 +3482,17 @@ class MainWindow(QWidget):
             pids = [x for x in pids if x]
             filtered_last = {k: last_upload_map[k] for k in pids if k in last_upload_map}
             dlg_interaction.populate(visible, filtered_last, prune_checked_to_existing=False)
+            _update_dlg_upload_profile_count()
 
         def _schedule_dlg_profiles_filter() -> None:
             dlg_filter_timer.start(150)
 
+        dlg_search_row, dlg_query = self._make_dlg_profiles_search_row(
+            dlg,
+            dlg_profiles,
+            dlg_tag_filter,
+            on_changed=_apply_dlg_profiles_filter,
+        )
         dlg_filter_timer.timeout.connect(_apply_dlg_profiles_filter)
         dlg_query.textChanged.connect(_schedule_dlg_profiles_filter)
 
@@ -3562,7 +3574,7 @@ class MainWindow(QWidget):
             q = dlg_query.text().strip()
             pv = _planned_videos_count()
             lines = [f"{planned_label}: {pv}"]
-            if q:
+            if q or dlg_tag_filter[0]:
                 lines.append(f"Показано профилей: {shown} из {total_dlg_profiles}")
             if n <= 0:
                 lines.append(
@@ -3646,7 +3658,7 @@ class MainWindow(QWidget):
         profiles_col_l.addWidget(dlg_profile_count_lbl)
         profiles_col_l.addWidget(dlg_raise_videos_btn)
         profiles_col_l.addWidget(dlg_raise_videos_schedule_btn)
-        profiles_col_l.addWidget(dlg_query)
+        profiles_col_l.addLayout(dlg_search_row)
         dlg_sel_row, _dlg_checked_lbl = self._build_profiles_selection_toolbar(
             dlg,
             dlg_interaction,
@@ -4585,18 +4597,66 @@ class MainWindow(QWidget):
     def _sync_profiles_tag_filter_button(self) -> None:
         if not hasattr(self, "_btn_profiles_filter_tags"):
             return
-        n = len(getattr(self, "_profiles_tag_filter", frozenset()) or ())
+        self._sync_tag_filter_button(
+            self._btn_profiles_filter_tags,
+            getattr(self, "_profiles_tag_filter", frozenset()) or frozenset(),
+        )
+
+    @staticmethod
+    def _sync_tag_filter_button(btn: QPushButton, tag_filter: frozenset[str]) -> None:
+        n = len(tag_filter)
         if n:
-            self._btn_profiles_filter_tags.setText(f"По тэгам ({n})")
-            self._btn_profiles_filter_tags.setToolTip(
+            btn.setText(f"По тэгам ({n})")
+            btn.setToolTip(
                 f"Активен фильтр по {n} тег(ам). Нажмите, чтобы изменить или сбросить."
             )
         else:
-            self._btn_profiles_filter_tags.setText("По тэгам")
-            self._btn_profiles_filter_tags.setToolTip(
+            btn.setText("По тэгам")
+            btn.setToolTip(
                 "Отфильтровать список по выбранным тегам "
                 "(все теги загруженных профилей, не только Zaliver)."
             )
+
+    def _make_dlg_profiles_search_row(
+        self,
+        parent: QWidget,
+        profiles: list[dict[str, object]],
+        tag_filter_box: list[frozenset[str]],
+        *,
+        on_changed: Callable[[], None],
+    ) -> tuple[QHBoxLayout, QLineEdit]:
+        """Строка поиска + «По тэгам» для диалогов выбора профилей."""
+        if not tag_filter_box:
+            tag_filter_box.append(frozenset())
+
+        query = QLineEdit()
+        query.setPlaceholderText("Поиск по профилям (имя, ID, теги)…")
+
+        btn = QPushButton("По тэгам")
+        btn.setObjectName("secondary")
+        btn.setAutoDefault(False)
+        btn.setDefault(False)
+        self._sync_tag_filter_button(btn, tag_filter_box[0])
+
+        def _open_tags() -> None:
+            dlg = ProfileTagsFilterDialog(
+                tags=collect_all_tags_from_profiles(profiles),
+                initially_checked=tag_filter_box[0],
+                parent=parent,
+            )
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            tag_filter_box[0] = frozenset(dlg.selected_tags())
+            self._sync_tag_filter_button(btn, tag_filter_box[0])
+            on_changed()
+
+        btn.clicked.connect(_open_tags)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(query, 1)
+        row.addWidget(btn)
+        return row, query
 
     def _open_profiles_tag_filter_dialog(self) -> None:
         raw = self._profiles_raw
@@ -4752,17 +4812,22 @@ class MainWindow(QWidget):
         last_upload_map = self._upload_store.last_uploaded_at_by_profiles(ids)
         total_dlg_profiles = len(dlg_profiles)
 
-        dlg_query = QLineEdit()
-        dlg_query.setPlaceholderText("Поиск по профилям (имя, ID, теги)…")
+        dlg_tag_filter: list[frozenset[str]] = [frozenset()]
         dlg_filter_timer = QTimer(dlg)
         dlg_filter_timer.setSingleShot(True)
 
         def _dlg_profiles_matched(q_raw: str) -> list[dict[str, object]]:
             tokens = profile_search_tokens(q_raw)
+            tag_filter = dlg_tag_filter[0]
             matched: list[tuple[int, dict[str, object]]] = []
             for i, p in enumerate(dlg_profiles):
-                if isinstance(p, dict) and profile_matches_search(p, tokens):
-                    matched.append((i, p))
+                if not isinstance(p, dict):
+                    continue
+                if not profile_matches_search(p, tokens):
+                    continue
+                if not profile_matches_tag_filter(p, tag_filter):
+                    continue
+                matched.append((i, p))
             matched.sort(key=lambda ip: profile_search_rank(ip[1], tokens, q_raw, ip[0]))
             return [p for _i, p in matched]
 
@@ -4792,10 +4857,17 @@ class MainWindow(QWidget):
             pids = [x for x in pids if x]
             filtered_last = {k: last_upload_map[k] for k in pids if k in last_upload_map}
             dlg_interaction.populate(visible, filtered_last, prune_checked_to_existing=False)
+            _update_dlg_profile_count()
 
         def _schedule_dlg_profiles_filter() -> None:
             dlg_filter_timer.start(150)
 
+        dlg_search_row, dlg_query = self._make_dlg_profiles_search_row(
+            dlg,
+            dlg_profiles,
+            dlg_tag_filter,
+            on_changed=_apply_dlg_profiles_filter,
+        )
         dlg_filter_timer.timeout.connect(_apply_dlg_profiles_filter)
         dlg_query.textChanged.connect(_schedule_dlg_profiles_filter)
 
@@ -4815,7 +4887,7 @@ class MainWindow(QWidget):
             shown = dlg_interaction.lw.count()
             q = dlg_query.text().strip()
             lines = [f"{count_label_prefix}: {n}"]
-            if q:
+            if q or dlg_tag_filter[0]:
                 lines.append(f"Показано профилей: {shown} из {total_dlg_profiles}")
             dlg_profile_count_lbl.setText("\n".join(lines))
 
@@ -4830,7 +4902,7 @@ class MainWindow(QWidget):
         )
 
         layout.addWidget(dlg_profile_count_lbl)
-        layout.addWidget(dlg_query)
+        layout.addLayout(dlg_search_row)
         layout.addLayout(dlg_sel_row)
         layout.addWidget(lw, 1)
 

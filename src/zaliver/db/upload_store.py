@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 
+def _normalize_platform(value: str | None) -> str:
+    v = (value or "").strip().lower()
+    return "instagram" if v == "instagram" else "youtube"
+
+
 def _app_data_dir() -> Path:
     if sys.platform == "win32":
         root = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or ""
@@ -51,6 +56,170 @@ _RECENT_UPLOAD_TITLES_KEEP = 20
 # Выпадающие списки в диалоге «Настройка канала».
 _RECENT_CHANNEL_SETUP_UI_LIMIT = 5
 _RECENT_CHANNEL_SETUP_KEEP = 20
+
+# table_name → value column; recent-значения изолированы по платформе.
+_RECENT_TEXT_TABLES: tuple[tuple[str, str], ...] = (
+    ("recent_upload_titles", "title"),
+    ("recent_channel_names", "name"),
+    ("recent_channel_link_titles", "title"),
+    ("recent_channel_link_urls", "url"),
+    ("recent_channel_descriptions", "description"),
+    ("recent_video_default_titles", "title"),
+    ("recent_channel_name_fields", "content"),
+    ("recent_video_default_title_fields", "content"),
+    ("recent_promote_comment_fields", "content"),
+)
+
+
+def _migrate_recent_table_add_platform(
+    con: sqlite3.Connection,
+    *,
+    table: str,
+    column: str,
+) -> None:
+    """Добавить колонку platform и составной PRIMARY KEY; старые строки → youtube."""
+    cols = {
+        str(r[1]) for r in con.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if "platform" in cols:
+        return
+    tmp = f"{table}__plat"
+    con.execute(f"DROP TABLE IF EXISTS {tmp};")
+    con.execute(
+        f"""
+        CREATE TABLE {tmp} (
+            platform TEXT NOT NULL DEFAULT 'youtube',
+            {column} TEXT NOT NULL,
+            used_at TEXT NOT NULL,
+            PRIMARY KEY (platform, {column})
+        );
+        """
+    )
+    con.execute(
+        f"""
+        INSERT OR IGNORE INTO {tmp}(platform, {column}, used_at)
+        SELECT 'youtube', {column}, used_at FROM {table};
+        """
+    )
+    con.execute(f"DROP TABLE {table};")
+    con.execute(f"ALTER TABLE {tmp} RENAME TO {table};")
+    con.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_{table}_plat_used "
+        f"ON {table}(platform, used_at DESC);"
+    )
+
+
+def _migrate_upload_sessions_add_platform(con: sqlite3.Connection) -> None:
+    cols = {
+        str(r[1]) for r in con.execute("PRAGMA table_info(upload_sessions)").fetchall()
+    }
+    if "platform" in cols:
+        return
+    try:
+        con.execute(
+            "ALTER TABLE upload_sessions "
+            "ADD COLUMN platform TEXT NOT NULL DEFAULT 'youtube';"
+        )
+    except sqlite3.Error:
+        return
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_upload_sessions_platform "
+        "ON upload_sessions(platform, started_at DESC);"
+    )
+
+
+def _migrate_uploaded_videos_add_platform(con: sqlite3.Connection) -> None:
+    """Добавить platform и UNIQUE(platform, video_id); старые строки → youtube."""
+    cols = {
+        str(r[1]) for r in con.execute("PRAGMA table_info(uploaded_videos)").fetchall()
+    }
+    if "platform" in cols:
+        return
+    tmp = "uploaded_videos__plat"
+    con.execute(f"DROP TABLE IF EXISTS {tmp};")
+    con.execute(
+        f"""
+        CREATE TABLE {tmp} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            platform TEXT NOT NULL DEFAULT 'youtube',
+            uploaded_at TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            url TEXT NOT NULL DEFAULT '',
+            video_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL DEFAULT '',
+            view_count INTEGER,
+            like_count INTEGER,
+            comment_count INTEGER,
+            stats_updated_at TEXT,
+            stats_unavailable INTEGER NOT NULL DEFAULT 0,
+            stats_unavailable_data_api INTEGER NOT NULL DEFAULT 0,
+            age_restricted INTEGER,
+            UNIQUE(platform, video_id),
+            FOREIGN KEY(session_id) REFERENCES upload_sessions(id) ON DELETE CASCADE
+        );
+        """
+    )
+    # Копируем существующие колонки; отсутствующие (старые БД) — через COALESCE в SELECT.
+    src_cols = cols
+
+    def _col(name: str, fallback: str) -> str:
+        return name if name in src_cols else fallback
+
+    select_bits = [
+        "id",
+        "session_id",
+        "'youtube' AS platform",
+        "uploaded_at",
+        "title",
+        "description",
+        "url",
+        "video_id",
+        _col("profile_id", "'' AS profile_id"),
+        _col("view_count", "NULL AS view_count"),
+        _col("like_count", "NULL AS like_count"),
+        _col("comment_count", "NULL AS comment_count"),
+        _col("stats_updated_at", "NULL AS stats_updated_at"),
+        (
+            "COALESCE(stats_unavailable, 0) AS stats_unavailable"
+            if "stats_unavailable" in src_cols
+            else "0 AS stats_unavailable"
+        ),
+        (
+            "COALESCE(stats_unavailable_data_api, 0) AS stats_unavailable_data_api"
+            if "stats_unavailable_data_api" in src_cols
+            else "0 AS stats_unavailable_data_api"
+        ),
+        _col("age_restricted", "NULL AS age_restricted"),
+    ]
+    # profile_id без алиаса, если колонка есть
+    if "profile_id" in src_cols:
+        select_bits[8] = "COALESCE(profile_id, '') AS profile_id"
+    con.execute(
+        f"""
+        INSERT OR IGNORE INTO {tmp}(
+            id, session_id, platform, uploaded_at, title, description, url, video_id,
+            profile_id, view_count, like_count, comment_count, stats_updated_at,
+            stats_unavailable, stats_unavailable_data_api, age_restricted
+        )
+        SELECT {", ".join(select_bits)} FROM uploaded_videos;
+        """
+    )
+    con.execute("DROP TABLE uploaded_videos;")
+    con.execute(f"ALTER TABLE {tmp} RENAME TO uploaded_videos;")
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_uploaded_videos_session "
+        "ON uploaded_videos(session_id, uploaded_at DESC);"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_uploaded_videos_uploaded_at "
+        "ON uploaded_videos(uploaded_at DESC);"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_uploaded_videos_platform "
+        "ON uploaded_videos(platform, uploaded_at DESC);"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +299,8 @@ class UploadStore:
                     processed_videos INTEGER NOT NULL DEFAULT 0,
                     uploaded_ok INTEGER NOT NULL DEFAULT 0,
                     ended_at TEXT,
-                    status TEXT NOT NULL DEFAULT 'running'
+                    status TEXT NOT NULL DEFAULT 'running',
+                    platform TEXT NOT NULL DEFAULT 'youtube'
                 );
                 """
             )
@@ -152,6 +322,7 @@ class UploadStore:
                 CREATE TABLE IF NOT EXISTS uploaded_videos (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id INTEGER NOT NULL,
+                    platform TEXT NOT NULL DEFAULT 'youtube',
                     uploaded_at TEXT NOT NULL,
                     title TEXT NOT NULL DEFAULT '',
                     description TEXT NOT NULL DEFAULT '',
@@ -162,7 +333,10 @@ class UploadStore:
                     like_count INTEGER,
                     comment_count INTEGER,
                     stats_updated_at TEXT,
-                    UNIQUE(video_id),
+                    stats_unavailable INTEGER NOT NULL DEFAULT 0,
+                    stats_unavailable_data_api INTEGER NOT NULL DEFAULT 0,
+                    age_restricted INTEGER,
+                    UNIQUE(platform, video_id),
                     FOREIGN KEY(session_id) REFERENCES upload_sessions(id) ON DELETE CASCADE
                 );
                 """
@@ -184,6 +358,8 @@ class UploadStore:
             con.execute(
                 "CREATE INDEX IF NOT EXISTS idx_uploaded_videos_uploaded_at ON uploaded_videos(uploaded_at DESC);"
             )
+            _migrate_upload_sessions_add_platform(con)
+            _migrate_uploaded_videos_add_platform(con)
 
             con.execute(
                 """
@@ -315,6 +491,8 @@ class UploadStore:
                 "CREATE INDEX IF NOT EXISTS idx_recent_promote_comment_fields_used_at "
                 "ON recent_promote_comment_fields(used_at DESC);"
             )
+            for table, column in _RECENT_TEXT_TABLES:
+                _migrate_recent_table_add_platform(con, table=table, column=column)
 
     def _list_recent_text_values(
         self,
@@ -322,17 +500,19 @@ class UploadStore:
         table: str,
         column: str,
         limit: int,
+        platform: str = "youtube",
     ) -> list[str]:
         lim = max(1, int(limit))
+        plat = _normalize_platform(platform)
         with self._connect() as con:
             rows = con.execute(
                 f"""
                 SELECT {column} FROM {table}
-                WHERE trim({column}) <> ''
+                WHERE platform = ? AND trim({column}) <> ''
                 ORDER BY used_at DESC, {column} ASC
                 LIMIT ?;
                 """,
-                (lim,),
+                (plat, lim),
             ).fetchall()
         return [
             str(r[column]).strip() for r in rows if str(r[column]).strip()
@@ -345,44 +525,51 @@ class UploadStore:
         column: str,
         value: str,
         keep: int,
+        platform: str = "youtube",
         preserve_whitespace: bool = False,
     ) -> None:
         raw = value or ""
         if not raw.strip():
             return
         v = raw if preserve_whitespace else raw.strip()
+        plat = _normalize_platform(platform)
         now = _utc_now_iso()
         with self._connect() as con:
             con.execute(
                 f"""
-                INSERT INTO {table}({column}, used_at)
-                VALUES(?, ?)
-                ON CONFLICT({column}) DO UPDATE SET used_at=excluded.used_at;
+                INSERT INTO {table}(platform, {column}, used_at)
+                VALUES(?, ?, ?)
+                ON CONFLICT(platform, {column}) DO UPDATE SET used_at=excluded.used_at;
                 """,
-                (v, now),
+                (plat, v, now),
             )
             con.execute(
                 f"""
                 DELETE FROM {table}
-                WHERE rowid NOT IN (
+                WHERE platform = ?
+                  AND rowid NOT IN (
                     SELECT rowid FROM {table}
+                    WHERE platform = ?
                     ORDER BY used_at DESC
                     LIMIT ?
                 );
                 """,
-                (max(1, int(keep)),),
+                (plat, plat, max(1, int(keep))),
             )
 
-    def start_session(self, *, planned_videos: int) -> UploadSession:
+    def start_session(
+        self, *, planned_videos: int, platform: str = "youtube"
+    ) -> UploadSession:
         started_at = _utc_now_iso()
         planned = max(0, int(planned_videos))
+        plat = _normalize_platform(platform)
         with self._connect() as con:
             cur = con.execute(
                 """
-                INSERT INTO upload_sessions(started_at, planned_videos, status)
-                VALUES(?, ?, 'running');
+                INSERT INTO upload_sessions(started_at, planned_videos, status, platform)
+                VALUES(?, ?, 'running', ?);
                 """,
-                (started_at, planned),
+                (started_at, planned, plat),
             )
             sid = int(cur.lastrowid)
         return UploadSession(
@@ -446,16 +633,18 @@ class UploadStore:
         video_id: str,
         profile_id: str = "",
         uploaded_at: str | None = None,
+        platform: str = "youtube",
     ) -> int:
         ua = (uploaded_at or _utc_now_iso()).strip() or _utc_now_iso()
+        plat = _normalize_platform(platform)
         with self._connect() as con:
             cur = con.execute(
                 """
                 INSERT INTO uploaded_videos(
-                    session_id, uploaded_at, title, description, url, video_id, profile_id
+                    session_id, platform, uploaded_at, title, description, url, video_id, profile_id
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(video_id) DO UPDATE SET
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(platform, video_id) DO UPDATE SET
                     session_id=excluded.session_id,
                     uploaded_at=excluded.uploaded_at,
                     title=excluded.title,
@@ -465,6 +654,7 @@ class UploadStore:
                 """,
                 (
                     int(session_id),
+                    plat,
                     ua,
                     (title or "").strip(),
                     (description or "").strip(),
@@ -476,56 +666,69 @@ class UploadStore:
             return int(cur.lastrowid or 0)
 
     def list_recent_upload_titles(
-        self, limit: int = _RECENT_UPLOAD_TITLES_UI_LIMIT
+        self,
+        limit: int = _RECENT_UPLOAD_TITLES_UI_LIMIT,
+        *,
+        platform: str = "youtube",
     ) -> list[str]:
         """Последние уникальные названия для выпадающего списка перед заливом."""
         lim = max(1, int(limit))
+        plat = _normalize_platform(platform)
         with self._connect() as con:
             rows = con.execute(
                 """
                 SELECT title FROM recent_upload_titles
-                WHERE trim(title) <> ''
+                WHERE platform = ? AND trim(title) <> ''
                 ORDER BY used_at DESC, title ASC
                 LIMIT ?;
                 """,
-                (lim,),
+                (plat, lim),
             ).fetchall()
         out = [str(r["title"]).strip() for r in rows if str(r["title"]).strip()]
         if out:
             return out[:lim]
+        if plat != "youtube":
+            return []
         with self._connect() as con:
             rows = con.execute(
                 """
                 SELECT title FROM uploaded_videos
-                WHERE trim(title) <> ''
+                WHERE platform = ? AND trim(title) <> ''
                 GROUP BY title
                 ORDER BY MAX(uploaded_at) DESC, title ASC
                 LIMIT ?;
                 """,
-                (lim,),
+                (plat, lim),
             ).fetchall()
         return [str(r["title"]).strip() for r in rows if str(r["title"]).strip()][:lim]
 
-    def remember_upload_title(self, title: str) -> None:
+    def remember_upload_title(self, title: str, *, platform: str = "youtube") -> None:
         """Запомнить название после подтверждения диалога залива."""
         self._remember_recent_text_value(
             table="recent_upload_titles",
             column="title",
             value=title,
             keep=_RECENT_UPLOAD_TITLES_KEEP,
+            platform=platform,
         )
 
     def list_recent_channel_names(
-        self, limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT
+        self,
+        limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT,
+        *,
+        platform: str = "youtube",
     ) -> list[str]:
         """Последние названия каналов для выпадающего списка."""
         return self._list_recent_text_values(
             table="recent_channel_names",
             column="name",
             limit=limit,
+            platform=platform,
         )
 
-    def remember_channel_names(self, names: Iterable[str]) -> None:
+    def remember_channel_names(
+        self, names: Iterable[str], *, platform: str = "youtube"
+    ) -> None:
         """Запомнить названия каналов после подтверждения настройки."""
         for name in names:
             self._remember_recent_text_value(
@@ -533,141 +736,191 @@ class UploadStore:
                 column="name",
                 value=name,
                 keep=_RECENT_CHANNEL_SETUP_KEEP,
+                platform=platform,
             )
 
     def list_recent_channel_name_fields(
-        self, limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT
+        self,
+        limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT,
+        *,
+        platform: str = "youtube",
     ) -> list[str]:
         """Последние полные списки названий каналов (многострочное поле)."""
         return self._list_recent_text_values(
             table="recent_channel_name_fields",
             column="content",
             limit=limit,
+            platform=platform,
         )
 
-    def remember_channel_name_field(self, content: str) -> None:
+    def remember_channel_name_field(
+        self, content: str, *, platform: str = "youtube"
+    ) -> None:
         """Запомнить содержимое поля «Название» целиком."""
         self._remember_recent_text_value(
             table="recent_channel_name_fields",
             column="content",
             value=content,
             keep=_RECENT_CHANNEL_SETUP_KEEP,
+            platform=platform,
             preserve_whitespace=True,
         )
 
     def list_recent_channel_link_titles(
-        self, limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT
+        self,
+        limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT,
+        *,
+        platform: str = "youtube",
     ) -> list[str]:
         """Последние названия ссылок канала для выпадающего списка."""
         return self._list_recent_text_values(
             table="recent_channel_link_titles",
             column="title",
             limit=limit,
+            platform=platform,
         )
 
-    def remember_channel_link_title(self, title: str) -> None:
+    def remember_channel_link_title(
+        self, title: str, *, platform: str = "youtube"
+    ) -> None:
         """Запомнить название ссылки после подтверждения настройки канала."""
         self._remember_recent_text_value(
             table="recent_channel_link_titles",
             column="title",
             value=title,
             keep=_RECENT_CHANNEL_SETUP_KEEP,
+            platform=platform,
         )
 
     def list_recent_channel_link_urls(
-        self, limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT
+        self,
+        limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT,
+        *,
+        platform: str = "youtube",
     ) -> list[str]:
         """Последние URL ссылок канала для выпадающего списка."""
         return self._list_recent_text_values(
             table="recent_channel_link_urls",
             column="url",
             limit=limit,
+            platform=platform,
         )
 
-    def remember_channel_link_url(self, url: str) -> None:
+    def remember_channel_link_url(
+        self, url: str, *, platform: str = "youtube"
+    ) -> None:
         """Запомнить URL ссылки после подтверждения настройки канала."""
         self._remember_recent_text_value(
             table="recent_channel_link_urls",
             column="url",
             value=url,
             keep=_RECENT_CHANNEL_SETUP_KEEP,
+            platform=platform,
         )
 
     def list_recent_channel_descriptions(
-        self, limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT
+        self,
+        limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT,
+        *,
+        platform: str = "youtube",
     ) -> list[str]:
         """Последние описания канала для выпадающего списка."""
         return self._list_recent_text_values(
             table="recent_channel_descriptions",
             column="description",
             limit=limit,
+            platform=platform,
         )
 
-    def remember_channel_description(self, description: str) -> None:
+    def remember_channel_description(
+        self, description: str, *, platform: str = "youtube"
+    ) -> None:
         """Запомнить описание канала после подтверждения настройки."""
         self._remember_recent_text_value(
             table="recent_channel_descriptions",
             column="description",
             value=description,
             keep=_RECENT_CHANNEL_SETUP_KEEP,
+            platform=platform,
         )
 
     def list_recent_video_default_titles(
-        self, limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT
+        self,
+        limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT,
+        *,
+        platform: str = "youtube",
     ) -> list[str]:
         """Последние названия по умолчанию для загрузки видео."""
         return self._list_recent_text_values(
             table="recent_video_default_titles",
             column="title",
             limit=limit,
+            platform=platform,
         )
 
-    def remember_video_default_title(self, title: str) -> None:
+    def remember_video_default_title(
+        self, title: str, *, platform: str = "youtube"
+    ) -> None:
         """Запомнить название по умолчанию для загрузки видео."""
         self._remember_recent_text_value(
             table="recent_video_default_titles",
             column="title",
             value=title,
             keep=_RECENT_CHANNEL_SETUP_KEEP,
+            platform=platform,
         )
 
     def list_recent_video_default_title_fields(
-        self, limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT
+        self,
+        limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT,
+        *,
+        platform: str = "youtube",
     ) -> list[str]:
         """Последние полные списки названий для видео (многострочное поле)."""
         return self._list_recent_text_values(
             table="recent_video_default_title_fields",
             column="content",
             limit=limit,
+            platform=platform,
         )
 
-    def remember_video_default_title_field(self, content: str) -> None:
+    def remember_video_default_title_field(
+        self, content: str, *, platform: str = "youtube"
+    ) -> None:
         """Запомнить содержимое поля «Название для видео» целиком."""
         self._remember_recent_text_value(
             table="recent_video_default_title_fields",
             column="content",
             value=content,
             keep=_RECENT_CHANNEL_SETUP_KEEP,
+            platform=platform,
             preserve_whitespace=True,
         )
 
     def list_recent_promote_comment_fields(
-        self, limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT
+        self,
+        limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT,
+        *,
+        platform: str = "youtube",
     ) -> list[str]:
         """Последние списки комментариев для продвижения (многострочное поле)."""
         return self._list_recent_text_values(
             table="recent_promote_comment_fields",
             column="content",
             limit=limit,
+            platform=platform,
         )
 
-    def remember_promote_comment_field(self, content: str) -> None:
+    def remember_promote_comment_field(
+        self, content: str, *, platform: str = "youtube"
+    ) -> None:
         """Запомнить содержимое поля комментариев продвижения целиком."""
         self._remember_recent_text_value(
             table="recent_promote_comment_fields",
             column="content",
             value=content,
             keep=_RECENT_CHANNEL_SETUP_KEEP,
+            platform=platform,
             preserve_whitespace=True,
         )
 
@@ -696,16 +949,18 @@ class UploadStore:
         comment_count: int | None,
         age_restricted: bool = False,
         stats_updated_at: str | None = None,
+        platform: str = "youtube",
     ) -> None:
         ts = (stats_updated_at or _utc_now_iso()).strip() or _utc_now_iso()
         ar = 1 if age_restricted else 0
+        plat = _normalize_platform(platform)
         with self._connect() as con:
             con.execute(
                 """
                 UPDATE uploaded_videos
                 SET view_count=?, like_count=?, comment_count=?, stats_updated_at=?,
                     stats_unavailable=0, stats_unavailable_data_api=0, age_restricted=?
-                WHERE video_id=?;
+                WHERE platform=? AND video_id=?;
                 """,
                 (
                     int(view_count),
@@ -713,6 +968,7 @@ class UploadStore:
                     int(comment_count) if comment_count is not None else None,
                     ts,
                     ar,
+                    plat,
                     (video_id or "").strip(),
                 ),
             )
@@ -723,6 +979,7 @@ class UploadStore:
         video_id: str,
         stats_updated_at: str | None = None,
         youtube_data_api_error: bool = False,
+        platform: str = "youtube",
     ) -> None:
         """После неудачного запроса статистики: сброс счётчиков и флаг недоступности."""
         ts = (stats_updated_at or _utc_now_iso()).strip() or _utc_now_iso()
@@ -730,6 +987,7 @@ class UploadStore:
         if not vid:
             return
         api_flag = 1 if youtube_data_api_error else 0
+        plat = _normalize_platform(platform)
         with self._connect() as con:
             con.execute(
                 """
@@ -737,22 +995,26 @@ class UploadStore:
                 SET view_count=NULL, like_count=NULL, comment_count=NULL,
                     stats_updated_at=?, stats_unavailable=1,
                     stats_unavailable_data_api=?, age_restricted=NULL
-                WHERE video_id=?;
+                WHERE platform=? AND video_id=?;
                 """,
-                (ts, api_flag, vid),
+                (ts, api_flag, plat, vid),
             )
 
-    def list_sessions(self, limit: int = 200) -> list[UploadSession]:
+    def list_sessions(
+        self, limit: int = 200, *, platform: str = "youtube"
+    ) -> list[UploadSession]:
         lim = max(1, int(limit))
+        plat = _normalize_platform(platform)
         with self._connect() as con:
             rows = con.execute(
                 """
                 SELECT id, started_at, planned_videos, processed_videos, uploaded_ok, ended_at, status
                 FROM upload_sessions
+                WHERE platform = ?
                 ORDER BY started_at DESC, id DESC
                 LIMIT ?;
                 """,
-                (lim,),
+                (plat, lim),
             ).fetchall()
         out: list[UploadSession] = []
         for r in rows:
@@ -770,12 +1032,16 @@ class UploadStore:
         return out
 
     def list_uploaded_videos_for_sessions(
-        self, session_ids: Iterable[int]
+        self,
+        session_ids: Iterable[int],
+        *,
+        platform: str = "youtube",
     ) -> dict[int, list[UploadedVideo]]:
         ids = [int(x) for x in session_ids]
         if not ids:
             return {}
         ph = ",".join("?" for _ in ids)
+        plat = _normalize_platform(platform)
         with self._connect() as con:
             rows = con.execute(
                 f"""
@@ -789,10 +1055,10 @@ class UploadStore:
                     v.age_restricted AS age_restricted
                 FROM uploaded_videos v
                 LEFT JOIN upload_sessions s ON s.id = v.session_id
-                WHERE v.session_id IN ({ph})
+                WHERE v.platform = ? AND v.session_id IN ({ph})
                 ORDER BY v.uploaded_at DESC, v.id DESC;
                 """,
-                tuple(ids),
+                (plat, *ids),
             ).fetchall()
         out: dict[int, list[UploadedVideo]] = {sid: [] for sid in ids}
         for r in rows:
@@ -825,8 +1091,11 @@ class UploadStore:
             out.setdefault(v.session_id, []).append(v)
         return out
 
-    def list_uploaded_videos(self, limit: int = 500) -> list[UploadedVideo]:
+    def list_uploaded_videos(
+        self, limit: int = 500, *, platform: str = "youtube"
+    ) -> list[UploadedVideo]:
         lim = max(1, int(limit))
+        plat = _normalize_platform(platform)
         with self._connect() as con:
             rows = con.execute(
                 """
@@ -840,10 +1109,11 @@ class UploadStore:
                     v.age_restricted AS age_restricted
                 FROM uploaded_videos v
                 LEFT JOIN upload_sessions s ON s.id = v.session_id
+                WHERE v.platform = ?
                 ORDER BY v.uploaded_at DESC, v.id DESC
                 LIMIT ?;
                 """,
-                (lim,),
+                (plat, lim),
             ).fetchall()
         out: list[UploadedVideo] = []
         for r in rows:
@@ -941,7 +1211,9 @@ class UploadStore:
         except Exception:
             return 0
 
-    def last_uploaded_at_by_profiles(self, profile_ids: Iterable[str]) -> dict[str, str]:
+    def last_uploaded_at_by_profiles(
+        self, profile_ids: Iterable[str], *, platform: str = "youtube"
+    ) -> dict[str, str]:
         """
         For each non-empty profile_id, return the latest uploaded_at (ISO) from uploaded_videos.
         Profiles with no uploads are omitted from the dict.
@@ -950,15 +1222,16 @@ class UploadStore:
         if not ids:
             return {}
         ph = ",".join("?" for _ in ids)
+        plat = _normalize_platform(platform)
         with self._connect() as con:
             rows = con.execute(
                 f"""
                 SELECT profile_id, MAX(uploaded_at) AS last_at
                 FROM uploaded_videos
-                WHERE profile_id IN ({ph})
+                WHERE platform = ? AND profile_id IN ({ph})
                 GROUP BY profile_id;
                 """,
-                tuple(ids),
+                (plat, *ids),
             ).fetchall()
         out: dict[str, str] = {}
         for r in rows:
@@ -969,7 +1242,7 @@ class UploadStore:
         return out
 
     def list_promotable_videos_for_profiles(
-        self, profile_ids: Iterable[str]
+        self, profile_ids: Iterable[str], *, platform: str = "youtube"
     ) -> list[UploadedVideo]:
         """
         По одному уникальному видео на каждый профиль (порядок как в profile_ids).
@@ -992,6 +1265,7 @@ class UploadStore:
         if not ordered:
             return []
         ph = ",".join("?" for _ in ordered)
+        plat = _normalize_platform(platform)
         with self._connect() as con:
             rows = con.execute(
                 f"""
@@ -1005,14 +1279,15 @@ class UploadStore:
                     v.age_restricted AS age_restricted
                 FROM uploaded_videos v
                 LEFT JOIN upload_sessions s ON s.id = v.session_id
-                WHERE v.profile_id IN ({ph})
+                WHERE v.platform = ?
+                  AND v.profile_id IN ({ph})
                   AND trim(v.video_id) <> ''
                   AND COALESCE(v.stats_unavailable, 0) = 0
                   AND v.view_count IS NOT NULL
                   AND v.view_count > 0
                 ORDER BY v.uploaded_at DESC, v.id DESC;
                 """,
-                tuple(ordered),
+                (plat, *ordered),
             ).fetchall()
         by_profile: dict[str, UploadedVideo] = {}
         used_vids: set[str] = set()
@@ -1056,7 +1331,9 @@ class UploadStore:
             )
         return [by_profile[pid] for pid in ordered if pid in by_profile]
 
-    def profile_upload_pause_remaining_seconds(self, profile_id: str) -> float:
+    def profile_upload_pause_remaining_seconds(
+        self, profile_id: str, *, platform: str = "youtube"
+    ) -> float:
         """
         Секунды до конца паузы после последнего успешного залива с профиля (по БД),
         по тем же правилам, что «Пауза 3 ч» в списке профилей. 0 — можно заливать.
@@ -1064,7 +1341,7 @@ class UploadStore:
         pid = (profile_id or "").strip()
         if not pid:
             return 0.0
-        m = self.last_uploaded_at_by_profiles([pid])
+        m = self.last_uploaded_at_by_profiles([pid], platform=platform)
         iso = (m.get(pid) or "").strip()
         if not iso:
             return 0.0
@@ -1078,7 +1355,9 @@ class UploadStore:
         rem = _UPLOAD_PAUSE_BETWEEN_UPLOADS - delta
         return float(max(0.0, rem.total_seconds()))
 
-    def reset_latest_upload_time_for_profile(self, *, profile_id: str) -> int:
+    def reset_latest_upload_time_for_profile(
+        self, *, profile_id: str, platform: str = "youtube"
+    ) -> int:
         """
         Сдвигает время последнего залива для profile_id на >3 ч назад (по одной последней записи),
         чтобы в UI пауза 3 ч считалась пройденной. Возвращает число обновлённых строк (0 если записей нет).
@@ -1086,21 +1365,23 @@ class UploadStore:
         pid = (profile_id or "").strip()
         if not pid:
             return 0
+        plat = _normalize_platform(platform)
         old = (datetime.now(tz=timezone.utc) - timedelta(hours=4)).isoformat()
         with self._connect() as con:
             con.execute(
                 """
                 UPDATE uploaded_videos
                 SET uploaded_at = ?
-                WHERE profile_id = ?
+                WHERE platform = ?
+                  AND profile_id = ?
                   AND id = (
                     SELECT id FROM uploaded_videos
-                    WHERE profile_id = ?
+                    WHERE platform = ? AND profile_id = ?
                     ORDER BY uploaded_at DESC, id DESC
                     LIMIT 1
                   );
                 """,
-                (old, pid, pid),
+                (old, plat, pid, plat, pid),
             )
             row = con.execute("SELECT changes() AS n;").fetchone()
             try:

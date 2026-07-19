@@ -49,7 +49,7 @@ def main() -> None:
     from PyQt6.QtWidgets import QApplication
 
     from zaliver.processing.fd_limit import bootstrap_fd_limits
-    from zaliver.ui.main_window import MainWindow
+    from zaliver.ui.app_shell import AppShell
 
     bootstrap_fd_limits()
     app = QApplication(sys.argv)
@@ -58,7 +58,7 @@ def main() -> None:
     if icon_path is not None:
         ico = QIcon(str(icon_path))
         app.setWindowIcon(ico)
-    w = MainWindow()
+    w = AppShell()
     if icon_path is not None:
         w.setWindowIcon(ico)
     w.show()

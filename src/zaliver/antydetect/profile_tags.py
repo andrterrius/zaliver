@@ -10,6 +10,24 @@ STUDIO_AVAILABILITY_RESULT_TAGS: tuple[str, ...] = (
     STUDIO_AVAILABILITY_SUCCESS_TAG,
 )
 
+# Проверка доступности Gmail (Instagram, взаимоисключающие).
+GMAIL_AVAILABILITY_ERROR_TAG = "ОШИБКА ПРОВЕРКИ GMAIL"
+GMAIL_AVAILABILITY_SUCCESS_TAG = "УСПЕШНАЯ ПРОВЕРКА GMAIL"
+GMAIL_AVAILABILITY_RESULT_TAGS: tuple[str, ...] = (
+    GMAIL_AVAILABILITY_ERROR_TAG,
+    GMAIL_AVAILABILITY_SUCCESS_TAG,
+)
+
+# Регистрация аккаунта Instagram (взаимоисключающие).
+IG_REGISTER_ERROR_TAG = "ОШИБКА РЕГИСТРАЦИИ INSTAGRAM"
+IG_REGISTER_SMS_ERROR_TAG = "ОШИБКА АВТОРЕГА INSTAGRAM - SMS"
+IG_REGISTER_SUCCESS_TAG = "УСПЕШНАЯ РЕГИСТРАЦИЯ INSTAGRAM"
+IG_REGISTER_RESULT_TAGS: tuple[str, ...] = (
+    IG_REGISTER_ERROR_TAG,
+    IG_REGISTER_SMS_ERROR_TAG,
+    IG_REGISTER_SUCCESS_TAG,
+)
+
 # Смена аватарки канала.
 AVATAR_CHANGE_ERROR_TAG = "ОШИБКА СМЕНЫ АВАТАРКИ"
 AVATAR_CHANGE_SUCCESS_TAG = "УСПЕШНАЯ СМЕНА АВАТАРКИ"
@@ -97,6 +115,11 @@ UPLOAD_ERROR_3X_TAG = "upload_error_3x"
 ZALIVER_PROFILE_TAGS: tuple[str, ...] = (
     STUDIO_AVAILABILITY_ERROR_TAG,
     STUDIO_AVAILABILITY_SUCCESS_TAG,
+    GMAIL_AVAILABILITY_ERROR_TAG,
+    GMAIL_AVAILABILITY_SUCCESS_TAG,
+    IG_REGISTER_ERROR_TAG,
+    IG_REGISTER_SMS_ERROR_TAG,
+    IG_REGISTER_SUCCESS_TAG,
     AVATAR_CHANGE_ERROR_TAG,
     AVATAR_CHANGE_SUCCESS_TAG,
     NAME_CHANGE_ERROR_TAG,
@@ -144,6 +167,41 @@ def apply_mutually_exclusive_profile_tag(
     except Exception:
         pass
     api.add_profile_tag(pid, tag)
+
+
+def apply_ig_register_result_tag(
+    api: object,
+    profile_id: str,
+    *,
+    success: bool,
+    sms_captcha: bool = False,
+) -> str:
+    """
+    Результат авторега Instagram: успех / обычная ошибка / SMS-капча.
+    Снимает все IG_REGISTER_RESULT_TAGS, ставит один актуальный.
+    """
+    from zaliver.antydetect.local_antidetect_api import LocalAntidetectHttpAPI
+
+    if not isinstance(api, LocalAntidetectHttpAPI):
+        raise TypeError("api must be LocalAntidetectHttpAPI")
+    pid = (profile_id or "").strip()
+    if not pid:
+        return ""
+    if success:
+        tag = IG_REGISTER_SUCCESS_TAG
+    elif sms_captcha:
+        tag = IG_REGISTER_SMS_ERROR_TAG
+    else:
+        tag = IG_REGISTER_ERROR_TAG
+    for other in IG_REGISTER_RESULT_TAGS:
+        if other == tag:
+            continue
+        try:
+            api.remove_profile_tag(pid, other)
+        except Exception:
+            pass
+    api.add_profile_tag(pid, tag)
+    return tag
 
 
 def clear_zaliver_tags_on_profile(

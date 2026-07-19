@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import sys
 
-from PyQt6.QtCore import QSettings
-
 MAX_CONCURRENT_BROWSERS_MIN = 1
 MAX_CONCURRENT_BROWSERS_MAX = 10
 DEFAULT_MAX_CONCURRENT_BROWSERS = 3 if sys.platform == "darwin" else 5
@@ -24,9 +22,14 @@ def clamp_max_concurrent_browsers(value: int | float | str | None) -> int:
 
 
 def max_concurrent_browsers_from_settings(
-    settings: QSettings | None = None,
+    settings: object | None = None,
 ) -> int:
-    s = settings or QSettings("Zaliver", "Zaliver")
-    if not s.contains(SETTINGS_KEY):
+    from PyQt6.QtCore import QSettings
+
+    s = settings if settings is not None else QSettings("Zaliver", "Zaliver")
+    contains = getattr(s, "contains", None)
+    if callable(contains) and not contains(SETTINGS_KEY):
         return DEFAULT_MAX_CONCURRENT_BROWSERS
-    return clamp_max_concurrent_browsers(s.value(SETTINGS_KEY, DEFAULT_MAX_CONCURRENT_BROWSERS))
+    return clamp_max_concurrent_browsers(
+        s.value(SETTINGS_KEY, DEFAULT_MAX_CONCURRENT_BROWSERS)  # type: ignore[attr-defined]
+    )

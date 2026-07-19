@@ -539,6 +539,73 @@ def check_studio_availability_in_profile(
 
 
 @with_log_profile
+def check_gmail_availability_in_profile(
+    profile_id: str,
+    *,
+    local_token: str | None = None,
+    headless: bool = True,
+    login_credentials=None,
+) -> None:
+    """Dolphin → Gmail workspace → Войти → Google login → Inbox."""
+    from zaliver.instagram_upload.gmail_availability import (
+        KEEP_PROFILE_OPEN_AFTER_GMAIL_CHECK,
+        verify_gmail_inbox_available,
+    )
+
+    _log(
+        "Dolphin: проверка доступности Gmail. "
+        f"profile_id={profile_id!r}, headless={headless}"
+    )
+    api = DolphinAntyLocalAPI()
+    keep_open = bool(KEEP_PROFILE_OPEN_AFTER_GMAIL_CHECK)
+    try:
+        tok = (local_token or "").strip()
+        if tok:
+            _log("Dolphin: login_with_token…")
+            api.login_with_token(tok)
+        _log("Dolphin: start_profile…")
+        conn = api.start_profile(profile_id, headless=headless)
+        _log(
+            "Dolphin: профиль запущен. "
+            f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+        )
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_cdp(
+                p, (conn.ws_url(), conn.http_url())
+            )
+            try:
+                verify_gmail_inbox_available(
+                    page, login_credentials=login_credentials
+                )
+            finally:
+                if keep_open:
+                    _log(
+                        "Dolphin: профиль оставлен открытым для теста "
+                        f"(profile_id={profile_id!r}) — Playwright отключаемся без stop."
+                    )
+                else:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+    except Exception as e:
+        _log(f"Ошибка проверки Gmail: {type(e).__name__}: {e!r}")
+        raise _wrap_exc(e) from e
+    finally:
+        if keep_open:
+            _log(
+                "Dolphin: stop_profile пропущен (KEEP_PROFILE_OPEN_AFTER_GMAIL_CHECK)."
+            )
+            api.close()
+        else:
+            try:
+                api.stop_profile(profile_id)
+            except Exception as e:
+                _log(f"Dolphin: stop_profile: {e!r}")
+            api.close()
+
+
+@with_log_profile
 def check_studio_availability_in_local_antidetect_profile(
     profile_id: str,
     *,
@@ -609,6 +676,292 @@ def check_studio_availability_in_local_antidetect_profile(
                 pass
         try:
             _log(f"Local antidetect: проверка завершена за {time.perf_counter() - started_at:.1f} с.")
+        except Exception:
+            pass
+        api.close()
+
+
+@with_log_profile
+def check_gmail_availability_in_local_antidetect_profile(
+    profile_id: str,
+    *,
+    base_url: str,
+    headless: bool = True,
+    login_credentials=None,
+    remote_cdp=None,
+) -> None:
+    """Локальный антидетект → Gmail workspace → Войти → Google login → Inbox."""
+    from zaliver.instagram_upload.gmail_availability import (
+        KEEP_PROFILE_OPEN_AFTER_GMAIL_CHECK,
+        verify_gmail_inbox_available,
+    )
+    from zaliver.antydetect.local_antidetect_api import (
+        LocalAntidetectError,
+        LocalAntidetectHttpAPI,
+    )
+    from zaliver.antydetect.local_active_sessions import (
+        register_local_session,
+        unregister_local_session,
+    )
+
+    _log(
+        "Local antidetect: проверка доступности Gmail. "
+        f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}"
+    )
+    api = LocalAntidetectHttpAPI(base_url)
+    session_id: str | None = None
+    started_at = time.perf_counter()
+    keep_open = bool(KEEP_PROFILE_OPEN_AFTER_GMAIL_CHECK)
+    try:
+        acc = api.launch_profile(
+            profile_id, headless=headless, expose_cdp=True, remote_cdp=remote_cdp
+        )
+        sid = acc.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+        session_id = sid.strip()
+        bu = (base_url or "").strip() or "http://127.0.0.1:18765"
+        register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
+        ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+        _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_local_session_cdp(
+                p, api, session_id, ws_url
+            )
+            try:
+                verify_gmail_inbox_available(
+                    page, login_credentials=login_credentials
+                )
+            finally:
+                if keep_open:
+                    _log(
+                        "Local antidetect: профиль оставлен открытым для теста "
+                        f"(profile_id={profile_id!r}) — Playwright отключаемся без stop."
+                    )
+                else:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+    except Exception as e:
+        _log(f"Ошибка проверки Gmail: {type(e).__name__}: {e!r}")
+        raise LocalAntidetectError(f"Ошибка проверки доступности Gmail: {e}") from e
+    finally:
+        if keep_open:
+            _log(
+                "Local antidetect: stop_session пропущен "
+                "(KEEP_PROFILE_OPEN_AFTER_GMAIL_CHECK)."
+            )
+            # Сессию не unregister — профиль ещё жив; иначе UI может сбросить учёт.
+        elif session_id:
+            unregister_local_session(profile_id=profile_id)
+            try:
+                api.stop_session(session_id)
+            except Exception:
+                pass
+        try:
+            _log(
+                f"Local antidetect: проверка Gmail завершена за "
+                f"{time.perf_counter() - started_at:.1f} с."
+            )
+        except Exception:
+            pass
+        api.close()
+
+
+@with_log_profile
+def register_instagram_account_in_profile(
+    profile_id: str,
+    *,
+    local_token: str | None = None,
+    headless: bool = True,
+    login_credentials=None,
+    rucaptcha_api_key: str = "",
+    on_manual_captcha=None,
+) -> None:
+    """Dolphin → Gmail inbox → Instagram signup → капча → код из почты."""
+    from zaliver.instagram_upload.gmail_availability import verify_gmail_inbox_available
+    from zaliver.instagram_upload.register import (
+        KEEP_PROFILE_OPEN_AFTER_IG_REGISTER,
+        run_instagram_registration_after_gmail,
+    )
+
+    _log(
+        "Dolphin: регистрация Instagram. "
+        f"profile_id={profile_id!r}, headless={headless}"
+    )
+    api = DolphinAntyLocalAPI()
+    keep_open_on_error = bool(KEEP_PROFILE_OPEN_AFTER_IG_REGISTER)
+    succeeded = False
+    try:
+        tok = (local_token or "").strip()
+        if tok:
+            _log("Dolphin: login_with_token…")
+            api.login_with_token(tok)
+
+        _log("Dolphin: start_profile…")
+        conn = api.start_profile(profile_id, headless=headless)
+        _log(
+            "Dolphin: профиль запущен. "
+            f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+        )
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_cdp(
+                p, (conn.ws_url(), conn.http_url())
+            )
+            try:
+                verify_gmail_inbox_available(
+                    page, login_credentials=login_credentials
+                )
+                username = run_instagram_registration_after_gmail(
+                    page,
+                    login_credentials,
+                    rucaptcha_api_key=rucaptcha_api_key,
+                    on_manual_captcha=on_manual_captcha,
+                )
+                succeeded = True
+                _log(f"Dolphin: Instagram зарегистрирован, username={username!r}")
+            finally:
+                # Успех → всегда закрыть. Ошибка → оставить открытым для ручной капчи.
+                if succeeded or not keep_open_on_error:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+                else:
+                    _log(
+                        "Dolphin: профиль оставлен открытым после ошибки "
+                        f"(profile_id={profile_id!r})."
+                    )
+    except Exception as e:
+        _log(f"Ошибка регистрации Instagram: {type(e).__name__}: {e!r}")
+        raise _wrap_exc(e) from e
+    finally:
+        if succeeded or not keep_open_on_error:
+            try:
+                api.stop_profile(profile_id)
+                if succeeded:
+                    _log(
+                        "Dolphin: профиль закрыт после успешной регистрации "
+                        f"(profile_id={profile_id!r})."
+                    )
+            except Exception as e:
+                _log(f"Dolphin: stop_profile: {e!r}")
+            api.close()
+        else:
+            _log(
+                "Dolphin: stop_profile пропущен после ошибки "
+                "(KEEP_PROFILE_OPEN_AFTER_IG_REGISTER)."
+            )
+            api.close()
+
+
+@with_log_profile
+def register_instagram_account_in_local_antidetect_profile(
+    profile_id: str,
+    *,
+    base_url: str,
+    headless: bool = True,
+    login_credentials=None,
+    remote_cdp=None,
+    rucaptcha_api_key: str = "",
+    on_manual_captcha=None,
+) -> None:
+    """Локальный антидетект → Gmail → Instagram signup → капча → код из почты."""
+    from zaliver.instagram_upload.gmail_availability import verify_gmail_inbox_available
+    from zaliver.instagram_upload.register import (
+        KEEP_PROFILE_OPEN_AFTER_IG_REGISTER,
+        run_instagram_registration_after_gmail,
+    )
+    from zaliver.antydetect.local_antidetect_api import (
+        LocalAntidetectError,
+        LocalAntidetectHttpAPI,
+    )
+    from zaliver.antydetect.local_active_sessions import (
+        register_local_session,
+        unregister_local_session,
+    )
+
+    _log(
+        "Local antidetect: регистрация Instagram. "
+        f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}"
+    )
+    api = LocalAntidetectHttpAPI(base_url)
+    session_id: str | None = None
+    started_at = time.perf_counter()
+    keep_open_on_error = bool(KEEP_PROFILE_OPEN_AFTER_IG_REGISTER)
+    succeeded = False
+    try:
+        acc = api.launch_profile(
+            profile_id, headless=headless, expose_cdp=True, remote_cdp=remote_cdp
+        )
+        sid = acc.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+        session_id = sid.strip()
+        bu = (base_url or "").strip() or "http://127.0.0.1:18765"
+        register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
+        ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+        _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_local_session_cdp(
+                p, api, session_id, ws_url
+            )
+            try:
+                verify_gmail_inbox_available(
+                    page, login_credentials=login_credentials
+                )
+                username = run_instagram_registration_after_gmail(
+                    page,
+                    login_credentials,
+                    rucaptcha_api_key=rucaptcha_api_key,
+                    on_manual_captcha=on_manual_captcha,
+                )
+                succeeded = True
+                _log(
+                    "Local antidetect: Instagram зарегистрирован, "
+                    f"username={username!r}"
+                )
+            finally:
+                # Успех → всегда закрыть. Ошибка → оставить открытым для ручной капчи.
+                if succeeded or not keep_open_on_error:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+                else:
+                    _log(
+                        "Local antidetect: профиль оставлен открытым после ошибки "
+                        f"(profile_id={profile_id!r})."
+                    )
+    except Exception as e:
+        _log(f"Ошибка регистрации Instagram: {type(e).__name__}: {e!r}")
+        raise LocalAntidetectError(f"Ошибка регистрации Instagram: {e}") from e
+    finally:
+        if succeeded or not keep_open_on_error:
+            if session_id:
+                unregister_local_session(profile_id=profile_id)
+                try:
+                    api.stop_session(session_id)
+                    if succeeded:
+                        _log(
+                            "Local antidetect: профиль закрыт после успешной "
+                            f"регистрации (profile_id={profile_id!r})."
+                        )
+                except Exception:
+                    pass
+        else:
+            _log(
+                "Local antidetect: stop_session пропущен после ошибки "
+                "(KEEP_PROFILE_OPEN_AFTER_IG_REGISTER)."
+            )
+        try:
+            _log(
+                f"Local antidetect: регистрация Instagram завершена за "
+                f"{time.perf_counter() - started_at:.1f} с."
+            )
         except Exception:
             pass
         api.close()

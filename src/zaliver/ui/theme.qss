@@ -219,6 +219,26 @@ QListWidget#sideNav::item:selected {
     color: #f1f5f9;
 }
 
+QPushButton#sideNavBack {
+    background-color: #1a1d26;
+    color: #c7c9d9;
+    border: 1px solid #2d3142;
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-weight: 600;
+    text-align: left;
+}
+
+QPushButton#sideNavBack:hover {
+    background-color: #252836;
+    border: 1px solid #6366f1;
+    color: #f1f5f9;
+}
+
+QPushButton#sideNavBack:pressed {
+    background-color: #2e3245;
+}
+
 QListWidget#readyList {
     background-color: #0f1118;
     border: 1px solid #2d3142;
@@ -389,6 +409,12 @@ QWidget#profileRow {
 QWidget#profileRowChecked {
     background-color: rgba(99, 102, 241, 0.12);
     border: 2px solid #6366f1;
+    border-radius: 10px;
+}
+
+QWidget#profileRowAttention {
+    background-color: rgba(245, 158, 11, 0.16);
+    border: 2px solid #f59e0b;
     border-radius: 10px;
 }
 
@@ -1031,4 +1057,48 @@ QFrame#titleVariablesExample {
 QFrame#titleVariableSeparator {
     color: #2d3142;
     max-height: 1px;
+}
+
+/* Экран выбора платформы */
+QWidget#platformSelectRoot {
+    background-color: #12141c;
+}
+
+QLabel#platformSelectTitle {
+    font-size: 42px;
+    font-weight: 700;
+    color: #f1f5f9;
+    letter-spacing: 1px;
+}
+
+QLabel#platformSelectSubtitle {
+    font-size: 16px;
+    color: #94a3b8;
+    margin-bottom: 8px;
+}
+
+QFrame#platformCard {
+    background-color: #1a1d26;
+    border: 1px solid #2d3142;
+    border-radius: 16px;
+}
+
+QFrame#platformCard:hover {
+    border: 1px solid #6366f1;
+    background-color: #1e2230;
+}
+
+QLabel#platformCardName {
+    font-size: 24px;
+    font-weight: 700;
+    color: #f1f5f9;
+}
+
+QLabel#platformCardHint {
+    font-size: 13px;
+    color: #94a3b8;
+}
+
+QPushButton#platformCardBtn {
+    min-height: 22px;
 }

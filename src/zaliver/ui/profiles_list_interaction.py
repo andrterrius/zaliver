@@ -127,6 +127,60 @@ class ProfilesListInteraction(QObject):
         self.checked_profile_ids = set(self._profile_id_to_item.keys())
         self._apply_checkbox_visuals()
 
+    def focus_profile(
+        self,
+        profile_id: str,
+        *,
+        check: bool = True,
+        attention: bool = True,
+    ) -> bool:
+        """Прокрутить к профилю, опционально отметить и подсветить."""
+        pid = (profile_id or "").strip()
+        if not pid:
+            return False
+        # Снять прошлую attention-подсветку.
+        for row in list(self._profile_id_to_row.values()):
+            try:
+                if row.objectName() == "profileRowAttention":
+                    checked = False
+                    try:
+                        checked = bool(row.checkbox.isChecked())
+                    except Exception:
+                        pass
+                    row.setObjectName("profileRowChecked" if checked else "profileRow")
+                    row.style().unpolish(row)
+                    row.style().polish(row)
+            except Exception:
+                continue
+
+        item = self._profile_id_to_item.get(pid)
+        row = self._profile_id_to_row.get(pid)
+        if item is None and row is None:
+            return False
+        if check:
+            self.checked_profile_ids.add(pid)
+            self._apply_checkbox_visuals()
+        if item is not None:
+            try:
+                self.lw.scrollToItem(
+                    item, QListWidget.ScrollHint.PositionAtCenter
+                )
+            except Exception:
+                try:
+                    self.lw.scrollToItem(item)
+                except Exception:
+                    pass
+        if attention and row is not None:
+            try:
+                row.setObjectName("profileRowAttention")
+                row.style().unpolish(row)
+                row.style().polish(row)
+            except Exception:
+                pass
+        if check:
+            self.selection_changed.emit()
+        return True
+
     def select_checked_by_filter(self, mode: str, profiles_by_id: dict[str, dict[str, object]], last_upload_map: dict[str, str]) -> None:
         """mode: all | available | no_errors | with_errors | no_account_data | no_oldest_channel"""
         existing = set(profiles_by_id.keys())

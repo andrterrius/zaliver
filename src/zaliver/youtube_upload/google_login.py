@@ -94,7 +94,6 @@ _HOME_ADDRESS_HEADING_RE = re.compile(
     r"домашний\s+адрес",
     re.I,
 )
-_CANCEL_BTN_RE = re.compile(r"^отмена$|^cancel$", re.I)
 _SKIP_BTN_RE = re.compile(r"^skip$|^пропустить$", re.I)
 _BIRTHDAY_HEADING_RE = re.compile(
     r"add\s+your\s+birthday|добавьте\s+дату\s+рождения|"
@@ -177,6 +176,11 @@ def _random_birthday() -> tuple[int, int, int]:
     _, max_day = calendar.monthrange(year, month)
     day = random.randint(1, max_day)
     return day, month, year
+
+
+def random_birthday() -> tuple[int, int, int]:
+    """Публичный генератор даты рождения (день, месяц 1–12, год)."""
+    return _random_birthday()
 
 
 class GoogleLoginCredentialsMissingError(RuntimeError):
@@ -775,12 +779,12 @@ def _click_selfie_enrollment_not_now(page) -> None:
     page.wait_for_timeout(900)
 
 
-def _recovery_info_cancel_locator(scope):
+def _recovery_info_save_locator(scope):
     return (
-        scope.locator('[jsname="ZUkOIc"]')
-        .or_(scope.locator('button[aria-label="Отмена"]'))
-        .or_(scope.locator('button[aria-label="Cancel"]'))
-        .or_(scope.get_by_role("button", name=_CANCEL_BTN_RE))
+        scope.locator('[jsname="M2UYVd"]')
+        .or_(scope.locator('button[aria-label="Сохранить"]'))
+        .or_(scope.locator('button[aria-label="Save"]'))
+        .or_(scope.get_by_role("button", name=_SAVE_BTN_RE))
     )
 
 
@@ -820,23 +824,23 @@ def _recovery_info_step_visible(page) -> bool:
         if not (has_heading or has_phone):
             continue
         try:
-            cancel = _recovery_info_cancel_locator(scope)
-            if cancel.count() > 0 and cancel.first.is_visible(timeout=300):
+            save = _recovery_info_save_locator(scope)
+            if save.count() > 0 and save.first.is_visible(timeout=300):
                 return True
         except Exception:
             pass
     return False
 
 
-def _click_recovery_info_cancel_js(scope) -> bool:
+def _click_recovery_info_save_js(scope) -> bool:
     try:
         return bool(
             scope.evaluate(
                 """() => {
-                    const labels = ['Отмена', 'Cancel'];
+                    const labels = ['Сохранить', 'Save'];
                     const tryClick = (root) => {
                         if (!root) return false;
-                        const direct = root.querySelector('[jsname="ZUkOIc"]');
+                        const direct = root.querySelector('[jsname="M2UYVd"]');
                         if (direct) {
                             direct.click();
                             return true;
@@ -864,12 +868,12 @@ def _click_recovery_info_cancel_js(scope) -> bool:
         return False
 
 
-def _click_recovery_info_cancel(page) -> None:
-    _log("Google: восстановление доступа — нажимаем «Отмена»…")
+def _click_recovery_info_save(page) -> None:
+    _log("Google: восстановление доступа — нажимаем «Сохранить»…")
     clicked = False
     last_err = ""
     for scope in _google_auth_scopes(page):
-        btn = _recovery_info_cancel_locator(scope)
+        btn = _recovery_info_save_locator(scope)
         try:
             if btn.count() == 0:
                 continue
@@ -891,13 +895,13 @@ def _click_recovery_info_cancel(page) -> None:
             continue
     if not clicked:
         for scope in _google_auth_scopes(page):
-            if _click_recovery_info_cancel_js(scope):
+            if _click_recovery_info_save_js(scope):
                 clicked = True
-                _log("Google: клик «Отмена» через JS.")
+                _log("Google: клик «Сохранить» через JS.")
                 break
     if not clicked:
         raise RuntimeError(
-            "Google: кнопка «Отмена» на экране восстановления доступа не найдена. "
+            "Google: кнопка «Сохранить» на экране восстановления доступа не найдена. "
             f"URL={page.url!r}. {last_err}"
         )
     page.wait_for_timeout(900)
@@ -1678,25 +1682,42 @@ def attempt_google_login_for_studio(
     credentials: GoogleLoginCredentials | None,
     *,
     max_seconds: float = _GOOGLE_LOGIN_MAX_S,
+    handle_channel_switcher: bool = True,
 ) -> bool:
     """
     Пройти цепочку Google: email → личность → пароль → ключ доступа (пропуск) →
-    видеоселфи (пропуск) → выбор 2FA (Authenticator) → 2FA → канал.
+    видеоселфи (пропуск) → выбор 2FA (Authenticator) → 2FA → (опционально) канал.
     Возвращает True, если интерактивный вход больше не нужен.
+
+    ``handle_channel_switcher=False`` — для Gmail/Instagram: без выбора канала YouTube.
     """
     if credentials is None:
         return False
 
-    from zaliver.youtube_upload.studio import _studio_login_required
+    studio_login_required = None
+    if handle_channel_switcher:
+        from zaliver.youtube_upload.studio import _studio_login_required as studio_login_required
 
-    _log("Google/YouTube: обнаружен вход — пробуем автоматический сценарий…")
+    def _still_needs_login() -> bool:
+        if google_auth_interaction_visible(page):
+            return True
+        if "accounts.google.com" in _page_url_lower(page):
+            return True
+        if handle_channel_switcher and studio_login_required is not None:
+            try:
+                return bool(studio_login_required(page))
+            except Exception:
+                return False
+        return False
+
+    _log("Google: обнаружен вход — пробуем автоматический сценарий…")
     _log(f"Google: URL при старте входа: {page.url!r}")
     deadline = time.monotonic() + max_seconds
     steps = 0
     idle_rounds = 0
 
     while time.monotonic() < deadline:
-        if _channel_switcher_visible(page):
+        if handle_channel_switcher and _channel_switcher_visible(page):
             steps += 1
             _log(f"YouTube: выбор канала (шаг {steps})…")
             _handle_channel_switcher(page)
@@ -1717,13 +1738,22 @@ def attempt_google_login_for_studio(
             and not _totp_step_visible(page)
             and not _account_chooser_step_visible(page)
             and not google_auth_interaction_visible(page)
-            and not _studio_login_required(page)
+            and not (
+                handle_channel_switcher
+                and studio_login_required is not None
+                and studio_login_required(page)
+            )
         ):
-            _wait_for_channel_switcher_after_auth(page)
-            if not _channel_switcher_visible(page) and not _studio_login_required(page):
-                _log("Google/YouTube: вход завершён.")
-                return True
-            continue
+            if handle_channel_switcher:
+                _wait_for_channel_switcher_after_auth(page)
+                if not _channel_switcher_visible(page) and not (
+                    studio_login_required is not None and studio_login_required(page)
+                ):
+                    _log("Google/YouTube: вход завершён.")
+                    return True
+                continue
+            _log("Google: вход завершён (без выбора канала YouTube).")
+            return True
 
         if _account_chooser_step_visible(page):
             steps += 1
@@ -1810,8 +1840,8 @@ def attempt_google_login_for_studio(
         if _recovery_info_step_visible(page):
             steps += 1
             idle_rounds = 0
-            _log(f"Google: восстановление доступа — «Отмена» (шаг {steps})…")
-            _click_recovery_info_cancel(page)
+            _log(f"Google: восстановление доступа — «Сохранить» (шаг {steps})…")
+            _click_recovery_info_save(page)
             continue
 
         if _home_address_step_visible(page):
@@ -1842,7 +1872,7 @@ def attempt_google_login_for_studio(
             _fill_birthday_and_save(page)
             continue
 
-        if _studio_login_required(page) or "accounts.google.com" in _page_url_lower(page):
+        if _still_needs_login():
             if _try_use_another_account_if_present(page):
                 steps += 1
                 idle_rounds = 0

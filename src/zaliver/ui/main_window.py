@@ -33,6 +33,7 @@ from PyQt6.QtGui import QDesktopServices, QMouseEvent, QPixmap, QShowEvent, QCol
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
+    QApplication,
     QColorDialog,
     QDoubleSpinBox,
     QDialog,
@@ -137,6 +138,15 @@ from zaliver.ui.channel_setup_helpers import (
     make_magic_wand_button,
 )
 from zaliver.ui.title_variables_ui import show_youtube_title_warnings, title_field_with_variables_hint
+from zaliver.ui.platform import (
+    PLATFORM_INSTAGRAM,
+    PLATFORM_YOUTUBE,
+    PlatformSettings,
+    apply_platform_branding,
+    brand_text,
+    normalize_platform,
+    platform_display_name,
+)
 from zaliver.title_variables import (
     TitleVariableContext,
     expand_and_limit_title,
@@ -820,6 +830,9 @@ class MainWindow(QWidget):
     _youtube_upload_phase_finished = pyqtSignal(str)
     _studio_availability_progress = pyqtSignal(int, int, str)
     _studio_availability_finished = pyqtSignal(int, int)
+    _instagram_register_progress = pyqtSignal(int, int, str)
+    _instagram_register_finished = pyqtSignal(int, int)
+    _manual_captcha_needed = pyqtSignal(str)
     _studio_channel_setup_progress = pyqtSignal(int, int, str)
     _studio_channel_setup_finished = pyqtSignal(int, int)
     _studio_warmup_progress = pyqtSignal(int, int, str)
@@ -831,10 +844,20 @@ class MainWindow(QWidget):
     _zaliver_profile_tags_clear_progress = pyqtSignal(int, int, str)
     _zaliver_profile_tags_clear_finished = pyqtSignal(int, int)
     _profile_zaliver_tags_cache_update = pyqtSignal(str, object)
+    back_to_modes = pyqtSignal()
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        platform: str = PLATFORM_YOUTUBE,
+        *,
+        embedded: bool = False,
+    ) -> None:
         super().__init__()
-        self.setWindowTitle("Zaliver — уникализация видео")
+        self._platform = normalize_platform(platform)
+        self._embedded = bool(embedded)
+        self.setWindowTitle(
+            f"Zaliver — {platform_display_name(self._platform)}"
+        )
         self.setObjectName("zaliverRoot")
         self._work_thread: QThread | None = None
         self._processor: ProcessingController | None = None
@@ -855,7 +878,10 @@ class MainWindow(QWidget):
         self._upload_session_upload_done = False
         self._upload_session_upload_expected = False
 
-        self._settings = QSettings("Zaliver", "Zaliver")
+        self._settings = PlatformSettings(
+            QSettings("Zaliver", "Zaliver"),
+            self._platform,
+        )
         self._profiles_raw: list[dict[str, object]] | None = None
         self._profiles_tag_filter: frozenset[str] = frozenset()
         self._profiles_list_render_gen: int = 0
@@ -865,6 +891,7 @@ class MainWindow(QWidget):
         self._profiles_filter_timer.setSingleShot(True)
         self._profiles_filter_timer.timeout.connect(self._apply_profiles_filter)
         self._profiles_availability_running = False
+        self._profiles_register_running = False
         self._profiles_channel_setup_running = False
         self._profiles_warmup_running = False
         self._profiles_promote_running = False
@@ -872,11 +899,14 @@ class MainWindow(QWidget):
         self._profiles_tags_clear_running = False
         self._profiles_refresh_running = False
         self._last_availability_failed_ids: list[str] = []
+        self._last_register_failed_ids: list[str] = []
         self._last_channel_setup_failed_ids: list[str] = []
         self._last_warmup_failed_ids: list[str] = []
         self._last_promote_failed_ids: list[str] = []
         self._last_cookie_farm_failed_ids: list[str] = []
+        self._pending_captcha_notify_profile_id: str = ""
         self._build_ui()
+        apply_platform_branding(self, self._platform)
         self._bootstrap_fd_limits()
         self._ui_log_line.connect(self._route_ui_log_line)
         self._profiles_loaded.connect(self._on_profiles_loaded)
@@ -885,11 +915,16 @@ class MainWindow(QWidget):
         self._dolphin_google_failed.connect(self._on_dolphin_google_failed)
         self._after_video_saved.connect(self._refresh_ready_list)
         self._apply_theme()
-        self.showMaximized()
+        if not embedded:
+            self.showMaximized()
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
         self._load_folder_settings()
         self._load_antydetect_settings()
         self._load_youtube_settings()
         self._load_ai_settings()
+        self._load_rucaptcha_settings()
         self._update_profiles_section_header()
         self._sync_ffmpeg_install_row()
         self._pending_upload: dict[str, str] | None = None
@@ -906,6 +941,12 @@ class MainWindow(QWidget):
         self._youtube_upload_phase_finished.connect(self._on_youtube_upload_phase_finished)
         self._studio_availability_progress.connect(self._on_studio_availability_progress)
         self._studio_availability_finished.connect(self._on_studio_availability_finished)
+        self._instagram_register_progress.connect(self._on_instagram_register_progress)
+        self._instagram_register_finished.connect(self._on_instagram_register_finished)
+        self._manual_captcha_needed.connect(
+            self._on_manual_captcha_needed,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._studio_channel_setup_progress.connect(self._on_studio_channel_setup_progress)
         self._studio_channel_setup_finished.connect(self._on_studio_channel_setup_finished)
         self._studio_warmup_progress.connect(self._on_studio_warmup_progress)
@@ -933,6 +974,20 @@ class MainWindow(QWidget):
         p = self._theme_path()
         if p.is_file():
             self.setStyleSheet(p.read_text(encoding="utf-8"))
+
+    def _brand(self, text: str) -> str:
+        """Подмена YouTube → Instagram в UI-тексте (логика залива пока та же)."""
+        return brand_text(text, getattr(self, "_platform", PLATFORM_YOUTUBE))
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if (
+            event.type() == QEvent.Type.Show
+            and isinstance(watched, (QDialog, QMessageBox, QProgressDialog))
+            and not getattr(watched, "_zaliver_platform_branded", False)
+        ):
+            apply_platform_branding(watched, getattr(self, "_platform", PLATFORM_YOUTUBE))
+            setattr(watched, "_zaliver_platform_branded", True)
+        return super().eventFilter(watched, event)
 
     def _build_ui(self) -> None:
         home = QWidget()
@@ -1863,6 +1918,20 @@ class MainWindow(QWidget):
         self._btn_profiles_check_availability.clicked.connect(
             self._start_profiles_availability_check
         )
+        self._btn_profiles_register_accounts = QPushButton("Зарегать акки")
+        self._btn_profiles_register_accounts.setObjectName("secondary")
+        self._btn_profiles_register_accounts.setAutoDefault(False)
+        self._btn_profiles_register_accounts.setDefault(False)
+        self._btn_profiles_register_accounts.setToolTip(
+            "Только для отмеченных профилей (Instagram): вход в Gmail, "
+            "вторая вкладка instagram.com → «Создать новый аккаунт», "
+            "заполнение формы; капча — 2× RuCaptcha Proxyless, иначе ручное "
+            "ожидание; затем код из почты. "
+            "Режим Headless из настроек; параллельность — в «Настройках»."
+        )
+        self._btn_profiles_register_accounts.clicked.connect(
+            self._start_profiles_instagram_register
+        )
         self._btn_profiles_import_accounts = QPushButton("Импортировать данные учёток")
         self._btn_profiles_import_accounts.setObjectName("secondary")
         self._btn_profiles_import_accounts.setAutoDefault(False)
@@ -1937,8 +2006,10 @@ class MainWindow(QWidget):
         profiles_actions_row.addWidget(self._btn_profiles_promote)
         profiles_actions_row.addWidget(self._btn_profiles_cookie_farm)
         profiles_actions_row.addWidget(self._btn_profiles_check_availability)
+        profiles_actions_row.addWidget(self._btn_profiles_register_accounts)
         profiles_actions_row.addWidget(self._btn_profiles_import_accounts)
         profiles_actions_row.addStretch()
+        self._sync_profiles_platform_actions_visibility()
 
         self._profiles_status = QLabel("")
         self._profiles_status.setObjectName("hint")
@@ -1980,11 +2051,21 @@ class MainWindow(QWidget):
         profiles_l.addWidget(self._profiles_list, 1)
 
         self._channel_edit_tab = ChannelEditTabPane(
-            recent_channel_names=self._upload_store.list_recent_channel_name_fields(),
-            recent_channel_descriptions=self._upload_store.list_recent_channel_descriptions(),
-            recent_link_titles=self._upload_store.list_recent_channel_link_titles(),
-            recent_link_urls=self._upload_store.list_recent_channel_link_urls(),
-            recent_video_default_titles=self._upload_store.list_recent_video_default_title_fields(),
+            recent_channel_names=self._upload_store.list_recent_channel_name_fields(
+                platform=self._platform
+            ),
+            recent_channel_descriptions=self._upload_store.list_recent_channel_descriptions(
+                platform=self._platform
+            ),
+            recent_link_titles=self._upload_store.list_recent_channel_link_titles(
+                platform=self._platform
+            ),
+            recent_link_urls=self._upload_store.list_recent_channel_link_urls(
+                platform=self._platform
+            ),
+            recent_video_default_titles=self._upload_store.list_recent_video_default_title_fields(
+                platform=self._platform
+            ),
             ai_generate_fn=self._on_ai_magic_generate,
         )
         self._channel_edit_tab.select_profiles_requested.connect(
@@ -2255,6 +2336,37 @@ class MainWindow(QWidget):
         gai.addWidget(_settings_save_row(self._btn_save_ai), 5, 0, 1, 2)
         gai.addWidget(self._ai_settings_status, 6, 0, 1, 2)
 
+        gb_rucaptcha = QGroupBox("RuCaptcha")
+        grc = _compact_settings_grid(gb_rucaptcha)
+        rucaptcha_hint = QLabel(
+            "Сервис решения капч (reCAPTCHA Enterprise, Proxyless) для регистрации "
+            "Instagram. 2 попытки; если не вышло — ждём ручного прохождения. "
+            "Ключ — в личном кабинете rucaptcha.com."
+        )
+        rucaptcha_hint.setObjectName("hint")
+        rucaptcha_hint.setWordWrap(True)
+        self._rucaptcha_api_key = QLineEdit()
+        self._rucaptcha_api_key.setPlaceholderText("API key…")
+        self._rucaptcha_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._rucaptcha_api_key.setToolTip(
+            "API key RuCaptcha. Хранится локально в настройках приложения (QSettings)."
+        )
+        self._rucaptcha_show_key = QCheckBox("Показать ключ")
+        self._rucaptcha_show_key.stateChanged.connect(self._on_rucaptcha_show_key_changed)
+        self._btn_save_rucaptcha = QPushButton("Сохранить")
+        self._btn_save_rucaptcha.setObjectName("secondary")
+        self._btn_save_rucaptcha.clicked.connect(self._save_rucaptcha_settings)
+        self._rucaptcha_settings_status = QLabel("")
+        self._rucaptcha_settings_status.setObjectName("hint")
+        self._rucaptcha_settings_status.setWordWrap(True)
+
+        grc.addWidget(rucaptcha_hint, 0, 0, 1, 2)
+        grc.addWidget(QLabel("API key:"), 1, 0)
+        grc.addWidget(self._rucaptcha_api_key, 1, 1)
+        grc.addWidget(self._rucaptcha_show_key, 2, 0, 1, 2)
+        grc.addWidget(_settings_save_row(self._btn_save_rucaptcha), 3, 0, 1, 2)
+        grc.addWidget(self._rucaptcha_settings_status, 4, 0, 1, 2)
+
         settings_l.addWidget(settings_title)
         settings_l.addWidget(settings_hint)
         settings_l.addWidget(self._gb_stats_username)
@@ -2266,6 +2378,7 @@ class MainWindow(QWidget):
         settings_l.addWidget(self._gb_antydetect_remote)
         settings_l.addWidget(gb_yt)
         settings_l.addWidget(gb_ai)
+        settings_l.addWidget(gb_rucaptcha)
         settings_l.addStretch()
         settings_scroll.setWidget(settings_inner)
         settings_outer.addWidget(settings_scroll, 1)
@@ -2299,10 +2412,23 @@ class MainWindow(QWidget):
         self._nav.setCurrentRow(0)
         self._nav.currentRowChanged.connect(self._on_nav_row_changed)
 
+        self._btn_back_modes = QPushButton("← Выбор платформы")
+        self._btn_back_modes.setObjectName("sideNavBack")
+        self._btn_back_modes.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_back_modes.setToolTip("Вернуться к выбору режима")
+        self._btn_back_modes.clicked.connect(self.back_to_modes.emit)
+        self._btn_back_modes.setVisible(bool(getattr(self, "_embedded", False)))
+
+        nav_col = QVBoxLayout()
+        nav_col.setSpacing(8)
+        nav_col.setContentsMargins(0, 0, 0, 0)
+        nav_col.addWidget(self._nav, 1)
+        nav_col.addWidget(self._btn_back_modes, 0)
+
         outer = QHBoxLayout(self)
         outer.setSpacing(12)
         outer.setContentsMargins(16, 12, 16, 12)
-        outer.addWidget(self._nav)
+        outer.addLayout(nav_col)
         outer.addWidget(self._stack, 1)
 
     def _on_nav_row_changed(self, row: int) -> None:
@@ -2360,14 +2486,16 @@ class MainWindow(QWidget):
         except Exception:
             only_session_id = 0
         try:
-            sessions = self._upload_store.list_sessions(limit=400)
+            sessions = self._upload_store.list_sessions(limit=400, platform=self._platform)
         except Exception:
             sessions = []
         ids = [int(s.id) for s in sessions]
         m: dict[int, list[UploadedVideo]] = {}
         try:
             if ids:
-                raw = self._upload_store.list_uploaded_videos_for_sessions(ids)
+                raw = self._upload_store.list_uploaded_videos_for_sessions(
+                    ids, platform=self._platform
+                )
                 m = raw if isinstance(raw, dict) else {}
         except Exception:
             m = {}
@@ -2579,7 +2707,7 @@ class MainWindow(QWidget):
     def _uploaded_add_list_row(self, v: UploadedVideo) -> None:
         w_hint = self._uploaded_list_row_width()
         row_h = _UPLOADED_ROW_H
-        tip = self._uploaded_video_tooltip(v)
+        tip = self._brand(self._uploaded_video_tooltip(v))
         it = QListWidgetItem()
         it.setData(Qt.ItemDataRole.UserRole + 1, str(v.video_id))
         it.setData(Qt.ItemDataRole.UserRole + 2, str(v.url))
@@ -2606,6 +2734,7 @@ class MainWindow(QWidget):
             list_widget=self._uploaded_list,
             parent=self._uploaded_list,
         )
+        apply_platform_branding(row_w, self._platform)
         row_w.activated.connect(self._open_uploaded_url)
         self._uploaded_list.setItemWidget(it, row_w)
 
@@ -2723,6 +2852,7 @@ class MainWindow(QWidget):
                 self._upload_store.mark_video_stats_unavailable(
                     video_id=ve,
                     youtube_data_api_error=is_api,
+                    platform=self._platform,
                 )
             except Exception:
                 pass
@@ -2756,6 +2886,7 @@ class MainWindow(QWidget):
                     like_count=lc if lc is None else int(lc),
                     comment_count=cc if cc is None else int(cc),
                     age_restricted=ar,
+                    platform=self._platform,
                 )
             except Exception:
                 pass
@@ -2795,7 +2926,7 @@ class MainWindow(QWidget):
                 prev_id = 0
 
         try:
-            sessions = self._upload_store.list_sessions(limit=400)
+            sessions = self._upload_store.list_sessions(limit=400, platform=self._platform)
         except Exception:
             sessions = []
 
@@ -3155,7 +3286,9 @@ class MainWindow(QWidget):
                 "Название видео (обязательное для загрузки в YouTube). "
                 "Можно использовать переменные: {date}, {profile}, {video}, {index}…"
             )
-        for recent_title in self._upload_store.list_recent_upload_titles():
+        for recent_title in self._upload_store.list_recent_upload_titles(
+            platform=self._platform
+        ):
             title_edit.addItem(recent_title)
         if title_edit.count() > 0:
             title_edit.setCurrentIndex(0)
@@ -3439,7 +3572,9 @@ class MainWindow(QWidget):
         if self._profiles_interaction is not None:
             preselect = set(self._profiles_interaction.checked_profile_ids)
 
-        last_upload_map = self._upload_store.last_uploaded_at_by_profiles(ids)
+        last_upload_map = self._upload_store.last_uploaded_at_by_profiles(
+            ids, platform=self._platform
+        )
         dlg_profiles = [p for _pid, p in profile_rows]
         total_dlg_profiles = len(dlg_profiles)
 
@@ -3715,7 +3850,7 @@ class MainWindow(QWidget):
         title = (title_edit.currentText() or "").strip()
         if title and not keep_studio_title:
             show_youtube_title_warnings(self, [title])
-            self._upload_store.remember_upload_title(title)
+            self._upload_store.remember_upload_title(title, platform=self._platform)
         description = (desc_edit.toPlainText() or "").strip()
         picked = dlg_interaction.batch_profile_ids()
 
@@ -4147,6 +4282,7 @@ class MainWindow(QWidget):
         own = _is_own_antidetect_kind(kind)
         busy = (
             self._profiles_availability_running
+            or self._profiles_register_running
             or self._profiles_channel_setup_running
             or self._profiles_warmup_running
             or self._profiles_promote_running
@@ -4158,6 +4294,8 @@ class MainWindow(QWidget):
             self._btn_profiles_clear_zaliver_tags.setEnabled(own and not busy)
         if hasattr(self, "_btn_profiles_check_availability"):
             self._btn_profiles_check_availability.setEnabled(not busy)
+        if hasattr(self, "_btn_profiles_register_accounts"):
+            self._btn_profiles_register_accounts.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_channel_setup"):
             self._btn_profiles_channel_setup.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_warmup"):
@@ -4170,6 +4308,20 @@ class MainWindow(QWidget):
             self._btn_profiles_refresh.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_import_accounts"):
             self._btn_profiles_import_accounts.setEnabled(own and not busy)
+        self._sync_profiles_platform_actions_visibility()
+
+    def _sync_profiles_platform_actions_visibility(self) -> None:
+        is_ig = self._platform == PLATFORM_INSTAGRAM
+        if hasattr(self, "_btn_profiles_register_accounts"):
+            self._btn_profiles_register_accounts.setVisible(is_ig)
+        # YouTube-only массовые действия скрываем в Instagram (логика ещё YT).
+        for attr in (
+            "_btn_profiles_channel_setup",
+            "_btn_profiles_warmup",
+            "_btn_profiles_promote",
+        ):
+            if hasattr(self, attr):
+                getattr(self, attr).setVisible(not is_ig)
 
     def _load_antydetect_settings(self) -> None:
         if not hasattr(self, "_dolphin_token"):
@@ -4462,6 +4614,48 @@ class MainWindow(QWidget):
         self._ai_api_key.setEchoMode(
             QLineEdit.EchoMode.Normal if show else QLineEdit.EchoMode.Password
         )
+
+    def _load_rucaptcha_settings(self) -> None:
+        if not hasattr(self, "_rucaptcha_api_key"):
+            return
+        self._rucaptcha_api_key.setText(
+            (self._settings.value("rucaptcha/api_key", "", type=str) or "").strip()
+        )
+
+    def _save_rucaptcha_settings(self) -> None:
+        if not hasattr(self, "_rucaptcha_api_key"):
+            return
+        api_key = (self._rucaptcha_api_key.text() or "").strip()
+        if api_key:
+            self._settings.setValue("rucaptcha/api_key", api_key)
+        else:
+            try:
+                self._settings.remove("rucaptcha/api_key")
+            except Exception:
+                self._settings.setValue("rucaptcha/api_key", "")
+        try:
+            self._settings.sync()
+        except Exception:
+            pass
+        if hasattr(self, "_rucaptcha_settings_status"):
+            self._rucaptcha_settings_status.setText("Настройки RuCaptcha сохранены.")
+
+    def _on_rucaptcha_show_key_changed(self, _state: int) -> None:
+        if not hasattr(self, "_rucaptcha_api_key") or not hasattr(
+            self, "_rucaptcha_show_key"
+        ):
+            return
+        show = bool(self._rucaptcha_show_key.isChecked())
+        self._rucaptcha_api_key.setEchoMode(
+            QLineEdit.EchoMode.Normal if show else QLineEdit.EchoMode.Password
+        )
+
+    def _rucaptcha_api_key_from_settings(self) -> str:
+        if hasattr(self, "_rucaptcha_api_key"):
+            typed = (self._rucaptcha_api_key.text() or "").strip()
+            if typed:
+                return typed
+        return (self._settings.value("rucaptcha/api_key", "", type=str) or "").strip()
 
     def _on_ai_magic_generate(
         self,
@@ -4809,7 +5003,9 @@ class MainWindow(QWidget):
             )
             return None
 
-        last_upload_map = self._upload_store.last_uploaded_at_by_profiles(ids)
+        last_upload_map = self._upload_store.last_uploaded_at_by_profiles(
+            ids, platform=self._platform
+        )
         total_dlg_profiles = len(dlg_profiles)
 
         dlg_tag_filter: list[frozenset[str]] = [frozenset()]
@@ -4936,7 +5132,9 @@ class MainWindow(QWidget):
         visible = self._profiles_visible_matched()
         pids = [_profile_id(p) for p in visible]
         pids = [x for x in pids if x]
-        last_upload_map = self._upload_store.last_uploaded_at_by_profiles(pids)
+        last_upload_map = self._upload_store.last_uploaded_at_by_profiles(
+            pids, platform=self._platform
+        )
         kind = (
             self._default_browser_combo.currentData()
             if hasattr(self, "_default_browser_combo")
@@ -4994,7 +5192,9 @@ class MainWindow(QWidget):
         visible = self._profiles_visible_matched()
         by_id = self._profiles_by_id_map(visible)
         pids = list(by_id.keys())
-        last_upload_map = self._upload_store.last_uploaded_at_by_profiles(pids)
+        last_upload_map = self._upload_store.last_uploaded_at_by_profiles(
+            pids, platform=self._platform
+        )
         self._profiles_interaction.select_checked_by_filter(mode, by_id, last_upload_map)
 
     def _on_profiles_checked_selection_changed(self) -> None:
@@ -5115,10 +5315,15 @@ class MainWindow(QWidget):
             return
         profile_ids = self._collect_checked_profile_ids()
         if not profile_ids:
+            target = (
+                "вход в Gmail"
+                if self._platform == PLATFORM_INSTAGRAM
+                else "YouTube Studio"
+            )
             QMessageBox.warning(
                 self,
                 "Проверка доступности",
-                "Отметьте квадратиками профили, для которых нужно проверить YouTube Studio.",
+                f"Отметьте квадратиками профили, для которых нужно проверить {target}.",
             )
             return
 
@@ -5148,8 +5353,13 @@ class MainWindow(QWidget):
 
         self._profiles_availability_running = True
         self._sync_profiles_tab_action_buttons()
+        check_label = (
+            "Gmail"
+            if self._platform == PLATFORM_INSTAGRAM
+            else "Studio"
+        )
         self._profiles_status.setText(
-            f"Проверка доступности Studio: 0 / {len(profile_ids)}…"
+            f"Проверка доступности {check_label}: 0 / {len(profile_ids)}…"
         )
         headless_label = "headless" if headless else "с окном браузера"
         max_concurrent = self._max_concurrent_browsers()
@@ -5195,6 +5405,8 @@ class MainWindow(QWidget):
         max_concurrent: int = DEFAULT_MAX_CONCURRENT_BROWSERS,
     ) -> None:
         from zaliver.antydetect.antic_open import (
+            check_gmail_availability_in_local_antidetect_profile,
+            check_gmail_availability_in_profile,
             check_studio_availability_in_local_antidetect_profile,
             check_studio_availability_in_profile,
             set_log_sink,
@@ -5203,6 +5415,8 @@ class MainWindow(QWidget):
             MultiProfileAvailabilityChecker,
         )
         from zaliver.antydetect.profile_tags import (
+            GMAIL_AVAILABILITY_ERROR_TAG,
+            GMAIL_AVAILABILITY_SUCCESS_TAG,
             STUDIO_AVAILABILITY_ERROR_TAG,
             STUDIO_AVAILABILITY_SUCCESS_TAG,
         )
@@ -5210,9 +5424,43 @@ class MainWindow(QWidget):
         set_log_sink(self._ui_log_line.emit)
         kind_s = (kind or "").strip()
         base_u = (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
+        is_instagram = self._platform == PLATFORM_INSTAGRAM
+        success_tag = (
+            GMAIL_AVAILABILITY_SUCCESS_TAG
+            if is_instagram
+            else STUDIO_AVAILABILITY_SUCCESS_TAG
+        )
+        error_tag = (
+            GMAIL_AVAILABILITY_ERROR_TAG
+            if is_instagram
+            else STUDIO_AVAILABILITY_ERROR_TAG
+        )
 
         def _check_one(pid: str) -> None:
             creds = self._profile_login_credentials(pid)
+            if is_instagram:
+                if _is_own_antidetect_kind(kind_s):
+                    u = (base_url or "").strip()
+                    if not u:
+                        raise LocalAntidetectError(
+                            f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
+                        )
+                    check_gmail_availability_in_local_antidetect_profile(
+                        pid,
+                        base_url=u,
+                        headless=headless,
+                        login_credentials=creds,
+                        remote_cdp=remote_cdp,
+                    )
+                else:
+                    check_gmail_availability_in_profile(
+                        pid,
+                        local_token=token or None,
+                        headless=headless,
+                        login_credentials=creds,
+                    )
+                return
+
             yt_oldest = self._profile_yt_oldest_name(pid) or None
             search_oldest = self._youtube_search_oldest_channel()
             if _is_own_antidetect_kind(kind_s):
@@ -5252,7 +5500,7 @@ class MainWindow(QWidget):
                 profile_id=pid,
                 kind=kind_s,
                 base_url=base_u,
-                updates=[(ok, STUDIO_AVAILABILITY_SUCCESS_TAG, STUDIO_AVAILABILITY_ERROR_TAG)],
+                updates=[(ok, success_tag, error_tag)],
                 log_prefix="availability",
             )
 
@@ -5276,6 +5524,236 @@ class MainWindow(QWidget):
             self._last_availability_failed_ids = list(profile_ids)
             self._studio_availability_finished.emit(0, len(profile_ids))
 
+    def _start_profiles_instagram_register(self) -> None:
+        if self._platform != PLATFORM_INSTAGRAM:
+            QMessageBox.information(
+                self,
+                "Регистрация Instagram",
+                "Регистрация доступна только в режиме Instagram.",
+            )
+            return
+        if self._profiles_register_running:
+            QMessageBox.information(
+                self,
+                "Регистрация Instagram",
+                "Регистрация уже выполняется. Дождитесь завершения.",
+            )
+            return
+        if self._profiles_raw is None:
+            QMessageBox.warning(
+                self,
+                "Регистрация Instagram",
+                "Сначала загрузите список профилей (кнопка «Обновить»).",
+            )
+            return
+        profile_ids = self._collect_checked_profile_ids()
+        if not profile_ids:
+            QMessageBox.warning(
+                self,
+                "Регистрация Instagram",
+                "Отметьте квадратиками профили для регистрации аккаунтов Instagram.",
+            )
+            return
+
+        token = (self._dolphin_token.text() or "").strip()
+        if not token:
+            token = (
+                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
+            ).strip()
+        kind = self._default_browser_combo.currentData()
+        if not isinstance(kind, str) or not kind.strip():
+            kind = "dolphin"
+        base_url = self._own_antidetect_base_url_from_settings(kind)
+
+        headless = True
+        if hasattr(self, "_dolphin_headless"):
+            headless = bool(self._dolphin_headless.isChecked())
+        else:
+            headless = bool(
+                self._settings.value("antydetect/dolphin_headless", True, type=bool)
+            )
+
+        try:
+            remote_cdp = self._remote_cdp_launch_options_for_kind(kind)
+        except LocalAntidetectError as e:
+            QMessageBox.warning(self, "Регистрация Instagram", str(e))
+            return
+
+        rucaptcha_key = self._rucaptcha_api_key_from_settings()
+
+        self._profiles_register_running = True
+        self._sync_profiles_tab_action_buttons()
+        self._profiles_status.setText(
+            f"Регистрация Instagram: 0 / {len(profile_ids)}…"
+        )
+        headless_label = "headless" if headless else "с окном браузера"
+        max_concurrent = self._max_concurrent_browsers()
+
+        try:
+            self._append_log(
+                f"[ig-register] Старт регистрации {len(profile_ids)} профилей "
+                f"({headless_label}, до {max_concurrent} параллельно)…"
+            )
+            if not rucaptcha_key:
+                self._append_log(
+                    "[ig-register] Ключ RuCaptcha не задан — при капче "
+                    "сразу ручное ожидание."
+                )
+            threading.Thread(
+                target=self._profiles_instagram_register_worker,
+                kwargs={
+                    "profile_ids": profile_ids,
+                    "kind": kind,
+                    "token": token,
+                    "base_url": base_url,
+                    "headless": headless,
+                    "remote_cdp": remote_cdp,
+                    "max_concurrent": max_concurrent,
+                    "rucaptcha_api_key": rucaptcha_key,
+                },
+                daemon=True,
+            ).start()
+        except Exception as e:
+            self._profiles_register_running = False
+            self._sync_profiles_tab_action_buttons()
+            self._append_log(f"[ig-register] Не удалось запустить: {e!r}")
+            QMessageBox.critical(
+                self,
+                "Регистрация Instagram",
+                f"Не удалось запустить регистрацию:\n{e}",
+            )
+
+    def _profiles_instagram_register_worker(
+        self,
+        *,
+        profile_ids: list[str],
+        kind: str,
+        token: str,
+        base_url: str,
+        headless: bool,
+        remote_cdp: RemoteCdpLaunchOptions | None = None,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT_BROWSERS,
+        rucaptcha_api_key: str = "",
+    ) -> None:
+        from zaliver.antydetect.antic_open import (
+            register_instagram_account_in_local_antidetect_profile,
+            register_instagram_account_in_profile,
+            set_log_sink,
+        )
+        from zaliver.youtube_upload.multi_availability_checker import (
+            MultiProfileAvailabilityChecker,
+        )
+        from zaliver.antydetect.profile_tags import (
+            IG_REGISTER_ERROR_TAG,
+            IG_REGISTER_SMS_ERROR_TAG,
+            IG_REGISTER_SUCCESS_TAG,
+            apply_ig_register_result_tag,
+        )
+        from zaliver.instagram_upload.register import InstagramSmsCaptchaError
+
+        set_log_sink(self._ui_log_line.emit)
+        kind_s = (kind or "").strip()
+        base_u = (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
+        rc_key = (rucaptcha_api_key or "").strip()
+
+        def _check_one(pid: str) -> None:
+            creds = self._profile_login_credentials(pid)
+
+            def _on_manual_captcha() -> None:
+                self._manual_captcha_needed.emit(pid)
+
+            if _is_own_antidetect_kind(kind_s):
+                u = (base_url or "").strip()
+                if not u:
+                    raise LocalAntidetectError(
+                        f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
+                    )
+                register_instagram_account_in_local_antidetect_profile(
+                    pid,
+                    base_url=u,
+                    headless=headless,
+                    login_credentials=creds,
+                    remote_cdp=remote_cdp,
+                    rucaptcha_api_key=rc_key,
+                    on_manual_captcha=_on_manual_captcha,
+                )
+            else:
+                register_instagram_account_in_profile(
+                    pid,
+                    local_token=token or None,
+                    headless=headless,
+                    login_credentials=creds,
+                    rucaptcha_api_key=rc_key,
+                    on_manual_captcha=_on_manual_captcha,
+                )
+
+        def _on_profile_done(pid: str, ok: bool, err: str) -> None:
+            if not _is_own_antidetect_kind(kind_s):
+                if not ok:
+                    self._ui_log_line.emit(
+                        f"[ig-register] profile={pid}: теги регистрации "
+                        "доступны только для своего антидетекта."
+                    )
+                return
+            sms = (not ok) and (
+                InstagramSmsCaptchaError.matches(err)
+                or IG_REGISTER_SMS_ERROR_TAG in (err or "")
+            )
+            try:
+                api = LocalAntidetectHttpAPI(base_u)
+                try:
+                    tag = apply_ig_register_result_tag(
+                        api,
+                        pid,
+                        success=ok,
+                        sms_captcha=sms,
+                    )
+                    self._ui_log_line.emit(
+                        f"[ig-register] profile={pid} tag_set={tag!r}"
+                    )
+                finally:
+                    api.close()
+                error_tag = (
+                    IG_REGISTER_SMS_ERROR_TAG if sms else IG_REGISTER_ERROR_TAG
+                )
+                from zaliver.antydetect.profile_tags import IG_REGISTER_RESULT_TAGS
+
+                self._profile_zaliver_tags_cache_update.emit(
+                    pid,
+                    [
+                        {
+                            "success": ok,
+                            "success_tag": IG_REGISTER_SUCCESS_TAG,
+                            "error_tag": error_tag,
+                            "strip_tags": list(IG_REGISTER_RESULT_TAGS),
+                        }
+                    ],
+                )
+            except Exception as te:
+                self._ui_log_line.emit(
+                    f"[ig-register] profile={pid} tag_set_failed err={te!r}"
+                )
+
+        def _on_progress(done: int, total: int, profile_id: str) -> None:
+            self._instagram_register_progress.emit(done, total, profile_id)
+
+        mgr = MultiProfileAvailabilityChecker(
+            profile_ids=profile_ids,
+            check_one=_check_one,
+            on_profile_done=_on_profile_done,
+            on_progress=_on_progress,
+            log_sink=self._ui_log_line.emit,
+            max_concurrent=max_concurrent,
+        )
+        try:
+            ok_n, fail_n, failed_ids = mgr.run()
+            self._last_register_failed_ids = list(failed_ids)
+            self._instagram_register_finished.emit(ok_n, fail_n)
+        except Exception as e:
+            self._ui_log_line.emit(f"[ig-register] Критическая ошибка воркера: {e!r}")
+            self._last_register_failed_ids = list(profile_ids)
+            self._instagram_register_finished.emit(0, len(profile_ids))
+
     def _profiles_channel_setup_dialog_title(self) -> str:
         return "Редактирование канала"
 
@@ -5290,11 +5768,21 @@ class MainWindow(QWidget):
         if not hasattr(self, "_channel_edit_tab"):
             return
         self._channel_edit_tab.load_recent_values(
-            channel_names=self._upload_store.list_recent_channel_name_fields(),
-            descriptions=self._upload_store.list_recent_channel_descriptions(),
-            link_titles=self._upload_store.list_recent_channel_link_titles(),
-            link_urls=self._upload_store.list_recent_channel_link_urls(),
-            video_titles=self._upload_store.list_recent_video_default_title_fields(),
+            channel_names=self._upload_store.list_recent_channel_name_fields(
+                platform=self._platform
+            ),
+            descriptions=self._upload_store.list_recent_channel_descriptions(
+                platform=self._platform
+            ),
+            link_titles=self._upload_store.list_recent_channel_link_titles(
+                platform=self._platform
+            ),
+            link_urls=self._upload_store.list_recent_channel_link_urls(
+                platform=self._platform
+            ),
+            video_titles=self._upload_store.list_recent_video_default_title_fields(
+                platform=self._platform
+            ),
         )
         self._channel_edit_tab.set_running(self._profiles_channel_setup_running)
 
@@ -5352,23 +5840,37 @@ class MainWindow(QWidget):
         link_title = tab.channel_link_title()
         link_url = tab.channel_link_url()
         if description.strip():
-            self._upload_store.remember_channel_description(tab.channel_description_field_text())
+            self._upload_store.remember_channel_description(
+                tab.channel_description_field_text(), platform=self._platform
+            )
         for lt, lu in channel_links:
-            self._upload_store.remember_channel_link_title(lt)
-            self._upload_store.remember_channel_link_url(lu)
+            self._upload_store.remember_channel_link_title(
+                lt, platform=self._platform
+            )
+            self._upload_store.remember_channel_link_url(
+                lu, platform=self._platform
+            )
         video_default_titles = tab.video_default_titles_for_remember()
         if video_default_titles:
             for vt in video_default_titles:
-                self._upload_store.remember_video_default_title(vt)
+                self._upload_store.remember_video_default_title(
+                    vt, platform=self._platform
+                )
         video_titles_field = tab.video_default_titles_field_text()
         if video_titles_field.strip():
-            self._upload_store.remember_video_default_title_field(video_titles_field)
+            self._upload_store.remember_video_default_title_field(
+                video_titles_field, platform=self._platform
+            )
         channel_names = tab.channel_names_for_remember()
         if channel_names:
-            self._upload_store.remember_channel_names(channel_names)
+            self._upload_store.remember_channel_names(
+                channel_names, platform=self._platform
+            )
         channel_names_field = tab.channel_names_field_text()
         if channel_names_field.strip():
-            self._upload_store.remember_channel_name_field(channel_names_field)
+            self._upload_store.remember_channel_name_field(
+                channel_names_field, platform=self._platform
+            )
         assignments = tab.profile_assignments()
         has_text_fill = tab.has_channel_text_fill()
         has_video_title_fill = tab.has_video_default_title()
@@ -6146,7 +6648,9 @@ class MainWindow(QWidget):
     def _prompt_profiles_promote_settings(self) -> ProfilePromoteSettings | None:
         dlg = ProfilePromoteDialog(
             parent=self,
-            recent_comments=self._upload_store.list_recent_promote_comment_fields(),
+            recent_comments=self._upload_store.list_recent_promote_comment_fields(
+                platform=self._platform
+            ),
             ai_generate_fn=self._on_ai_magic_generate,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -6155,7 +6659,7 @@ class MainWindow(QWidget):
         if settings.enable_comments:
             try:
                 self._upload_store.remember_promote_comment_field(
-                    dlg.comments_field_text()
+                    dlg.comments_field_text(), platform=self._platform
                 )
             except Exception:
                 pass
@@ -6203,7 +6707,7 @@ class MainWindow(QWidget):
                 )
                 return
             videos = self._upload_store.list_promotable_videos_for_profiles(
-                visible_ids
+                visible_ids, platform=self._platform
             )
             if not videos:
                 QMessageBox.warning(
@@ -7082,8 +7586,9 @@ class MainWindow(QWidget):
 
     def _on_studio_availability_progress(self, current: int, total: int, profile_id: str) -> None:
         pid = (profile_id or "").strip()
+        check_label = "Gmail" if self._platform == PLATFORM_INSTAGRAM else "Studio"
         self._profiles_status.setText(
-            f"Проверка доступности Studio: {current} / {total}"
+            f"Проверка доступности {check_label}: {current} / {total}"
             + (f" — профиль {pid}" if pid else "…")
         )
 
@@ -7111,6 +7616,185 @@ class MainWindow(QWidget):
             self,
             "Проверка доступности",
             f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
+        )
+
+    def _on_instagram_register_progress(
+        self, current: int, total: int, profile_id: str
+    ) -> None:
+        pid = (profile_id or "").strip()
+        self._profiles_status.setText(
+            f"Регистрация Instagram: {current} / {total}"
+            + (f" — профиль {pid}" if pid else "…")
+        )
+
+    def _raise_zaliver_window(self) -> None:
+        """Поднять Zaliver поверх других окон (AppShell или MainWindow)."""
+        win = self.window()
+        try:
+            if win.isMinimized():
+                win.showNormal()
+            else:
+                win.show()
+            win.raise_()
+            win.activateWindow()
+        except Exception:
+            pass
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.alert(win, 3000)
+            except Exception:
+                pass
+
+    def _profile_display_name(self, profile_id: str) -> str:
+        pid = (profile_id or "").strip()
+        if not pid:
+            return ""
+        for p in self._profiles_raw or []:
+            if not isinstance(p, dict):
+                continue
+            if _profile_id(p) == pid:
+                return _profile_name(p)
+        return ""
+
+    def _focus_profiles_tab_and_profile(self, profile_id: str) -> None:
+        """Открыть вкладку «Профили» и выделить нужный профиль."""
+        pid = (profile_id or "").strip()
+        try:
+            # 0 Уникализация … 4 Профили
+            self._nav.setCurrentRow(4)
+        except Exception:
+            pass
+        inter = getattr(self, "_profiles_interaction", None)
+        if inter is None or not pid:
+            return
+        ok = inter.focus_profile(pid, check=True, attention=True)
+        if not ok:
+            self._append_log(
+                f"[ig-register] Профиль {pid} не найден в списке "
+                "(возможно, скрыт фильтром) — сбросьте поиск/фильтр тегов."
+            )
+            self._append_log(
+                f"[ig-register] Нужна ручная капча для профиля {pid}."
+            )
+        else:
+            self._append_log(
+                f"[ig-register] Выделен профиль {pid} — пройдите капчу в браузере."
+            )
+
+    def _on_manual_captcha_needed(self, profile_id: str) -> None:
+        """После провала RuCaptcha — обычное системное уведомление Windows."""
+        pid = (profile_id or "").strip()
+        if not pid:
+            return
+        QTimer.singleShot(0, lambda p=pid: self._show_manual_captcha_notification(p))
+
+    def _show_manual_captcha_notification(self, profile_id: str) -> None:
+        pid = (profile_id or "").strip()
+        if not pid:
+            return
+        name = self._profile_display_name(pid)
+        self._append_log(
+            f"[ig-register] Нужна ручная капча для профиля {pid}"
+            + (f" ({name})" if name else "")
+            + "."
+        )
+        self._pending_captcha_notify_profile_id = pid
+
+        # Мигание кнопки на панели задач (Windows alert).
+        try:
+            win = self.window()
+            app = QApplication.instance()
+            if app is not None:
+                app.alert(win, 0)  # 0 = пока пользователь не среагирует
+        except Exception:
+            pass
+
+        title = "Zaliver — нужна капча"
+        if name:
+            body = f"Пройдите капчу вручную.\nПрофиль: {name} ({pid})"
+        else:
+            body = f"Пройдите капчу вручную.\nПрофиль: {pid}"
+
+        shown = False
+        try:
+            win = self.window()
+            notifier = getattr(win, "desktop_notifier", None)
+            if notifier is None:
+                from zaliver.ui.desktop_notify import DesktopNotifier
+
+                if not hasattr(self, "_fallback_desktop_notifier"):
+                    self._fallback_desktop_notifier = DesktopNotifier(self)
+                notifier = self._fallback_desktop_notifier
+
+            try:
+                notifier.message_clicked.disconnect(
+                    self._on_desktop_captcha_notification_clicked
+                )
+            except Exception:
+                pass
+            notifier.message_clicked.connect(
+                self._on_desktop_captcha_notification_clicked,
+                Qt.ConnectionType.QueuedConnection,
+            )
+
+            show = getattr(win, "show_desktop_notification", None)
+            if callable(show):
+                shown = bool(show(title, body, msecs=30000))
+            else:
+                shown = bool(notifier.notify(title, body, msecs=30000))
+        except Exception as e:
+            self._append_log(f"[ig-register] Уведомление: {e!r}")
+            shown = False
+
+        if not shown:
+            # Fallback: без tray — просто поднять окно и выделить профиль.
+            self._append_log(
+                "[ig-register] Системные уведомления недоступны — "
+                "открываю вкладку «Профили»."
+            )
+            try:
+                self._raise_zaliver_window()
+                self._focus_profiles_tab_and_profile(pid)
+            except Exception:
+                pass
+
+    def _on_desktop_captcha_notification_clicked(self) -> None:
+        pid = (getattr(self, "_pending_captcha_notify_profile_id", "") or "").strip()
+        try:
+            self._raise_zaliver_window()
+            if pid:
+                self._focus_profiles_tab_and_profile(pid)
+        except Exception as e:
+            self._append_log(
+                f"[ig-register] Не удалось открыть профиль из уведомления: {e!r}"
+            )
+
+    def _on_instagram_register_finished(self, ok_n: int, fail_n: int) -> None:
+        self._profiles_register_running = False
+        self._sync_profiles_tab_action_buttons()
+        total = int(ok_n) + int(fail_n)
+        self._profiles_status.setText(
+            f"Регистрация Instagram завершена: успешно {ok_n}, с ошибкой {fail_n} "
+            f"(всего {total})."
+        )
+        self._append_log(
+            f"[ig-register] Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}."
+        )
+        if int(fail_n) > 0:
+            failed = getattr(self, "_last_register_failed_ids", None) or []
+            if failed:
+                self._append_log(
+                    "[ig-register] Профили с ошибкой (ID): " + ", ".join(failed)
+                )
+        kind = self._default_browser_combo.currentData()
+        if _is_own_antidetect_kind((kind or "").strip()) and total > 0:
+            self._refresh_profiles_list_after_zaliver_tags()
+        QMessageBox.information(
+            self,
+            "Регистрация Instagram",
+            f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.\n"
+            "Успех = форма отправлена и аккаунт подтверждён кодом из почты.",
         )
 
     def _on_studio_channel_setup_progress(
@@ -7294,7 +7978,9 @@ class MainWindow(QWidget):
         )
         if ans != QMessageBox.StandardButton.Yes:
             return
-        n = self._upload_store.reset_latest_upload_time_for_profile(profile_id=pid)
+        n = self._upload_store.reset_latest_upload_time_for_profile(
+            profile_id=pid, platform=self._platform
+        )
         if n <= 0:
             QMessageBox.information(
                 parent,
@@ -7307,7 +7993,9 @@ class MainWindow(QWidget):
             "Zaliver",
             "Пауза обновлена: с этого профиля снова можно загружать видео.",
         )
-        new_map = self._upload_store.last_uploaded_at_by_profiles([pid])
+        new_map = self._upload_store.last_uploaded_at_by_profiles(
+            [pid], platform=self._platform
+        )
         new_iso = new_map.get(pid)
         if dialog_profiles_interaction is not None:
             dialog_profiles_interaction.update_upload_cooldown_for_profile(pid, new_iso)
@@ -7414,6 +8102,7 @@ class MainWindow(QWidget):
                         url=url,
                         video_id=vid,
                         profile_id=profile_id,
+                        platform=self._platform,
                     )
                     try:
                         self._upload_store.inc_uploaded_ok(
@@ -8051,7 +8740,9 @@ class MainWindow(QWidget):
         except Exception:
             planned = 0
         try:
-            self._upload_session = self._upload_store.start_session(planned_videos=planned)
+            self._upload_session = self._upload_store.start_session(
+            planned_videos=planned, platform=self._platform
+        )
         except Exception:
             self._upload_session = None
         self._upload_session_processing_done = False
@@ -8141,7 +8832,9 @@ class MainWindow(QWidget):
         except Exception:
             planned = 0
         try:
-            self._upload_session = self._upload_store.start_session(planned_videos=planned)
+            self._upload_session = self._upload_store.start_session(
+            planned_videos=planned, platform=self._platform
+        )
         except Exception:
             self._upload_session = None
         self._upload_session_processing_done = False
@@ -8263,7 +8956,7 @@ class MainWindow(QWidget):
         self.btn_start.setEnabled(False)
         if self._active_work_mode == "slicing" and hasattr(self, "_slice_tab"):
             self._slice_tab.set_busy()
-            self._slice_tab.progress_label.setText("YouTube: загрузка…")
+            self._slice_tab.progress_label.setText(self._brand("YouTube: загрузка…"))
 
     def _finish_slice_tab_after_upload(self, status: str) -> None:
         if self._active_work_mode != "slicing" or not hasattr(self, "_slice_tab"):
@@ -8274,11 +8967,15 @@ class MainWindow(QWidget):
         st.progress.setRange(0, mx)
         st.progress.setValueImmediate(mx)
         if status == "cancelled":
-            st.progress_label.setText("Загрузка на YouTube отменена.")
+            st.progress_label.setText(self._brand("Загрузка на YouTube отменена."))
         elif status == "timeout":
-            st.progress_label.setText("Загрузка на YouTube остановлена по таймауту.")
+            st.progress_label.setText(
+                self._brand("Загрузка на YouTube остановлена по таймауту.")
+            )
         elif status == "upload_failed":
-            st.progress_label.setText("Готово (ошибки загрузки на YouTube).")
+            st.progress_label.setText(
+                self._brand("Готово (ошибки загрузки на YouTube).")
+            )
         else:
             st.progress_label.setText("Готово")
 
@@ -8641,6 +9338,7 @@ class MainWindow(QWidget):
                         url=url,
                         video_id=vid,
                         profile_id=profile_id,
+                        platform=self._platform,
                     )
                     try:
                         self._upload_store.inc_uploaded_ok(session_id=sid, delta=1)
@@ -8756,7 +9454,9 @@ class MainWindow(QWidget):
                 cooldown_s=10.0,
                 max_attempts_per_profile=2,
                 max_concurrent_uploads=self._max_concurrent_browsers(),
-                profile_upload_pause_remaining_s=self._upload_store.profile_upload_pause_remaining_seconds,
+                profile_upload_pause_remaining_s=lambda pid: self._upload_store.profile_upload_pause_remaining_seconds(
+                    pid, platform=self._platform
+                ),
                 log_sink=self._ui_log_line.emit,
                 upload_one=_upload_one,
                 on_profile_attempt=_on_profile_upload_attempt,
@@ -8850,7 +9550,7 @@ class MainWindow(QWidget):
     def _append_log(self, line: str) -> None:
         from zaliver.log_format import format_log_line
 
-        self.log.appendPlainText(format_log_line(line))
+        self.log.appendPlainText(format_log_line(self._brand(line)))
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
 
     def _append_slice_log(self, line: str) -> None:
@@ -8858,7 +9558,7 @@ class MainWindow(QWidget):
 
         if not hasattr(self, "_slice_tab"):
             return
-        self._slice_tab.log.appendPlainText(format_log_line(line))
+        self._slice_tab.log.appendPlainText(format_log_line(self._brand(line)))
         bar = self._slice_tab.log.verticalScrollBar()
         bar.setValue(bar.maximum())
 
@@ -8939,6 +9639,7 @@ class MainWindow(QWidget):
         if not isinstance(updates_obj, list):
             return
         pairs: list[tuple[bool, str, str]] = []
+        extra_strip: set[str] = set()
         for item in updates_obj:
             if not isinstance(item, dict):
                 continue
@@ -8947,9 +9648,15 @@ class MainWindow(QWidget):
             if not success_tag or not error_tag:
                 continue
             pairs.append((bool(item.get("success")), success_tag, error_tag))
+            raw_strip = item.get("strip_tags")
+            if isinstance(raw_strip, (list, tuple, set)):
+                for t in raw_strip:
+                    s = str(t or "").strip()
+                    if s:
+                        extra_strip.add(s)
         if not pairs:
             return
-        strip_tags = {t for _ok, st, et in pairs for t in (st, et)}
+        strip_tags = {t for _ok, st, et in pairs for t in (st, et)} | extra_strip
         for i, p in enumerate(self._profiles_raw):
             if _profile_id(p) != pid:
                 continue

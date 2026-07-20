@@ -28,7 +28,7 @@ _IG_SUBJECT_HINT_RE = re.compile(
 
 _EMAIL_WAIT_MAX_S = 120.0
 _EMAIL_POLL_S = 4.0
-# Письмо видно в списке, но не открывается / код не читается — reload.
+# Письмо видно в списке, но не открывается / код не читается — снова #inbox/.
 _OPEN_EMAIL_MAX_S = 10.0
 
 
@@ -44,27 +44,24 @@ def _bring_to_front(page) -> None:
 
 
 def _goto_inbox(page) -> None:
+    """Открыть https://mail.google.com/mail/u/0/#inbox/ (без page.reload)."""
+    _log(f"Gmail: переходим на {GMAIL_INBOX_URL}")
     try:
         page.goto(GMAIL_INBOX_URL, wait_until="domcontentloaded", timeout=90_000)
     except Exception as e:
         _log(f"Gmail: goto inbox: {e!r}")
         try:
-            page.reload(wait_until="domcontentloaded", timeout=60_000)
+            page.evaluate("(u) => { location.assign(u); }", GMAIL_INBOX_URL)
+            page.wait_for_load_state("domcontentloaded", timeout=60_000)
         except Exception as e2:
-            _log(f"Gmail: reload: {e2!r}")
+            _log(f"Gmail: location.assign inbox: {e2!r}")
     page.wait_for_timeout(1500)
     dismiss_gmail_smart_features_if_present(page)
 
 
 def _reload_inbox(page) -> None:
-    """Обновить Inbox (reload или goto)."""
-    _log("Gmail: обновляем Inbox…")
-    try:
-        page.reload(wait_until="domcontentloaded", timeout=60_000)
-    except Exception:
-        _goto_inbox(page)
-    page.wait_for_timeout(1200)
-    dismiss_gmail_smart_features_if_present(page)
+    """Снова открыть Inbox через goto #inbox/ (не page.reload)."""
+    _goto_inbox(page)
     _click_primary_tab(page)
 
 
@@ -227,7 +224,7 @@ def _open_instagram_row_and_read_code(page, row) -> str | None:
     """
     Открыть письмо Instagram и вытащить код.
     Если за ``_OPEN_EMAIL_MAX_S`` не открылось / код не читается — None
-    (вызывающий делает reload и повтор).
+    (вызывающий снова открывает #inbox/ и повторяет).
     """
     open_deadline = time.monotonic() + _OPEN_EMAIL_MAX_S
 
@@ -242,7 +239,7 @@ def _open_instagram_row_and_read_code(page, row) -> str | None:
     if not _click_instagram_row(page, row):
         _log(
             f"Gmail: клик по письму не удался за {_OPEN_EMAIL_MAX_S:.0f} с — "
-            "обновим страницу."
+            "откроем #inbox/ снова."
         )
         return None
 
@@ -265,7 +262,7 @@ def _open_instagram_row_and_read_code(page, row) -> str | None:
 
     _log(
         f"Gmail: письмо есть, но не открылось / код не прочитан "
-        f"за {_OPEN_EMAIL_MAX_S:.0f} с — обновляем страницу."
+        f"за {_OPEN_EMAIL_MAX_S:.0f} с — откроем #inbox/ снова."
     )
     return None
 
@@ -274,17 +271,26 @@ def fetch_instagram_confirmation_code_from_gmail(
     gmail_page,
     *,
     max_seconds: float = _EMAIL_WAIT_MAX_S,
+    exclude_codes: set[str] | frozenset[str] | None = None,
 ) -> str:
     """
-    Переключиться на Gmail, обновить Inbox, открыть письмо Instagram,
+    Переключиться на Gmail, открыть #inbox/, письмо Instagram,
     вернуть 6-значный код.
 
     Если письмо уже в списке, но не открывается дольше 10 с —
-    reload Inbox и повторная попытка.
+    снова goto #inbox/ и повторная попытка.
+
+    ``exclude_codes`` — коды, которые уже пробовали на Instagram:
+    такие письма пропускаем и ждём новое.
     """
     _bring_to_front(gmail_page)
     deadline = time.monotonic() + max(30.0, float(max_seconds))
     last_err: str | None = None
+    exclude = {
+        str(c).strip()
+        for c in (exclude_codes or ())
+        if c is not None and str(c).strip()
+    }
 
     while time.monotonic() < deadline:
         try:
@@ -299,22 +305,6 @@ def fetch_instagram_confirmation_code_from_gmail(
 
             row = _find_instagram_row(gmail_page)
             if row is None:
-                # Иногда письмо в Social.
-                for social_pat in (
-                    re.compile(r"^social$", re.I),
-                    re.compile(r"^социальные", re.I),
-                ):
-                    try:
-                        tab = gmail_page.get_by_role("tab", name=social_pat).first
-                        if tab.count() > 0 and tab.is_visible(timeout=300):
-                            tab.click(timeout=4000)
-                            gmail_page.wait_for_timeout(800)
-                            row = _find_instagram_row(gmail_page)
-                            if row is not None:
-                                break
-                    except Exception:
-                        continue
-            if row is None:
                 last_err = "письмо Instagram ещё не пришло"
                 _log(f"Gmail: {last_err}, ждём…")
                 gmail_page.wait_for_timeout(int(_EMAIL_POLL_S * 1000))
@@ -322,15 +312,23 @@ def fetch_instagram_confirmation_code_from_gmail(
 
             code = _open_instagram_row_and_read_code(gmail_page, row)
             if code:
+                if code in exclude:
+                    last_err = (
+                        f"код {code} уже пробовали — ждём новое письмо"
+                    )
+                    _log(f"Gmail: {last_err}")
+                    _reload_inbox(gmail_page)
+                    gmail_page.wait_for_timeout(int(_EMAIL_POLL_S * 1000))
+                    continue
                 _log(f"Gmail: код подтверждения Instagram = {code}")
                 return code
 
             last_err = (
                 f"письмо не открылось за {_OPEN_EMAIL_MAX_S:.0f} с "
-                "(или код не найден) — reload"
+                "(или код не найден) — снова #inbox/"
             )
             _log(f"Gmail: {last_err}")
-            # Сразу reload и следующая попытка (без лишней паузы poll).
+            # Сразу goto #inbox/ и следующая попытка (без лишней паузы poll).
             _reload_inbox(gmail_page)
             continue
         except Exception as e:

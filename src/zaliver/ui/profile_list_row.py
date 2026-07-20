@@ -44,6 +44,11 @@ class ProfileListRow(QWidget):
         on_upload_pause_click: Callable[[], None] | None = None,
         show_account_data_button: bool = False,
         on_account_data_click: Callable[[], None] | None = None,
+        account_data_button_text: str | None = None,
+        account_data_tooltip: str | None = None,
+        show_gmail_data_button: bool = False,
+        on_gmail_data_click: Callable[[], None] | None = None,
+        gmail_data_tooltip: str | None = None,
         show_preview_button: bool = False,
         on_preview_click: Callable[[], None] | None = None,
     ) -> None:
@@ -58,6 +63,7 @@ class ProfileListRow(QWidget):
         self._upload_cooldown_kind = upload_kind
         self._upload_pause_cb = on_upload_pause_click
         self._account_data_cb = on_account_data_click
+        self._gmail_data_cb = on_gmail_data_click
         self._preview_cb = on_preview_click
 
         outer = QHBoxLayout(self)
@@ -138,15 +144,31 @@ class ProfileListRow(QWidget):
 
         self.account_data_btn: QPushButton | None = None
         if show_account_data_button and on_account_data_click is not None:
-            self.account_data_btn = QPushButton("Данные учетки")
+            self.account_data_btn = QPushButton(
+                (account_data_button_text or "").strip() or "Данные учетки"
+            )
             self.account_data_btn.setObjectName("secondary")
             self.account_data_btn.setAutoDefault(False)
             self.account_data_btn.setDefault(False)
             self.account_data_btn.setToolTip(
-                "Логин, пароль и 2FA YouTube (custom_data локального антидетекта)"
+                (account_data_tooltip or "").strip()
+                or "Логин, пароль и 2FA (custom_data локального антидетекта)"
             )
             self.account_data_btn.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
             outer.addWidget(self.account_data_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.gmail_data_btn: QPushButton | None = None
+        if show_gmail_data_button and on_gmail_data_click is not None:
+            self.gmail_data_btn = QPushButton("Данные Gmail")
+            self.gmail_data_btn.setObjectName("secondary")
+            self.gmail_data_btn.setAutoDefault(False)
+            self.gmail_data_btn.setDefault(False)
+            self.gmail_data_btn.setToolTip(
+                (gmail_data_tooltip or "").strip()
+                or "Логин и пароль Gmail (custom_data локального антидетекта)"
+            )
+            self.gmail_data_btn.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            outer.addWidget(self.gmail_data_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.preview_btn: QPushButton | None = None
         if show_preview_button and on_preview_click is not None:

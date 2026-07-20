@@ -264,6 +264,34 @@ def _save_yt_oldest_name_to_profile(api, profile_id: str, name: str) -> None:
         )
 
 
+def _save_instagram_credentials_to_profile(api, profile_id: str, credentials) -> None:
+    """Сохранить inst_login / inst_password в custom_data (yt_* и inst_2fa не трогаем)."""
+    from zaliver.ui.profile_account_data_dialog import INST_LOGIN_KEY, INST_PASSWORD_KEY
+
+    if credentials is None:
+        return
+    email = str(getattr(credentials, "email", "") or "").strip()
+    password = str(getattr(credentials, "password", "") or "")
+    if not email and not password:
+        return
+    # inst_2fa не пишем при регистрации — не затираем вручную введённый секрет.
+    payload = {
+        INST_LOGIN_KEY: email,
+        INST_PASSWORD_KEY: password,
+    }
+    try:
+        api.merge_profile_custom_data(profile_id, payload)
+        _log(
+            "Local antidetect: в custom_data сохранены Instagram-данные "
+            f"({INST_LOGIN_KEY}={email!r}) для profile_id={profile_id!r}."
+        )
+    except Exception as e:
+        _log(
+            "Local antidetect: не удалось сохранить Instagram-данные "
+            f"для profile_id={profile_id!r}: {e!r}"
+        )
+
+
 def _make_save_yt_oldest_name_handler(api, profile_id: str):
     def save(name: str) -> None:
         _save_yt_oldest_name_to_profile(api, profile_id, name)
@@ -777,7 +805,6 @@ def register_instagram_account_in_profile(
     local_token: str | None = None,
     headless: bool = True,
     login_credentials=None,
-    rucaptcha_api_key: str = "",
     on_manual_captcha=None,
 ) -> None:
     """Dolphin → Gmail inbox → Instagram signup → капча → код из почты."""
@@ -817,7 +844,6 @@ def register_instagram_account_in_profile(
                 username = run_instagram_registration_after_gmail(
                     page,
                     login_credentials,
-                    rucaptcha_api_key=rucaptcha_api_key,
                     on_manual_captcha=on_manual_captcha,
                 )
                 succeeded = True
@@ -865,7 +891,6 @@ def register_instagram_account_in_local_antidetect_profile(
     headless: bool = True,
     login_credentials=None,
     remote_cdp=None,
-    rucaptcha_api_key: str = "",
     on_manual_captcha=None,
 ) -> None:
     """Локальный антидетект → Gmail → Instagram signup → капча → код из почты."""
@@ -916,10 +941,12 @@ def register_instagram_account_in_local_antidetect_profile(
                 username = run_instagram_registration_after_gmail(
                     page,
                     login_credentials,
-                    rucaptcha_api_key=rucaptcha_api_key,
                     on_manual_captcha=on_manual_captcha,
                 )
                 succeeded = True
+                _save_instagram_credentials_to_profile(
+                    api, profile_id, login_credentials
+                )
                 _log(
                     "Local antidetect: Instagram зарегистрирован, "
                     f"username={username!r}"

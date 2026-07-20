@@ -12,6 +12,9 @@ YT_LOGIN_KEY = "yt_login"
 YT_PASSWORD_KEY = "yt_password"
 YT_2FA_KEY = "yt_2fa"
 YT_OLDEST_NAME_KEY = "yt_oldest_name"
+GMAIL_LOGIN_KEY = "gmail_login"
+GMAIL_PASSWORD_KEY = "gmail_password"
+GMAIL_2FA_KEY = "gmail_2fa"
 
 _IDENTITY_HEADING_RE = re.compile(
     r"подтвердите\s+свою\s+личность|confirm\s+your\s+identity",
@@ -221,6 +224,27 @@ def credentials_from_custom_data(
     if not email and not password and not twofa:
         return None
     return GoogleLoginCredentials(email=email, password=password, twofa_token=twofa)
+
+
+def gmail_or_yt_credentials_from_custom_data(
+    custom_data: dict[str, object] | None,
+) -> GoogleLoginCredentials | None:
+    """
+    Для входа в Gmail: если в custom_data есть gmail_* — только они,
+    иначе yt_login / yt_password / yt_2fa.
+    """
+    if not isinstance(custom_data, dict):
+        return None
+    email = str(custom_data.get(GMAIL_LOGIN_KEY) or "").strip()
+    password = str(custom_data.get(GMAIL_PASSWORD_KEY) or "")
+    twofa = str(custom_data.get(GMAIL_2FA_KEY) or "").strip()
+    if email or password or twofa:
+        return GoogleLoginCredentials(
+            email=email,
+            password=password,
+            twofa_token=twofa,
+        )
+    return credentials_from_custom_data(custom_data)
 
 
 def oldest_name_from_custom_data(custom_data: dict[str, object] | None) -> str:

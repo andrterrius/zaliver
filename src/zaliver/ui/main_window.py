@@ -100,7 +100,11 @@ from zaliver.ui.profile_list_helpers import (
     profile_search_tokens,
 )
 from zaliver.ui.profile_account_data_dialog import (
+    INST_LOGIN_KEY,
     ProfileAccountDataDialog,
+    SECTION_GMAIL,
+    SECTION_INSTAGRAM,
+    SECTION_YOUTUBE,
     YT_LOGIN_KEY,
 )
 from zaliver.ui.profile_accounts_import_dialog import ProfileAccountsImportDialog
@@ -924,7 +928,6 @@ class MainWindow(QWidget):
         self._load_antydetect_settings()
         self._load_youtube_settings()
         self._load_ai_settings()
-        self._load_rucaptcha_settings()
         self._update_profiles_section_header()
         self._sync_ffmpeg_install_row()
         self._pending_upload: dict[str, str] | None = None
@@ -1925,8 +1928,9 @@ class MainWindow(QWidget):
         self._btn_profiles_register_accounts.setToolTip(
             "Только для отмеченных профилей (Instagram): вход в Gmail, "
             "вторая вкладка instagram.com → «Создать новый аккаунт», "
-            "заполнение формы; капча — 2× RuCaptcha Proxyless, иначе ручное "
-            "ожидание; затем код из почты. "
+            "заполнение формы; капча — расширение AntiCaptcha в антидетекте "
+            "(ключ в Настройки антидетекта), иначе ручное ожидание; "
+            "затем код из почты. "
             "Режим Headless из настроек; параллельность — в «Настройках»."
         )
         self._btn_profiles_register_accounts.clicked.connect(
@@ -2029,6 +2033,7 @@ class MainWindow(QWidget):
             self._upload_store,
             on_upload_pause_click=self._ask_reset_upload_cooldown_for_profile,
             on_account_data_click=self._open_profile_account_data_dialog,
+            on_gmail_data_click=self._open_profile_gmail_data_dialog,
             on_preview_click=self._open_profile_cdp_preview,
         )
         list_sel_row, self._lbl_checked_profiles_count = self._build_profiles_selection_toolbar(
@@ -2336,37 +2341,6 @@ class MainWindow(QWidget):
         gai.addWidget(_settings_save_row(self._btn_save_ai), 5, 0, 1, 2)
         gai.addWidget(self._ai_settings_status, 6, 0, 1, 2)
 
-        gb_rucaptcha = QGroupBox("RuCaptcha")
-        grc = _compact_settings_grid(gb_rucaptcha)
-        rucaptcha_hint = QLabel(
-            "Сервис решения капч (reCAPTCHA Enterprise, Proxyless) для регистрации "
-            "Instagram. 2 попытки; если не вышло — ждём ручного прохождения. "
-            "Ключ — в личном кабинете rucaptcha.com."
-        )
-        rucaptcha_hint.setObjectName("hint")
-        rucaptcha_hint.setWordWrap(True)
-        self._rucaptcha_api_key = QLineEdit()
-        self._rucaptcha_api_key.setPlaceholderText("API key…")
-        self._rucaptcha_api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self._rucaptcha_api_key.setToolTip(
-            "API key RuCaptcha. Хранится локально в настройках приложения (QSettings)."
-        )
-        self._rucaptcha_show_key = QCheckBox("Показать ключ")
-        self._rucaptcha_show_key.stateChanged.connect(self._on_rucaptcha_show_key_changed)
-        self._btn_save_rucaptcha = QPushButton("Сохранить")
-        self._btn_save_rucaptcha.setObjectName("secondary")
-        self._btn_save_rucaptcha.clicked.connect(self._save_rucaptcha_settings)
-        self._rucaptcha_settings_status = QLabel("")
-        self._rucaptcha_settings_status.setObjectName("hint")
-        self._rucaptcha_settings_status.setWordWrap(True)
-
-        grc.addWidget(rucaptcha_hint, 0, 0, 1, 2)
-        grc.addWidget(QLabel("API key:"), 1, 0)
-        grc.addWidget(self._rucaptcha_api_key, 1, 1)
-        grc.addWidget(self._rucaptcha_show_key, 2, 0, 1, 2)
-        grc.addWidget(_settings_save_row(self._btn_save_rucaptcha), 3, 0, 1, 2)
-        grc.addWidget(self._rucaptcha_settings_status, 4, 0, 1, 2)
-
         settings_l.addWidget(settings_title)
         settings_l.addWidget(settings_hint)
         settings_l.addWidget(self._gb_stats_username)
@@ -2378,7 +2352,6 @@ class MainWindow(QWidget):
         settings_l.addWidget(self._gb_antydetect_remote)
         settings_l.addWidget(gb_yt)
         settings_l.addWidget(gb_ai)
-        settings_l.addWidget(gb_rucaptcha)
         settings_l.addStretch()
         settings_scroll.setWidget(settings_inner)
         settings_outer.addWidget(settings_scroll, 1)
@@ -4615,48 +4588,6 @@ class MainWindow(QWidget):
             QLineEdit.EchoMode.Normal if show else QLineEdit.EchoMode.Password
         )
 
-    def _load_rucaptcha_settings(self) -> None:
-        if not hasattr(self, "_rucaptcha_api_key"):
-            return
-        self._rucaptcha_api_key.setText(
-            (self._settings.value("rucaptcha/api_key", "", type=str) or "").strip()
-        )
-
-    def _save_rucaptcha_settings(self) -> None:
-        if not hasattr(self, "_rucaptcha_api_key"):
-            return
-        api_key = (self._rucaptcha_api_key.text() or "").strip()
-        if api_key:
-            self._settings.setValue("rucaptcha/api_key", api_key)
-        else:
-            try:
-                self._settings.remove("rucaptcha/api_key")
-            except Exception:
-                self._settings.setValue("rucaptcha/api_key", "")
-        try:
-            self._settings.sync()
-        except Exception:
-            pass
-        if hasattr(self, "_rucaptcha_settings_status"):
-            self._rucaptcha_settings_status.setText("Настройки RuCaptcha сохранены.")
-
-    def _on_rucaptcha_show_key_changed(self, _state: int) -> None:
-        if not hasattr(self, "_rucaptcha_api_key") or not hasattr(
-            self, "_rucaptcha_show_key"
-        ):
-            return
-        show = bool(self._rucaptcha_show_key.isChecked())
-        self._rucaptcha_api_key.setEchoMode(
-            QLineEdit.EchoMode.Normal if show else QLineEdit.EchoMode.Password
-        )
-
-    def _rucaptcha_api_key_from_settings(self) -> str:
-        if hasattr(self, "_rucaptcha_api_key"):
-            typed = (self._rucaptcha_api_key.text() or "").strip()
-            if typed:
-                return typed
-        return (self._settings.value("rucaptcha/api_key", "", type=str) or "").strip()
-
     def _on_ai_magic_generate(
         self,
         *,
@@ -5142,12 +5073,28 @@ class MainWindow(QWidget):
         )
         show_account = _is_own_antidetect_kind(kind if isinstance(kind, str) else "")
         show_preview = isinstance(kind, str) and kind.strip() == "remote"
+        is_ig = self._platform == PLATFORM_INSTAGRAM
+        account_btn_text = "Данные Insta" if is_ig else "Данные учетки"
+        account_tip = (
+            "Логин, пароль и 2FA Instagram (custom_data локального антидетекта)"
+            if is_ig
+            else "Логин, пароль и 2FA YouTube (custom_data локального антидетекта)"
+        )
         self._profiles_interaction.populate(
             visible,
             last_upload_map,
             prune_checked_to_existing=False,
             show_account_data_button=show_account,
             show_preview_button=show_preview,
+            account_data_button_text=account_btn_text,
+            account_data_tooltip=account_tip,
+            show_gmail_data_button=show_account and is_ig,
+            gmail_data_tooltip=(
+                "Логин, пароль и 2FA Gmail (стартовые значения из yt_*; "
+                "сохранение в gmail_login / gmail_password / gmail_2fa)"
+                if is_ig
+                else None
+            ),
         )
         self._profiles_list_render_gen += 1
         return len(visible)
@@ -5579,8 +5526,6 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "Регистрация Instagram", str(e))
             return
 
-        rucaptcha_key = self._rucaptcha_api_key_from_settings()
-
         self._profiles_register_running = True
         self._sync_profiles_tab_action_buttons()
         self._profiles_status.setText(
@@ -5594,11 +5539,6 @@ class MainWindow(QWidget):
                 f"[ig-register] Старт регистрации {len(profile_ids)} профилей "
                 f"({headless_label}, до {max_concurrent} параллельно)…"
             )
-            if not rucaptcha_key:
-                self._append_log(
-                    "[ig-register] Ключ RuCaptcha не задан — при капче "
-                    "сразу ручное ожидание."
-                )
             threading.Thread(
                 target=self._profiles_instagram_register_worker,
                 kwargs={
@@ -5609,7 +5549,6 @@ class MainWindow(QWidget):
                     "headless": headless,
                     "remote_cdp": remote_cdp,
                     "max_concurrent": max_concurrent,
-                    "rucaptcha_api_key": rucaptcha_key,
                 },
                 daemon=True,
             ).start()
@@ -5633,7 +5572,6 @@ class MainWindow(QWidget):
         headless: bool,
         remote_cdp: RemoteCdpLaunchOptions | None = None,
         max_concurrent: int = DEFAULT_MAX_CONCURRENT_BROWSERS,
-        rucaptcha_api_key: str = "",
     ) -> None:
         from zaliver.antydetect.antic_open import (
             register_instagram_account_in_local_antidetect_profile,
@@ -5654,7 +5592,6 @@ class MainWindow(QWidget):
         set_log_sink(self._ui_log_line.emit)
         kind_s = (kind or "").strip()
         base_u = (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
-        rc_key = (rucaptcha_api_key or "").strip()
 
         def _check_one(pid: str) -> None:
             creds = self._profile_login_credentials(pid)
@@ -5674,7 +5611,6 @@ class MainWindow(QWidget):
                     headless=headless,
                     login_credentials=creds,
                     remote_cdp=remote_cdp,
-                    rucaptcha_api_key=rc_key,
                     on_manual_captcha=_on_manual_captcha,
                 )
             else:
@@ -5683,7 +5619,6 @@ class MainWindow(QWidget):
                     local_token=token or None,
                     headless=headless,
                     login_credentials=creds,
-                    rucaptcha_api_key=rc_key,
                     on_manual_captcha=_on_manual_captcha,
                 )
 
@@ -7123,15 +7058,21 @@ class MainWindow(QWidget):
         return self._own_antidetect_base_url_from_settings("local")
 
     def _profile_login_credentials(self, profile_id: str):
-        from zaliver.youtube_upload.google_login import credentials_from_custom_data
+        from zaliver.youtube_upload.google_login import (
+            credentials_from_custom_data,
+            gmail_or_yt_credentials_from_custom_data,
+        )
 
         pid = (profile_id or "").strip()
         for p in self._profiles_raw or []:
             if _profile_id(p) != pid:
                 continue
             cd = p.get("custom_data")
-            if isinstance(cd, dict):
-                return credentials_from_custom_data(cd)
+            if not isinstance(cd, dict):
+                return None
+            if self._platform == PLATFORM_INSTAGRAM:
+                return gmail_or_yt_credentials_from_custom_data(cd)
+            return credentials_from_custom_data(cd)
         return None
 
     def _profile_yt_oldest_name(self, profile_id: str) -> str:
@@ -7186,6 +7127,7 @@ class MainWindow(QWidget):
         dlg = ProfileAccountsImportDialog(
             selected_profiles=selected_profiles,
             all_profiles=list(self._profiles_raw or []),
+            platform=self._platform,
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -7336,9 +7278,22 @@ class MainWindow(QWidget):
         pid = (profile_id or "").strip()
         if not pid:
             return
-        self._show_profile_account_data_dialog(pid)
+        section = (
+            SECTION_INSTAGRAM
+            if self._platform == PLATFORM_INSTAGRAM
+            else SECTION_YOUTUBE
+        )
+        self._show_profile_account_data_dialog(pid, section=section)
 
-    def _show_profile_account_data_dialog(self, profile_id: str) -> None:
+    def _open_profile_gmail_data_dialog(self, profile_id: str) -> None:
+        pid = (profile_id or "").strip()
+        if not pid:
+            return
+        self._show_profile_account_data_dialog(pid, section=SECTION_GMAIL)
+
+    def _show_profile_account_data_dialog(
+        self, profile_id: str, *, section: str = SECTION_YOUTUBE
+    ) -> None:
         pid = (profile_id or "").strip()
         if not pid:
             return
@@ -7369,18 +7324,40 @@ class MainWindow(QWidget):
         except LocalAntidetectError as e:
             load_error = str(e)
 
+        dlg_titles = {
+            SECTION_INSTAGRAM: "Данные Insta",
+            SECTION_GMAIL: "Данные Gmail",
+            SECTION_YOUTUBE: "Данные учетки",
+        }
+        dlg_title = dlg_titles.get(section, "Данные учетки")
+
         dlg = ProfileAccountDataDialog(
             profile_name=name,
             profile_id=pid,
             custom_data=custom_data,
+            section=section,
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
         payload = dlg.account_data_payload()
-        login = str(payload.get(YT_LOGIN_KEY) or "").strip()
-        if login:
+        if section == SECTION_GMAIL and not payload:
+            QMessageBox.information(
+                self,
+                dlg_title,
+                "Изменений нет — gmail_* в custom_data не обновлялись.",
+            )
+            return
+        login_key = YT_LOGIN_KEY
+        if section == SECTION_INSTAGRAM:
+            login_key = INST_LOGIN_KEY
+        elif section == SECTION_GMAIL:
+            from zaliver.ui.profile_account_data_dialog import GMAIL_LOGIN_KEY
+
+            login_key = GMAIL_LOGIN_KEY
+        login = str(payload.get(login_key) or "").strip()
+        if login and section == SECTION_YOUTUBE:
             from zaliver.ui.account_import_parser import (
                 find_profiles_with_login,
                 format_profile_login_conflict,
@@ -7395,7 +7372,7 @@ class MainWindow(QWidget):
                 )
                 answer = QMessageBox.warning(
                     self,
-                    "Данные учетки",
+                    dlg_title,
                     f"Почта {login} уже указана в другом профиле:\n{owners}\n\n"
                     "Всё равно сохранить?",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -7412,7 +7389,7 @@ class MainWindow(QWidget):
         except LocalAntidetectError as e:
             QMessageBox.warning(
                 self,
-                "Данные учетки",
+                dlg_title,
                 f"Не удалось сохранить:\n{e}",
             )
             return
@@ -7436,7 +7413,7 @@ class MainWindow(QWidget):
                 "Сохранено в custom_data профиля.\n\n"
                 f"При открытии не удалось обновить данные с API: {load_error}"
             )
-        QMessageBox.information(self, "Данные учетки", msg)
+        QMessageBox.information(self, dlg_title, msg)
 
     def _start_clear_zaliver_profile_tags(self) -> None:
         if self._profiles_tags_clear_running:
@@ -7683,7 +7660,7 @@ class MainWindow(QWidget):
             )
 
     def _on_manual_captcha_needed(self, profile_id: str) -> None:
-        """После провала RuCaptcha — обычное системное уведомление Windows."""
+        """Если расширение не решило капчу — системное уведомление Windows."""
         pid = (profile_id or "").strip()
         if not pid:
             return

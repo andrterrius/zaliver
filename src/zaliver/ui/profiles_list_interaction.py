@@ -40,6 +40,7 @@ class ProfilesListInteraction(QObject):
         *,
         on_upload_pause_click: Callable[[str], None] | None = None,
         on_account_data_click: Callable[[str], None] | None = None,
+        on_gmail_data_click: Callable[[str], None] | None = None,
         on_preview_click: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(list_widget)
@@ -47,6 +48,7 @@ class ProfilesListInteraction(QObject):
         self._upload_store = upload_store
         self._on_upload_pause_click = on_upload_pause_click
         self._on_account_data_click = on_account_data_click
+        self._on_gmail_data_click = on_gmail_data_click
         self._on_preview_click = on_preview_click
 
         self.checked_profile_ids: set[str] = set()
@@ -66,6 +68,7 @@ class ProfilesListInteraction(QObject):
         self._checkbox_press_global: QPoint | None = None
         self._checkbox_press_modifiers = Qt.KeyboardModifier.NoModifier
         self._account_data_armed_row: ProfileListRow | None = None
+        self._gmail_data_armed_row: ProfileListRow | None = None
         self._copy_id_armed_row: ProfileListRow | None = None
         self._preview_armed_row: ProfileListRow | None = None
 
@@ -229,6 +232,10 @@ class ProfilesListInteraction(QObject):
         prune_checked_to_existing: bool = True,
         show_account_data_button: bool = False,
         show_preview_button: bool = False,
+        account_data_button_text: str | None = None,
+        account_data_tooltip: str | None = None,
+        show_gmail_data_button: bool = False,
+        gmail_data_tooltip: str | None = None,
     ) -> None:
         list_scroll = self.lw.verticalScrollBar().value()
         existing_ids = {_profile_id(p) for p in profiles}
@@ -272,6 +279,15 @@ class ProfilesListInteraction(QObject):
                     if show_account_data_button and self._on_account_data_click
                     else None
                 ),
+                account_data_button_text=account_data_button_text,
+                account_data_tooltip=account_data_tooltip,
+                show_gmail_data_button=show_gmail_data_button,
+                on_gmail_data_click=(
+                    (lambda pid=pid: self._emit_gmail_data_click(pid))
+                    if show_gmail_data_button and self._on_gmail_data_click
+                    else None
+                ),
+                gmail_data_tooltip=gmail_data_tooltip,
                 show_preview_button=show_preview_button,
                 on_preview_click=(
                     (lambda pid=pid: self._emit_preview_click(pid))
@@ -313,6 +329,8 @@ class ProfilesListInteraction(QObject):
         row.upload_label.installEventFilter(self)
         if row.account_data_btn is not None:
             row.account_data_btn.installEventFilter(self)
+        if row.gmail_data_btn is not None:
+            row.gmail_data_btn.installEventFilter(self)
         if row.preview_btn is not None:
             row.preview_btn.installEventFilter(self)
         if row.copy_id_btn is not None:
@@ -322,6 +340,10 @@ class ProfilesListInteraction(QObject):
                 continue
             if row.account_data_btn is not None and (
                 ch is row.account_data_btn or row.account_data_btn.isAncestorOf(ch)
+            ):
+                continue
+            if row.gmail_data_btn is not None and (
+                ch is row.gmail_data_btn or row.gmail_data_btn.isAncestorOf(ch)
             ):
                 continue
             if row.preview_btn is not None and (
@@ -550,6 +572,15 @@ class ProfilesListInteraction(QObject):
             return
         QTimer.singleShot(0, lambda p=pid: cb(p))
 
+    def _emit_gmail_data_click(self, profile_id: str) -> None:
+        cb = self._on_gmail_data_click
+        if cb is None:
+            return
+        pid = (profile_id or "").strip()
+        if not pid:
+            return
+        QTimer.singleShot(0, lambda p=pid: cb(p))
+
     def _emit_preview_click(self, profile_id: str) -> None:
         cb = self._on_preview_click
         if cb is None:
@@ -585,8 +616,40 @@ class ProfilesListInteraction(QObject):
                 return row
         return None
 
+    def _profile_row_for_gmail_button_hit(
+        self, watched: QWidget, vp_pos: QPoint
+    ) -> ProfileListRow | None:
+        widgets_to_check: list[QWidget] = [watched]
+        child = self.lw.viewport().childAt(vp_pos)
+        if child is not None and child is not watched:
+            widgets_to_check.append(child)
+
+        for w in widgets_to_check:
+            cur: QWidget | None = w
+            while cur is not None and cur is not self.lw.viewport():
+                for row in self._profile_id_to_row.values():
+                    btn = row.gmail_data_btn
+                    if btn is not None and (cur is btn or btn.isAncestorOf(cur)):
+                        return row
+                cur = cur.parentWidget()
+
+        for row in self._profile_id_to_row.values():
+            btn = row.gmail_data_btn
+            if btn is None or not btn.isVisible():
+                continue
+            top_left = btn.mapTo(self.lw.viewport(), QPoint(0, 0))
+            if QRect(top_left, btn.size()).contains(vp_pos):
+                return row
+        return None
+
     def _invoke_account_data_click(self, row: ProfileListRow) -> None:
         cb = row._account_data_cb
+        if cb is None:
+            return
+        cb()
+
+    def _invoke_gmail_data_click(self, row: ProfileListRow) -> None:
+        cb = row._gmail_data_cb
         if cb is None:
             return
         cb()
@@ -646,6 +709,13 @@ class ProfilesListInteraction(QObject):
                 return True
         return False
 
+    def _is_gmail_data_button(self, watched: QWidget) -> bool:
+        for row in self._profile_id_to_row.values():
+            btn = row.gmail_data_btn
+            if btn is not None and (watched is btn or btn.isAncestorOf(watched)):
+                return True
+        return False
+
     def _profile_row_for_copy_id_button_hit(
         self, watched: QWidget, vp_pos: QPoint
     ) -> ProfileListRow | None:
@@ -680,6 +750,7 @@ class ProfilesListInteraction(QObject):
 
     def _reset_pointer_interaction_state(self) -> None:
         self._account_data_armed_row = None
+        self._gmail_data_armed_row = None
         self._copy_id_armed_row = None
         self._preview_armed_row = None
         self._lmb_select_end()
@@ -777,11 +848,24 @@ class ProfilesListInteraction(QObject):
                 self._invoke_account_data_click(row)
                 return True
 
+            if (
+                et == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton
+                and self._gmail_data_armed_row is not None
+            ):
+                row = self._gmail_data_armed_row
+                self._gmail_data_armed_row = None
+                self._cancel_checkbox_click_pending()
+                self._lmb_select_end()
+                self._invoke_gmail_data_click(row)
+                return True
+
             if et == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
                 copy_row = self._profile_row_for_copy_id_button_hit(watched, vp_pos)
                 if copy_row is not None:
                     self._copy_id_armed_row = copy_row
                     self._account_data_armed_row = None
+                    self._gmail_data_armed_row = None
                     self._preview_armed_row = None
                     self._cancel_checkbox_click_pending()
                     return True
@@ -790,10 +874,19 @@ class ProfilesListInteraction(QObject):
                 account_row = self._profile_row_for_account_button_hit(watched, vp_pos)
                 if account_row is not None:
                     self._account_data_armed_row = account_row
+                    self._gmail_data_armed_row = None
                     self._preview_armed_row = None
                     self._cancel_checkbox_click_pending()
                     return True
                 self._account_data_armed_row = None
+
+                gmail_row = self._profile_row_for_gmail_button_hit(watched, vp_pos)
+                if gmail_row is not None:
+                    self._gmail_data_armed_row = gmail_row
+                    self._preview_armed_row = None
+                    self._cancel_checkbox_click_pending()
+                    return True
+                self._gmail_data_armed_row = None
 
                 preview_row = self._profile_row_for_preview_button_hit(
                     watched, vp_pos, global_pos=global_pos
@@ -801,6 +894,7 @@ class ProfilesListInteraction(QObject):
                 if preview_row is not None:
                     self._preview_armed_row = preview_row
                     self._account_data_armed_row = None
+                    self._gmail_data_armed_row = None
                     self._copy_id_armed_row = None
                     self._cancel_checkbox_click_pending()
                     return True
@@ -849,7 +943,11 @@ class ProfilesListInteraction(QObject):
                 return False
 
             if et == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                if self._is_preview_button(watched) or self._is_account_data_button(watched):
+                if (
+                    self._is_preview_button(watched)
+                    or self._is_account_data_button(watched)
+                    or self._is_gmail_data_button(watched)
+                ):
                     return False
                 if self._profile_row_for_preview_button_hit(
                     watched, vp_pos, global_pos=global_pos

@@ -25,13 +25,14 @@ PLATFORM_CHOICES: tuple[tuple[str, str, str], ...] = (
 )
 
 # Общие для всех платформ (антидетект, ключ LLM).
-_SHARED_KEY_PREFIXES: tuple[str, ...] = ("antydetect/", "rucaptcha/")
+_SHARED_KEY_PREFIXES: tuple[str, ...] = (
+    "antydetect/",
+)
 _SHARED_KEYS: frozenset[str] = frozenset(
     {
         "ai/base_url",
         "ai/api_key",
         "ai/model",
-        "rucaptcha/api_key",
     }
 )
 
@@ -48,6 +49,26 @@ _BRAND_REPLACEMENTS: tuple[tuple[str, str], ...] = (
     ("YouTube", "Instagram"),
     ("Youtube", "Instagram"),
     ("youtube", "instagram"),
+)
+
+# Фразы, где «YouTube» оставляем даже в режиме Instagram
+# (логин/пароль из yt_* , кнопки подстановки и т.п.).
+_BRAND_PRESERVE_PHRASES: tuple[str, ...] = (
+    "подставить логин и пароль от YouTube",
+    "подставить логин и пароль от Gmail",
+    "данные YouTube не меняются",
+    "из YouTube-данных",
+    "YouTube-данных",
+    "Gmail/YouTube-данных",
+    "Нет YouTube-данных",
+    "Подставлено из YouTube",
+    "Подставлено из Gmail",
+    "нет yt_login / yt_password",
+    "yt_login / yt_password",
+    "yt_login и yt_password",
+    "gmail_login / gmail_password",
+    "gmail_login / gmail_password / gmail_2fa",
+    "yt_login / yt_password / yt_2fa",
 )
 
 
@@ -67,8 +88,17 @@ def brand_text(text: str, platform: str) -> str:
     if normalize_platform(platform) != PLATFORM_INSTAGRAM or not text:
         return text
     out = text
+    preserved: list[tuple[str, str]] = []
+    for i, phrase in enumerate(_BRAND_PRESERVE_PHRASES):
+        if phrase not in out:
+            continue
+        token = f"\x00ZALIVER_KEEP_{i}\x00"
+        preserved.append((token, phrase))
+        out = out.replace(phrase, token)
     for old, new in _BRAND_REPLACEMENTS:
         out = out.replace(old, new)
+    for token, phrase in preserved:
+        out = out.replace(token, phrase)
     return out
 
 

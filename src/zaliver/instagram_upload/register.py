@@ -16,6 +16,14 @@ from zaliver.youtube_upload import studio as _studio
 from zaliver.antydetect.profile_tags import IG_REGISTER_SMS_ERROR_TAG
 
 INSTAGRAM_URL = "https://www.instagram.com/"
+_IG_CAPTCHA_FALLBACK_URLS = (
+    "https://www.instagram.com/accounts/emailsignup/",
+    "https://www.instagram.com/",
+    "https://instagram.com/accounts/emailsignup/",
+    "https://instagram.com/",
+    "https://www.facebook.com/",
+    "https://facebook.com/",
+)
 
 # При ошибке регистрации оставлять профиль открытым (ручная капча / отладка).
 # При успехе профиль всегда закрывается автоматически.
@@ -92,10 +100,15 @@ _TERMS_HEADING_RE = re.compile(
     re.IGNORECASE,
 )
 _ALLOW_ALL_COOKIES_RE = re.compile(
-    r"^allow\s+all\s+cookies$|"
-    r"^разрешить\s+все\s+(файлы\s+)?cookie[s]?$|"
-    r"^принять\s+все\s+(файлы\s+)?cookie[s]?$|"
-    r"^разрешить\s+все$",
+    r"allow\s+all\s+cookies|"
+    r"разрешить\s+все\s+(файлы\s+)?cookie|"
+    r"принять\s+все\s+(файлы\s+)?cookie|"
+    r"разрешить\s+все\b",
+    re.IGNORECASE,
+)
+_DECLINE_OPTIONAL_COOKIES_RE = re.compile(
+    r"decline\s+optional(\s+cookies)?|"
+    r"отклонить\s+необязательные(\s+файлы\s+cookie)?",
     re.IGNORECASE,
 )
 _COOKIE_CONSENT_HEADING_RE = re.compile(
@@ -104,12 +117,31 @@ _COOKIE_CONSENT_HEADING_RE = re.compile(
     r"разрешить\s+использование\s+файлов\s+cookie\s+от\s+instagram|"
     r"использовать\s+файлы\s+cookie|"
     r"cookie[s]?\s+(by|from)\s+instagram|"
-    r"cookies?\s+from\s+instagram\s+on\s+this\s+browser",
+    r"cookies?\s+from\s+instagram\s+on\s+this\s+browser|"
+    r"файлов\s+cookie\s+от\s+instagram\s+в\s+этом\s+браузере",
     re.IGNORECASE,
 )
+# Только код из письма. НЕ «enter the code» — совпадает с image captcha
+# («Enter the code from the image»).
 _CONFIRM_CODE_HEADING_RE = re.compile(
-    r"введите\s+код\s+подтверждения|enter\s+(the\s+)?confirmation\s+code|"
-    r"enter\s+the\s+code",
+    r"введите\s+код\s+подтверждения|"
+    r"enter\s+(the\s+)?confirmation\s+code|"
+    r"enter\s+(the\s+)?security\s+code|"
+    r"confirmation\s+code",
+    re.IGNORECASE,
+)
+_EMAIL_CODE_REJECTED_RE = re.compile(
+    r"that\s+code\s+isn.?t\s+valid|"
+    r"code\s+isn.?t\s+valid|"
+    r"incorrect\s+(confirmation\s+)?code|"
+    r"invalid\s+(confirmation\s+)?code|"
+    r"wrong\s+(confirmation\s+)?code|"
+    r"check\s+the\s+code\s+and\s+try\s+again|"
+    r"please\s+check\s+the\s+code|"
+    r"неверн(ый|ым)\s+код(\s+подтверждения)?|"
+    r"код\s+недействителен|"
+    r"проверьте\s+код|"
+    r"запросите\s+новый\s+код",
     re.IGNORECASE,
 )
 _HUMAN_CONFIRM_RE = re.compile(
@@ -146,11 +178,16 @@ _MONTH_NAMES_RU = (
 
 _SIGNUP_READY_MAX_S = 90.0
 _CAPTCHA_OR_CODE_WAIT_MAX_S = 120.0
-_CAPTCHA_FULLY_LOADED_MAX_S = 60.0
-# Пауза после «iframe капчи появился» перед createTask в RuCaptcha.
+# Пауза после появления iframe — дать расширению AntiCaptcha подняться.
 _CAPTCHA_IFRAME_SETTLE_S = 10.0
-_CONFIRM_SCREEN_MAX_S = 90.0
+_CONFIRM_SCREEN_MAX_S = 300.0
 _HOME_AFTER_CODE_MAX_S = 60.0
+# Ожидание авторешения капчи расширением AntiCaptcha в браузере.
+_EXTENSION_CAPTCHA_MAX_S = 180.0
+# Сколько раз пробовать код из почты, если экран не сменился.
+_EMAIL_CODE_ATTEMPTS = 5
+# Пауза после «Продолжить», чтобы понять: ушли с экрана кода или нет.
+_AFTER_EMAIL_CODE_SETTLE_S = 15.0
 _MANUAL_CAPTCHA_LOG_EVERY_S = 30.0
 
 
@@ -328,7 +365,12 @@ def _is_accounts_suspended(page) -> bool:
 
 
 def _signup_form_visible(page) -> bool:
-    """Форма регистрации видна / URL emailsignup без suspended."""
+    """Форма регистрации видна / URL emailsignup без suspended и без cookie-диалога."""
+    try:
+        if _is_cookie_consent_screen(page):
+            return False
+    except Exception:
+        pass
     try:
         if page.get_by_text(
             re.compile(r"зарегистрируйтесь|sign\s*up\s+for\s+instagram", re.I)
@@ -447,7 +489,7 @@ def _instagram_session_cookie_present(page) -> bool:
     """Настоящая сессия: cookie sessionid / ds_user_id."""
     try:
         try:
-            cookies = page.context.cookies(["https://www.instagram.com"])
+            cookies = page.context.cookies(["https://instagram.com"])
         except TypeError:
             cookies = page.context.cookies()
         except Exception:
@@ -807,12 +849,10 @@ def _wait_signup_form(
     page,
     *,
     max_seconds: float = _SIGNUP_READY_MAX_S,
-    rucaptcha_api_key: str = "",
-    on_manual_captcha=None,
 ) -> None:
-    del rucaptcha_api_key, on_manual_captcha  # больше не решаем image captcha
     deadline = time.monotonic() + max_seconds
     while time.monotonic() < deadline:
+        accept_instagram_cookie_consent_if_present(page)
         if _signup_form_visible(page):
             return
         _raise_if_already_logged_in(page)
@@ -827,7 +867,10 @@ def _wait_signup_form(
 
 
 def _is_confirmation_code_screen(page) -> bool:
-    """Уже экран ввода кода из почты (капчи может не быть)."""
+    """Уже экран ввода кода из почты (не image captcha / human check)."""
+    # Image captcha тоже про «code» + maxlength=6 — не путать с почтой.
+    if _is_image_captcha_screen(page) or _is_human_confirm_intro_screen(page):
+        return False
     try:
         heading = page.get_by_text(_CONFIRM_CODE_HEADING_RE).first
         if heading.count() > 0 and heading.is_visible(timeout=300):
@@ -835,8 +878,20 @@ def _is_confirmation_code_screen(page) -> bool:
     except Exception:
         pass
     try:
+        # Код из почты — input; image captcha — textarea.
         field = page.locator('input[maxlength="6"]').first
         if field.count() > 0 and field.is_visible(timeout=300):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _email_confirmation_code_rejected(page) -> bool:
+    """Instagram показал ошибку неверного кода из письма."""
+    try:
+        loc = page.get_by_text(_EMAIL_CODE_REJECTED_RE).first
+        if loc.count() > 0 and loc.is_visible(timeout=300):
             return True
     except Exception:
         pass
@@ -905,77 +960,222 @@ def _is_cookie_consent_url(url: str) -> bool:
     return "instagram.com" in u and "/consent" in u
 
 
+def _cookie_dialog(page):
+    """Модалка cookies: role=dialog с заголовком Allow the use of cookies…"""
+    return page.locator('[role="dialog"][aria-modal="true"]').filter(
+        has_text=_COOKIE_CONSENT_HEADING_RE
+    )
+
+
+def _cookie_allow_buttons(page):
+    """
+    Кнопки Accept all / «Разрешить все cookie».
+    Новый UI (/consent): div[role=button] в dialog.
+    Старый UI: <button class="_a9-- _asz1">.
+    """
+    dialog = _cookie_dialog(page)
+    return (
+        # Новый Meta-dialog — приоритет.
+        dialog.locator('[role="button"]').filter(has_text=_ALLOW_ALL_COOKIES_RE),
+        dialog.get_by_role("button", name=re.compile(r"^allow\s+all\s+cookies$", re.I)),
+        dialog.get_by_role(
+            "button", name=re.compile(r"^разрешить\s+все\s+(файлы\s+)?cookie[s]?$", re.I)
+        ),
+        page.get_by_role("button", name=re.compile(r"^allow\s+all\s+cookies$", re.I)),
+        page.get_by_role(
+            "button", name=re.compile(r"^разрешить\s+все\s+(файлы\s+)?cookie[s]?$", re.I)
+        ),
+        page.locator('[role="dialog"] [role="button"]').filter(
+            has_text=_ALLOW_ALL_COOKIES_RE
+        ),
+        page.locator('[role="button"]').filter(has_text=_ALLOW_ALL_COOKIES_RE),
+        # Старый баннер.
+        page.locator("button._asz1").filter(has_text=_ALLOW_ALL_COOKIES_RE),
+        page.locator("button._a9--").filter(has_text=_ALLOW_ALL_COOKIES_RE),
+        page.locator("div._abdc button").filter(has_text=_ALLOW_ALL_COOKIES_RE),
+        page.locator("button").filter(has_text=_ALLOW_ALL_COOKIES_RE),
+        page.get_by_text(re.compile(r"^allow\s+all\s+cookies$", re.I)),
+        page.get_by_text(
+            re.compile(r"^разрешить\s+все\s+(файлы\s+)?cookie[s]?$", re.I)
+        ),
+    )
+
+
+def _cookie_allow_button_present(page) -> bool:
+    for loc in _cookie_allow_buttons(page):
+        try:
+            if loc.count() > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _is_cookie_consent_screen(page) -> bool:
-    """Диалог cookies: EN Allow all / RU «Разрешить все cookie» (_abdc / /consent)."""
+    """Диалог cookies: EN Allow all / RU «Разрешить все cookie» (dialog / _abdc / /consent)."""
     try:
         if _is_cookie_consent_url(_page_url(page)):
             return True
     except Exception:
         pass
     try:
-        heading = page.get_by_text(_COOKIE_CONSENT_HEADING_RE).first
-        if heading.count() > 0 and heading.is_visible(timeout=300):
+        dialog = _cookie_dialog(page).first
+        if dialog.count() > 0 and dialog.is_visible(timeout=400):
             return True
     except Exception:
         pass
-    for sel in (
-        'button:has-text("Разрешить все cookie")',
-        'button:has-text("Allow all cookies")',
-        "button._a9--._asz1",
-        '[role="button"]',
-    ):
-        try:
-            btn = page.locator(sel).filter(has_text=_ALLOW_ALL_COOKIES_RE).first
-            if btn.count() > 0 and btn.is_visible(timeout=300):
-                return True
-        except Exception:
-            continue
     try:
-        # Старый баннер Instagram (класс _abdc) с кнопками _a9--.
+        heading = page.get_by_text(_COOKIE_CONSENT_HEADING_RE).first
+        if heading.count() > 0 and heading.is_visible(timeout=400):
+            return True
+    except Exception:
+        pass
+    if _cookie_allow_button_present(page):
+        return True
+    try:
+        decline = page.locator('[role="button"], button').filter(
+            has_text=_DECLINE_OPTIONAL_COOKIES_RE
+        ).first
+        if decline.count() > 0:
+            return True
+    except Exception:
+        pass
+    try:
         banner = page.locator("div._abdc").first
         if banner.count() > 0 and banner.is_visible(timeout=300):
-            btn = banner.locator("button").filter(has_text=_ALLOW_ALL_COOKIES_RE).first
-            if btn.count() > 0 and btn.is_visible(timeout=200):
-                return True
             if banner.get_by_text(_COOKIE_CONSENT_HEADING_RE).count() > 0:
                 return True
-    except Exception:
-        pass
-    try:
-        dialog = page.locator('[role="dialog"][aria-modal="true"]').filter(
-            has_text=_COOKIE_CONSENT_HEADING_RE
-        ).first
-        if dialog.count() > 0 and dialog.is_visible(timeout=300):
-            return True
+            if banner.locator("button._asz1, button._a9--").count() > 0:
+                return True
     except Exception:
         pass
     return False
 
 
+def _click_allow_all_cookies_via_js(page) -> bool:
+    """Прямой DOM-клик — dialog div[role=button] и sticky button._asz1."""
+    try:
+        clicked = page.evaluate(
+            """() => {
+                const needles = [
+                    'allow all cookies',
+                    'разрешить все cookie',
+                    'разрешить все файлы cookie',
+                    'принять все cookie',
+                    'принять все файлы cookie',
+                ];
+                const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                const isAllow = (t) => needles.some((n) => t === n);
+
+                // 1) Сначала внутри aria-modal dialog.
+                const dialogs = Array.from(
+                    document.querySelectorAll('[role="dialog"][aria-modal="true"]')
+                );
+                for (const dlg of dialogs) {
+                    const nodes = Array.from(
+                        dlg.querySelectorAll('button, [role="button"]')
+                    );
+                    for (const el of nodes) {
+                        const t = norm(el.innerText || el.textContent);
+                        if (!isAllow(t)) continue;
+                        try { el.scrollIntoView({block: 'center', inline: 'nearest'}); } catch (e) {}
+                        el.click();
+                        return 'dialog:' + t;
+                    }
+                }
+
+                // 2) По всей странице — только точное совпадение текста.
+                const nodes = Array.from(
+                    document.querySelectorAll('button, [role="button"]')
+                );
+                nodes.sort((a, b) => {
+                    const as = (a.className || '').includes('_asz1') ? 0 : 1;
+                    const bs = (b.className || '').includes('_asz1') ? 0 : 1;
+                    return as - bs;
+                });
+                for (const el of nodes) {
+                    const t = norm(el.innerText || el.textContent);
+                    if (!isAllow(t)) continue;
+                    try { el.scrollIntoView({block: 'center', inline: 'nearest'}); } catch (e) {}
+                    el.click();
+                    return t;
+                }
+                return null;
+            }"""
+        )
+        if clicked:
+            _log(f"Instagram: cookie consent — JS click ({clicked!r})")
+            return True
+    except Exception as e:
+        _log(f"Instagram: cookie JS click failed: {e!r}")
+    return False
+
+
 def _click_allow_all_cookies_button(page) -> bool:
-    """Клик по Accept all: div[role=button] или <button class=_a9-->."""
-    candidates = (
-        page.get_by_role("button", name=_ALLOW_ALL_COOKIES_RE),
-        page.locator("div._abdc button").filter(has_text=_ALLOW_ALL_COOKIES_RE),
-        page.locator("button._a9--").filter(has_text=_ALLOW_ALL_COOKIES_RE),
-        page.locator("button").filter(has_text=_ALLOW_ALL_COOKIES_RE),
-        page.locator('[role="button"]').filter(has_text=_ALLOW_ALL_COOKIES_RE),
-    )
-    for loc in candidates:
+    """Клик по Allow all cookies (dialog div / button._asz1 / JS)."""
+    # Сначала JS по dialog — самый надёжный путь для нового UI.
+    if _click_allow_all_cookies_via_js(page):
+        return True
+    for loc in _cookie_allow_buttons(page):
         try:
             btn = loc.first
             if btn.count() <= 0:
                 continue
-            if not btn.is_visible(timeout=400):
+            try:
+                btn.scroll_into_view_if_needed(timeout=3000)
+            except Exception:
+                pass
+            page.wait_for_timeout(150)
+            try:
+                btn.click(timeout=8000)
+                return True
+            except Exception:
+                pass
+            try:
+                btn.click(timeout=5000, force=True)
+                return True
+            except Exception:
+                pass
+            try:
+                box = btn.bounding_box()
+                if box:
+                    page.mouse.click(
+                        box["x"] + box["width"] / 2,
+                        box["y"] + box["height"] / 2,
+                    )
+                    return True
+            except Exception:
                 continue
-            btn.click(timeout=8000)
-            return True
         except Exception:
             continue
     return _click_by_text(page, _ALLOW_ALL_COOKIES_RE, prefer_link=False)
 
 
-def click_instagram_allow_all_cookies(page, *, max_seconds: float = 20.0) -> bool:
+def _cookie_consent_dismissed(page) -> bool:
+    """True если ушли с /consent и диалог/кнопки Allow all больше нет."""
+    try:
+        url = _page_url(page)
+    except Exception:
+        url = ""
+    if _is_cookie_consent_url(url):
+        return False
+    try:
+        dialog = _cookie_dialog(page).first
+        if dialog.count() > 0 and dialog.is_visible(timeout=200):
+            return False
+    except Exception:
+        pass
+    if _cookie_allow_button_present(page):
+        return False
+    try:
+        if page.get_by_text(_COOKIE_CONSENT_HEADING_RE).first.is_visible(timeout=200):
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def click_instagram_allow_all_cookies(page, *, max_seconds: float = 30.0) -> bool:
     """
     Нажать «Allow all cookies» / «Разрешить все cookie».
     True если кликнули или диалог уже исчез.
@@ -984,23 +1184,62 @@ def click_instagram_allow_all_cookies(page, *, max_seconds: float = 20.0) -> boo
         return False
 
     deadline = time.monotonic() + max_seconds
+    clicked_once = False
     while time.monotonic() < deadline:
-        if not _is_cookie_consent_screen(page):
+        url = _page_url(page)
+        if (
+            not _is_cookie_consent_url(url)
+            and _cookie_consent_dismissed(page)
+        ):
+            if clicked_once:
+                _log(f"Instagram: после cookies URL={url!r}")
             return True
+
+        # Ждём кнопку Allow all / dialog — не только старый button._asz1.
+        if not _cookie_allow_button_present(page):
+            try:
+                page.locator(
+                    '[role="dialog"][aria-modal="true"] [role="button"], '
+                    "button._asz1, button._a9--"
+                ).filter(has_text=_ALLOW_ALL_COOKIES_RE).first.wait_for(
+                    state="attached", timeout=1500
+                )
+            except Exception:
+                try:
+                    _cookie_dialog(page).first.wait_for(state="visible", timeout=800)
+                except Exception:
+                    page.wait_for_timeout(400)
+            if not _cookie_allow_button_present(page):
+                # Dialog есть, кнопки ещё нет — JS всё равно попробуем позже.
+                if _is_cookie_consent_url(url) or _cookie_dialog(page).count() > 0:
+                    if _click_allow_all_cookies_via_js(page):
+                        clicked_once = True
+                        _log("Instagram: cookie consent — JS click (ожидание).")
+                        page.wait_for_timeout(800)
+                        continue
+                page.wait_for_timeout(400)
+                continue
+
         if _click_allow_all_cookies_button(page):
+            clicked_once = True
             _log("Instagram: cookie consent — нажали «Allow all cookies».")
-            page.wait_for_timeout(800)
-            # После accept обычно редирект с /consent на главную.
-            settle = time.monotonic() + 12.0
+            settle = time.monotonic() + 15.0
             while time.monotonic() < settle:
-                if not _is_cookie_consent_screen(page):
-                    _log(f"Instagram: после cookies URL={_page_url(page)!r}")
+                url = _page_url(page)
+                if not _is_cookie_consent_url(url) and _cookie_consent_dismissed(page):
+                    _log(f"Instagram: после cookies URL={url!r}")
                     return True
                 try:
                     page.wait_for_timeout(400)
                 except Exception:
                     break
-            return True
+            if not _is_cookie_consent_url(_page_url(page)) and _cookie_consent_dismissed(
+                page
+            ):
+                _log(f"Instagram: cookie dialog закрыт, URL={_page_url(page)!r}")
+                return True
+            _log("Instagram: cookie клик был, но экран ещё виден — повторяем…")
+            continue
         page.wait_for_timeout(400)
 
     _log("Instagram: cookie consent виден, но «Allow all cookies» не нажалась.")
@@ -1008,13 +1247,75 @@ def click_instagram_allow_all_cookies(page, *, max_seconds: float = 20.0) -> boo
 
 
 def accept_instagram_cookie_consent_if_present(
-    page, *, max_seconds: float = 20.0
+    page, *, max_seconds: float = 30.0, appear_seconds: float = 0.0
 ) -> bool:
-    """Если есть /consent или диалог cookies — Accept all. True если обработали."""
-    if not _is_cookie_consent_screen(page):
-        return False
-    _log("Instagram: экран согласия на cookies.")
-    return click_instagram_allow_all_cookies(page, max_seconds=max_seconds)
+    """
+    Если есть /consent или диалог cookies — Accept all.
+    appear_seconds > 0 — подождать появления диалога (после навигации).
+    """
+    deadline = time.monotonic() + max(0.0, appear_seconds)
+    while True:
+        if _is_cookie_consent_screen(page):
+            _log(
+                f"Instagram: экран согласия на cookies "
+                f"(URL={_page_url(page)!r})."
+            )
+            return click_instagram_allow_all_cookies(page, max_seconds=max_seconds)
+        if time.monotonic() >= deadline:
+            return False
+        # На /consent всегда ждём кнопку, early-skip не применяем.
+        try:
+            if _is_cookie_consent_url(_page_url(page)):
+                page.wait_for_timeout(300)
+                continue
+        except Exception:
+            pass
+        if _page_looks_past_cookie_gate(page):
+            return False
+        try:
+            page.wait_for_timeout(300)
+        except Exception:
+            return False
+
+
+def _page_looks_past_cookie_gate(page) -> bool:
+    """Есть UI логина/регистрации/ленты — ждать cookie-диалог не нужно."""
+    try:
+        if _is_cookie_consent_url(_page_url(page)):
+            return False
+    except Exception:
+        pass
+    try:
+        if _cookie_dialog(page).count() > 0:
+            return False
+    except Exception:
+        pass
+    try:
+        if page.get_by_text(_CREATE_ACCOUNT_RE).first.is_visible(timeout=200):
+            return True
+    except Exception:
+        pass
+    try:
+        if page.get_by_role("button", name=_LOG_IN_RE).first.is_visible(timeout=200):
+            return True
+    except Exception:
+        pass
+    try:
+        inp = page.locator(
+            'input[name="username"], input[name="email"], '
+            'input[aria-label*="email" i], input[aria-label*="пароль" i], '
+            'input[aria-label*="password" i]'
+        ).first
+        if inp.count() > 0 and inp.is_visible(timeout=200):
+            return True
+    except Exception:
+        pass
+    try:
+        if _instagram_already_logged_in(page):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _captcha_iframe_visible(page) -> bool:
@@ -1026,952 +1327,6 @@ def _captcha_iframe_visible(page) -> bool:
         return frame.count() > 0 and frame.is_visible(timeout=500)
     except Exception:
         return False
-
-
-# Готовность виджета внутри фрейма (не только наличие iframe в DOM).
-_CAPTCHA_READY_JS = """
-() => {
-  const report = {
-    hasSizedIframe: false,
-    hasSitekey: false,
-    hasAnchorSrc: false,
-    hasCheckbox: false,
-    hasResponseTa: false,
-    hasChallengeUi: false,
-    clients: 0,
-    grecaptchaApi: false,
-  };
-
-  const iframeSel =
-    'iframe#captcha-recaptcha, iframe[src*="captcha"], iframe[src*="recaptcha"], ' +
-    'iframe[src*="referer_frame"], iframe[src*="google.com/recaptcha"], ' +
-    'iframe[src*="recaptcha.net"], iframe[title*="reCAPTCHA" i], iframe[title*="recaptcha" i]';
-
-  document.querySelectorAll(iframeSel).forEach((el) => {
-    try {
-      const r = el.getBoundingClientRect();
-      const style = window.getComputedStyle(el);
-      const visible =
-        style.visibility !== 'hidden' &&
-        style.display !== 'none' &&
-        Number(style.opacity || '1') > 0 &&
-        r.width >= 40 &&
-        r.height >= 40;
-      if (visible) report.hasSizedIframe = true;
-    } catch (e) {}
-    const src = el.getAttribute('src') || el.src || '';
-    if (/\\/anchor|\\/enterprise\\/anchor|\\/bframe|enterprise\\/bframe/i.test(src)) {
-      report.hasAnchorSrc = true;
-    }
-    try {
-      const u = new URL(src, location.href);
-      const k = (u.searchParams.get('k') || '').trim();
-      if (/^6L[\\w-]{10,}$/.test(k)) report.hasSitekey = true;
-    } catch (e) {}
-  });
-
-  document.querySelectorAll('[data-sitekey]').forEach((el) => {
-    const k = (el.getAttribute('data-sitekey') || '').trim();
-    if (/^6L[\\w-]{10,}$/.test(k)) report.hasSitekey = true;
-  });
-
-  if (
-    document.querySelector(
-      '#recaptcha-anchor, .rc-anchor, #rc-anchor-container, ' +
-        '.rc-anchor-checkbox, .rc-anchor-content, #rc-anchor-alert'
-    )
-  ) {
-    report.hasCheckbox = true;
-  }
-  if (
-    document.querySelector(
-      '.rc-imageselect, .rc-imageselect-payload, #rc-imageselect, ' +
-        '.rc-doscaptcha, .rc-defaultchallenge'
-    )
-  ) {
-    report.hasChallengeUi = true;
-  }
-  if (
-    document.querySelector(
-      '#g-recaptcha-response, textarea[name="g-recaptcha-response"], ' +
-        'textarea[id^="g-recaptcha-response"]'
-    )
-  ) {
-    report.hasResponseTa = true;
-  }
-
-  try {
-    if (typeof ___grecaptcha_cfg !== 'undefined' && ___grecaptcha_cfg.clients) {
-      report.clients = Object.keys(___grecaptcha_cfg.clients).length;
-    }
-  } catch (e) {}
-
-  try {
-    if (typeof grecaptcha !== 'undefined') {
-      if (
-        typeof grecaptcha.render === 'function' ||
-        typeof grecaptcha.execute === 'function' ||
-        (grecaptcha.enterprise &&
-          (typeof grecaptcha.enterprise.render === 'function' ||
-            typeof grecaptcha.enterprise.execute === 'function'))
-      ) {
-        report.grecaptchaApi = true;
-      }
-    }
-  } catch (e) {}
-
-  return report;
-}
-"""
-
-
-def _captcha_load_status(page) -> dict:
-    """Собрать признаки прогрузки капчи по всем фреймам страницы."""
-    merged = {
-        "ready": False,
-        "hasSizedIframe": False,
-        "hasSitekey": False,
-        "hasAnchorSrc": False,
-        "hasCheckbox": False,
-        "hasResponseTa": False,
-        "hasChallengeUi": False,
-        "clients": 0,
-        "grecaptchaApi": False,
-    }
-    try:
-        frames = list(page.frames)
-    except Exception:
-        frames = []
-    for fr in frames:
-        try:
-            st = fr.evaluate(_CAPTCHA_READY_JS)
-        except Exception:
-            continue
-        if not isinstance(st, dict):
-            continue
-        for key in (
-            "hasSizedIframe",
-            "hasSitekey",
-            "hasAnchorSrc",
-            "hasCheckbox",
-            "hasResponseTa",
-            "hasChallengeUi",
-            "grecaptchaApi",
-        ):
-            if st.get(key):
-                merged[key] = True
-        try:
-            merged["clients"] = max(int(merged["clients"]), int(st.get("clients") or 0))
-        except Exception:
-            pass
-
-    widget_ready = bool(
-        merged["hasCheckbox"]
-        or merged["hasChallengeUi"]
-        or merged["hasResponseTa"]
-        or merged["clients"] > 0
-        or (merged["hasAnchorSrc"] and merged["grecaptchaApi"])
-    )
-    merged["ready"] = bool(
-        merged["hasSizedIframe"] and merged["hasSitekey"] and widget_ready
-    )
-    return merged
-
-
-def _captcha_fully_loaded(page) -> bool:
-    """True, когда виджет капчи реально отрисован во фрейме."""
-    try:
-        return bool(_captcha_load_status(page).get("ready"))
-    except Exception:
-        return False
-
-
-def _wait_captcha_fully_loaded(
-    page,
-    *,
-    max_seconds: float = _CAPTCHA_FULLY_LOADED_MAX_S,
-) -> bool:
-    """
-    Ждать полной прогрузки капчи во фрейме перед запросом в RuCaptcha.
-
-    Требуем два подряд успешных опроса (~1.2 с стабильности), чтобы не
-    отправлять createTask по полупустому iframe.
-    """
-    deadline = time.monotonic() + max(5.0, float(max_seconds))
-    stable_hits = 0
-    last_log = 0.0
-    _log("Instagram: жду полной прогрузки капчи во фрейме…")
-    while time.monotonic() < deadline:
-        if _is_confirmation_code_screen(page):
-            _log("Instagram: пока ждали капчу — уже экран кода.")
-            return True
-        status = _captcha_load_status(page)
-        if status.get("ready"):
-            stable_hits += 1
-            if stable_hits >= 2:
-                _log(
-                    "Instagram: капча полностью прогружена "
-                    f"(clients={status.get('clients')}, "
-                    f"checkbox={status.get('hasCheckbox')}, "
-                    f"anchor={status.get('hasAnchorSrc')}, "
-                    f"responseTa={status.get('hasResponseTa')})."
-                )
-                return True
-        else:
-            stable_hits = 0
-            now = time.monotonic()
-            if now - last_log >= 5.0:
-                _log(
-                    "Instagram: капча ещё грузится "
-                    f"(sized={status.get('hasSizedIframe')}, "
-                    f"sitekey={status.get('hasSitekey')}, "
-                    f"clients={status.get('clients')}, "
-                    f"checkbox={status.get('hasCheckbox')}, "
-                    f"anchor={status.get('hasAnchorSrc')})…"
-                )
-                last_log = now
-        try:
-            page.wait_for_timeout(600)
-        except Exception:
-            return False
-    _log(
-        f"Instagram: капча не прогрузилась полностью за {max_seconds:.0f} с."
-    )
-    return False
-
-
-_EXTRACT_SITEKEY_JS = """
-() => {
-  const keys = [];
-  const add = (k) => {
-    if (typeof k === 'string') {
-      const t = k.trim();
-      if (t && !keys.includes(t)) keys.push(t);
-    }
-  };
-  document.querySelectorAll('[data-sitekey]').forEach((el) => {
-    add(el.getAttribute('data-sitekey'));
-  });
-  document.querySelectorAll('iframe[src*="recaptcha"], iframe[src*="google.com/recaptcha"], iframe[src*="recaptcha.net"]').forEach((el) => {
-    try {
-      const u = new URL(el.src, location.href);
-      add(u.searchParams.get('k'));
-    } catch (e) {}
-  });
-  try {
-    if (typeof ___grecaptcha_cfg !== 'undefined' && ___grecaptcha_cfg.clients) {
-      const walk = (obj, depth) => {
-        if (!obj || depth > 6) return;
-        if (typeof obj === 'string' && /^6L[\\w-]{10,}$/.test(obj)) add(obj);
-        if (typeof obj !== 'object') return;
-        if (Array.isArray(obj)) {
-          obj.forEach((x) => walk(x, depth + 1));
-          return;
-        }
-        for (const v of Object.values(obj)) walk(v, depth + 1);
-      };
-      walk(___grecaptcha_cfg.clients, 0);
-    }
-  } catch (e) {}
-  return keys;
-}
-"""
-
-_DETECT_CAPTCHA_META_JS = """
-() => {
-  const meta = {
-    sitekeys: [],
-    invisible: false,
-    enterprise: false,
-    apiDomain: '',
-    dataS: '',
-  };
-  const addKey = (k) => {
-    if (typeof k === 'string') {
-      const t = k.trim();
-      if (t && /^6L[\\w-]{10,}$/.test(t) && !meta.sitekeys.includes(t)) {
-        meta.sitekeys.push(t);
-      }
-    }
-  };
-  const html = (document.documentElement && document.documentElement.innerHTML) || '';
-  if (/grecaptcha\\.enterprise|recaptcha\\/enterprise|recaptchaenterprise/i.test(html)) {
-    meta.enterprise = true;
-  }
-  if (typeof grecaptcha !== 'undefined' && grecaptcha.enterprise) {
-    meta.enterprise = true;
-  }
-  document.querySelectorAll('[data-sitekey]').forEach((el) => {
-    addKey(el.getAttribute('data-sitekey'));
-    const size = (el.getAttribute('data-size') || '').toLowerCase();
-    if (size === 'invisible') meta.invisible = true;
-    const s = el.getAttribute('data-s');
-    if (s && !meta.dataS) meta.dataS = s;
-  });
-  document.querySelectorAll('iframe[src*="recaptcha"], iframe[src*="google.com/recaptcha"], iframe[src*="recaptcha.net"]').forEach((el) => {
-    try {
-      const u = new URL(el.src, location.href);
-      addKey(u.searchParams.get('k'));
-      const size = (u.searchParams.get('size') || '').toLowerCase();
-      if (size === 'invisible') meta.invisible = true;
-      if (/enterprise/i.test(u.pathname + u.href)) meta.enterprise = true;
-      if (u.hostname.includes('recaptcha.net')) meta.apiDomain = 'recaptcha.net';
-      else if (u.hostname.includes('google.com')) meta.apiDomain = 'google.com';
-    } catch (e) {}
-  });
-  document.querySelectorAll('script[src*="recaptcha"]').forEach((el) => {
-    const src = el.getAttribute('src') || '';
-    if (/enterprise/i.test(src)) meta.enterprise = true;
-    if (/recaptcha\\.net/i.test(src)) meta.apiDomain = meta.apiDomain || 'recaptcha.net';
-  });
-  try {
-    if (typeof ___grecaptcha_cfg !== 'undefined' && ___grecaptcha_cfg.clients) {
-      const walk = (obj, depth) => {
-        if (!obj || depth > 7) return;
-        if (typeof obj === 'string') {
-          addKey(obj);
-          if (obj === 'invisible') meta.invisible = true;
-          return;
-        }
-        if (typeof obj !== 'object') return;
-        if (Array.isArray(obj)) {
-          obj.forEach((x) => walk(x, depth + 1));
-          return;
-        }
-        for (const [k, v] of Object.entries(obj)) {
-          if (String(k).toLowerCase() === 'size' && String(v).toLowerCase() === 'invisible') {
-            meta.invisible = true;
-          }
-          walk(v, depth + 1);
-        }
-      };
-      walk(___grecaptcha_cfg.clients, 0);
-    }
-  } catch (e) {}
-  return meta;
-}
-"""
-
-_INJECT_TOKEN_JS = """
-(token) => {
-  const report = {
-    setCount: 0,
-    callbacks: 0,
-    overridden: false,
-    dataCallbacks: 0,
-    posts: 0,
-    sitekeyFns: 0,
-    clients: 0,
-    hasGrecaptcha: false,
-    callbackPaths: [],
-    checkboxMarked: false,
-  };
-
-  const isBadCallbackKey = (k) => {
-    const key = String(k).toLowerCase();
-    return (
-      key.includes('error') ||
-      key.includes('expired') ||
-      key.includes('timeout') ||
-      key.includes('close') ||
-      key === 'reset'
-    );
-  };
-
-  // Только success-callback. НЕ трогаем error-callback / expired-callback —
-  // их вызов сбрасывает виджет (капча «обновляется»).
-  const isSuccessCallbackKey = (k) => {
-    const key = String(k).toLowerCase();
-    if (isBadCallbackKey(key)) return false;
-    return (
-      key === 'callback' ||
-      key === 'promise-callback' ||
-      key === 'success-callback' ||
-      key === 'promisecallback'
-    );
-  };
-
-  const safeCall = (fn) => {
-    if (typeof fn === 'string') {
-      try {
-        const resolved = window[fn];
-        if (typeof resolved === 'function') return safeCall(resolved);
-      } catch (e) {}
-      return false;
-    }
-    if (typeof fn !== 'function') return false;
-    try {
-      fn(token);
-      return true;
-    } catch (e) {
-      try {
-        fn();
-        return true;
-      } catch (e2) {
-        return false;
-      }
-    }
-  };
-
-  const ownEntries = (obj) => {
-    const out = [];
-    if (!obj || typeof obj !== 'object') return out;
-    let keys;
-    try {
-      keys = Reflect.ownKeys(obj);
-    } catch (e) {
-      try {
-        keys = Object.keys(obj);
-      } catch (e2) {
-        return out;
-      }
-    }
-    for (const k of keys) {
-      let v;
-      try {
-        v = obj[k];
-      } catch (e) {
-        continue;
-      }
-      out.push([k, v]);
-    }
-    return out;
-  };
-
-  const setNativeValue = (el, value) => {
-    try {
-      const proto =
-        el.tagName === 'TEXTAREA'
-          ? window.HTMLTextAreaElement.prototype
-          : window.HTMLInputElement.prototype;
-      const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-      if (desc && desc.set) desc.set.call(el, value);
-      else el.value = value;
-    } catch (e) {
-      el.value = value;
-    }
-    try { el.innerHTML = value; } catch (e) {}
-    try {
-      el.setAttribute('value', value);
-    } catch (e) {}
-    try { el.style.display = ''; } catch (e) {}
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-  };
-
-  document
-    .querySelectorAll(
-      '#g-recaptcha-response, textarea[name="g-recaptcha-response"], ' +
-        'textarea[id^="g-recaptcha-response"], input[name="g-recaptcha-response"], ' +
-        '[name="g-recaptcha-response"]'
-    )
-    .forEach((el) => {
-      setNativeValue(el, token);
-      report.setCount += 1;
-    });
-
-  if (report.setCount === 0) {
-    try {
-      const ta = document.createElement('textarea');
-      ta.id = 'g-recaptcha-response';
-      ta.name = 'g-recaptcha-response';
-      ta.style.display = 'none';
-      document.body.appendChild(ta);
-      setNativeValue(ta, token);
-      report.setCount += 1;
-    } catch (e) {}
-  }
-
-  const patchG = (g) => {
-    if (!g || typeof g !== 'object') return;
-    report.hasGrecaptcha = true;
-    try {
-      g.getResponse = function () { return token; };
-      report.overridden = true;
-    } catch (e) {}
-    try {
-      if (g.enterprise) {
-        g.enterprise.getResponse = function () { return token; };
-        report.overridden = true;
-      }
-    } catch (e) {}
-  };
-  try {
-    if (typeof grecaptcha !== 'undefined') patchG(grecaptcha);
-    if (typeof window !== 'undefined' && window.grecaptcha) patchG(window.grecaptcha);
-  } catch (e) {}
-
-  // Визуально «галочка» в anchor-фрейме (после patch getResponse).
-  try {
-    const anchor = document.querySelector(
-      '#recaptcha-anchor, .recaptcha-checkbox, #rc-anchor-container'
-    );
-    if (anchor) {
-      anchor.setAttribute('aria-checked', 'true');
-      anchor.classList.add('recaptcha-checkbox-checked');
-      const border = document.querySelector('.recaptcha-checkbox-border');
-      if (border) border.style.display = 'none';
-      const check = document.querySelector('.recaptcha-checkbox-checkmark');
-      if (check) check.style.display = 'block';
-      report.checkboxMarked = true;
-    }
-  } catch (e) {}
-
-  // Паттерн 2captcha findRecaptchaClients: clients[id][top][sub] где sitekey+size.
-  // Также: любой function-sibling рядом с sitekey (Meta иногда не кладёт size).
-  const callFindRecaptchaClients = () => {
-    if (typeof ___grecaptcha_cfg === 'undefined' || !___grecaptcha_cfg.clients) return;
-    const clients = ___grecaptcha_cfg.clients;
-    try {
-      report.clients = Object.keys(clients).length;
-    } catch (e) {}
-    for (const [cid, client] of ownEntries(clients)) {
-      if (!client || typeof client !== 'object') continue;
-      for (const [toplevelKey, toplevel] of ownEntries(client)) {
-        if (!toplevel || typeof toplevel !== 'object') continue;
-        for (const [sublevelKey, sublevel] of ownEntries(toplevel)) {
-          if (!sublevel || typeof sublevel !== 'object') continue;
-          let hasSitekey = false;
-          let hasSize = false;
-          try {
-            hasSitekey = 'sitekey' in sublevel || !!(
-              typeof sublevel.sitekey === 'string' &&
-              /^6L[\\w-]{10,}$/.test(sublevel.sitekey)
-            );
-            hasSize = 'size' in sublevel;
-          } catch (e) {
-            continue;
-          }
-          if (!hasSitekey) continue;
-          const tryKeys = hasSize
-            ? ['callback', 'promise-callback', 'success-callback']
-            : ['callback', 'promise-callback', 'success-callback'];
-          for (const cbKey of tryKeys) {
-            let cb;
-            try {
-              cb = sublevel[cbKey];
-            } catch (e) {
-              continue;
-            }
-            if (typeof cb !== 'function' && typeof cb !== 'string') continue;
-            const path =
-              '___grecaptcha_cfg.clients[' +
-              JSON.stringify(cid) +
-              '][' +
-              JSON.stringify(toplevelKey) +
-              '][' +
-              JSON.stringify(sublevelKey) +
-              '][' +
-              JSON.stringify(cbKey) +
-              ']';
-            if (safeCall(cb)) {
-              report.callbacks += 1;
-              if (report.callbackPaths.length < 5) report.callbackPaths.push(path);
-            }
-          }
-          // Любая function рядом с sitekey (кроме onload/error/expired).
-          if (report.callbacks === 0 || !hasSize) {
-            for (const [k, v] of ownEntries(sublevel)) {
-              if (typeof v !== 'function') continue;
-              const lk = String(k).toLowerCase();
-              if (isBadCallbackKey(lk)) continue;
-              if (lk === 'onload' || lk === 'render') continue;
-              const path =
-                '___grecaptcha_cfg.clients[' +
-                JSON.stringify(cid) +
-                '][' +
-                JSON.stringify(toplevelKey) +
-                '][' +
-                JSON.stringify(sublevelKey) +
-                '][' +
-                JSON.stringify(k) +
-                ']';
-              if (safeCall(v)) {
-                report.callbacks += 1;
-                if (report.callbackPaths.length < 5) report.callbackPaths.push(path);
-              }
-            }
-          }
-        }
-      }
-    }
-  };
-
-  // Глубокий поиск ТОЛЬКО success-callback по имени ключа.
-  const callNamedSuccessCallbacks = (obj, depth, seen, path) => {
-    if (!obj || depth > 12) return;
-    if (typeof obj !== 'object') return;
-    if (seen.has(obj)) return;
-    seen.add(obj);
-    for (const [k, v] of ownEntries(obj)) {
-      const nextPath = path + '[' + JSON.stringify(k) + ']';
-      if (isSuccessCallbackKey(k) && (typeof v === 'function' || typeof v === 'string')) {
-        if (safeCall(v)) {
-          report.callbacks += 1;
-          if (report.callbackPaths.length < 5) report.callbackPaths.push(nextPath);
-        }
-      } else if (v && typeof v === 'object') {
-        callNamedSuccessCallbacks(v, depth + 1, seen, nextPath);
-      }
-    }
-  };
-
-  try {
-    callFindRecaptchaClients();
-    if (typeof ___grecaptcha_cfg !== 'undefined' && ___grecaptcha_cfg.clients) {
-      if (report.callbacks === 0) {
-        callNamedSuccessCallbacks(
-          ___grecaptcha_cfg.clients,
-          0,
-          new WeakSet(),
-          '___grecaptcha_cfg.clients'
-        );
-      }
-    }
-  } catch (e) {}
-
-  // data-callback="funcName" — не вызывать data-error-callback / data-expired-callback.
-  try {
-    document.querySelectorAll('[data-callback]').forEach((el) => {
-      const name = el.getAttribute('data-callback');
-      if (!name || isBadCallbackKey(name)) return;
-      try {
-        const fn = window[name];
-        if (typeof fn === 'function' && safeCall(fn)) {
-          report.dataCallbacks += 1;
-        }
-      } catch (e) {}
-    });
-  } catch (e) {}
-
-  const globalNames = [
-    'onCaptchaSuccess',
-    'captchaCallback',
-    'recaptchaCallback',
-    'onRecaptchaSuccess',
-    'captchaResponseCallback',
-  ];
-  for (const name of globalNames) {
-    try {
-      const fn = window[name];
-      if (typeof fn === 'function' && safeCall(fn)) report.dataCallbacks += 1;
-    } catch (e) {}
-  }
-
-  // postMessage — Meta referer_frame / captcha bridge.
-  const payloads = [
-    token,
-    { token },
-    { response: token },
-    { 'g-recaptcha-response': token },
-    { type: 'recaptcha_response', token },
-    { type: 'recaptcha-token', token },
-    { type: 'captcha_solved', token },
-    { type: 'CAPTCHA_SOLVED', response: token },
-    { event: 'captcha_solved', payload: token },
-    { source: 'recaptcha', response: token },
-    { name: 'captchaResponse', payload: { response: token } },
-    { method: 'captchaResponse', params: { response: token } },
-  ];
-  for (const p of payloads) {
-    try {
-      window.postMessage(p, '*');
-      report.posts += 1;
-    } catch (e) {}
-    try {
-      if (window.parent && window.parent !== window) {
-        window.parent.postMessage(p, '*');
-        report.posts += 1;
-      }
-    } catch (e) {}
-    try {
-      if (window.top && window.top !== window) {
-        window.top.postMessage(p, '*');
-        report.posts += 1;
-      }
-    } catch (e) {}
-  }
-
-  return report;
-}
-"""
-
-def _collect_sitekeys(page) -> list[str]:
-    keys: list[str] = []
-    for frame in page.frames:
-        try:
-            found = frame.evaluate(_EXTRACT_SITEKEY_JS)
-        except Exception:
-            continue
-        if isinstance(found, list):
-            for k in found:
-                if isinstance(k, str) and k.strip() and k.strip() not in keys:
-                    keys.append(k.strip())
-    return keys
-
-def _detect_captcha_meta(page) -> dict:
-    """Собрать sitekey + флаги invisible/enterprise/apiDomain со всех фреймов."""
-    merged = {
-        "sitekeys": [],
-        "invisible": False,
-        "enterprise": False,
-        "apiDomain": "",
-        "dataS": "",
-    }
-    # Сначала фреймы капчи — их sitekey приоритетнее.
-    frames = list(page.frames)
-    captcha_frames = []
-    other_frames = []
-    for fr in frames:
-        try:
-            url = (fr.url or "").lower()
-        except Exception:
-            url = ""
-        if any(
-            x in url
-            for x in (
-                "recaptcha",
-                "captcha",
-                "referer_frame",
-                "google.com/recaptcha",
-                "recaptcha.net",
-            )
-        ):
-            captcha_frames.append(fr)
-        else:
-            other_frames.append(fr)
-
-    for fr in captcha_frames + other_frames:
-        try:
-            meta = fr.evaluate(_DETECT_CAPTCHA_META_JS)
-        except Exception:
-            continue
-        if not isinstance(meta, dict):
-            continue
-        for k in meta.get("sitekeys") or []:
-            if isinstance(k, str) and k.strip() and k.strip() not in merged["sitekeys"]:
-                merged["sitekeys"].append(k.strip())
-        if meta.get("invisible"):
-            merged["invisible"] = True
-        if meta.get("enterprise"):
-            merged["enterprise"] = True
-        if meta.get("apiDomain") and not merged["apiDomain"]:
-            merged["apiDomain"] = str(meta.get("apiDomain") or "").strip()
-        if meta.get("dataS") and not merged["dataS"]:
-            merged["dataS"] = str(meta.get("dataS") or "").strip()
-    return merged
-
-def _instagram_captcha_page_url(page) -> str:
-    """URL для RuCaptcha: канонический Instagram, без about:blank."""
-    try:
-        cur = (page.url or "").strip()
-    except Exception:
-        cur = ""
-    if "instagram.com" in cur.lower() and not cur.lower().startswith("about:"):
-        try:
-            from urllib.parse import urlsplit, urlunsplit
-
-            parts = urlsplit(cur)
-            path = parts.path or "/"
-            return urlunsplit((parts.scheme or "https", parts.netloc, path, "", ""))
-        except Exception:
-            return cur
-    return INSTAGRAM_URL
-
-
-def _inject_frame_score(result: dict) -> int:
-    """Насколько inject «успешен» в этом фрейме (callback важнее textarea)."""
-    return (
-        int(result.get("callbacks") or 0) * 100
-        + int(result.get("dataCallbacks") or 0) * 50
-        + int(result.get("sitekeyFns") or 0) * 20
-        + (30 if result.get("overridden") else 0)
-        + (10 if result.get("checkboxMarked") else 0)
-        + int(result.get("clients") or 0) * 5
-        + int(result.get("setCount") or 0)
-    )
-
-
-def _recaptcha_image_challenge_visible(page) -> bool:
-    """True, если открыт popup reCAPTCHA с картинками (bframe / imageselect)."""
-    try:
-        status = _captcha_load_status(page)
-        if status.get("hasChallengeUi"):
-            return True
-    except Exception:
-        pass
-    for frame in list(page.frames):
-        try:
-            url = (frame.url or "").lower()
-        except Exception:
-            url = ""
-        if "/bframe" in url or "enterprise/bframe" in url:
-            try:
-                if frame.locator(
-                    ".rc-imageselect, .rc-imageselect-payload, #rc-imageselect, "
-                    ".rc-defaultchallenge, .rc-doscaptcha"
-                ).first.count() > 0:
-                    return True
-            except Exception:
-                return True
-    return False
-
-
-def _dismiss_recaptcha_image_challenge(page) -> bool:
-    """
-    Закрыть challenge с картинками, если он открылся.
-
-    После inject токена кликать чекбокс нельзя: Google открывает imageselect,
-    а Instagram так и не получает success-callback → «Далее» мёртва.
-    """
-    closed = False
-    for frame in list(page.frames):
-        try:
-            url = (frame.url or "").lower()
-        except Exception:
-            url = ""
-        if not any(x in url for x in ("/bframe", "recaptcha", "enterprise")):
-            continue
-        try:
-            close_btn = frame.locator(
-                "button[title='Close'], button[aria-label='Close'], "
-                "button[title='Закрыть'], button[aria-label='Закрыть']"
-            ).first
-            if close_btn.count() > 0 and close_btn.is_visible(timeout=400):
-                close_btn.click(timeout=2000, force=True)
-                closed = True
-                _log("Instagram: закрыл popup reCAPTCHA (картинки).")
-                break
-        except Exception:
-            continue
-    if not closed:
-        try:
-            page.keyboard.press("Escape")
-            closed = True
-            _log("Instagram: Escape — попытка закрыть challenge с картинками.")
-        except Exception:
-            pass
-    if closed:
-        try:
-            page.wait_for_timeout(400)
-        except Exception:
-            pass
-    return closed
-
-
-def _inject_recaptcha_token(page, token: str) -> dict:
-    """
-    Вставить токен + вызвать success-callback, чтобы React включил Next.
-
-    Важно: НЕ кликать чекбокс после inject — клик открывает challenge с
-    картинками и ломает callback-путь.
-    """
-    injected = False
-    best: dict | None = None
-    frames: list = []
-
-    # Сначала фреймы капчи / с grecaptcha, потом остальные (main в конце повторно).
-    captcha_frames: list = []
-    other_frames: list = []
-    try:
-        main = page.main_frame
-    except Exception:
-        main = None
-    for fr in page.frames:
-        try:
-            url = (fr.url or "").lower()
-        except Exception:
-            url = ""
-        if any(
-            x in url
-            for x in (
-                "recaptcha",
-                "captcha",
-                "referer_frame",
-                "google.com/recaptcha",
-                "recaptcha.net",
-            )
-        ):
-            captcha_frames.append(fr)
-        elif main is not None and fr == main:
-            continue
-        else:
-            other_frames.append(fr)
-    frames = captcha_frames + other_frames
-    if main is not None:
-        frames.append(main)
-
-    for frame in frames:
-        try:
-            result = frame.evaluate(_INJECT_TOKEN_JS, token)
-            injected = True
-            if isinstance(result, dict):
-                if best is None or _inject_frame_score(result) > _inject_frame_score(best):
-                    best = result
-                if (
-                    result.get("callbacks")
-                    or result.get("dataCallbacks")
-                    or result.get("overridden")
-                    or result.get("checkboxMarked")
-                ):
-                    try:
-                        furl = (frame.url or "")[:80]
-                    except Exception:
-                        furl = "?"
-                    paths = result.get("callbackPaths") or []
-                    path_s = ""
-                    if isinstance(paths, list) and paths:
-                        path_s = f", path={paths[0]!r}"
-                    _log(
-                        "Instagram: inject OK — "
-                        f"set={result.get('setCount')}, "
-                        f"callbacks={result.get('callbacks')}, "
-                        f"dataCb={result.get('dataCallbacks')}, "
-                        f"override={result.get('overridden')}, "
-                        f"clients={result.get('clients')}, "
-                        f"checkbox={result.get('checkboxMarked')}, "
-                        f"frame={furl!r}{path_s}"
-                    )
-        except Exception:
-            continue
-
-    if not injected:
-        raise RuntimeError("Instagram: не удалось вставить токен капчи в страницу/фреймы.")
-    if best:
-        paths = best.get("callbackPaths") or []
-        path_s = ""
-        if isinstance(paths, list) and paths:
-            path_s = f", path={paths[0]!r}"
-        _log(
-            "Instagram: итог inject — "
-            f"set={best.get('setCount')}, callbacks={best.get('callbacks')}, "
-            f"override={best.get('overridden')}, clients={best.get('clients')}, "
-            f"checkbox={best.get('checkboxMarked')}{path_s}"
-        )
-        if int(best.get("callbacks") or 0) == 0 and int(best.get("dataCallbacks") or 0) == 0:
-            _log(
-                "Instagram: success-callback не найден — "
-                "только textarea/override. Next может остаться disabled."
-            )
-    page.wait_for_timeout(400)
-    # Ещё раз в main — React-обработчик часто живёт на родительской странице.
-    if main is not None:
-        try:
-            page.main_frame.evaluate(_INJECT_TOKEN_JS, token)
-        except Exception:
-            pass
-    # Если уже открыт challenge с картинками — закрыть (не решать кликом).
-    try:
-        if _recaptcha_image_challenge_visible(page):
-            _log(
-                "Instagram: после inject открыт challenge с картинками — "
-                "закрываю (клик чекбокса не делаем)."
-            )
-            _dismiss_recaptcha_image_challenge(page)
-    except Exception as e:
-        _log(f"Instagram: dismiss challenge: {e!r}")
-    page.wait_for_timeout(400)
-    return best or {}
 
 
 def _click_instagram_next(page) -> bool:
@@ -1989,285 +1344,50 @@ def _click_instagram_next(page) -> bool:
         return False
 
 
-_RELOAD_CAPTCHA_FRAME_JS = """
+def _recaptcha_has_response(page) -> bool:
+    """Есть ли уже токен в textarea / grecaptcha.getResponse."""
+    js = """
 () => {
-  const report = { cleared: 0, reset: 0, reloaded: 0 };
-  const clearSel =
+  const areas = document.querySelectorAll(
     '#g-recaptcha-response, textarea[name="g-recaptcha-response"], ' +
-    'textarea[id^="g-recaptcha-response"], input[name="g-recaptcha-response"], ' +
-    '[name="g-recaptcha-response"]';
-  document.querySelectorAll(clearSel).forEach((el) => {
-    try {
-      el.value = '';
-      el.innerHTML = '';
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      report.cleared += 1;
-    } catch (e) {}
-  });
-
+      'textarea[id^="g-recaptcha-response"]'
+  );
+  for (const el of areas) {
+    if ((el.value || '').trim().length > 20) return true;
+  }
   try {
     if (typeof grecaptcha !== 'undefined') {
-      if (typeof grecaptcha.reset === 'function') {
-        try { grecaptcha.reset(); report.reset += 1; } catch (e) {}
+      if (grecaptcha.enterprise && typeof grecaptcha.enterprise.getResponse === 'function') {
+        const t = (grecaptcha.enterprise.getResponse() || '').trim();
+        if (t.length > 20) return true;
       }
-      if (grecaptcha.enterprise && typeof grecaptcha.enterprise.reset === 'function') {
-        try { grecaptcha.enterprise.reset(); report.reset += 1; } catch (e) {}
+      if (typeof grecaptcha.getResponse === 'function') {
+        const t = (grecaptcha.getResponse() || '').trim();
+        if (t.length > 20) return true;
       }
     }
   } catch (e) {}
-
-  const iframeSel =
-    'iframe#captcha-recaptcha, iframe[src*="captcha"], ' +
-    'iframe[src*="recaptcha"], iframe[src*="referer_frame"], ' +
-    'iframe[title*="reCAPTCHA" i], iframe[title*="recaptcha" i]';
-  document.querySelectorAll(iframeSel).forEach((iframe) => {
-    try {
-      const src = iframe.getAttribute('src') || iframe.src || '';
-      if (!src || src === 'about:blank') return;
-      // Force reload: bump cache-buster then restore original if needed.
-      try {
-        const u = new URL(src, location.href);
-        u.searchParams.set('_zaliver_reload', String(Date.now()));
-        iframe.src = u.toString();
-      } catch (e2) {
-        iframe.src = src;
-      }
-      report.reloaded += 1;
-    } catch (e) {}
-  });
-  return report;
+  return false;
 }
 """
-
-
-def reload_instagram_captcha_frame(page) -> None:
-    """
-    Сбросить состояние после неудачного RuCaptcha (inject/overrides)
-    и перезагрузить iframe капчи перед ручным прохождением.
-    """
-    _log("Instagram: перезагружаю фрейм капчи перед ручным прохождением…")
-    totals = {"cleared": 0, "reset": 0, "reloaded": 0}
-    # Только main_frame — обход всех frames через evaluate иногда валит CDP.
-    frames = []
-    try:
-        frames.append(page.main_frame)
-    except Exception:
-        pass
-    try:
-        for fr in page.frames:
-            if fr in frames:
-                continue
-            try:
-                url = (fr.url or "").lower()
-            except Exception:
-                url = ""
-            if any(
-                x in url
-                for x in ("recaptcha", "captcha", "referer_frame")
-            ):
-                frames.append(fr)
-    except Exception:
-        pass
-
-    for frame in frames:
+    for frame in list(page.frames):
         try:
-            result = frame.evaluate(_RELOAD_CAPTCHA_FRAME_JS)
-        except Exception:
-            continue
-        if not isinstance(result, dict):
-            continue
-        for k in totals:
-            try:
-                totals[k] += int(result.get(k) or 0)
-            except Exception:
-                pass
-
-    _log(
-        "Instagram: reload капчи — "
-        f"cleared={totals['cleared']}, reset={totals['reset']}, "
-        f"reloaded={totals['reloaded']}"
-    )
-    try:
-        page.wait_for_timeout(2500)
-    except Exception:
-        return
-    deadline = time.monotonic() + 20.0
-    while time.monotonic() < deadline:
-        try:
-            if _is_confirmation_code_screen(page):
-                return
-            if _captcha_iframe_visible(page):
-                _log("Instagram: фрейм капчи снова на месте.")
-                return
-            page.wait_for_timeout(400)
-        except Exception:
-            return
-    _log("Instagram: после reload iframe капчи пока не видно — всё равно ждём вручную.")
-
-
-def try_solve_instagram_captcha_rucaptcha(
-    page,
-    *,
-    rucaptcha_api_key: str,
-) -> bool:
-    """
-    2× Proxyless через RuCaptcha (без прокси/UA). True если токен вставлен
-    и «Далее» нажата / уже экран кода.
-
-    Запрос в RuCaptcha уходит только после полной прогрузки капчи во фрейме.
-    """
-    from zaliver.captcha.rucaptcha import (
-        RuCaptchaError,
-        solve_recaptcha_v2_proxyless,
-    )
-
-    api_key = (rucaptcha_api_key or "").strip()
-    if not api_key:
-        _log("Instagram: ключ RuCaptcha не задан — сразу ручная капча.")
-        return False
-
-    if _is_confirmation_code_screen(page):
-        return True
-
-    if not _wait_captcha_fully_loaded(page):
-        _log(
-            "Instagram: капча не прогрузилась — RuCaptcha не вызываем, "
-            "ручное ожидание."
-        )
-        return False
-
-    if _is_confirmation_code_screen(page):
-        return True
-
-    meta = _detect_captcha_meta(page)
-    if not meta.get("sitekeys"):
-        keys = _collect_sitekeys(page)
-        if keys:
-            meta = {
-                "sitekeys": keys,
-                "invisible": False,
-                "enterprise": False,
-                "apiDomain": "",
-                "dataS": "",
-            }
-
-    sitekeys = list(meta.get("sitekeys") or [])
-    if not sitekeys:
-        _log("Instagram: sitekey не найден — RuCaptcha пропуск, ручная капча.")
-        return False
-
-    website_key = sitekeys[0]
-    website_url = _instagram_captcha_page_url(page)
-    prefer_invisible = bool(meta.get("invisible"))
-    api_domain = (meta.get("apiDomain") or "").strip() or None
-    enterprise_payload = None
-    data_s = (meta.get("dataS") or "").strip()
-    if data_s:
-        enterprise_payload = {"s": data_s}
-
-    _log(
-        f"Instagram: RuCaptcha Proxyless — sitekey={website_key[:16]}… "
-        f"url={website_url!r}, invisible={prefer_invisible}, "
-        f"apiDomain={api_domain!r}"
-    )
-
-    token: str | None = None
-    last_err: Exception | None = None
-    try:
-        token = solve_recaptcha_v2_proxyless(
-            api_key,
-            website_url=website_url,
-            website_key=website_key,
-            is_invisible=prefer_invisible,
-            is_enterprise=True,
-            api_domain=api_domain,
-            enterprise_payload=enterprise_payload,
-            retries=2,
-            log=_log,
-        )
-    except RuCaptchaError as e:
-        last_err = e
-        if len(sitekeys) > 1:
-            for alt_key in sitekeys[1:]:
-                _log(f"Instagram: другой sitekey={alt_key[:16]}…")
-                try:
-                    token = solve_recaptcha_v2_proxyless(
-                        api_key,
-                        website_url=website_url,
-                        website_key=alt_key,
-                        is_invisible=prefer_invisible,
-                        is_enterprise=True,
-                        api_domain=api_domain,
-                        enterprise_payload=enterprise_payload,
-                        retries=1,
-                        log=_log,
-                    )
-                    last_err = None
-                    break
-                except RuCaptchaError as e2:
-                    last_err = e2
-
-    if not token:
-        _log(
-            "Instagram: RuCaptcha не решила капчу"
-            + (f" ({last_err})" if last_err else "")
-            + " — переходим к ручному ожиданию."
-        )
-        return False
-
-    _log(f"Instagram: RuCaptcha токен (len={len(token)}), вставляем…")
-    try:
-        _inject_recaptcha_token(page, token)
-    except Exception as e:
-        _log(f"Instagram: inject токена не удался: {e!r} — ручная капча.")
-        return False
-
-    # Ждём активации Next / экран кода. Чекбокс НЕ кликаем — только re-inject.
-    wait_started = time.monotonic()
-    wait_deadline = wait_started + 45.0
-    reinject_at = (3.0, 8.0, 15.0)
-    reinject_done: set[float] = set()
-    challenge_logged = False
-    while time.monotonic() < wait_deadline:
-        if _is_confirmation_code_screen(page):
-            _log("Instagram: после RuCaptcha сразу экран кода.")
-            return True
-        if _next_button_enabled(page):
-            if _click_instagram_next(page):
+            if frame.evaluate(js):
                 return True
-            break
-        elapsed = time.monotonic() - wait_started
-        if _recaptcha_image_challenge_visible(page):
-            if not challenge_logged:
-                _log(
-                    "Instagram: виден challenge с картинками — "
-                    "это ломает callback; закрываю и re-inject."
-                )
-                challenge_logged = True
-            try:
-                _dismiss_recaptcha_image_challenge(page)
-            except Exception:
-                pass
-        for t in reinject_at:
-            if t in reinject_done or elapsed < t:
-                continue
-            reinject_done.add(t)
-            try:
-                _log(f"Instagram: повторный inject токена (~{t:.0f} с)…")
-                _inject_recaptcha_token(page, token)
-            except Exception as e:
-                _log(f"Instagram: re-inject: {e!r}")
-        page.wait_for_timeout(500)
-
-    if _is_confirmation_code_screen(page):
-        return True
-    _log(
-        "Instagram: после RuCaptcha «Далее» не активировалась — "
-        "ручное ожидание."
-    )
+        except Exception:
+            continue
     return False
 
+
+def _captcha_passed_locally(page) -> bool:
+    """Капча уже пройдена: токен / Next / экран кода."""
+    if _is_confirmation_code_screen(page):
+        return True
+    if _next_button_enabled(page):
+        return True
+    if _recaptcha_has_response(page):
+        return True
+    return False
 
 
 def _wait_captcha_or_code_screen(
@@ -2337,30 +1457,75 @@ def _next_button_enabled(page) -> bool:
         return False
 
 
+def _extension_captcha_solved_visible(page) -> bool:
+    """Бейдж AntiCaptcha .antigate_solver.solved на странице."""
+    try:
+        loc = page.locator(".antigate_solver.solved").first
+        return loc.count() > 0 and loc.is_visible(timeout=300)
+    except Exception:
+        return False
+
+
+def _wait_anticaptcha_extension_solve(
+    page,
+    *,
+    max_seconds: float = _EXTENSION_CAPTCHA_MAX_S,
+) -> bool:
+    """
+    Ждать авторешения капчи браузерным расширением AntiCaptcha
+    (без HTTP API Zaliver и без reload фрейма).
+    """
+    deadline = time.monotonic() + float(max_seconds)
+    last_log = 0.0
+    _log(
+        f"Instagram: жду расширение AntiCaptcha до {max_seconds:.0f} с "
+        "(бейдж .antigate_solver.solved / «Далее» / экран кода)…"
+    )
+    while time.monotonic() < deadline:
+        accept_instagram_terms_if_present(page, max_seconds=5.0)
+        if _is_confirmation_code_screen(page):
+            _log("Instagram: расширение — уже экран кода.")
+            return True
+        if _extension_captcha_solved_visible(page):
+            _log("Instagram: расширение отметило капчу как solved.")
+            if _next_button_enabled(page) and _click_instagram_next(page):
+                return True
+            if _is_confirmation_code_screen(page):
+                return True
+            # Токен мог подставиться без авто-submit — пробуем Next ещё раз.
+            page.wait_for_timeout(1500)
+            if _next_button_enabled(page) and _click_instagram_next(page):
+                return True
+            if _is_confirmation_code_screen(page):
+                return True
+            return True
+        if _captcha_passed_locally(page) or _next_button_enabled(page):
+            if _click_instagram_next(page) or _is_confirmation_code_screen(page):
+                _log("Instagram: капча пройдена (Next активна) — вероятно расширение.")
+                return True
+        now = time.monotonic()
+        if now - last_log >= _MANUAL_CAPTCHA_LOG_EVERY_S:
+            _log(
+                f"Instagram: всё ещё жду расширение… "
+                f"({int(now - (deadline - max_seconds))} с)."
+            )
+            last_log = now
+        page.wait_for_timeout(800)
+    _log("Instagram: расширение не решило капчу за отведённое время.")
+    return False
+
+
 def wait_instagram_manual_captcha(
     page,
     *,
-    reload_frame: bool = False,
     on_manual_captcha=None,
 ) -> None:
     """
     Бессрочно ждать, пока человек пройдёт капчу (кнопка «Далее»/Next активна),
     затем нажать её. Если уже экран кода — выйти без клика.
-
-    ``reload_frame`` — сбросить/перезагрузить iframe после неудачного RuCaptcha.
     """
     if _is_confirmation_code_screen(page):
         _log("Instagram: капча не нужна — уже экран кода.")
-        return
-
-    if reload_frame:
-        try:
-            reload_instagram_captcha_frame(page)
-        except Exception as e:
-            _log(f"Instagram: reload фрейма капчи не удался: {e!r}")
-
-    if _is_confirmation_code_screen(page):
-        _log("Instagram: после reload уже экран кода.")
         return
 
     _log(
@@ -2413,37 +1578,37 @@ def wait_instagram_manual_captcha(
 def wait_instagram_after_signup(
     page,
     *,
-    rucaptcha_api_key: str = "",
     on_manual_captcha=None,
 ) -> None:
-    """После «Отправить»: условия → RuCaptcha Proxyless (2×) или ручная капча / экран кода."""
+    """После «Отправить»: расширение AntiCaptcha → иначе ручное ожидание."""
     # Сразу после Submit иногда показывают «agree to our terms».
     page.wait_for_timeout(600)
     accept_instagram_terms_if_present(page, max_seconds=15.0)
     outcome = _wait_captcha_or_code_screen(page)
     if outcome == "code":
         return
-    # createTask только спустя N секунд после появления iframe.
+    # Дать iframe/расширению время подняться.
     settle_ms = int(max(0.0, float(_CAPTCHA_IFRAME_SETTLE_S)) * 1000)
     if settle_ms > 0:
         _log(
             f"Instagram: жду {_CAPTCHA_IFRAME_SETTLE_S:.0f} с после iframe "
-            "перед запросом в RuCaptcha…"
+            "перед решением капчи…"
         )
         page.wait_for_timeout(settle_ms)
         if _is_confirmation_code_screen(page):
             _log("Instagram: за время паузы уже экран кода.")
             return
-    solved = try_solve_instagram_captcha_rucaptcha(
-        page, rucaptcha_api_key=rucaptcha_api_key
+
+    if _wait_anticaptcha_extension_solve(page):
+        if _is_confirmation_code_screen(page):
+            return
+        wait_instagram_confirmation_code_screen(page)
+        return
+
+    wait_instagram_manual_captcha(
+        page,
+        on_manual_captcha=on_manual_captcha,
     )
-    if not solved:
-        # После inject/RuCaptcha виджет часто «ломается» — обновим фрейм.
-        wait_instagram_manual_captcha(
-            page,
-            reload_frame=True,
-            on_manual_captcha=on_manual_captcha,
-        )
     if _is_confirmation_code_screen(page):
         return
     wait_instagram_confirmation_code_screen(page)
@@ -2454,24 +1619,13 @@ def wait_instagram_confirmation_code_screen(
     *,
     max_seconds: float = _CONFIRM_SCREEN_MAX_S,
 ) -> None:
-    """Ждать экран «Введите код подтверждения»."""
+    """Ждать экран «Введите код подтверждения» (код из почты)."""
     deadline = time.monotonic() + max_seconds
     while time.monotonic() < deadline:
         accept_instagram_terms_if_present(page, max_seconds=8.0)
-        try:
-            heading = page.get_by_text(_CONFIRM_CODE_HEADING_RE).first
-            if heading.count() > 0 and heading.is_visible(timeout=400):
-                _log("Instagram: экран кода подтверждения.")
-                return
-        except Exception:
-            pass
-        try:
-            field = page.locator('input[maxlength="6"]').first
-            if field.count() > 0 and field.is_visible(timeout=300):
-                _log("Instagram: поле кода подтверждения видно.")
-                return
-        except Exception:
-            pass
+        if _is_confirmation_code_screen(page):
+            _log("Instagram: экран кода подтверждения.")
+            return
         page.wait_for_timeout(500)
     raise RuntimeError(
         f"Instagram: экран кода подтверждения не появился за {max_seconds:.0f} с "
@@ -2699,413 +1853,8 @@ def click_instagram_human_confirm_continue(page, *, max_seconds: float = 30.0) -
     return False
 
 
-def wait_instagram_image_captcha_manual(
-    page,
-    username: str = "",
-    *,
-    on_manual_captcha=None,
-) -> None:
-    """
-    Image-капча (в т.ч. /accounts/suspended): уведомление + бессрочное ожидание,
-    пока человек введёт код и экран капчи закроется.
-    """
-    if _image_captcha_passed(page, username):
-        return
-
-    if callable(on_manual_captcha):
-        try:
-            on_manual_captcha()
-        except Exception as e:
-            _log(f"Instagram: on_manual_captcha (image): {e!r}")
-
-    _log(
-        "Instagram: image captcha — жду ручного прохождения "
-        "(код с картинки → Next)…"
-    )
-    started = time.monotonic()
-    last_log = started
-    while True:
-        if _image_captcha_passed(page, username):
-            _log("Instagram: image captcha пройдена (ручной ввод).")
-            return
-        if _next_button_enabled(page):
-            _log("Instagram: Next активна после image captcha — нажимаем.")
-            if _click_image_captcha_next(page):
-                page.wait_for_timeout(1200)
-                continue
-        now = time.monotonic()
-        if now - last_log >= _MANUAL_CAPTCHA_LOG_EVERY_S:
-            waited = int(now - started)
-            _log(
-                f"Instagram: всё ещё жду image captcha… ({waited} с). "
-                "Введите код с картинки в окне браузера."
-            )
-            last_log = now
-        page.wait_for_timeout(800)
-
-
-def _image_captcha_passed(page, username: str = "") -> bool:
-    """Капча пройдена: главная / форма signup / ушли с suspended и поля кода."""
-    uname = (username or "").strip().lstrip("@")
-    if uname and _instagram_home_ready(page, uname):
-        return True
-    if _signup_form_visible(page):
-        return True
-    if _is_image_captcha_screen(page):
-        return False
-    if _is_accounts_suspended(page):
-        return False
-    return True
-
-
-def _image_captcha_img_locator(page):
-    return page.locator(
-        'img[src*="facebook.com/captcha/tfbimage"], '
-        'img[src*="captcha_challenge"]'
-    ).first
-
-
-def _image_captcha_input_locator(page):
-    """
-    Bloks TextInput: placeholder часто пустой, подпись в соседнем span
-    («Enter the code from the image»), type=tel maxlength=6.
-    """
-    # 1) Точный bloks TextInput
-    for sel in (
-        'textarea[data-bloks-name="bk.components.TextInput"][maxlength="6"]',
-        'textarea[type="tel"][maxlength="6"]',
-        'textarea[data-bloks-name="bk.components.TextInput"]',
-    ):
-        try:
-            loc = page.locator(sel).first
-            if loc.count() > 0 and loc.is_visible(timeout=400):
-                return loc
-        except Exception:
-            pass
-
-    # 2) Textarea рядом с подписью (placeholder пустой)
-    try:
-        label = page.get_by_text(_IMAGE_CAPTCHA_PLACEHOLDER_RE).first
-        if label.count() > 0 and label.is_visible(timeout=400):
-            root = label.locator(
-                "xpath=ancestor::div[.//textarea[@maxlength='6' or "
-                "@data-bloks-name='bk.components.TextInput']][1]"
-            )
-            ta = root.locator(
-                'textarea[data-bloks-name="bk.components.TextInput"], '
-                'textarea[maxlength="6"], textarea'
-            ).first
-            if ta.count() > 0 and ta.is_visible(timeout=400):
-                return ta
-    except Exception:
-        pass
-
-    for sel in (
-        'textarea[placeholder*="code from the image" i]',
-        'textarea[placeholder*="код с картинки" i]',
-        'textarea[maxlength="6"]',
-        'input[maxlength="6"]',
-    ):
-        try:
-            loc = page.locator(sel).first
-            if loc.count() > 0 and loc.is_visible(timeout=300):
-                return loc
-        except Exception:
-            pass
-    return None
-
-
-def _capture_image_captcha_base64(page) -> str:
-    """Снять картинку капчи → clean base64 для RuCaptcha ImageToTextTask."""
-    img = _image_captcha_img_locator(page)
-    if img.count() == 0 or not img.is_visible(timeout=2000):
-        raise RuntimeError("Instagram: не нашли img image captcha.")
-
-    src = ""
-    try:
-        src = (img.get_attribute("src") or "").strip()
-    except Exception:
-        src = ""
-
-    if src.startswith("http"):
-        try:
-            resp = page.request.get(src, timeout=30000)
-            if resp.ok:
-                raw = resp.body()
-                if raw:
-                    return base64.b64encode(raw).decode("ascii")
-        except Exception as e:
-            _log(f"Instagram: download captcha img failed, screenshot: {e!r}")
-
-    png = img.screenshot(type="png")
-    if not png:
-        raise RuntimeError("Instagram: пустой screenshot image captcha.")
-    return base64.b64encode(png).decode("ascii")
-
-
-def _read_image_captcha_field_value(field) -> str:
-    try:
-        val = field.input_value(timeout=1000)
-        if val is not None:
-            return str(val)
-    except Exception:
-        pass
-    try:
-        return str(field.evaluate("el => el.value || el.textContent || ''") or "")
-    except Exception:
-        return ""
-
-
-def _fill_image_captcha_code(page, code: str) -> None:
-    """
-    Ввод в bloks TextInput.
-
-    Нельзя ставить el.value через JS — DOM меняется, а React/bloks state нет
-    (счётчик пустой, Next не активируется). Нужны реальные клавиши.
-    """
-    raw = (code or "").strip()
-    cleaned = re.sub(r"\D+", "", raw)
-    if not cleaned:
-        cleaned = re.sub(r"\s+", "", raw)
-    _log(f"Instagram: RuCaptcha код raw={raw!r}, cleaned={cleaned!r}")
-    if not cleaned:
-        raise RuntimeError(f"Instagram: пустой код image captcha от RuCaptcha: {raw!r}")
-
-    field = _image_captcha_input_locator(page)
-    if field is None:
-        raise RuntimeError("Instagram: не нашли поле кода image captcha.")
-
-    try:
-        meta = field.evaluate(
-            """el => ({
-                tag: el.tagName,
-                type: el.getAttribute('type') || '',
-                placeholder: el.getAttribute('placeholder') || '',
-                bloks: el.getAttribute('data-bloks-name') || '',
-                max: el.getAttribute('maxlength') || '',
-                value: el.value || '',
-            })"""
-        )
-        _log(f"Instagram: поле image captcha meta={meta!r}")
-    except Exception as e:
-        _log(f"Instagram: meta поля image captcha: {e!r}")
-
-    # Родители с pointer-events:none — force click + явный focus.
-    try:
-        field.click(force=True, timeout=8000)
-    except Exception as e:
-        _log(f"Instagram: force click image captcha: {e!r}")
-    try:
-        field.evaluate("el => { el.focus(); el.click(); }")
-    except Exception:
-        pass
-    page.wait_for_timeout(200)
-
-    # Сброс DOM+state клавишами (не через fill/JS value).
-    for combo in ("Control+A", "Meta+A"):
-        try:
-            page.keyboard.press(combo)
-            break
-        except Exception:
-            pass
-    try:
-        page.keyboard.press("Backspace")
-    except Exception:
-        pass
-    page.wait_for_timeout(100)
-
-    # Реальный ввод — React/bloks слушает keydown/input.
-    try:
-        page.keyboard.type(cleaned, delay=120)
-        _log(f"Instagram: keyboard.type отправил {cleaned!r}")
-    except Exception as e:
-        _log(f"Instagram: keyboard.type не сработал: {e!r}")
-        try:
-            field.press_sequentially(cleaned, delay=120)
-            _log(f"Instagram: press_sequentially отправил {cleaned!r}")
-        except Exception as e2:
-            raise RuntimeError(
-                f"Instagram: не удалось напечатать код image captcha: {e2!r}"
-            ) from e2
-
-    page.wait_for_timeout(300)
-    actual = re.sub(r"\D+", "", _read_image_captcha_field_value(field).strip())
-    _log(f"Instagram: в поле image captcha сейчас {actual!r} (ждали {cleaned!r})")
-    if actual != cleaned:
-        # Ещё одна попытка: посимвольно через keyboard.press
-        _log("Instagram: повторный посимвольный ввод image captcha…")
-        try:
-            field.click(force=True, timeout=5000)
-            field.evaluate("el => el.focus()")
-            page.keyboard.press("Control+A")
-            page.keyboard.press("Backspace")
-            for ch in cleaned:
-                page.keyboard.press(ch)
-                page.wait_for_timeout(80)
-        except Exception as e:
-            _log(f"Instagram: посимвольный ввод: {e!r}")
-        actual = re.sub(r"\D+", "", _read_image_captcha_field_value(field).strip())
-        _log(f"Instagram: после повтора в поле {actual!r}")
-        if actual != cleaned:
-            raise RuntimeError(
-                f"Instagram: код не попал в bloks TextInput: "
-                f"ждали {cleaned!r}, в поле {actual!r}"
-            )
-    _log(f"Instagram: ввели код image captcha {cleaned!r}.")
-
-
-def _click_image_captcha_next(page) -> bool:
-    """Нажать Next/Далее на экране image captcha."""
-    if _click_instagram_next(page):
-        return True
-    try:
-        btn = page.locator(
-            '[role="button"][aria-label="Next" i], '
-            '[role="button"][aria-label="Далее" i]'
-        ).first
-        if btn.count() > 0 and btn.is_visible(timeout=400):
-            disabled = (
-                (btn.get_attribute("aria-disabled") or "").lower() == "true"
-                or btn.get_attribute("disabled") is not None
-            )
-            if not disabled:
-                btn.click(timeout=5000)
-                _log("Instagram: нажали Next (aria-label) после image captcha.")
-                return True
-    except Exception:
-        pass
-    return False
-
-
-def _wait_image_captcha_ui(page, *, max_seconds: float = 30.0) -> bool:
-    """Дождаться UI капчи на suspended / уже открытом экране."""
-    deadline = time.monotonic() + max_seconds
-    while time.monotonic() < deadline:
-        if _image_captcha_passed(page, ""):
-            return False
-        if _is_image_captcha_screen(page):
-            return True
-        if not _is_accounts_suspended(page):
-            return False
-        page.wait_for_timeout(400)
-    return _is_image_captcha_screen(page)
-
-
-def try_solve_instagram_image_captcha_rucaptcha(
-    page,
-    username: str = "",
-    *,
-    rucaptcha_api_key: str,
-    retries: int = 2,
-) -> bool:
-    """
-    Решить digit image captcha через RuCaptcha ImageToTextTask.
-    True если ушли с экрана / открылась главная / signup.
-    """
-    from zaliver.captcha.rucaptcha import RuCaptchaError, solve_image_to_text
-
-    api_key = (rucaptcha_api_key or "").strip()
-    if not api_key:
-        return False
-
-    attempts = max(1, int(retries))
-    for attempt in range(1, attempts + 1):
-        if _image_captcha_passed(page, username):
-            return True
-        if not _is_image_captcha_screen(page):
-            if _is_accounts_suspended(page):
-                if not _wait_image_captcha_ui(page, max_seconds=15.0):
-                    if _image_captcha_passed(page, username):
-                        return True
-                    _log(
-                        "Instagram: suspended без UI капчи "
-                        f"(попытка {attempt}/{attempts})."
-                    )
-                    continue
-            else:
-                return True
-
-        _log(
-            f"Instagram: image captcha → RuCaptcha ImageToText "
-            f"попытка {attempt}/{attempts}…"
-        )
-        try:
-            body_b64 = _capture_image_captcha_base64(page)
-            text = solve_image_to_text(
-                api_key,
-                body_base64=body_b64,
-                numeric=1,
-                case=False,
-                min_length=4,
-                max_length=6,
-                comment="цифры с картинки Instagram",
-                retries=1,
-                log=_log,
-            )
-            _log(f"Instagram: RuCaptcha вернула код image captcha: {text!r}")
-        except (RuCaptchaError, RuntimeError) as e:
-            _log(f"Instagram: RuCaptcha image captcha неудача: {e}")
-            continue
-
-        try:
-            _fill_image_captcha_code(page, text)
-        except Exception as e:
-            _log(f"Instagram: не ввели код image captcha: {e!r}")
-            continue
-
-        # Ждём активации Next и клик / уход с экрана.
-        wait_until = time.monotonic() + 20.0
-        clicked = False
-        while time.monotonic() < wait_until:
-            if _image_captcha_passed(page, username):
-                _log("Instagram: image captcha решена.")
-                return True
-            if _next_button_enabled(page):
-                if _click_image_captcha_next(page):
-                    clicked = True
-                    page.wait_for_timeout(1500)
-                    if _image_captcha_passed(page, username):
-                        _log("Instagram: image captcha решена (после Next).")
-                        return True
-                    # Остались на image captcha — возможно неверный код.
-                    if _is_image_captcha_screen(page) or _is_accounts_suspended(page):
-                        break
-            page.wait_for_timeout(400)
-
-        if not clicked and (
-            _is_image_captcha_screen(page) or _is_accounts_suspended(page)
-        ):
-            # Bloks-кнопка иногда без disabled — пробуем клик один раз.
-            if _click_image_captcha_next(page):
-                clicked = True
-                page.wait_for_timeout(1500)
-                if _image_captcha_passed(page, username):
-                    return True
-
-        if clicked and not _image_captcha_passed(page, username):
-            _log(
-                f"Instagram: после кода RuCaptcha всё ещё image captcha "
-                f"(попытка {attempt}/{attempts})."
-            )
-            continue
-        if not clicked:
-            _log(
-                f"Instagram: Next не нажалась после кода RuCaptcha "
-                f"(попытка {attempt}/{attempts})."
-            )
-
-    return _image_captcha_passed(page, username)
-
-
-def resolve_instagram_image_captcha(
-    page,
-    *,
-    username: str = "",
-    rucaptcha_api_key: str = "",
-    on_manual_captcha=None,
-) -> None:
-    """Больше не решаем: image/SMS captcha → тег и остановка авторега."""
-    del username, rucaptcha_api_key, on_manual_captcha
+def resolve_instagram_image_captcha(page) -> None:
+    """Image/SMS captcha → тег и остановка авторега (не решаем)."""
     abort_if_instagram_sms_image_captcha(page)
 
 
@@ -3113,15 +1862,12 @@ def handle_instagram_human_confirmation(
     page,
     username: str,
     *,
-    rucaptcha_api_key: str = "",
-    on_manual_captcha=None,
     appear_timeout_s: float = 45.0,
 ) -> None:
     """
     После кода из почты: опционально «Confirm you're human» → Continue →
     image captcha → стоп с тегом SMS (не решаем).
     """
-    del rucaptcha_api_key, on_manual_captcha
     if _instagram_home_ready(page, username):
         return
 
@@ -3235,35 +1981,123 @@ def wait_instagram_home_with_username(
     )
 
 
+def _left_email_confirmation_screen(page, username: str) -> bool:
+    """True если уже не экран кода из почты (human check / главная / SMS и т.п.)."""
+    if _is_human_confirm_intro_screen(page):
+        return True
+    if _is_accounts_suspended(page) or _is_image_captcha_screen(page):
+        return True
+    if _is_terms_agree_screen(page):
+        return True
+    if _instagram_home_ready(page, username):
+        return True
+    # URL ушёл с signup/confirm email — считаем, что код принят.
+    try:
+        url = (page.url or "").strip().lower()
+        if "instagram.com" in url:
+            left_signup = all(
+                token not in url
+                for token in (
+                    "emailsignup",
+                    "accounts/signup",
+                    "confirm_email",
+                    "challenge",
+                )
+            )
+            if left_signup and ("onetap" in url or "/accounts/" not in url):
+                return True
+    except Exception:
+        pass
+    return not _is_confirmation_code_screen(page)
+
+
 def complete_instagram_email_confirmation(
     ig_page,
     gmail_page,
     username: str,
-    *,
-    rucaptcha_api_key: str = "",
-    on_manual_captcha=None,
 ) -> None:
-    """Экран кода → Gmail (код) → ввод → Продолжить → (human check) → главная."""
+    """
+    Экран кода → Gmail (код) → ввод → Продолжить → (human check) → главная.
+
+    Новое письмо ищем только если код явно отклонён или всё ещё
+    именно экран кода из почты (не image captcha / human check).
+    """
     from zaliver.instagram_upload.gmail_confirmation_code import (
         fetch_instagram_confirmation_code_from_gmail,
     )
 
     wait_instagram_confirmation_code_screen(ig_page)
-    code = fetch_instagram_confirmation_code_from_gmail(gmail_page)
-    try:
-        ig_page.bring_to_front()
-    except Exception:
-        pass
-    ig_page.wait_for_timeout(500)
-    wait_instagram_confirmation_code_screen(ig_page, max_seconds=30.0)
-    fill_instagram_confirmation_code(ig_page, code)
-    click_instagram_continue_after_code(ig_page)
-    handle_instagram_human_confirmation(
-        ig_page,
-        username,
-        rucaptcha_api_key=rucaptcha_api_key,
-        on_manual_captcha=on_manual_captcha,
-    )
+    # Дать Instagram время отправить письмо, прежде чем идти в Gmail.
+    _log("Instagram: экран кода — ждём 3 с перед переходом на почту…")
+    ig_page.wait_for_timeout(3000)
+    used_codes: set[str] = set()
+    last_code = ""
+
+    for attempt in range(1, _EMAIL_CODE_ATTEMPTS + 1):
+        code = fetch_instagram_confirmation_code_from_gmail(
+            gmail_page,
+            exclude_codes=used_codes,
+        )
+        last_code = code
+        used_codes.add(code)
+        try:
+            ig_page.bring_to_front()
+        except Exception:
+            pass
+        ig_page.wait_for_timeout(500)
+        if attempt > 1 and _left_email_confirmation_screen(ig_page, username):
+            _log(
+                "Instagram: пока ходили в Gmail, экран почтового кода уже сменился — "
+                "новое письмо не нужно."
+            )
+            break
+        wait_instagram_confirmation_code_screen(ig_page, max_seconds=30.0)
+        fill_instagram_confirmation_code(ig_page, code)
+        click_instagram_continue_after_code(ig_page)
+
+        settle_deadline = time.monotonic() + _AFTER_EMAIL_CODE_SETTLE_S
+        while time.monotonic() < settle_deadline:
+            if _left_email_confirmation_screen(ig_page, username):
+                break
+            if _email_confirmation_code_rejected(ig_page):
+                break
+            ig_page.wait_for_timeout(500)
+
+        if _left_email_confirmation_screen(ig_page, username):
+            _log(
+                f"Instagram: код {code} принят — экран почтового кода сменился "
+                f"(URL={ig_page.url!r})."
+            )
+            break
+
+        rejected = _email_confirmation_code_rejected(ig_page)
+        still_email_code = _is_confirmation_code_screen(ig_page)
+        if not rejected and not still_email_code:
+            # Не email-code и не ошибка — ушли на другой шаг (captcha/human/…).
+            _log(
+                f"Instagram: после кода {code} больше не экран почтового кода "
+                f"(URL={ig_page.url!r}) — не ждём новое письмо."
+            )
+            break
+
+        _log(
+            f"Instagram: после кода {code} "
+            + (
+                "код отклонён"
+                if rejected
+                else "всё ещё экран подтверждения из почты"
+            )
+            + f" (попытка {attempt}/{_EMAIL_CODE_ATTEMPTS}) — "
+            "открываем Gmail #inbox/ и ищем новое письмо."
+        )
+    else:
+        raise RuntimeError(
+            f"Instagram: после {_EMAIL_CODE_ATTEMPTS} кодов из почты "
+            f"(последний {last_code!r}) экран подтверждения не сменился "
+            f"(URL={ig_page.url!r})"
+        )
+
+    handle_instagram_human_confirmation(ig_page, username)
     wait_instagram_home_with_username(ig_page, username)
     _log(f"Instagram: регистрация подтверждена, username={username!r}.")
 
@@ -3314,10 +2148,18 @@ def _navigate_page_to(page, url: str, *, label: str = "Instagram") -> None:
             cur = _page_url(page)
             if _is_instagram_url(cur):
                 _log(f"{label}: OK, URL={cur!r}")
+                if _is_cookie_consent_url(cur):
+                    accept_instagram_cookie_consent_if_present(
+                        page, appear_seconds=8.0, max_seconds=30.0
+                    )
                 return
             if cur and cur.lower() != "about:blank":
                 # Уже не blank (редирект/логин и т.п.) — считаем успехом.
                 _log(f"{label}: загрузилось URL={cur!r}")
+                if _is_cookie_consent_url(cur):
+                    accept_instagram_cookie_consent_if_present(
+                        page, appear_seconds=8.0, max_seconds=30.0
+                    )
                 return
             _log(f"{label}: после {name} всё ещё {cur!r}")
         except Exception as e:
@@ -3334,8 +2176,6 @@ def open_instagram_signup_tab(
     gmail_page,
     *,
     password: str = "",
-    rucaptcha_api_key: str = "",
-    on_manual_captcha=None,
 ):
     """Вторая вкладка: Instagram → сохранённый профиль / «Создать новый аккаунт»."""
     context = gmail_page.context
@@ -3393,7 +2233,8 @@ def open_instagram_signup_tab(
         pass
 
     # /consent или модалка «Allow the use of cookies» — Accept all → главная.
-    accept_instagram_cookie_consent_if_present(ig_page)
+    # Диалог часто появляется с задержкой после навигации.
+    accept_instagram_cookie_consent_if_present(ig_page, appear_seconds=12.0)
 
     # Сразу на suspended — циферная капча: стоп с тегом SMS.
     abort_if_instagram_sms_image_captcha(ig_page)
@@ -3420,7 +2261,9 @@ def open_instagram_signup_tab(
             signup = "https://www.instagram.com/accounts/emailsignup/"
             _log(f"Instagram: кнопка создания не найдена — goto {signup}")
             _navigate_page_to(ig_page, signup)
-            accept_instagram_cookie_consent_if_present(ig_page)
+            accept_instagram_cookie_consent_if_present(
+                ig_page, appear_seconds=10.0
+            )
             # Залогиненная сессия часто редиректит emailsignup → главная.
             # Коротко ждём отрисовки ленты, не 90 с формы signup.
             settle = time.monotonic() + 8.0
@@ -3439,11 +2282,7 @@ def open_instagram_signup_tab(
         else:
             _log("Instagram: нажали «Создать новый аккаунт».")
 
-    _wait_signup_form(
-        ig_page,
-        rucaptcha_api_key=rucaptcha_api_key,
-        on_manual_captcha=on_manual_captcha,
-    )
+    _wait_signup_form(ig_page)
     return ig_page
 
 
@@ -3466,7 +2305,10 @@ def fill_instagram_signup_form(
     if not local:
         raise RuntimeError(f"Instagram: не удалось взять локальную часть email {email!r}")
 
-    _log(f"Instagram: email={email!r}, username/name={local!r}")
+    _log(f"Instagram: email={email!r}, username={local!r} (full name пропускаем)")
+
+    # Cookie-диалог может всплыть уже на форме signup.
+    accept_instagram_cookie_consent_if_present(page, appear_seconds=5.0)
 
     _fill_labeled_input(
         page,
@@ -3474,7 +2316,11 @@ def fill_instagram_signup_form(
             "Мобильный телефон или электронный адрес",
             "Номер мобильного телефона или электронный адрес",
             "Mobile number or email",
+            "электронный адрес",
+            "телефон",
             "email",
+            "mobile",
+            "number",
         ],
         email,
     )
@@ -3488,13 +2334,6 @@ def fill_instagram_signup_form(
     page.wait_for_timeout(400)
 
     _fill_birthday(page)
-    page.wait_for_timeout(400)
-
-    _fill_labeled_input(
-        page,
-        ["Имя и фамилия", "Название", "Full name", "Name"],
-        local,
-    )
     page.wait_for_timeout(400)
 
     _fill_labeled_input(
@@ -3546,12 +2385,11 @@ def run_instagram_registration_after_gmail(
     gmail_page,
     credentials: GoogleLoginCredentials | None,
     *,
-    rucaptcha_api_key: str = "",
     on_manual_captcha=None,
 ) -> str:
     """
-    Gmail уже открыт → Instagram signup → RuCaptcha/ручная капча → код из почты.
-    Возвращает зарегистрированный username.
+    Gmail уже открыт → Instagram signup → расширение AntiCaptcha / ручная капча →
+    код из почты. Возвращает зарегистрированный username.
 
     Если в профиле уже выполнен вход в Instagram — считаем успехом
     (новый аккаунт создавать не нужно).
@@ -3562,8 +2400,6 @@ def run_instagram_registration_after_gmail(
         ig_page = open_instagram_signup_tab(
             gmail_page,
             password=(credentials.password or "").strip(),
-            rucaptcha_api_key=rucaptcha_api_key,
-            on_manual_captcha=on_manual_captcha,
         )
     except InstagramAlreadyLoggedInError as e:
         username = (e.username or "").strip().lstrip("@")
@@ -3579,15 +2415,12 @@ def run_instagram_registration_after_gmail(
         username = fill_instagram_signup_form(ig_page, credentials)
         wait_instagram_after_signup(
             ig_page,
-            rucaptcha_api_key=rucaptcha_api_key,
             on_manual_captcha=on_manual_captcha,
         )
         complete_instagram_email_confirmation(
             ig_page,
             gmail_page,
             username,
-            rucaptcha_api_key=rucaptcha_api_key,
-            on_manual_captcha=on_manual_captcha,
         )
         return username
     except Exception:

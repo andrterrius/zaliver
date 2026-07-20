@@ -13,7 +13,7 @@ from zaliver.youtube_upload.google_login import (
 from zaliver.youtube_upload import studio as _studio
 
 GMAIL_WORKSPACE_URL = "https://workspace.google.com/intl/ru/gmail/#inbox"
-GMAIL_INBOX_URL = "https://mail.google.com/mail/u/0/#inbox"
+GMAIL_INBOX_URL = "https://mail.google.com/mail/u/0/#inbox/"
 
 # Временно для тестов: не останавливать профиль антидетекта после проверки Gmail.
 KEEP_PROFILE_OPEN_AFTER_GMAIL_CHECK = True
@@ -610,19 +610,26 @@ def _wait_gmail_inbox_ready(page, *, max_seconds: float = _GMAIL_READY_MAX_S) ->
     )
 
 
+def _on_google_accounts_url(page) -> bool:
+    return "accounts.google.com" in _page_url_lower(page)
+
+
 def _page_looks_signed_in(page) -> bool:
-    """Уже в аккаунте: Inbox/Входящие, smart features или mail.google.com без UI входа."""
+    """Уже в аккаунте: только реальный Inbox/Входящие или диалог smart features.
+
+    Один URL mail.google.com без UI входа — НЕ признак сессии: так бывает
+    на промежуточной загрузке / перед редиректом на accounts (confirmidentifier и т.п.).
+    """
     try:
         if page is None or page.is_closed():
             return False
     except Exception:
         return False
+    if _on_google_accounts_url(page) or _auth_ui_on_mail_page(page):
+        return False
     if _inbox_or_incoming_visible(page):
         return True
     if _smart_features_dialog_visible(page):
-        return True
-    url = _page_url_lower(page)
-    if _is_mail_google_url(url) and not _auth_ui_on_mail_page(page):
         return True
     return False
 
@@ -720,7 +727,14 @@ def verify_gmail_inbox_available(
     """
     _log(f"Gmail: открываем {GMAIL_INBOX_URL}")
     page.goto(GMAIL_INBOX_URL, wait_until="domcontentloaded", timeout=90_000)
-    page.wait_for_timeout(800)
+    # Даём шанс редиректу на accounts (confirmidentifier / identifier) или UI Inbox.
+    settle_deadline = time.monotonic() + 4.0
+    while time.monotonic() < settle_deadline:
+        if _on_google_accounts_url(page) or _auth_ui_on_mail_page(page):
+            break
+        if gmail_inbox_ready(page) or _smart_features_dialog_visible(page):
+            break
+        page.wait_for_timeout(300)
 
     # Уже открыт inbox — сразу выходим, без повторного goto и долгого wait.
     if gmail_inbox_ready(page):
@@ -728,7 +742,7 @@ def verify_gmail_inbox_available(
         return
 
     if _page_looks_signed_in(page):
-        _log("Gmail: уже в аккаунте — дожидаемся UI Inbox.")
+        _log(f"Gmail: уже в аккаунте — дожидаемся UI Inbox (URL={page.url!r}).")
         if _smart_features_dialog_visible(page):
             dismiss_gmail_smart_features_if_present(page)
         if not _inbox_or_incoming_visible(page) and not _already_on_inbox_url(page):
@@ -738,8 +752,8 @@ def verify_gmail_inbox_available(
 
     auth_page = None
     url = _page_url_lower(page)
-    if "accounts.google.com" in url or google_auth_interaction_visible(page):
-        _log("Gmail: уже на странице входа Google.")
+    if _on_google_accounts_url(page) or google_auth_interaction_visible(page):
+        _log(f"Gmail: нужна авторизация Google (URL={page.url!r}).")
         auth_page = page
     elif not _is_mail_google_url(url):
         # Редирект не на mail и не на accounts — запасной путь через workspace «Войти».
@@ -818,8 +832,8 @@ def verify_gmail_inbox_available(
                 return
             needs_login = google_auth_interaction_visible(login_target)
 
-    # accounts.google.com без видимого UI входа часто = уже залогинены / редирект.
-    if not needs_login and "accounts.google.com" in _page_url_lower(login_target):
+    # accounts.google.com без видимого UI входа: либо редирект в почту, либо всё же вход.
+    if not needs_login and _on_google_accounts_url(login_target):
         state = _wait_until_auth_or_signed_in(login_target, max_seconds=8.0)
         if state == "signed_in":
             _log("Gmail: редирект после accounts — уже в аккаунте.")
@@ -832,7 +846,9 @@ def verify_gmail_inbox_available(
                     _goto_gmail_inbox(page)
                 _wait_gmail_inbox_ready(page, max_seconds=max_seconds)
             return
-        needs_login = google_auth_interaction_visible(login_target)
+        # confirmidentifier / identifier / challenge — всегда нужен пайплайн входа.
+        needs_login = True
+        _log(f"Gmail: остаёмся на accounts — запускаем вход (URL={login_target.url!r}).")
 
     if needs_login:
         if login_credentials is None:

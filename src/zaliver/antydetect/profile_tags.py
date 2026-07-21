@@ -60,12 +60,20 @@ NAME_CHANGE_RESULT_TAGS: tuple[str, ...] = (
     NAME_CHANGE_SUCCESS_TAG,
 )
 
-# Прогрев Shorts.
+# Прогрев Shorts (YouTube).
 WARMUP_ERROR_TAG = "ОШИБКА ПРОГРЕВА"
 WARMUP_SUCCESS_TAG = "УСПЕШНЫЙ ПРОГРЕВ"
 WARMUP_RESULT_TAGS: tuple[str, ...] = (
     WARMUP_ERROR_TAG,
     WARMUP_SUCCESS_TAG,
+)
+
+# Прогрев Reels (Instagram).
+IG_WARMUP_ERROR_TAG = "ОШИБКА ПРОГРЕВА INSTAGRAM"
+IG_WARMUP_SUCCESS_TAG = "УСПЕШНЫЙ ПРОГРЕВ INSTAGRAM"
+IG_WARMUP_RESULT_TAGS: tuple[str, ...] = (
+    IG_WARMUP_ERROR_TAG,
+    IG_WARMUP_SUCCESS_TAG,
 )
 
 # Продвижение (открытие чужих видео / подписка).
@@ -146,6 +154,8 @@ ZALIVER_PROFILE_TAGS: tuple[str, ...] = (
     NAME_CHANGE_SUCCESS_TAG,
     WARMUP_ERROR_TAG,
     WARMUP_SUCCESS_TAG,
+    IG_WARMUP_ERROR_TAG,
+    IG_WARMUP_SUCCESS_TAG,
     PROMOTE_ERROR_TAG,
     PROMOTE_SUCCESS_TAG,
     LANGUAGE_CHANGE_ERROR_TAG,

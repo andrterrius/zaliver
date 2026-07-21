@@ -14,7 +14,6 @@ _LOG_PROFILE_ID: ContextVar[str | None] = ContextVar("log_profile_id", default=N
 _TS_RE = re.compile(
     r"\[(?:\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}|\d{2}:\d{2}:\d{2})\]"
 )
-_PROFILE_RE = re.compile(r"profile(?:_id)?=", re.I)
 
 F = TypeVar("F", bound=Callable[..., object])
 
@@ -58,7 +57,8 @@ def format_log_line(message: str, *, profile_id: str | None = None) -> str:
     prefix_parts: list[str] = []
     if not _TS_RE.search(msg):
         prefix_parts.append(f"[{log_timestamp()}]")
-    if pid and not _PROFILE_RE.search(msg) and f"[{pid}]" not in msg:
+    # Всегда префикс [pid], даже если в тексте уже есть profile_id=...
+    if pid and f"[{pid}]" not in msg:
         prefix_parts.append(f"[{pid}]")
 
     if prefix_parts:

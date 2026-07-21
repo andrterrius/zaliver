@@ -824,6 +824,15 @@ class ShortsWarmupSettings(NamedTuple):
     horizontal_videos_count: int
 
 
+class ReelsWarmupSettings(NamedTuple):
+    reels_count: int
+    like_probability_pct: float
+    follow_probability_pct: float
+    watch_min_s: int
+    watch_max_s: int
+    watch_full: bool
+
+
 class MainWindow(QWidget):
     _after_video_saved = pyqtSignal()
     _profiles_loaded = pyqtSignal(object)
@@ -1988,9 +1997,8 @@ class MainWindow(QWidget):
         self._btn_profiles_warmup.setAutoDefault(False)
         self._btn_profiles_warmup.setDefault(False)
         self._btn_profiles_warmup.setToolTip(
-            "Только для отмеченных профилей: авторизация, выбор канала, "
-            "затем просмотр YouTube Shorts — лента рекомендаций или по поисковому "
-            "запросу (пауза на каждом ролике, случайные лайки, подписки и прокрутка). "
+            "Только для отмеченных профилей: прогрев ленты Shorts (YouTube) "
+            "или Reels (Instagram) — просмотр роликов, случайные лайки/подписки. "
             "Режим Headless из настроек; параллельность — в «Настройках»."
         )
         self._btn_profiles_warmup.clicked.connect(self._start_profiles_warmup)
@@ -4316,14 +4324,16 @@ class MainWindow(QWidget):
             self._btn_profiles_register_accounts.setVisible(is_ig)
         if hasattr(self, "_btn_profiles_connect_2fa"):
             self._btn_profiles_connect_2fa.setVisible(is_ig)
-        # YouTube-only массовые действия скрываем в Instagram (логика ещё YT).
+        # YouTube-only массовые действия скрываем в Instagram.
         for attr in (
             "_btn_profiles_channel_setup",
-            "_btn_profiles_warmup",
             "_btn_profiles_promote",
         ):
             if hasattr(self, attr):
                 getattr(self, attr).setVisible(not is_ig)
+        # Прогрев: Shorts (YT) или Reels (IG).
+        if hasattr(self, "_btn_profiles_warmup"):
+            self._btn_profiles_warmup.setVisible(True)
 
     def _load_antydetect_settings(self) -> None:
         if not hasattr(self, "_dolphin_token"):
@@ -6624,18 +6634,132 @@ class MainWindow(QWidget):
             horizontal_videos_count=horizontal_count_spin.value(),
         )
 
+    def _prompt_reels_warmup_settings(self) -> ReelsWarmupSettings | None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Прогрев Instagram Reels")
+        dlg.setModal(True)
+        dlg.setMinimumWidth(420)
+        v = QVBoxLayout(dlg)
+
+        hint = QLabel(
+            "Для каждого отмеченного профиля: главная Instagram, при необходимости "
+            "вход в аккаунт, переход на /reels/. На каждом рилсе с заданной "
+            "вероятностью ставится лайк и/или подписка, затем — следующий."
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("hint")
+        v.addWidget(hint)
+
+        form = QFormLayout()
+        count_spin = QSpinBox()
+        count_spin.setRange(1, 9999)
+        count_spin.setValue(15)
+        form.addRow("Количество просмотренных Reels:", count_spin)
+
+        like_spin = QDoubleSpinBox()
+        like_spin.setRange(0.0, 100.0)
+        like_spin.setDecimals(1)
+        like_spin.setSingleStep(1.0)
+        like_spin.setSuffix(" %")
+        like_spin.setValue(35.0)
+        form.addRow("Вероятность лайка:", like_spin)
+
+        follow_spin = QDoubleSpinBox()
+        follow_spin.setRange(0.0, 100.0)
+        follow_spin.setDecimals(1)
+        follow_spin.setSingleStep(1.0)
+        follow_spin.setSuffix(" %")
+        follow_spin.setValue(10.0)
+        form.addRow("Вероятность подписки:", follow_spin)
+
+        watch_range_row = QHBoxLayout()
+        watch_min_spin = QSpinBox()
+        watch_min_spin.setRange(1, 9999)
+        watch_min_spin.setValue(4)
+        watch_min_spin.setSuffix(" с")
+        watch_max_spin = QSpinBox()
+        watch_max_spin.setRange(1, 9999)
+        watch_max_spin.setValue(12)
+        watch_max_spin.setSuffix(" с")
+        watch_range_row.addWidget(watch_min_spin)
+        watch_range_row.addWidget(QLabel("—"))
+        watch_range_row.addWidget(watch_max_spin)
+        watch_range_row.addStretch()
+        watch_range_w = QWidget()
+        watch_range_w.setLayout(watch_range_row)
+        watch_range_lbl = QLabel("Длительность просмотра Reel:")
+        form.addRow(watch_range_lbl, watch_range_w)
+
+        watch_full_cb = QCheckBox("Смотреть каждый Reel до конца")
+        watch_full_cb.setToolTip(
+            "Дождаться конца ролика, затем листать дальше. "
+            "Если снять галочку — случайное время в указанном диапазоне."
+        )
+        form.addRow("", watch_full_cb)
+
+        def _sync_watch_mode(full_watch: bool) -> None:
+            watch_range_lbl.setVisible(not full_watch)
+            watch_range_w.setVisible(not full_watch)
+
+        watch_full_cb.toggled.connect(_sync_watch_mode)
+        _sync_watch_mode(watch_full_cb.isChecked())
+
+        v.addLayout(form)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.setObjectName("danger")
+        btn_start = QPushButton("Старт")
+        btn_start.setDefault(True)
+        btn_start.setAutoDefault(True)
+        btn_cancel.clicked.connect(dlg.reject)
+        row.addWidget(btn_cancel)
+        row.addWidget(btn_start)
+        v.addLayout(row)
+
+        def _try_accept() -> None:
+            if (
+                not watch_full_cb.isChecked()
+                and watch_min_spin.value() > watch_max_spin.value()
+            ):
+                QMessageBox.warning(
+                    dlg,
+                    "Прогрев Instagram Reels",
+                    "Минимальная длительность просмотра не может быть "
+                    "больше максимальной.",
+                )
+                return
+            dlg.accept()
+
+        btn_start.clicked.connect(_try_accept)
+
+        count_spin.setFocus()
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return ReelsWarmupSettings(
+            reels_count=count_spin.value(),
+            like_probability_pct=like_spin.value(),
+            follow_probability_pct=follow_spin.value(),
+            watch_min_s=watch_min_spin.value(),
+            watch_max_s=watch_max_spin.value(),
+            watch_full=watch_full_cb.isChecked(),
+        )
+
     def _start_profiles_warmup(self) -> None:
+        is_ig = self._platform == PLATFORM_INSTAGRAM
+        title = "Прогрев Reels" if is_ig else "Прогрев Shorts"
         if self._profiles_warmup_running:
             QMessageBox.information(
                 self,
-                "Прогрев Shorts",
+                title,
                 "Прогрев уже выполняется. Дождитесь завершения.",
             )
             return
         if self._profiles_raw is None:
             QMessageBox.warning(
                 self,
-                "Прогрев Shorts",
+                title,
                 "Сначала загрузите список профилей (кнопка «Обновить»).",
             )
             return
@@ -6643,12 +6767,17 @@ class MainWindow(QWidget):
         if not profile_ids:
             QMessageBox.warning(
                 self,
-                "Прогрев Shorts",
+                title,
                 "Отметьте квадратиками профили, для которых нужен прогрев.",
             )
             return
 
-        warmup_settings = self._prompt_shorts_warmup_settings()
+        if is_ig:
+            warmup_settings: ShortsWarmupSettings | ReelsWarmupSettings | None = (
+                self._prompt_reels_warmup_settings()
+            )
+        else:
+            warmup_settings = self._prompt_shorts_warmup_settings()
         if warmup_settings is None:
             return
 
@@ -6673,46 +6802,65 @@ class MainWindow(QWidget):
         try:
             remote_cdp = self._remote_cdp_launch_options_for_kind(kind)
         except LocalAntidetectError as e:
-            QMessageBox.warning(self, "Прогрев Shorts", str(e))
+            QMessageBox.warning(self, title, str(e))
             return
 
         self._profiles_warmup_running = True
         self._sync_profiles_tab_action_buttons()
-        self._profiles_status.setText(
-            f"Прогрев Shorts: 0 / {len(profile_ids)}…"
-        )
+        self._profiles_status.setText(f"{title}: 0 / {len(profile_ids)}…")
         headless_label = "headless" if headless else "с окном браузера"
         max_concurrent = self._max_concurrent_browsers()
-        watch_note = (
-            "до конца каждого ролика (прогресс в %)"
-            if warmup_settings.watch_full_video
-            else (
-                f"{warmup_settings.shorts_watch_min_s}–"
-                f"{warmup_settings.shorts_watch_max_s} с"
+
+        if isinstance(warmup_settings, ReelsWarmupSettings):
+            watch_note = (
+                "до конца каждого ролика"
+                if warmup_settings.watch_full
+                else (
+                    f"{warmup_settings.watch_min_s}–"
+                    f"{warmup_settings.watch_max_s} с"
+                )
             )
-        )
-        self._append_log(
-            f"[warmup] Старт для {len(profile_ids)} профилей "
-            f"(Shorts: {warmup_settings.shorts_count}, "
-            f"просмотр {watch_note}, "
-            f"лайк {warmup_settings.like_probability_pct:g}%, "
-            f"подписка {warmup_settings.subscribe_probability_pct:g}%"
-            + (
-                ", Shorts: рекомендации"
-                if warmup_settings.shorts_recommendations
-                else f", Shorts: поиск «{warmup_settings.shorts_search_query}»"
+            self._append_log(
+                f"[warmup] Старт для {len(profile_ids)} профилей "
+                f"(Reels: {warmup_settings.reels_count}, "
+                f"просмотр {watch_note}, "
+                f"лайк {warmup_settings.like_probability_pct:g}%, "
+                f"подписка {warmup_settings.follow_probability_pct:g}%, "
+                f"{headless_label}, до {max_concurrent} параллельно)…"
             )
-            + (
-                f", горизонтальные: {warmup_settings.horizontal_videos_count}, "
-                f"поиск «{warmup_settings.horizontal_search_query}»"
-                if warmup_settings.watch_horizontal_videos
-                else ""
+            worker = self._profiles_reels_warmup_worker
+        else:
+            watch_note = (
+                "до конца каждого ролика (прогресс в %)"
+                if warmup_settings.watch_full_video
+                else (
+                    f"{warmup_settings.shorts_watch_min_s}–"
+                    f"{warmup_settings.shorts_watch_max_s} с"
+                )
             )
-            + f", {headless_label}, до {max_concurrent} параллельно)…"
-        )
+            self._append_log(
+                f"[warmup] Старт для {len(profile_ids)} профилей "
+                f"(Shorts: {warmup_settings.shorts_count}, "
+                f"просмотр {watch_note}, "
+                f"лайк {warmup_settings.like_probability_pct:g}%, "
+                f"подписка {warmup_settings.subscribe_probability_pct:g}%"
+                + (
+                    ", Shorts: рекомендации"
+                    if warmup_settings.shorts_recommendations
+                    else f", Shorts: поиск «{warmup_settings.shorts_search_query}»"
+                )
+                + (
+                    f", горизонтальные: {warmup_settings.horizontal_videos_count}, "
+                    f"поиск «{warmup_settings.horizontal_search_query}»"
+                    if warmup_settings.watch_horizontal_videos
+                    else ""
+                )
+                + f", {headless_label}, до {max_concurrent} параллельно)…"
+            )
+            worker = self._profiles_warmup_worker
 
         threading.Thread(
-            target=self._profiles_warmup_worker,
+            target=worker,
             kwargs={
                 "profile_ids": profile_ids,
                 "kind": kind,
@@ -6815,6 +6963,96 @@ class MainWindow(QWidget):
                 base_url=base_url,
                 updates=[(ok, WARMUP_SUCCESS_TAG, WARMUP_ERROR_TAG)],
                 log_prefix="warmup",
+            )
+
+        mgr = MultiProfileAvailabilityChecker(
+            profile_ids=profile_ids,
+            check_one=_warmup_one,
+            on_profile_done=_on_profile_done,
+            on_progress=_on_progress,
+            log_sink=self._ui_log_line.emit,
+            max_concurrent=max_concurrent,
+        )
+        ok_n, fail_n, failed_ids = mgr.run()
+        self._last_warmup_failed_ids = list(failed_ids)
+        self._studio_warmup_finished.emit(ok_n, fail_n)
+
+    def _profiles_reels_warmup_worker(
+        self,
+        *,
+        profile_ids: list[str],
+        kind: str,
+        token: str,
+        base_url: str,
+        headless: bool,
+        warmup_settings: ReelsWarmupSettings,
+        remote_cdp: RemoteCdpLaunchOptions | None = None,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT_BROWSERS,
+    ) -> None:
+        from zaliver.antydetect.antic_open import (
+            set_log_sink,
+            warmup_instagram_reels_in_local_antidetect_profile,
+            warmup_instagram_reels_in_profile,
+        )
+        from zaliver.antydetect.local_antidetect_api import LocalAntidetectError
+        from zaliver.youtube_upload.multi_availability_checker import (
+            MultiProfileAvailabilityChecker,
+        )
+
+        set_log_sink(self._ui_log_line.emit)
+        kind_s = (kind or "").strip()
+
+        def _warmup_one(pid: str) -> None:
+            login, password, twofa = self._instagram_session_credentials(pid)
+            warmup_kw = {
+                "session_login": login,
+                "session_password": password,
+                "session_twofa": twofa,
+                "reels_count": warmup_settings.reels_count,
+                "like_probability_pct": warmup_settings.like_probability_pct,
+                "follow_probability_pct": warmup_settings.follow_probability_pct,
+                "watch_min_s": float(warmup_settings.watch_min_s),
+                "watch_max_s": float(warmup_settings.watch_max_s),
+                "watch_full": warmup_settings.watch_full,
+            }
+            if _is_own_antidetect_kind(kind_s):
+                u = (base_url or "").strip()
+                if not u:
+                    raise LocalAntidetectError(
+                        f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
+                    )
+                warmup_instagram_reels_in_local_antidetect_profile(
+                    pid,
+                    base_url=u,
+                    headless=headless,
+                    remote_cdp=remote_cdp,
+                    **warmup_kw,
+                )
+            else:
+                warmup_instagram_reels_in_profile(
+                    pid,
+                    local_token=token or None,
+                    headless=headless,
+                    **warmup_kw,
+                )
+
+        def _on_progress(done: int, total: int, profile_id: str) -> None:
+            self._studio_warmup_progress.emit(done, total, profile_id)
+
+        def _on_profile_done(pid: str, ok: bool, err: str) -> None:
+            if not _is_own_antidetect_kind(kind_s):
+                return
+            from zaliver.antydetect.profile_tags import (
+                IG_WARMUP_ERROR_TAG,
+                IG_WARMUP_SUCCESS_TAG,
+            )
+
+            self._apply_zaliver_profile_tags_from_worker(
+                profile_id=pid,
+                kind=kind_s,
+                base_url=base_url,
+                updates=[(ok, IG_WARMUP_SUCCESS_TAG, IG_WARMUP_ERROR_TAG)],
+                log_prefix="ig-warmup",
             )
 
         mgr = MultiProfileAvailabilityChecker(
@@ -8127,8 +8365,13 @@ class MainWindow(QWidget):
         self, current: int, total: int, profile_id: str
     ) -> None:
         pid = (profile_id or "").strip()
+        label = (
+            "Прогрев Reels"
+            if self._platform == PLATFORM_INSTAGRAM
+            else "Прогрев Shorts"
+        )
         self._profiles_status.setText(
-            f"Прогрев Shorts: {current} / {total}"
+            f"{label}: {current} / {total}"
             + (f" — профиль {pid}" if pid else "…")
         )
 
@@ -8136,8 +8379,13 @@ class MainWindow(QWidget):
         self._profiles_warmup_running = False
         self._sync_profiles_tab_action_buttons()
         total = int(ok_n) + int(fail_n)
+        label = (
+            "Прогрев Reels"
+            if self._platform == PLATFORM_INSTAGRAM
+            else "Прогрев Shorts"
+        )
         self._profiles_status.setText(
-            f"Прогрев Shorts завершён: успешно {ok_n}, с ошибкой {fail_n} "
+            f"{label} завершён: успешно {ok_n}, с ошибкой {fail_n} "
             f"(всего {total})."
         )
         self._append_log(
@@ -8152,7 +8400,7 @@ class MainWindow(QWidget):
         self._refresh_profiles_list_after_zaliver_tags()
         QMessageBox.information(
             self,
-            "Прогрев Shorts",
+            label,
             f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.",
         )
 

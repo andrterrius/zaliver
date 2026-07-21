@@ -276,11 +276,11 @@ def _studio_finalize_oldest_channel_name(
 
 
 def _log(message: str) -> None:
-    from zaliver.log_format import format_log_line
+    from zaliver.log_format import format_log_line, get_log_profile_id
 
     line = format_log_line(
         f"[youtube_studio] {message}",
-        profile_id=get_studio_profile_id(),
+        profile_id=get_studio_profile_id() or get_log_profile_id(),
     )
     sink = _LOG_SINK
     if sink is not None:

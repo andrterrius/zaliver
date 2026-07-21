@@ -5,12 +5,12 @@ from __future__ import annotations
 import re
 import time
 
+from zaliver.instagram_upload.logutil import emit_instagram_log, instagram_entrypoint
 from zaliver.youtube_upload.google_login import (
     GoogleLoginCredentials,
     attempt_google_login_for_studio,
     google_auth_interaction_visible,
 )
-from zaliver.youtube_upload import studio as _studio
 
 GMAIL_WORKSPACE_URL = "https://workspace.google.com/intl/ru/gmail/#inbox"
 GMAIL_INBOX_URL = "https://mail.google.com/mail/u/0/#inbox/"
@@ -40,7 +40,7 @@ _SMART_FEATURES_SCREENS = 3
 
 
 def _log(message: str) -> None:
-    _studio._log(f"[gmail] {message}")
+    emit_instagram_log(message, tag="[gmail]")
 
 
 def _page_url_lower(page) -> str:
@@ -713,11 +713,13 @@ def _open_inbox_on_first_then_close_auth(
     return first
 
 
+@instagram_entrypoint
 def verify_gmail_inbox_available(
     page,
     *,
     login_credentials: GoogleLoginCredentials | None = None,
     max_seconds: float = _GMAIL_READY_MAX_S,
+    profile_id: str | None = None,
 ) -> None:
     """
     Пайплайн проверки доступности для Instagram (шаг 1):

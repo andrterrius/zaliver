@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 
+from zaliver.instagram_upload.logutil import emit_instagram_log, instagram_entrypoint
 from zaliver.instagram_upload.register import (
     INSTAGRAM_URL,
     accept_instagram_cookie_consent_if_present,
@@ -18,7 +19,6 @@ from zaliver.instagram_upload.register import (
     _navigate_page_to,
     _onetap_password_visible,
 )
-from zaliver.youtube_upload import studio as _studio
 
 _IG_READY_MAX_S = 90.0
 # Антидетект отдаёт CDP раньше, чем вкладка уходит с about:blank.
@@ -30,7 +30,7 @@ class InstagramAccountSuspendedError(RuntimeError):
 
 
 def _log(message: str) -> None:
-    _studio._log(f"[instagram] {message}")
+    emit_instagram_log(message, tag="[instagram]")
 
 
 def _page_url(page) -> str:
@@ -112,6 +112,7 @@ def _needs_session_relogin(page) -> bool:
     )
 
 
+@instagram_entrypoint
 def verify_instagram_home_available(
     page,
     *,
@@ -119,6 +120,7 @@ def verify_instagram_home_available(
     session_login: str = "",
     session_password: str = "",
     session_twofa: str = "",
+    profile_id: str | None = None,
 ) -> str:
     """
     Открыть главную Instagram и убедиться, что сессия уже залогинена.

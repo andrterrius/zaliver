@@ -8,11 +8,11 @@ import random
 import re
 import time
 
+from zaliver.instagram_upload.logutil import emit_instagram_log, instagram_entrypoint
 from zaliver.youtube_upload.google_login import (
     GoogleLoginCredentials,
     random_birthday,
 )
-from zaliver.youtube_upload import studio as _studio
 from zaliver.antydetect.profile_tags import (
     IG_REGISTER_ERROR_TAG,
     IG_REGISTER_SMS_ERROR_TAG,
@@ -313,7 +313,7 @@ _RECAPTCHA_ANCHOR_SEL = (
 
 
 def _log(message: str) -> None:
-    _studio._log(f"[instagram] {message}")
+    emit_instagram_log(message, tag="[instagram]")
 
 
 def email_local_part(email: str) -> str:
@@ -3150,11 +3150,13 @@ def fill_instagram_signup_form(
     return username
 
 
+@instagram_entrypoint
 def run_instagram_registration_after_gmail(
     gmail_page,
     credentials: GoogleLoginCredentials | None,
     *,
     on_manual_captcha=None,
+    profile_id: str | None = None,
 ) -> str:
     """
     Gmail уже открыт → Instagram signup → расширение AntiCaptcha / ручная капча →

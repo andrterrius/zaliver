@@ -6,6 +6,7 @@ import re
 import time
 from collections.abc import Callable
 
+from zaliver.instagram_upload.logutil import emit_instagram_log, instagram_entrypoint
 from zaliver.instagram_upload.register import (
     _click_by_text,
     _is_accounts_suspended,
@@ -13,7 +14,6 @@ from zaliver.instagram_upload.register import (
     _page_url,
     accept_instagram_cookie_consent_if_present,
 )
-from zaliver.youtube_upload import studio as _studio
 from zaliver.youtube_upload.totp import get_totp_token
 
 ACCOUNTS_CENTER_URL = (
@@ -154,7 +154,7 @@ class InstagramLoginRequiredError(RuntimeError):
 
 
 def _log(message: str) -> None:
-    _studio._log(f"[instagram-2fa] {message}")
+    emit_instagram_log(message, tag="[instagram-2fa]")
 
 
 def _is_accounts_login(page) -> bool:
@@ -1102,6 +1102,7 @@ def _finish_already_enabled(page) -> str:
     return ""
 
 
+@instagram_entrypoint
 def setup_instagram_totp_2fa(
     page,
     *,
@@ -1111,6 +1112,7 @@ def setup_instagram_totp_2fa(
     session_password: str = "",
     session_twofa: str = "",
     max_seconds: float = 180.0,
+    profile_id: str | None = None,
 ) -> str:
     """
     Accounts Center → Password and security → 2FA →

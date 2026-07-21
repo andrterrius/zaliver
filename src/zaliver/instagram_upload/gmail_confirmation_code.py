@@ -10,7 +10,7 @@ from zaliver.instagram_upload.gmail_availability import (
     dismiss_gmail_smart_features_if_present,
     gmail_inbox_ready,
 )
-from zaliver.youtube_upload import studio as _studio
+from zaliver.instagram_upload.logutil import emit_instagram_log
 
 _CODE_RE = re.compile(r"\b(\d{6})\b")
 _META_CODE_RE = re.compile(r"\b(\d{8})\b")
@@ -49,7 +49,7 @@ _OPEN_EMAIL_MAX_S = 10.0
 
 
 def _log(message: str) -> None:
-    _studio._log(f"[gmail] {message}")
+    emit_instagram_log(message, tag="[gmail]")
 
 
 def _bring_to_front(page) -> None:

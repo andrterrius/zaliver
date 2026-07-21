@@ -422,15 +422,36 @@ def _page_objects_from_connected_browser(browser):
     )
     context = browser.contexts[0] if browser.contexts else browser.new_context()
     page = None
+    blank = None
     for pg in context.pages:
         try:
-            if "studio.youtube.com" in (pg.url or ""):
-                page = pg
-                break
+            if pg.is_closed():
+                continue
         except Exception:
             continue
+        try:
+            url = (pg.url or "").strip().lower()
+        except Exception:
+            url = ""
+        if "studio.youtube.com" in url:
+            page = pg
+            break
+        if "accountscenter.instagram.com" in url:
+            # Целевая страница 2FA / Accounts Center.
+            page = pg
+            break
+        if "instagram.com" in url:
+            # Предпочитаем Instagram blank/чужим вкладкам (проверка IG).
+            page = pg
+            continue
+        if url in ("about:blank", "about:srcdoc", ""):
+            if blank is None:
+                blank = pg
+            continue
+        if page is None:
+            page = pg
     if page is None:
-        page = context.pages[0] if context.pages else context.new_page()
+        page = blank or (context.pages[0] if context.pages else context.new_page())
     _log(
         "Playwright: выбраны объекты. "
         f"context_pages={len(context.pages)}, page_url={page.url!r}"
@@ -799,6 +820,138 @@ def check_gmail_availability_in_local_antidetect_profile(
 
 
 @with_log_profile
+def check_instagram_availability_in_profile(
+    profile_id: str,
+    *,
+    local_token: str | None = None,
+    headless: bool = True,
+) -> None:
+    """Dolphin → instagram.com → проверка входа в аккаунт → закрытие профиля."""
+    from zaliver.instagram_upload.instagram_availability import (
+        verify_instagram_home_available,
+    )
+
+    _log(
+        "Dolphin: проверка доступности Instagram. "
+        f"profile_id={profile_id!r}, headless={headless}"
+    )
+    api = DolphinAntyLocalAPI()
+    try:
+        tok = (local_token or "").strip()
+        if tok:
+            _log("Dolphin: login_with_token…")
+            api.login_with_token(tok)
+        _log("Dolphin: start_profile…")
+        conn = api.start_profile(profile_id, headless=headless)
+        _log(
+            "Dolphin: профиль запущен. "
+            f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+        )
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_cdp(
+                p, (conn.ws_url(), conn.http_url())
+            )
+            try:
+                verify_instagram_home_available(page)
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        _log(f"Ошибка проверки Instagram: {type(e).__name__}: {e!r}")
+        raise _wrap_exc(e) from e
+    finally:
+        try:
+            api.stop_profile(profile_id)
+        except Exception as e:
+            _log(f"Dolphin: stop_profile: {e!r}")
+        api.close()
+
+
+@with_log_profile
+def check_instagram_availability_in_local_antidetect_profile(
+    profile_id: str,
+    *,
+    base_url: str,
+    headless: bool = True,
+    remote_cdp=None,
+) -> None:
+    """Локальный антидетект → instagram.com → проверка входа → закрытие профиля."""
+    from zaliver.instagram_upload.instagram_availability import (
+        verify_instagram_home_available,
+    )
+    from zaliver.antydetect.local_antidetect_api import (
+        LocalAntidetectError,
+        LocalAntidetectHttpAPI,
+    )
+    from zaliver.antydetect.local_active_sessions import (
+        register_local_session,
+        unregister_local_session,
+    )
+
+    _log(
+        "Local antidetect: проверка доступности Instagram. "
+        f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}"
+    )
+    api = LocalAntidetectHttpAPI(base_url)
+    session_id: str | None = None
+    started_at = time.perf_counter()
+    try:
+        # Не Studio: иначе антидетект ждёт загрузку YouTube перед CDP.
+        acc = api.launch_profile(
+            profile_id,
+            headless=headless,
+            expose_cdp=True,
+            remote_cdp=remote_cdp,
+            start_url="https://www.instagram.com/",
+        )
+        sid = acc.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+        session_id = sid.strip()
+        bu = (base_url or "").strip() or "http://127.0.0.1:18765"
+        register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
+        ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+        _log(
+            "Local antidetect: cdp_ws_url="
+            f"{ws_url!r} (start_url=https://www.instagram.com/)"
+        )
+
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_local_session_cdp(
+                p, api, session_id, ws_url
+            )
+            try:
+                verify_instagram_home_available(page)
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        _log(f"Ошибка проверки Instagram: {type(e).__name__}: {e!r}")
+        raise LocalAntidetectError(
+            f"Ошибка проверки доступности Instagram: {e}"
+        ) from e
+    finally:
+        if session_id:
+            unregister_local_session(profile_id=profile_id)
+            try:
+                api.stop_session(session_id)
+            except Exception:
+                pass
+        try:
+            _log(
+                f"Local antidetect: проверка Instagram завершена за "
+                f"{time.perf_counter() - started_at:.1f} с."
+            )
+        except Exception:
+            pass
+        api.close()
+
+
+@with_log_profile
 def register_instagram_account_in_profile(
     profile_id: str,
     *,
@@ -811,6 +964,8 @@ def register_instagram_account_in_profile(
     from zaliver.instagram_upload.gmail_availability import verify_gmail_inbox_available
     from zaliver.instagram_upload.register import (
         KEEP_PROFILE_OPEN_AFTER_IG_REGISTER,
+        InstagramRegistrationFailedError,
+        InstagramSmsCaptchaError,
         run_instagram_registration_after_gmail,
     )
 
@@ -821,6 +976,7 @@ def register_instagram_account_in_profile(
     api = DolphinAntyLocalAPI()
     keep_open_on_error = bool(KEEP_PROFILE_OPEN_AFTER_IG_REGISTER)
     succeeded = False
+    force_close = False
     try:
         tok = (local_token or "").strip()
         if tok:
@@ -838,19 +994,24 @@ def register_instagram_account_in_profile(
                 p, (conn.ws_url(), conn.http_url())
             )
             try:
-                verify_gmail_inbox_available(
-                    page, login_credentials=login_credentials
-                )
-                username = run_instagram_registration_after_gmail(
-                    page,
-                    login_credentials,
-                    on_manual_captcha=on_manual_captcha,
-                )
-                succeeded = True
-                _log(f"Dolphin: Instagram зарегистрирован, username={username!r}")
+                try:
+                    verify_gmail_inbox_available(
+                        page, login_credentials=login_credentials
+                    )
+                    username = run_instagram_registration_after_gmail(
+                        page,
+                        login_credentials,
+                        on_manual_captcha=on_manual_captcha,
+                    )
+                    succeeded = True
+                    _log(f"Dolphin: Instagram зарегистрирован, username={username!r}")
+                except (InstagramSmsCaptchaError, InstagramRegistrationFailedError):
+                    force_close = True
+                    raise
             finally:
-                # Успех → всегда закрыть. Ошибка → оставить открытым для ручной капчи.
-                if succeeded or not keep_open_on_error:
+                # Успех / известная ошибка регистрации → закрыть.
+                # Иная ошибка → оставить для ручной капчи.
+                if succeeded or force_close or not keep_open_on_error:
                     try:
                         browser.close()
                     except Exception:
@@ -861,15 +1022,31 @@ def register_instagram_account_in_profile(
                         f"(profile_id={profile_id!r})."
                     )
     except Exception as e:
+        if not force_close and (
+            isinstance(e, (InstagramSmsCaptchaError, InstagramRegistrationFailedError))
+            or InstagramSmsCaptchaError.matches(str(e))
+            or InstagramRegistrationFailedError.matches(str(e))
+        ):
+            force_close = True
+        if force_close:
+            _log(
+                "Dolphin: известная ошибка регистрации — закрываем профиль "
+                f"(profile_id={profile_id!r})."
+            )
         _log(f"Ошибка регистрации Instagram: {type(e).__name__}: {e!r}")
         raise _wrap_exc(e) from e
     finally:
-        if succeeded or not keep_open_on_error:
+        if succeeded or force_close or not keep_open_on_error:
             try:
                 api.stop_profile(profile_id)
                 if succeeded:
                     _log(
                         "Dolphin: профиль закрыт после успешной регистрации "
+                        f"(profile_id={profile_id!r})."
+                    )
+                elif force_close:
+                    _log(
+                        "Dolphin: профиль закрыт после ошибки регистрации "
                         f"(profile_id={profile_id!r})."
                     )
             except Exception as e:
@@ -897,6 +1074,8 @@ def register_instagram_account_in_local_antidetect_profile(
     from zaliver.instagram_upload.gmail_availability import verify_gmail_inbox_available
     from zaliver.instagram_upload.register import (
         KEEP_PROFILE_OPEN_AFTER_IG_REGISTER,
+        InstagramRegistrationFailedError,
+        InstagramSmsCaptchaError,
         run_instagram_registration_after_gmail,
     )
     from zaliver.antydetect.local_antidetect_api import (
@@ -917,6 +1096,7 @@ def register_instagram_account_in_local_antidetect_profile(
     started_at = time.perf_counter()
     keep_open_on_error = bool(KEEP_PROFILE_OPEN_AFTER_IG_REGISTER)
     succeeded = False
+    force_close = False
     try:
         acc = api.launch_profile(
             profile_id, headless=headless, expose_cdp=True, remote_cdp=remote_cdp
@@ -935,25 +1115,29 @@ def register_instagram_account_in_local_antidetect_profile(
                 p, api, session_id, ws_url
             )
             try:
-                verify_gmail_inbox_available(
-                    page, login_credentials=login_credentials
-                )
-                username = run_instagram_registration_after_gmail(
-                    page,
-                    login_credentials,
-                    on_manual_captcha=on_manual_captcha,
-                )
-                succeeded = True
-                _save_instagram_credentials_to_profile(
-                    api, profile_id, login_credentials
-                )
-                _log(
-                    "Local antidetect: Instagram зарегистрирован, "
-                    f"username={username!r}"
-                )
+                try:
+                    verify_gmail_inbox_available(
+                        page, login_credentials=login_credentials
+                    )
+                    username = run_instagram_registration_after_gmail(
+                        page,
+                        login_credentials,
+                        on_manual_captcha=on_manual_captcha,
+                    )
+                    succeeded = True
+                    _save_instagram_credentials_to_profile(
+                        api, profile_id, login_credentials
+                    )
+                    _log(
+                        "Local antidetect: Instagram зарегистрирован, "
+                        f"username={username!r}"
+                    )
+                except (InstagramSmsCaptchaError, InstagramRegistrationFailedError):
+                    force_close = True
+                    raise
             finally:
-                # Успех → всегда закрыть. Ошибка → оставить открытым для ручной капчи.
-                if succeeded or not keep_open_on_error:
+                # Успех / известная ошибка регистрации → закрыть.
+                if succeeded or force_close or not keep_open_on_error:
                     try:
                         browser.close()
                     except Exception:
@@ -964,10 +1148,21 @@ def register_instagram_account_in_local_antidetect_profile(
                         f"(profile_id={profile_id!r})."
                     )
     except Exception as e:
+        if not force_close and (
+            isinstance(e, (InstagramSmsCaptchaError, InstagramRegistrationFailedError))
+            or InstagramSmsCaptchaError.matches(str(e))
+            or InstagramRegistrationFailedError.matches(str(e))
+        ):
+            force_close = True
+        if force_close:
+            _log(
+                "Local antidetect: известная ошибка регистрации — закрываем профиль "
+                f"(profile_id={profile_id!r})."
+            )
         _log(f"Ошибка регистрации Instagram: {type(e).__name__}: {e!r}")
         raise LocalAntidetectError(f"Ошибка регистрации Instagram: {e}") from e
     finally:
-        if succeeded or not keep_open_on_error:
+        if succeeded or force_close or not keep_open_on_error:
             if session_id:
                 unregister_local_session(profile_id=profile_id)
                 try:
@@ -975,6 +1170,11 @@ def register_instagram_account_in_local_antidetect_profile(
                     if succeeded:
                         _log(
                             "Local antidetect: профиль закрыт после успешной "
+                            f"регистрации (profile_id={profile_id!r})."
+                        )
+                    elif force_close:
+                        _log(
+                            "Local antidetect: профиль закрыт после ошибки "
                             f"регистрации (profile_id={profile_id!r})."
                         )
                 except Exception:
@@ -992,6 +1192,221 @@ def register_instagram_account_in_local_antidetect_profile(
         except Exception:
             pass
         api.close()
+
+
+def _save_instagram_2fa_to_profile(api, profile_id: str, secret: str) -> None:
+    """Сохранить inst_2fa в custom_data профиля."""
+    from zaliver.ui.profile_account_data_dialog import INST_2FA_KEY
+
+    s = (secret or "").strip()
+    if not s:
+        return
+    try:
+        api.merge_profile_custom_data(profile_id, {INST_2FA_KEY: s})
+        _log(
+            "Local antidetect: в custom_data сохранён "
+            f"{INST_2FA_KEY} (len={len(s)}) для profile_id={profile_id!r}."
+        )
+    except Exception as e:
+        _log(
+            "Local antidetect: не удалось сохранить "
+            f"{INST_2FA_KEY} для profile_id={profile_id!r}: {e!r}"
+        )
+        raise
+
+
+@with_log_profile
+def setup_instagram_2fa_in_profile(
+    profile_id: str,
+    *,
+    local_token: str | None = None,
+    headless: bool = True,
+    login_credentials=None,
+    keep_open_on_error: bool | None = None,
+) -> str:
+    """Dolphin → Accounts Center → подключить TOTP 2FA → вернуть секрет."""
+    from zaliver.instagram_upload.setup_2fa import (
+        KEEP_PROFILE_OPEN_AFTER_IG_2FA,
+        setup_instagram_totp_2fa,
+    )
+
+    _log(
+        "Dolphin: подключение 2FA Instagram. "
+        f"profile_id={profile_id!r}, headless={headless}"
+    )
+    api = DolphinAntyLocalAPI()
+    if keep_open_on_error is None:
+        keep_open_on_error = bool(KEEP_PROFILE_OPEN_AFTER_IG_2FA)
+    else:
+        keep_open_on_error = bool(keep_open_on_error)
+    succeeded = False
+    secret = ""
+    try:
+        tok = (local_token or "").strip()
+        if tok:
+            _log("Dolphin: login_with_token…")
+            api.login_with_token(tok)
+        _log("Dolphin: start_profile…")
+        conn = api.start_profile(profile_id, headless=headless)
+        _log(
+            "Dolphin: профиль запущен. "
+            f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+        )
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_cdp(
+                p, (conn.ws_url(), conn.http_url())
+            )
+            try:
+                secret = setup_instagram_totp_2fa(
+                    page, login_credentials=login_credentials, max_seconds=300.0
+                )
+                succeeded = True
+                _log(
+                    f"Dolphin: 2FA Instagram подключена (secret_len={len(secret)})."
+                )
+            finally:
+                if succeeded or not keep_open_on_error:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+                else:
+                    _log(
+                        "Dolphin: профиль оставлен открытым после ошибки 2FA "
+                        f"(profile_id={profile_id!r})."
+                    )
+    except Exception as e:
+        _log(f"Ошибка подключения 2FA Instagram: {type(e).__name__}: {e!r}")
+        raise _wrap_exc(e) from e
+    finally:
+        if succeeded or not keep_open_on_error:
+            try:
+                api.stop_profile(profile_id)
+            except Exception as e:
+                _log(f"Dolphin: stop_profile: {e!r}")
+            api.close()
+        else:
+            _log(
+                "Dolphin: stop_profile пропущен после ошибки "
+                "(keep_open_on_error)."
+            )
+            api.close()
+    return secret
+
+
+@with_log_profile
+def setup_instagram_2fa_in_local_antidetect_profile(
+    profile_id: str,
+    *,
+    base_url: str,
+    headless: bool = True,
+    remote_cdp=None,
+    login_credentials=None,
+    keep_open_on_error: bool | None = None,
+) -> str:
+    """Локальный антидетект → Accounts Center → TOTP 2FA → сохранить inst_2fa."""
+    from zaliver.instagram_upload.setup_2fa import (
+        KEEP_PROFILE_OPEN_AFTER_IG_2FA,
+        setup_instagram_totp_2fa,
+    )
+    from zaliver.antydetect.local_antidetect_api import (
+        LocalAntidetectError,
+        LocalAntidetectHttpAPI,
+    )
+    from zaliver.antydetect.local_active_sessions import (
+        register_local_session,
+        unregister_local_session,
+    )
+
+    _log(
+        "Local antidetect: подключение 2FA Instagram. "
+        f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}"
+    )
+    api = LocalAntidetectHttpAPI(base_url)
+    session_id: str | None = None
+    started_at = time.perf_counter()
+    if keep_open_on_error is None:
+        keep_open_on_error = bool(KEEP_PROFILE_OPEN_AFTER_IG_2FA)
+    else:
+        keep_open_on_error = bool(keep_open_on_error)
+    succeeded = False
+    secret = ""
+    try:
+        acc = api.launch_profile(
+            profile_id,
+            headless=headless,
+            expose_cdp=True,
+            remote_cdp=remote_cdp,
+        )
+        sid = acc.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+        session_id = sid.strip()
+        bu = (base_url or "").strip() or "http://127.0.0.1:18765"
+        register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
+        ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+        _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_local_session_cdp(
+                p, api, session_id, ws_url
+            )
+            try:
+                def _on_secret(s: str) -> None:
+                    _save_instagram_2fa_to_profile(api, profile_id, s)
+
+                secret = setup_instagram_totp_2fa(
+                    page,
+                    on_secret=_on_secret,
+                    login_credentials=login_credentials,
+                    max_seconds=300.0,
+                )
+                succeeded = True
+                _log(
+                    "Local antidetect: 2FA Instagram подключена "
+                    f"(secret_len={len(secret)})."
+                )
+            finally:
+                if succeeded or not keep_open_on_error:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+                else:
+                    _log(
+                        "Local antidetect: профиль оставлен открытым после ошибки 2FA "
+                        f"(profile_id={profile_id!r})."
+                    )
+    except Exception as e:
+        _log(f"Ошибка подключения 2FA Instagram: {type(e).__name__}: {e!r}")
+        raise LocalAntidetectError(f"Ошибка подключения 2FA Instagram: {e}") from e
+    finally:
+        if succeeded or not keep_open_on_error:
+            if session_id:
+                unregister_local_session(profile_id=profile_id)
+                try:
+                    api.stop_session(session_id)
+                    if succeeded:
+                        _log(
+                            "Local antidetect: профиль закрыт после успешного "
+                            f"подключения 2FA (profile_id={profile_id!r})."
+                        )
+                except Exception:
+                    pass
+        else:
+            _log(
+                "Local antidetect: stop_session пропущен после ошибки "
+                "(keep_open_on_error)."
+            )
+        try:
+            _log(
+                f"Local antidetect: подключение 2FA Instagram завершено за "
+                f"{time.perf_counter() - started_at:.1f} с."
+            )
+        except Exception:
+            pass
+        api.close()
+    return secret
 
 
 @with_log_profile

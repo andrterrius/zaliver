@@ -836,6 +836,8 @@ class MainWindow(QWidget):
     _studio_availability_finished = pyqtSignal(int, int)
     _instagram_register_progress = pyqtSignal(int, int, str)
     _instagram_register_finished = pyqtSignal(int, int)
+    _instagram_2fa_progress = pyqtSignal(int, int, str)
+    _instagram_2fa_finished = pyqtSignal(int, int)
     _manual_captcha_needed = pyqtSignal(str)
     _studio_channel_setup_progress = pyqtSignal(int, int, str)
     _studio_channel_setup_finished = pyqtSignal(int, int)
@@ -896,6 +898,7 @@ class MainWindow(QWidget):
         self._profiles_filter_timer.timeout.connect(self._apply_profiles_filter)
         self._profiles_availability_running = False
         self._profiles_register_running = False
+        self._profiles_2fa_running = False
         self._profiles_channel_setup_running = False
         self._profiles_warmup_running = False
         self._profiles_promote_running = False
@@ -946,6 +949,8 @@ class MainWindow(QWidget):
         self._studio_availability_finished.connect(self._on_studio_availability_finished)
         self._instagram_register_progress.connect(self._on_instagram_register_progress)
         self._instagram_register_finished.connect(self._on_instagram_register_finished)
+        self._instagram_2fa_progress.connect(self._on_instagram_2fa_progress)
+        self._instagram_2fa_finished.connect(self._on_instagram_2fa_finished)
         self._manual_captcha_needed.connect(
             self._on_manual_captcha_needed,
             Qt.ConnectionType.QueuedConnection,
@@ -1914,9 +1919,11 @@ class MainWindow(QWidget):
         self._btn_profiles_check_availability.setDefault(False)
         self._btn_profiles_check_availability.setToolTip(
             "Только для отмеченных профилей (квадратики): режим Headless из настроек, "
-            "число параллельных браузеров — в разделе «Настройки», создание канала и «Далее» при "
-            "необходимости, ожидание URL studio.youtube.com/channel/{id} "
-            "или channel-appeal."
+            "число параллельных браузеров — в разделе «Настройки». "
+            "YouTube: Studio, создание канала и «Далее» при необходимости, "
+            "ожидание URL studio.youtube.com/channel/{id} или channel-appeal. "
+            "Instagram: открытие instagram.com и проверка, что аккаунт уже вошёл; "
+            "после проверки профиль закрывается."
         )
         self._btn_profiles_check_availability.clicked.connect(
             self._start_profiles_availability_check
@@ -1935,6 +1942,22 @@ class MainWindow(QWidget):
         )
         self._btn_profiles_register_accounts.clicked.connect(
             self._start_profiles_instagram_register
+        )
+        self._btn_profiles_connect_2fa = QPushButton("Подключить 2FA")
+        self._btn_profiles_connect_2fa.setObjectName("secondary")
+        self._btn_profiles_connect_2fa.setAutoDefault(False)
+        self._btn_profiles_connect_2fa.setDefault(False)
+        self._btn_profiles_connect_2fa.setToolTip(
+            "Только для отмеченных профилей (Instagram): Accounts Center → "
+            "Password and security → Two-factor authentication → "
+            "при необходимости код из письма Meta (Gmail) → "
+            "Authentication app; секрет сохраняется в inst_2fa, "
+            "затем вводится OTP для подтверждения. "
+            "Если 2FA уже включена — тоже успешный статус (секрет не перезаписываем). "
+            "Режим Headless из настроек; параллельность — в «Настройках»."
+        )
+        self._btn_profiles_connect_2fa.clicked.connect(
+            self._start_profiles_instagram_2fa
         )
         self._btn_profiles_import_accounts = QPushButton("Импортировать данные учёток")
         self._btn_profiles_import_accounts.setObjectName("secondary")
@@ -1999,7 +2022,7 @@ class MainWindow(QWidget):
         self._btn_profiles_clear_zaliver_tags.setToolTip(
             "С отмеченных профилей снимает служебные теги Zaliver "
             "(ошибки залива, проверки Studio, смены аватарки/названия, прогрева, "
-            "продвижения, фарма Cookie "
+            "продвижения, фарма Cookie, регистрации/2FA Instagram "
             "и заполнения канала и т.д.). Только свой антидетект."
         )
         self._btn_profiles_clear_zaliver_tags.clicked.connect(
@@ -2011,6 +2034,7 @@ class MainWindow(QWidget):
         profiles_actions_row.addWidget(self._btn_profiles_cookie_farm)
         profiles_actions_row.addWidget(self._btn_profiles_check_availability)
         profiles_actions_row.addWidget(self._btn_profiles_register_accounts)
+        profiles_actions_row.addWidget(self._btn_profiles_connect_2fa)
         profiles_actions_row.addWidget(self._btn_profiles_import_accounts)
         profiles_actions_row.addStretch()
         self._sync_profiles_platform_actions_visibility()
@@ -2176,7 +2200,7 @@ class MainWindow(QWidget):
         gmc = _compact_settings_vbox(self._gb_max_concurrent_browsers)
         browsers_hint = QLabel(
             "Максимум одновременно открытых браузеров при заливке, проверке Studio, "
-            "редактировании каналов и прогреве."
+            "редактировании каналов, прогреве, регистрации Instagram и подключении 2FA."
         )
         browsers_hint.setObjectName("hint")
         browsers_hint.setWordWrap(True)
@@ -4256,6 +4280,7 @@ class MainWindow(QWidget):
         busy = (
             self._profiles_availability_running
             or self._profiles_register_running
+            or self._profiles_2fa_running
             or self._profiles_channel_setup_running
             or self._profiles_warmup_running
             or self._profiles_promote_running
@@ -4269,6 +4294,8 @@ class MainWindow(QWidget):
             self._btn_profiles_check_availability.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_register_accounts"):
             self._btn_profiles_register_accounts.setEnabled(not busy)
+        if hasattr(self, "_btn_profiles_connect_2fa"):
+            self._btn_profiles_connect_2fa.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_channel_setup"):
             self._btn_profiles_channel_setup.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_warmup"):
@@ -4287,6 +4314,8 @@ class MainWindow(QWidget):
         is_ig = self._platform == PLATFORM_INSTAGRAM
         if hasattr(self, "_btn_profiles_register_accounts"):
             self._btn_profiles_register_accounts.setVisible(is_ig)
+        if hasattr(self, "_btn_profiles_connect_2fa"):
+            self._btn_profiles_connect_2fa.setVisible(is_ig)
         # YouTube-only массовые действия скрываем в Instagram (логика ещё YT).
         for attr in (
             "_btn_profiles_channel_setup",
@@ -5263,7 +5292,7 @@ class MainWindow(QWidget):
         profile_ids = self._collect_checked_profile_ids()
         if not profile_ids:
             target = (
-                "вход в Gmail"
+                "вход в Instagram"
                 if self._platform == PLATFORM_INSTAGRAM
                 else "YouTube Studio"
             )
@@ -5301,7 +5330,7 @@ class MainWindow(QWidget):
         self._profiles_availability_running = True
         self._sync_profiles_tab_action_buttons()
         check_label = (
-            "Gmail"
+            "Instagram"
             if self._platform == PLATFORM_INSTAGRAM
             else "Studio"
         )
@@ -5352,8 +5381,8 @@ class MainWindow(QWidget):
         max_concurrent: int = DEFAULT_MAX_CONCURRENT_BROWSERS,
     ) -> None:
         from zaliver.antydetect.antic_open import (
-            check_gmail_availability_in_local_antidetect_profile,
-            check_gmail_availability_in_profile,
+            check_instagram_availability_in_local_antidetect_profile,
+            check_instagram_availability_in_profile,
             check_studio_availability_in_local_antidetect_profile,
             check_studio_availability_in_profile,
             set_log_sink,
@@ -5362,8 +5391,8 @@ class MainWindow(QWidget):
             MultiProfileAvailabilityChecker,
         )
         from zaliver.antydetect.profile_tags import (
-            GMAIL_AVAILABILITY_ERROR_TAG,
-            GMAIL_AVAILABILITY_SUCCESS_TAG,
+            INSTAGRAM_AVAILABILITY_ERROR_TAG,
+            INSTAGRAM_AVAILABILITY_SUCCESS_TAG,
             STUDIO_AVAILABILITY_ERROR_TAG,
             STUDIO_AVAILABILITY_SUCCESS_TAG,
         )
@@ -5373,18 +5402,17 @@ class MainWindow(QWidget):
         base_u = (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
         is_instagram = self._platform == PLATFORM_INSTAGRAM
         success_tag = (
-            GMAIL_AVAILABILITY_SUCCESS_TAG
+            INSTAGRAM_AVAILABILITY_SUCCESS_TAG
             if is_instagram
             else STUDIO_AVAILABILITY_SUCCESS_TAG
         )
         error_tag = (
-            GMAIL_AVAILABILITY_ERROR_TAG
+            INSTAGRAM_AVAILABILITY_ERROR_TAG
             if is_instagram
             else STUDIO_AVAILABILITY_ERROR_TAG
         )
 
         def _check_one(pid: str) -> None:
-            creds = self._profile_login_credentials(pid)
             if is_instagram:
                 if _is_own_antidetect_kind(kind_s):
                     u = (base_url or "").strip()
@@ -5392,22 +5420,21 @@ class MainWindow(QWidget):
                         raise LocalAntidetectError(
                             f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
                         )
-                    check_gmail_availability_in_local_antidetect_profile(
+                    check_instagram_availability_in_local_antidetect_profile(
                         pid,
                         base_url=u,
                         headless=headless,
-                        login_credentials=creds,
                         remote_cdp=remote_cdp,
                     )
                 else:
-                    check_gmail_availability_in_profile(
+                    check_instagram_availability_in_profile(
                         pid,
                         local_token=token or None,
                         headless=headless,
-                        login_credentials=creds,
                     )
                 return
 
+            creds = self._profile_login_credentials(pid)
             yt_oldest = self._profile_yt_oldest_name(pid) or None
             search_oldest = self._youtube_search_oldest_channel()
             if _is_own_antidetect_kind(kind_s):
@@ -5688,6 +5715,212 @@ class MainWindow(QWidget):
             self._ui_log_line.emit(f"[ig-register] Критическая ошибка воркера: {e!r}")
             self._last_register_failed_ids = list(profile_ids)
             self._instagram_register_finished.emit(0, len(profile_ids))
+
+    def _start_profiles_instagram_2fa(self) -> None:
+        if self._platform != PLATFORM_INSTAGRAM:
+            QMessageBox.information(
+                self,
+                "Подключение 2FA Instagram",
+                "Подключение 2FA доступно только в режиме Instagram.",
+            )
+            return
+        if self._profiles_2fa_running:
+            QMessageBox.information(
+                self,
+                "Подключение 2FA Instagram",
+                "Подключение 2FA уже выполняется. Дождитесь завершения.",
+            )
+            return
+        if self._profiles_raw is None:
+            QMessageBox.warning(
+                self,
+                "Подключение 2FA Instagram",
+                "Сначала загрузите список профилей (кнопка «Обновить»).",
+            )
+            return
+        profile_ids = self._collect_checked_profile_ids()
+        if not profile_ids:
+            QMessageBox.warning(
+                self,
+                "Подключение 2FA Instagram",
+                "Отметьте квадратиками профили для подключения 2FA Instagram.",
+            )
+            return
+
+        token = (self._dolphin_token.text() or "").strip()
+        if not token:
+            token = (
+                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
+            ).strip()
+        kind = self._default_browser_combo.currentData()
+        if not isinstance(kind, str) or not kind.strip():
+            kind = "dolphin"
+        base_url = self._own_antidetect_base_url_from_settings(kind)
+
+        headless = True
+        if hasattr(self, "_dolphin_headless"):
+            headless = bool(self._dolphin_headless.isChecked())
+        else:
+            headless = bool(
+                self._settings.value("antydetect/dolphin_headless", True, type=bool)
+            )
+
+        try:
+            remote_cdp = self._remote_cdp_launch_options_for_kind(kind)
+        except LocalAntidetectError as e:
+            QMessageBox.warning(self, "Подключение 2FA Instagram", str(e))
+            return
+
+        self._profiles_2fa_running = True
+        self._sync_profiles_tab_action_buttons()
+        self._profiles_status.setText(
+            f"Подключение 2FA Instagram: 0 / {len(profile_ids)}…"
+        )
+        headless_label = "headless" if headless else "с окном браузера"
+        max_concurrent = self._max_concurrent_browsers()
+
+        try:
+            self._append_log(
+                f"[ig-2fa] Старт подключения 2FA для {len(profile_ids)} профилей "
+                f"({headless_label}, до {max_concurrent} параллельно)…"
+            )
+            threading.Thread(
+                target=self._profiles_instagram_2fa_worker,
+                kwargs={
+                    "profile_ids": profile_ids,
+                    "kind": kind,
+                    "token": token,
+                    "base_url": base_url,
+                    "headless": headless,
+                    "remote_cdp": remote_cdp,
+                    "max_concurrent": max_concurrent,
+                },
+                daemon=True,
+            ).start()
+        except Exception as e:
+            self._profiles_2fa_running = False
+            self._sync_profiles_tab_action_buttons()
+            self._append_log(f"[ig-2fa] Не удалось запустить: {e!r}")
+            QMessageBox.critical(
+                self,
+                "Подключение 2FA Instagram",
+                f"Не удалось запустить подключение 2FA:\n{e}",
+            )
+
+    def _profiles_instagram_2fa_worker(
+        self,
+        *,
+        profile_ids: list[str],
+        kind: str,
+        token: str,
+        base_url: str,
+        headless: bool,
+        remote_cdp: RemoteCdpLaunchOptions | None = None,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT_BROWSERS,
+    ) -> None:
+        from zaliver.antydetect.antic_open import (
+            set_log_sink,
+            setup_instagram_2fa_in_local_antidetect_profile,
+            setup_instagram_2fa_in_profile,
+        )
+        from zaliver.youtube_upload.multi_availability_checker import (
+            MultiProfileAvailabilityChecker,
+        )
+        from zaliver.antydetect.profile_tags import (
+            IG_2FA_ERROR_TAG,
+            IG_2FA_RESULT_TAGS,
+            IG_2FA_SUCCESS_TAG,
+            apply_mutually_exclusive_profile_tag,
+        )
+
+        set_log_sink(self._ui_log_line.emit)
+        kind_s = (kind or "").strip()
+        base_u = (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
+
+        def _check_one(pid: str) -> None:
+            creds = self._profile_login_credentials(pid)
+            if _is_own_antidetect_kind(kind_s):
+                u = (base_url or "").strip()
+                if not u:
+                    raise LocalAntidetectError(
+                        f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
+                    )
+                setup_instagram_2fa_in_local_antidetect_profile(
+                    pid,
+                    base_url=u,
+                    headless=headless,
+                    remote_cdp=remote_cdp,
+                    login_credentials=creds,
+                    keep_open_on_error=False,
+                )
+            else:
+                setup_instagram_2fa_in_profile(
+                    pid,
+                    local_token=token or None,
+                    headless=headless,
+                    login_credentials=creds,
+                    keep_open_on_error=False,
+                )
+
+        def _on_profile_done(pid: str, ok: bool, err: str) -> None:
+            if not _is_own_antidetect_kind(kind_s):
+                if not ok:
+                    self._ui_log_line.emit(
+                        f"[ig-2fa] profile={pid}: теги 2FA "
+                        "доступны только для своего антидетекта."
+                    )
+                return
+            try:
+                api = LocalAntidetectHttpAPI(base_u)
+                try:
+                    apply_mutually_exclusive_profile_tag(
+                        api,
+                        pid,
+                        success=ok,
+                        success_tag=IG_2FA_SUCCESS_TAG,
+                        error_tag=IG_2FA_ERROR_TAG,
+                    )
+                    tag = IG_2FA_SUCCESS_TAG if ok else IG_2FA_ERROR_TAG
+                    self._ui_log_line.emit(
+                        f"[ig-2fa] profile={pid} tag_set={tag!r}"
+                    )
+                finally:
+                    api.close()
+                self._profile_zaliver_tags_cache_update.emit(
+                    pid,
+                    [
+                        {
+                            "success": ok,
+                            "success_tag": IG_2FA_SUCCESS_TAG,
+                            "error_tag": IG_2FA_ERROR_TAG,
+                            "strip_tags": list(IG_2FA_RESULT_TAGS),
+                        }
+                    ],
+                )
+            except Exception as te:
+                self._ui_log_line.emit(
+                    f"[ig-2fa] profile={pid} tag_set_failed err={te!r}"
+                )
+
+        def _on_progress(done: int, total: int, profile_id: str) -> None:
+            self._instagram_2fa_progress.emit(done, total, profile_id)
+
+        mgr = MultiProfileAvailabilityChecker(
+            profile_ids=profile_ids,
+            check_one=_check_one,
+            on_profile_done=_on_profile_done,
+            on_progress=_on_progress,
+            log_sink=self._ui_log_line.emit,
+            max_concurrent=max_concurrent,
+        )
+        try:
+            ok_n, fail_n, failed_ids = mgr.run()
+            self._last_2fa_failed_ids = list(failed_ids)
+            self._instagram_2fa_finished.emit(ok_n, fail_n)
+        except Exception as e:
+            self._ui_log_line.emit(f"[ig-2fa] Критическая ошибка воркера: {e!r}")
+            self._last_2fa_failed_ids = list(profile_ids)
+            self._instagram_2fa_finished.emit(0, len(profile_ids))
 
     def _profiles_channel_setup_dialog_title(self) -> str:
         return "Редактирование канала"
@@ -7563,7 +7796,7 @@ class MainWindow(QWidget):
 
     def _on_studio_availability_progress(self, current: int, total: int, profile_id: str) -> None:
         pid = (profile_id or "").strip()
-        check_label = "Gmail" if self._platform == PLATFORM_INSTAGRAM else "Studio"
+        check_label = "Instagram" if self._platform == PLATFORM_INSTAGRAM else "Studio"
         self._profiles_status.setText(
             f"Проверка доступности {check_label}: {current} / {total}"
             + (f" — профиль {pid}" if pid else "…")
@@ -7772,6 +8005,43 @@ class MainWindow(QWidget):
             "Регистрация Instagram",
             f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.\n"
             "Успех = форма отправлена и аккаунт подтверждён кодом из почты.",
+        )
+
+    def _on_instagram_2fa_progress(
+        self, current: int, total: int, profile_id: str
+    ) -> None:
+        pid = (profile_id or "").strip()
+        self._profiles_status.setText(
+            f"Подключение 2FA Instagram: {current} / {total}"
+            + (f" — профиль {pid}" if pid else "…")
+        )
+
+    def _on_instagram_2fa_finished(self, ok_n: int, fail_n: int) -> None:
+        self._profiles_2fa_running = False
+        self._sync_profiles_tab_action_buttons()
+        total = int(ok_n) + int(fail_n)
+        self._profiles_status.setText(
+            f"Подключение 2FA Instagram завершено: успешно {ok_n}, с ошибкой {fail_n} "
+            f"(всего {total})."
+        )
+        self._append_log(
+            f"[ig-2fa] Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}."
+        )
+        if int(fail_n) > 0:
+            failed = getattr(self, "_last_2fa_failed_ids", None) or []
+            if failed:
+                self._append_log(
+                    "[ig-2fa] Профили с ошибкой (ID): " + ", ".join(failed)
+                )
+        kind = self._default_browser_combo.currentData()
+        if _is_own_antidetect_kind((kind or "").strip()) and total > 0:
+            self._refresh_profiles_list_after_zaliver_tags()
+        QMessageBox.information(
+            self,
+            "Подключение 2FA Instagram",
+            f"Итог: успешно {ok_n}, с ошибкой {fail_n}, всего {total}.\n"
+            "Успех = 2FA подключена (или уже была включена). "
+            "Новый секрет сохраняется в inst_2fa.",
         )
 
     def _on_studio_channel_setup_progress(

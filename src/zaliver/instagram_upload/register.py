@@ -13,7 +13,10 @@ from zaliver.youtube_upload.google_login import (
     random_birthday,
 )
 from zaliver.youtube_upload import studio as _studio
-from zaliver.antydetect.profile_tags import IG_REGISTER_SMS_ERROR_TAG
+from zaliver.antydetect.profile_tags import (
+    IG_REGISTER_ERROR_TAG,
+    IG_REGISTER_SMS_ERROR_TAG,
+)
 
 INSTAGRAM_URL = "https://www.instagram.com/"
 _IG_CAPTCHA_FALLBACK_URLS = (
@@ -44,6 +47,23 @@ class InstagramSmsCaptchaError(RuntimeError):
         return IG_REGISTER_SMS_ERROR_TAG in text
 
 
+class InstagramRegistrationFailedError(RuntimeError):
+    """
+    Явный баннер ошибки на форме signup
+    («An error occurred during your registration…») — закрываем профиль.
+    """
+
+    def __init__(self, detail: str = "") -> None:
+        base = IG_REGISTER_ERROR_TAG
+        msg = f"{base}: {detail}" if (detail or "").strip() else base
+        super().__init__(msg)
+
+    @classmethod
+    def matches(cls, err: str) -> bool:
+        text = err or ""
+        return IG_REGISTER_ERROR_TAG in text and IG_REGISTER_SMS_ERROR_TAG not in text
+
+
 class InstagramAlreadyLoggedInError(RuntimeError):
     """В профиле уже выполнен вход в Instagram — регистрация не нужна."""
 
@@ -58,18 +78,58 @@ class InstagramAlreadyLoggedInError(RuntimeError):
 
 
 def abort_if_instagram_sms_image_captcha(page) -> None:
-    """Если циферная капча / suspended — сразу ошибка с тегом SMS."""
-    if _is_accounts_suspended(page) or _is_image_captcha_screen(page):
+    """
+    Human-check intro / /accounts/suspended / циферная image-капча —
+    сразу ошибка с тегом SMS (авторег не продолжаем).
+    """
+    if not (
+        _is_accounts_suspended(page)
+        or _is_image_captcha_screen(page)
+        or _is_human_confirm_intro_screen(page)
+    ):
+        return
+    url = ""
+    try:
+        url = page.url or ""
+    except Exception:
         url = ""
-        try:
-            url = page.url or ""
-        except Exception:
-            url = ""
-        _log(
-            f"Instagram: image/SMS captcha — авторег остановлен "
-            f"({IG_REGISTER_SMS_ERROR_TAG}), URL={url!r}"
-        )
-        raise InstagramSmsCaptchaError(f"URL={url!r}")
+    _log(
+        f"Instagram: human/SMS captcha — авторег остановлен "
+        f"({IG_REGISTER_SMS_ERROR_TAG}), URL={url!r}"
+    )
+    raise InstagramSmsCaptchaError(f"URL={url!r}")
+
+
+def _is_registration_failed_banner(page) -> bool:
+    """Баннер «An error occurred during your registration…» на форме signup."""
+    try:
+        loc = page.get_by_text(_REGISTRATION_FAILED_BANNER_RE).first
+        if loc.count() > 0 and loc.is_visible(timeout=400):
+            return True
+    except Exception:
+        pass
+    try:
+        body = page.locator("body").inner_text(timeout=600) or ""
+    except Exception:
+        return False
+    return bool(_REGISTRATION_FAILED_BANNER_RE.search(body))
+
+
+def abort_if_instagram_registration_failed(page) -> None:
+    """Явная ошибка регистрации на форме → обычный error-тег."""
+    if not _is_registration_failed_banner(page):
+        return
+    url = ""
+    try:
+        url = page.url or ""
+    except Exception:
+        url = ""
+    _log(
+        f"Instagram: баннер ошибки регистрации — стоп "
+        f"({IG_REGISTER_ERROR_TAG}), URL={url!r}"
+    )
+    raise InstagramRegistrationFailedError(f"URL={url!r}")
+
 
 _CREATE_ACCOUNT_RE = re.compile(
     r"создать\s+новый\s+аккаунт|create\s+(new\s+)?account|sign\s*up",
@@ -146,8 +206,27 @@ _EMAIL_CODE_REJECTED_RE = re.compile(
 )
 _HUMAN_CONFIRM_RE = re.compile(
     r"confirm\s+you.?re\s+human|"
-    r"подтвердите[,\s]+что\s+вы\s+человек|"
-    r"подтвердите[,\s]+что\s+вы\s+не\s+робот",
+    r"подтвердите[,\s]+что\s+вы[\s\u00a0]*[—–\-]*[\s\u00a0]*человек|"
+    r"подтвердите[,\s]+что\s+вы\s+не\s+робот|"
+    r"чтобы\s+использовать\s+свой\s+аккаунт",
+    re.IGNORECASE,
+)
+_HUMAN_CONFIRM_TIP_RE = re.compile(
+    r"takes\s+about\s+30\s+seconds|"
+    r"займет\s+около\s+30[\s\u00a0]*секунд|"
+    r"займёт\s+около\s+30[\s\u00a0]*секунд|"
+    r"около\s+30[\s\u00a0]*секунд",
+    re.IGNORECASE,
+)
+_REGISTRATION_FAILED_BANNER_RE = re.compile(
+    r"an\s+error\s+occurred\s+during\s+your\s+registration|"
+    r"error\s+occurred\s+during\s+(your\s+)?registration|"
+    r"во\s+время\s+регистрации\s+произошл[ао]\s+ошибк|"
+    r"при\s+регистрации\s+произошл[ао]\s+ошибк|"
+    r"ошибка\s+при\s+регистрации|"
+    r"не\s+удалось\s+(завершить\s+)?регистрац|"
+    r"registration\s+failed|"
+    r"couldn.?t\s+complete\s+(your\s+)?registration",
     re.IGNORECASE,
 )
 _IMAGE_CAPTCHA_PLACEHOLDER_RE = re.compile(
@@ -189,6 +268,20 @@ _EMAIL_CODE_ATTEMPTS = 5
 # Пауза после «Продолжить», чтобы понять: ушли с экрана кода или нет.
 _AFTER_EMAIL_CODE_SETTLE_S = 15.0
 _MANUAL_CAPTCHA_LOG_EVERY_S = 30.0
+# Если руками долго не проходят — клик по капче (может пройти само / будит расширение).
+_MANUAL_CAPTCHA_NUDGE_AFTER_S = 60.0
+_MANUAL_CAPTCHA_NUDGE_EVERY_S = 45.0
+# После обновления iframe — ждать прогрузки перед кликом.
+_CAPTCHA_RELOAD_READY_MAX_S = 25.0
+_CAPTCHA_IFRAME_SEL = (
+    'iframe#captcha-recaptcha, iframe[src*="captcha"], '
+    'iframe[src*="recaptcha"], iframe[src*="referer_frame"], '
+    'iframe[title*="reCAPTCHA"], iframe[title*="recaptcha"]'
+)
+_RECAPTCHA_ANCHOR_SEL = (
+    "#recaptcha-anchor, .recaptcha-checkbox-border, "
+    ".rc-anchor-checkbox, span[role='checkbox']"
+)
 
 
 def _log(message: str) -> None:
@@ -355,13 +448,18 @@ def _username_taken_visible(page) -> bool:
 
 
 def _is_accounts_suspended(page) -> bool:
-    """URL /accounts/suspended/ — экран циферной image-капчи Instagram."""
+    """URL /accounts/suspended — human-check / циферная капча Instagram."""
     url = ""
     try:
         url = (page.url or "").lower()
     except Exception:
         url = ""
     return "/accounts/suspended" in url
+
+
+def _human_confirm_mentions_account(text: str) -> bool:
+    t = (text or "").lower()
+    return "account" in t or "аккаунт" in t
 
 
 def _signup_form_visible(page) -> bool:
@@ -1320,10 +1418,7 @@ def _page_looks_past_cookie_gate(page) -> bool:
 
 def _captcha_iframe_visible(page) -> bool:
     try:
-        frame = page.locator(
-            'iframe#captcha-recaptcha, iframe[src*="captcha"], '
-            'iframe[src*="recaptcha"], iframe[src*="referer_frame"]'
-        ).first
+        frame = page.locator(_CAPTCHA_IFRAME_SEL).first
         return frame.count() > 0 and frame.is_visible(timeout=500)
     except Exception:
         return False
@@ -1403,6 +1498,7 @@ def _wait_captcha_or_code_screen(
     """
     deadline = time.monotonic() + max_seconds
     while time.monotonic() < deadline:
+        abort_if_instagram_registration_failed(page)
         accept_instagram_terms_if_present(page, max_seconds=8.0)
         if _is_confirmation_code_screen(page):
             _log("Instagram: экран кода подтверждения (без капчи).")
@@ -1466,6 +1562,201 @@ def _extension_captcha_solved_visible(page) -> bool:
         return False
 
 
+def _reload_captcha_iframe(page) -> bool:
+    """
+    Обновить iframe капчи (переназначить src / grecaptcha.reset).
+    True если удалось инициировать reload.
+    """
+    js = """
+() => {
+  const sel =
+    'iframe#captcha-recaptcha, iframe[src*="captcha"], ' +
+    'iframe[src*="recaptcha"], iframe[src*="referer_frame"], ' +
+    'iframe[title*="reCAPTCHA"], iframe[title*="recaptcha"]';
+  const frames = Array.from(document.querySelectorAll(sel));
+  let n = 0;
+  for (const iframe of frames) {
+    try {
+      const src = iframe.getAttribute('src') || iframe.src || '';
+      if (!src) continue;
+      const u = new URL(src, location.href);
+      u.searchParams.set('_zaliver_ts', String(Date.now()));
+      iframe.src = u.toString();
+      n += 1;
+    } catch (e) {
+      try {
+        const src = iframe.src;
+        if (src) {
+          iframe.src = src;
+          n += 1;
+        }
+      } catch (e2) {}
+    }
+  }
+  try {
+    if (typeof grecaptcha !== 'undefined') {
+      if (grecaptcha.enterprise && typeof grecaptcha.enterprise.reset === 'function') {
+        grecaptcha.enterprise.reset();
+        n += 1;
+      } else if (typeof grecaptcha.reset === 'function') {
+        grecaptcha.reset();
+        n += 1;
+      }
+    }
+  } catch (e) {}
+  return n;
+}
+"""
+    total = 0
+    for frame in list(page.frames):
+        try:
+            n = frame.evaluate(js)
+            if isinstance(n, (int, float)) and n > 0:
+                total += int(n)
+        except Exception:
+            continue
+    if total > 0:
+        _log(f"Instagram: обновил iframe капчи ({total}).")
+        return True
+    return False
+
+
+def _recaptcha_checkbox_ready(page) -> bool:
+    """Виден ли чекбокс reCAPTCHA в каком-либо фрейме."""
+    try:
+        for frame in list(page.frames):
+            try:
+                url = (frame.url or "").lower()
+            except Exception:
+                url = ""
+            if url and "recaptcha" not in url and "captcha" not in url:
+                if url not in ("", "about:blank"):
+                    continue
+            try:
+                box = frame.locator(_RECAPTCHA_ANCHOR_SEL).first
+                if box.count() > 0 and box.is_visible(timeout=400):
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    try:
+        fl = page.frame_locator(_CAPTCHA_IFRAME_SEL).first
+        box = fl.locator(_RECAPTCHA_ANCHOR_SEL).first
+        return box.count() > 0 and box.is_visible(timeout=400)
+    except Exception:
+        return False
+
+
+def _wait_captcha_ready_after_reload(
+    page,
+    *,
+    max_seconds: float = _CAPTCHA_RELOAD_READY_MAX_S,
+) -> bool:
+    """Ждать, пока после reload снова виден iframe / чекбокс капчи."""
+    deadline = time.monotonic() + float(max_seconds)
+    _log(
+        f"Instagram: жду прогрузку капчи после обновления "
+        f"(до {max_seconds:.0f} с)…"
+    )
+    # Краткая пауза: старый iframe успеет уйти.
+    page.wait_for_timeout(800)
+    while time.monotonic() < deadline:
+        if _is_confirmation_code_screen(page) or _captcha_passed_locally(page):
+            return True
+        if _recaptcha_checkbox_ready(page):
+            _log("Instagram: капча прогрузилась (чекбокс виден).")
+            return True
+        if _captcha_iframe_visible(page):
+            # iframe есть — ещё чуть подождать чекбокс, но уже почти готово
+            page.wait_for_timeout(600)
+            if _recaptcha_checkbox_ready(page) or _captcha_iframe_visible(page):
+                _log("Instagram: капча прогрузилась (iframe виден).")
+                return True
+        page.wait_for_timeout(400)
+    _log("Instagram: капча после обновления не прогрузилась за отведённое время.")
+    return False
+
+
+def _nudge_captcha_click(page) -> bool:
+    """
+    Обновить капчу, дождаться прогрузки, затем кликнуть по ней.
+    Иногда после клика challenge проходит сам или просыпается расширение.
+    """
+    reloaded = _reload_captcha_iframe(page)
+    if reloaded:
+        if not _wait_captcha_ready_after_reload(page):
+            # Всё равно пробуем клик — iframe мог быть без чекбокса.
+            _log("Instagram: кликаю по капче без подтверждения прогрузки…")
+    else:
+        _log("Instagram: iframe капчи для обновления не найден — кликаю как есть.")
+
+    # 1) Чекбокс внутри фреймов (anchor iframe Google).
+    try:
+        for frame in list(page.frames):
+            try:
+                url = (frame.url or "").lower()
+            except Exception:
+                url = ""
+            if url and "recaptcha" not in url and "captcha" not in url:
+                # Пустой about:blank и т.п. — тоже пробуем (вложенные фреймы).
+                if url not in ("", "about:blank"):
+                    continue
+            try:
+                box = frame.locator(_RECAPTCHA_ANCHOR_SEL).first
+                if box.count() == 0:
+                    continue
+                if not box.is_visible(timeout=400):
+                    continue
+                box.click(timeout=2500, force=True)
+                _log("Instagram: клик по чекбоксу reCAPTCHA (nudge).")
+                return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # 2) frame_locator по видимому iframe капчи.
+    try:
+        fl = page.frame_locator(_CAPTCHA_IFRAME_SEL).first
+        box = fl.locator(_RECAPTCHA_ANCHOR_SEL).first
+        box.click(timeout=2500, force=True)
+        _log("Instagram: клик по reCAPTCHA через frame_locator (nudge).")
+        return True
+    except Exception:
+        pass
+
+    # 3) Клик по самому iframe (центр) — иногда будит challenge/расширение.
+    try:
+        iframe = page.locator(_CAPTCHA_IFRAME_SEL).first
+        if iframe.count() > 0 and iframe.is_visible(timeout=500):
+            iframe.click(timeout=2500, force=True)
+            _log("Instagram: клик по iframe капчи (nudge).")
+            return True
+    except Exception:
+        pass
+
+    # 4) Бейдж/кнопка AntiCaptcha на странице.
+    try:
+        for sel in (
+            ".antigate_solver:not(.solved)",
+            ".antigate_solver",
+            "[class*='antigate']",
+        ):
+            loc = page.locator(sel).first
+            if loc.count() == 0:
+                continue
+            if not loc.is_visible(timeout=300):
+                continue
+            loc.click(timeout=2000, force=True)
+            _log(f"Instagram: клик по AntiCaptcha UI ({sel}) (nudge).")
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
 def _wait_anticaptcha_extension_solve(
     page,
     *,
@@ -1523,6 +1814,9 @@ def wait_instagram_manual_captcha(
     """
     Бессрочно ждать, пока человек пройдёт капчу (кнопка «Далее»/Next активна),
     затем нажать её. Если уже экран кода — выйти без клика.
+
+    Если долго нет прогресса — периодически кликаем по капче (nudge):
+    иногда challenge проходит сам или просыпается AntiCaptcha.
     """
     if _is_confirmation_code_screen(page):
         _log("Instagram: капча не нужна — уже экран кода.")
@@ -1540,6 +1834,7 @@ def wait_instagram_manual_captcha(
 
     started = time.monotonic()
     last_log = started
+    last_nudge = 0.0
     while True:
         if _is_confirmation_code_screen(page):
             _log("Instagram: во время ожидания капчи открылся экран кода.")
@@ -1547,15 +1842,51 @@ def wait_instagram_manual_captcha(
         if _next_button_enabled(page):
             _log("Instagram: «Далее» активна — капча пройдена вручную.")
             break
+        if _captcha_passed_locally(page):
+            _log("Instagram: капча пройдена (токен/Next) во время ожидания.")
+            break
+        if _extension_captcha_solved_visible(page):
+            _log("Instagram: расширение отметило solved во время ручного ожидания.")
+            break
         now = time.monotonic()
-        if now - last_log >= _MANUAL_CAPTCHA_LOG_EVERY_S:
-            waited = int(now - started)
+        waited = now - started
+        if waited >= _MANUAL_CAPTCHA_NUDGE_AFTER_S and (
+            last_nudge <= 0.0
+            or (now - last_nudge) >= _MANUAL_CAPTCHA_NUDGE_EVERY_S
+        ):
             _log(
-                f"Instagram: всё ещё жду ручную капчу… ({waited} с). "
+                f"Instagram: ручная капча без прогресса {int(waited)} с — "
+                "обновляю капчу и кликаю (nudge)…"
+            )
+            if _nudge_captcha_click(page):
+                page.wait_for_timeout(1500)
+                if _captcha_passed_locally(page) or _extension_captcha_solved_visible(
+                    page
+                ):
+                    _log("Instagram: после nudge капча выглядит пройденной.")
+                    break
+                if _is_confirmation_code_screen(page):
+                    _log("Instagram: после nudge уже экран кода.")
+                    return
+            else:
+                _log("Instagram: nudge — элемент капчи для клика не найден.")
+            last_nudge = time.monotonic()
+        if now - last_log >= _MANUAL_CAPTCHA_LOG_EVERY_S:
+            _log(
+                f"Instagram: всё ещё жду ручную капчу… ({int(waited)} с). "
                 "Пройдите капчу в окне браузера."
             )
             last_log = now
         page.wait_for_timeout(800)
+
+    # После nudge/токена Next может появиться с задержкой.
+    for _ in range(8):
+        if _is_confirmation_code_screen(page):
+            _log("Instagram: экран кода после прохождения капчи.")
+            return
+        if _next_button_enabled(page):
+            break
+        page.wait_for_timeout(500)
 
     if _click_by_text(page, _NEXT_RE, prefer_link=False):
         _log("Instagram: нажали «Далее» после капчи.")
@@ -1570,6 +1901,8 @@ def wait_instagram_manual_captcha(
         return
     except Exception:
         pass
+    if _is_confirmation_code_screen(page):
+        return
     raise RuntimeError(
         f"Instagram: «Далее» стала активной, но клик не удался (URL={page.url!r})"
     )
@@ -1583,7 +1916,9 @@ def wait_instagram_after_signup(
     """После «Отправить»: расширение AntiCaptcha → иначе ручное ожидание."""
     # Сразу после Submit иногда показывают «agree to our terms».
     page.wait_for_timeout(600)
+    abort_if_instagram_registration_failed(page)
     accept_instagram_terms_if_present(page, max_seconds=15.0)
+    abort_if_instagram_registration_failed(page)
     outcome = _wait_captcha_or_code_screen(page)
     if outcome == "code":
         return
@@ -1595,11 +1930,13 @@ def wait_instagram_after_signup(
             "перед решением капчи…"
         )
         page.wait_for_timeout(settle_ms)
+        abort_if_instagram_registration_failed(page)
         if _is_confirmation_code_screen(page):
             _log("Instagram: за время паузы уже экран кода.")
             return
 
     if _wait_anticaptcha_extension_solve(page):
+        abort_if_instagram_registration_failed(page)
         if _is_confirmation_code_screen(page):
             return
         wait_instagram_confirmation_code_screen(page)
@@ -1701,26 +2038,30 @@ def click_instagram_continue_after_code(
 
 
 def _is_human_confirm_intro_screen(page) -> bool:
-    """Экран «Confirm you're human to use your account…» с кнопкой Continue."""
+    """
+    Экран «Confirm you're human…» / «подтвердите, что вы — человек»
+    с кнопкой Continue / Продолжить (часто на /accounts/suspended).
+    """
     try:
         heading = page.locator(
             '[role="heading"][aria-label*="Confirm you" i], '
-            '[role="heading"][aria-label*="human" i]'
+            '[role="heading"][aria-label*="human" i], '
+            '[role="heading"][aria-label*="человек" i], '
+            '[role="heading"][aria-label*="аккаунт" i]'
         ).first
         if heading.count() > 0 and heading.is_visible(timeout=300):
             label = (heading.get_attribute("aria-label") or "").strip()
-            if _HUMAN_CONFIRM_RE.search(label) and "account" in label.lower():
+            if _HUMAN_CONFIRM_RE.search(label) and _human_confirm_mentions_account(
+                label
+            ):
                 return True
     except Exception:
         pass
     try:
         text = page.get_by_text(_HUMAN_CONFIRM_RE).first
         if text.count() > 0 and text.is_visible(timeout=300):
-            # Intro обычно с «to use your account» / Takes about 30 seconds.
             try:
-                tip = page.get_by_text(
-                    re.compile(r"takes\s+about\s+30\s+seconds|около\s+30\s+секунд", re.I)
-                ).first
+                tip = page.get_by_text(_HUMAN_CONFIRM_TIP_RE).first
                 if tip.count() > 0 and tip.is_visible(timeout=200):
                     return True
             except Exception:
@@ -1732,10 +2073,26 @@ def _is_human_confirm_intro_screen(page) -> bool:
                     body = page.locator("body").inner_text(timeout=500) or ""
                 except Exception:
                     pass
-                if "to use your account" in body.lower() or "account," in body.lower():
+                if _human_confirm_mentions_account(body) or _HUMAN_CONFIRM_TIP_RE.search(
+                    body
+                ):
                     return True
     except Exception:
         pass
+    # На /accounts/suspended: Continue + «~30 секунд» / human-текст.
+    if _is_accounts_suspended(page):
+        try:
+            tip = page.get_by_text(_HUMAN_CONFIRM_TIP_RE).first
+            if tip.count() > 0 and tip.is_visible(timeout=200):
+                return True
+        except Exception:
+            pass
+        try:
+            body = page.locator("body").inner_text(timeout=400) or ""
+            if _HUMAN_CONFIRM_RE.search(body):
+                return True
+        except Exception:
+            pass
     return False
 
 
@@ -1865,55 +2222,27 @@ def handle_instagram_human_confirmation(
     appear_timeout_s: float = 45.0,
 ) -> None:
     """
-    После кода из почты: опционально «Confirm you're human» → Continue →
-    image captcha → стоп с тегом SMS (не решаем).
+    После кода из почты: если «Confirm you're human» / /accounts/suspended /
+    image captcha — сразу SMS-ошибка (Continue не жмём).
     """
     if _instagram_home_ready(page, username):
         return
 
-    deadline = time.monotonic() + appear_timeout_s
-    saw_intro = False
-    saw_image = False
+    # Уже на экране после кода — стоп без ожидания.
+    abort_if_instagram_sms_image_captcha(page)
+
+    deadline = time.monotonic() + max(0.0, float(appear_timeout_s))
     while time.monotonic() < deadline:
         if _instagram_home_ready(page, username):
             return
-        if _is_accounts_suspended(page) or _is_image_captcha_screen(page):
-            saw_image = True
-            break
-        if _is_human_confirm_intro_screen(page):
-            saw_intro = True
-            break
+        abort_if_instagram_sms_image_captcha(page)
         page.wait_for_timeout(500)
 
-    if not saw_intro and not saw_image:
-        _log(
-            "Instagram: экран Confirm you're human не появился — "
-            "идём к проверке главной."
-        )
-        return
+    _log(
+        "Instagram: экран Confirm you're human / suspended не появился — "
+        "идём к проверке главной."
+    )
 
-    if saw_intro:
-        _log("Instagram: экран Confirm you're human (intro).")
-        if not click_instagram_human_confirm_continue(page):
-            _log("Instagram: не удалось нажать Continue на intro — ждём image captcha.")
-        wait_img = time.monotonic() + 60.0
-        while time.monotonic() < wait_img:
-            if _instagram_home_ready(page, username):
-                return
-            if _is_accounts_suspended(page) or _is_image_captcha_screen(page):
-                saw_image = True
-                break
-            page.wait_for_timeout(500)
-
-    if (
-        saw_image
-        or _is_accounts_suspended(page)
-        or _is_image_captcha_screen(page)
-    ):
-        abort_if_instagram_sms_image_captcha(page)
-        return
-
-    _log("Instagram: после intro image captcha не появилась.")
 
 def wait_instagram_home_with_username(
     page,
@@ -1933,6 +2262,7 @@ def wait_instagram_home_with_username(
     name_re = re.compile(rf"^{re.escape(username)}$", re.IGNORECASE)
     deadline = time.monotonic() + max_seconds
     while time.monotonic() < deadline:
+        abort_if_instagram_sms_image_captcha(page)
         try:
             link = page.locator(f'a[href="/{username}/"], a[href="/{username}"]').first
             if link.count() > 0 and link.is_visible(timeout=300):
@@ -2378,6 +2708,9 @@ def fill_instagram_signup_form(
                 f"Instagram: не нашли кнопку «Отправить»: {e!r}"
             ) from e
     _log("Instagram: нажали «Отправить».")
+    # Баннер «An error occurred during your registration…» часто сразу после Submit.
+    page.wait_for_timeout(1200)
+    abort_if_instagram_registration_failed(page)
     return username
 
 

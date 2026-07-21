@@ -819,12 +819,37 @@ def check_gmail_availability_in_local_antidetect_profile(
         api.close()
 
 
+def _instagram_session_creds_from_profile_dict(
+    profile: dict | None,
+) -> tuple[str, str, str]:
+    """(login, password, twofa) из custom_data для re-login вне регистрации."""
+    from zaliver.instagram_upload.instagram_availability import (
+        session_login_from_custom_data,
+        session_password_from_custom_data,
+        session_twofa_from_custom_data,
+    )
+
+    if not isinstance(profile, dict):
+        return "", "", ""
+    cd = profile.get("custom_data")
+    if not isinstance(cd, dict):
+        return "", "", ""
+    return (
+        session_login_from_custom_data(cd),
+        session_password_from_custom_data(cd),
+        session_twofa_from_custom_data(cd),
+    )
+
+
 @with_log_profile
 def check_instagram_availability_in_profile(
     profile_id: str,
     *,
     local_token: str | None = None,
     headless: bool = True,
+    session_login: str = "",
+    session_password: str = "",
+    session_twofa: str = "",
 ) -> None:
     """Dolphin → instagram.com → проверка входа в аккаунт → закрытие профиля."""
     from zaliver.instagram_upload.instagram_availability import (
@@ -852,7 +877,12 @@ def check_instagram_availability_in_profile(
                 p, (conn.ws_url(), conn.http_url())
             )
             try:
-                verify_instagram_home_available(page)
+                verify_instagram_home_available(
+                    page,
+                    session_login=session_login,
+                    session_password=session_password,
+                    session_twofa=session_twofa,
+                )
             finally:
                 try:
                     browser.close()
@@ -876,6 +906,9 @@ def check_instagram_availability_in_local_antidetect_profile(
     base_url: str,
     headless: bool = True,
     remote_cdp=None,
+    session_login: str = "",
+    session_password: str = "",
+    session_twofa: str = "",
 ) -> None:
     """Локальный антидетект → instagram.com → проверка входа → закрытие профиля."""
     from zaliver.instagram_upload.instagram_availability import (
@@ -898,13 +931,30 @@ def check_instagram_availability_in_local_antidetect_profile(
     session_id: str | None = None
     started_at = time.perf_counter()
     try:
-        # Не Studio: иначе антидетект ждёт загрузку YouTube перед CDP.
+        login = (session_login or "").strip()
+        pwd = (session_password or "").strip()
+        twofa = (session_twofa or "").strip()
+        if not pwd or not login:
+            try:
+                prof = api.get_profile(profile_id)
+                loaded_login, loaded_pwd, loaded_twofa = (
+                    _instagram_session_creds_from_profile_dict(prof)
+                )
+                if not login:
+                    login = loaded_login
+                if not pwd:
+                    pwd = loaded_pwd
+                if not twofa:
+                    twofa = loaded_twofa
+            except Exception as e:
+                _log(f"Local antidetect: не удалось прочитать custom_data: {e!r}")
+
+        # Без start_url Instagram: ссылку откроем сами после CDP.
         acc = api.launch_profile(
             profile_id,
             headless=headless,
             expose_cdp=True,
             remote_cdp=remote_cdp,
-            start_url="https://www.instagram.com/",
         )
         sid = acc.get("session_id")
         if not isinstance(sid, str) or not sid.strip():
@@ -913,17 +963,19 @@ def check_instagram_availability_in_local_antidetect_profile(
         bu = (base_url or "").strip() or "http://127.0.0.1:18765"
         register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
         ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
-        _log(
-            "Local antidetect: cdp_ws_url="
-            f"{ws_url!r} (start_url=https://www.instagram.com/)"
-        )
+        _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
 
         with sync_playwright() as p:
             browser, _context, page = _playwright_page_from_local_session_cdp(
                 p, api, session_id, ws_url
             )
             try:
-                verify_instagram_home_available(page)
+                verify_instagram_home_available(
+                    page,
+                    session_login=login,
+                    session_password=pwd,
+                    session_twofa=twofa,
+                )
             finally:
                 try:
                     browser.close()
@@ -1222,6 +1274,9 @@ def setup_instagram_2fa_in_profile(
     local_token: str | None = None,
     headless: bool = True,
     login_credentials=None,
+    session_login: str = "",
+    session_password: str = "",
+    session_twofa: str = "",
     keep_open_on_error: bool | None = None,
 ) -> str:
     """Dolphin → Accounts Center → подключить TOTP 2FA → вернуть секрет."""
@@ -1258,7 +1313,12 @@ def setup_instagram_2fa_in_profile(
             )
             try:
                 secret = setup_instagram_totp_2fa(
-                    page, login_credentials=login_credentials, max_seconds=300.0
+                    page,
+                    login_credentials=login_credentials,
+                    session_login=session_login,
+                    session_password=session_password,
+                    session_twofa=session_twofa,
+                    max_seconds=300.0,
                 )
                 succeeded = True
                 _log(
@@ -1302,6 +1362,9 @@ def setup_instagram_2fa_in_local_antidetect_profile(
     headless: bool = True,
     remote_cdp=None,
     login_credentials=None,
+    session_login: str = "",
+    session_password: str = "",
+    session_twofa: str = "",
     keep_open_on_error: bool | None = None,
 ) -> str:
     """Локальный антидетект → Accounts Center → TOTP 2FA → сохранить inst_2fa."""
@@ -1332,6 +1395,24 @@ def setup_instagram_2fa_in_local_antidetect_profile(
     succeeded = False
     secret = ""
     try:
+        login = (session_login or "").strip()
+        pwd = (session_password or "").strip()
+        twofa = (session_twofa or "").strip()
+        if not pwd or not login:
+            try:
+                prof = api.get_profile(profile_id)
+                loaded_login, loaded_pwd, loaded_twofa = (
+                    _instagram_session_creds_from_profile_dict(prof)
+                )
+                if not login:
+                    login = loaded_login
+                if not pwd:
+                    pwd = loaded_pwd
+                if not twofa:
+                    twofa = loaded_twofa
+            except Exception as e:
+                _log(f"Local antidetect: не удалось прочитать custom_data: {e!r}")
+
         acc = api.launch_profile(
             profile_id,
             headless=headless,
@@ -1359,6 +1440,9 @@ def setup_instagram_2fa_in_local_antidetect_profile(
                     page,
                     on_secret=_on_secret,
                     login_credentials=login_credentials,
+                    session_login=login,
+                    session_password=pwd,
+                    session_twofa=twofa,
                     max_seconds=300.0,
                 )
                 succeeded = True

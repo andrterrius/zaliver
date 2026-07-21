@@ -1107,6 +1107,9 @@ def setup_instagram_totp_2fa(
     *,
     on_secret: Callable[[str], None] | None = None,
     login_credentials=None,
+    session_login: str = "",
+    session_password: str = "",
+    session_twofa: str = "",
     max_seconds: float = 180.0,
 ) -> str:
     """
@@ -1117,12 +1120,66 @@ def setup_instagram_totp_2fa(
     Returns:
         Нормализованный TOTP-секрет.
     """
+    from zaliver.instagram_upload.register import (
+        INSTAGRAM_URL,
+        accept_instagram_cookie_consent_if_present,
+        ensure_instagram_session_relogin,
+        _instagram_already_logged_in,
+        _is_classic_login_form_visible,
+        _is_instagram_url,
+        _is_saved_profile_chooser_screen,
+        _navigate_page_to,
+        _onetap_password_visible,
+    )
+
     deadline = time.monotonic() + max(30.0, float(max_seconds))
 
     def _g() -> bool:
         return _guard_step(
             page, login_credentials=login_credentials, deadline=deadline
         )
+
+    def _needs_relogin() -> bool:
+        return (
+            _is_saved_profile_chooser_screen(page)
+            or _onetap_password_visible(page)
+            or _is_classic_login_form_visible(page)
+        )
+
+    # Разлогин на главной (не регистрация): форма / Continue → пароль → 2FA → Save.
+    user_login = (session_login or "").strip()
+    if not user_login and login_credentials is not None:
+        user_login = str(getattr(login_credentials, "email", "") or "").strip()
+    pwd = (session_password or "").strip()
+    if not pwd and login_credentials is not None:
+        pwd = str(getattr(login_credentials, "password", "") or "").strip()
+    twofa = (session_twofa or "").strip()
+    try:
+        url0 = (_page_url(page) or "").lower()
+        if not _is_instagram_url(url0) and "accountscenter" not in url0:
+            # Могли открыть about:blank — сначала главная Instagram.
+            if url0 in ("about:blank", "about:srcdoc", ""):
+                _navigate_page_to(page, INSTAGRAM_URL, label="Instagram 2FA")
+                accept_instagram_cookie_consent_if_present(page, appear_seconds=6.0)
+                # Дать UI отрисовать chooser / форму / ленту.
+                settle = time.monotonic() + 8.0
+                while time.monotonic() < settle:
+                    if _needs_relogin() or _instagram_already_logged_in(page):
+                        break
+                    page.wait_for_timeout(350)
+        if _needs_relogin():
+            ensure_instagram_session_relogin(
+                page,
+                login=user_login,
+                password=pwd,
+                twofa_secret=twofa,
+                max_seconds=90.0,
+            )
+    except Exception as e:
+        # Если это уже не экран разлогина — продолжим; иначе пробросим.
+        if _needs_relogin():
+            raise
+        _log(f"Instagram 2FA: pre-check session: {e!r}")
 
     _log(f"Instagram 2FA: открываем Accounts Center ({ACCOUNTS_CENTER_URL})")
     _ensure_accounts_center_open(page)

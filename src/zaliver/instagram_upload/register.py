@@ -140,13 +140,41 @@ _NEXT_RE = re.compile(r"^далее$|^next$", re.IGNORECASE)
 _CONTINUE_RE = re.compile(r"^продолжить$|^continue$", re.IGNORECASE)
 _LOG_IN_RE = re.compile(r"^войти$|^log\s*in$", re.IGNORECASE)
 _SAVE_INFO_RE = re.compile(
-    r"^save\s*info$|^сохранить(\s+данные)?$|^сохранить\s+информацию$",
+    r"^save(\s*info)?$|^сохранить(\s+данные)?$|^сохранить\s+информацию$",
     re.IGNORECASE,
 )
 _SAVE_LOGIN_INFO_HEADING_RE = re.compile(
     r"save\s+your\s+login\s+info|"
     r"сохранить\s+(данные\s+для\s+)?входа|"
     r"сохранить\s+информацию\s+для\s+входа",
+    re.IGNORECASE,
+)
+# «Введены неверные данные для входа» / Incorrect login credentials
+_WRONG_LOGIN_CREDENTIALS_RE = re.compile(
+    r"incorrect\s+(login\s+)?(credentials|information|details)|"
+    r"the\s+(password|login\s+info(rmation)?)\s+you\s+entered\s+is\s+incorrect|"
+    r"login\s+info(rmation)?\s+you\s+entered\s+is\s+incorrect|"
+    r"entered\s+an?\s+incorrect|"
+    r"введены\s+неверные\s+данные(\s+для\s+входа)?|"
+    r"неверн(ый|ые|ое)\s+(пароль|данные(\s+для\s+входа)?)|"
+    r"find\s+your\s+account\s+and\s+log\s+in",
+    re.IGNORECASE,
+)
+_LOGIN_2FA_CHALLENGE_RE = re.compile(
+    r"go\s+to\s+your\s+authentication\s+app|"
+    r"enter\s+the\s+6[- ]digit\s+code\s+for\s+this\s+account|"
+    r"two[- ]factor\s+authentication\s+app|"
+    r"перейд(ите|и)\s+в\s+(сво[её]\s+)?приложение\s+(для\s+)?аутентифика|"
+    r"введите\s+6[- ]значный\s+код|"
+    r"приложение\s+двухфакторной\s+аутентификации",
+    re.IGNORECASE,
+)
+_TRUST_DEVICE_RE = re.compile(
+    r"trust\s+this\s+device|"
+    r"skip\s+this\s+step\s+from\s+now\s+on|"
+    r"доверять\s+этому\s+устройству|"
+    r"запомнить\s+это\s+устройство|"
+    r"пропускать\s+этот\s+шаг",
     re.IGNORECASE,
 )
 _I_AGREE_RE = re.compile(
@@ -774,7 +802,53 @@ def _click_saved_profile_continue(page) -> bool:
     return _click_by_text(page, _CONTINUE_RE, prefer_link=False)
 
 
+def _is_classic_login_form_visible(page) -> bool:
+    """Форма Log in to Instagram: form#login_form (username/email + password)."""
+    try:
+        form = page.locator("form#login_form").first
+        if form.count() > 0 and form.is_visible(timeout=500):
+            email = form.locator('input[name="email"], input[type="text"]').first
+            pwd = form.locator('input[name="pass"], input[type="password"]').first
+            if (
+                email.count() > 0
+                and pwd.count() > 0
+                and email.is_visible(timeout=300)
+                and pwd.is_visible(timeout=300)
+            ):
+                return True
+    except Exception:
+        pass
+    try:
+        heading = page.get_by_text(
+            re.compile(r"^log\s+in\s+to\s+instagram$|^вход\s+в\s+instagram$", re.I)
+        ).first
+        if heading.count() > 0 and heading.is_visible(timeout=400):
+            email = page.locator('input[name="email"]').first
+            pwd = page.locator('input[name="pass"][type="password"]').first
+            if (
+                email.count() > 0
+                and pwd.count() > 0
+                and email.is_visible(timeout=300)
+                and pwd.is_visible(timeout=300)
+            ):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _onetap_password_visible(page) -> bool:
+    """Только пароль сохранённого профиля (не классическая login_form)."""
+    if _is_classic_login_form_visible(page):
+        return False
+    try:
+        inp = page.locator(
+            "form#aymh_password_entry_view input[type='password'][name='pass']"
+        ).first
+        if inp.count() > 0 and inp.is_visible(timeout=400):
+            return True
+    except Exception:
+        pass
     try:
         inp = page.locator('input[type="password"][name="pass"]').first
         if inp.count() > 0 and inp.is_visible(timeout=400):
@@ -790,12 +864,97 @@ def _onetap_password_visible(page) -> bool:
     return False
 
 
+def _fill_classic_login_form(page, login: str, password: str) -> None:
+    login = (login or "").strip()
+    password = password or ""
+    if not login:
+        raise RuntimeError(
+            "Instagram: пустой логин для формы входа "
+            "(нужен inst_login в данных учётки)."
+        )
+    if not password:
+        raise RuntimeError(
+            "Instagram: пустой пароль для формы входа "
+            "(нужен inst_password или gmail_password)."
+        )
+    form = page.locator("form#login_form").first
+    email_candidates = (
+        form.locator('input[name="email"]').first,
+        page.locator('input[name="email"]').first,
+        page.get_by_label(
+            re.compile(
+                r"mobile\s+number|username|email|номер\s+телефона|"
+                r"имя\s+пользователя|эл\.?\s*почт",
+                re.I,
+            )
+        ).first,
+    )
+    pwd_candidates = (
+        form.locator('input[name="pass"][type="password"]').first,
+        page.locator('input[name="pass"][type="password"]').first,
+        page.get_by_label(re.compile(r"^password$|^пароль$", re.I)).first,
+    )
+    filled_login = False
+    last_err: Exception | None = None
+    for inp in email_candidates:
+        try:
+            if inp.count() <= 0 or not inp.is_visible(timeout=500):
+                continue
+            inp.fill(login, timeout=10_000)
+            filled_login = True
+            break
+        except Exception as e:
+            last_err = e
+            continue
+    if not filled_login:
+        raise RuntimeError(
+            "Instagram: не найдено поле логина на форме входа"
+            + (f": {last_err!r}" if last_err else "")
+        )
+    filled_pwd = False
+    for inp in pwd_candidates:
+        try:
+            if inp.count() <= 0 or not inp.is_visible(timeout=500):
+                continue
+            inp.fill(password, timeout=10_000)
+            filled_pwd = True
+            break
+        except Exception as e:
+            last_err = e
+            continue
+    if not filled_pwd:
+        raise RuntimeError(
+            "Instagram: не найдено поле Password на форме входа"
+            + (f": {last_err!r}" if last_err else "")
+        )
+
+
+def _click_classic_log_in(page) -> bool:
+    try:
+        btn = page.locator(
+            'form#login_form [role="button"][aria-label="Log in" i], '
+            'form#login_form [role="button"][aria-label="Войти" i]'
+        ).first
+        if btn.count() > 0 and btn.is_visible(timeout=800):
+            disabled = (btn.get_attribute("aria-disabled") or "").lower() == "true"
+            if not disabled:
+                btn.click(timeout=8000)
+                return True
+    except Exception:
+        pass
+    return _click_onetap_log_in(page)
+
+
 def _fill_onetap_password(page, password: str) -> None:
     password = password or ""
     if not password:
-        raise RuntimeError("Instagram: пустой yt_password для входа в сохранённый профиль.")
+        raise RuntimeError(
+            "Instagram: пустой пароль для входа в сохранённый профиль "
+            "(нужен inst_password или gmail_password)."
+        )
     candidates = (
         page.locator('input[type="password"][name="pass"]').first,
+        page.locator("form#aymh_password_entry_view input[type='password']").first,
         page.get_by_label(re.compile(r"^password$|^пароль$", re.I)).first,
         page.locator('input[type="password"]').first,
     )
@@ -826,6 +985,121 @@ def _click_onetap_log_in(page) -> bool:
     except Exception:
         pass
     return _click_by_text(page, _LOG_IN_RE, prefer_link=False)
+
+
+def _wrong_login_credentials_visible(page) -> bool:
+    try:
+        if page.get_by_text(_WRONG_LOGIN_CREDENTIALS_RE).first.is_visible(timeout=500):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_login_2fa_challenge_screen(page) -> bool:
+    try:
+        if page.get_by_text(_LOGIN_2FA_CHALLENGE_RE).first.is_visible(timeout=500):
+            return True
+    except Exception:
+        pass
+    try:
+        if page.get_by_text(_TRUST_DEVICE_RE).first.is_visible(timeout=400):
+            code = page.get_by_label(re.compile(r"^code$|^код$", re.I)).first
+            if code.count() > 0 and code.is_visible(timeout=300):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _ensure_trust_device_checked(page) -> None:
+    """Оставить галочку «Trust this device…» включённой."""
+    try:
+        label = page.locator("label").filter(has_text=_TRUST_DEVICE_RE).first
+        if label.count() <= 0 or not label.is_visible(timeout=600):
+            return
+        cb = label.locator('input[type="checkbox"]').first
+        if cb.count() <= 0:
+            return
+        checked = (cb.get_attribute("aria-checked") or "").lower()
+        if checked == "true" or cb.is_checked():
+            return
+        try:
+            cb.check(timeout=3000)
+        except Exception:
+            label.click(timeout=3000)
+        _log("Instagram: включили «Trust this device».")
+    except Exception:
+        pass
+
+
+def _fill_login_2fa_code(page, code: str) -> bool:
+    code = (code or "").strip()
+    if not code:
+        return False
+    candidates = (
+        page.get_by_label(re.compile(r"^code$|^код$", re.I)).first,
+        page.locator(
+            'input[autocomplete="one-time-code"], '
+            'input[inputmode="numeric"], '
+            'input[maxlength="6"], '
+            'input[type="text"]'
+        ).first,
+    )
+    for inp in candidates:
+        try:
+            if inp.count() <= 0 or not inp.is_visible(timeout=600):
+                continue
+            inp.click(timeout=4000)
+            inp.fill("")
+            inp.fill(code, timeout=10_000)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _click_login_2fa_continue(page) -> bool:
+    try:
+        btn = page.locator('[role="button"]').filter(has_text=_CONTINUE_RE).first
+        if btn.count() > 0 and btn.is_visible(timeout=800):
+            disabled = (btn.get_attribute("aria-disabled") or "").lower() == "true"
+            if not disabled:
+                btn.click(timeout=8000)
+                return True
+    except Exception:
+        pass
+    return _click_by_text(page, _CONTINUE_RE, prefer_link=False)
+
+
+def _handle_login_2fa_challenge(page, twofa_secret: str, *, max_seconds: float = 60.0) -> None:
+    """Экран authenticator app после пароля: trust device + TOTP → Continue."""
+    from zaliver.youtube_upload.totp import get_totp_token
+
+    secret = (twofa_secret or "").strip().replace(" ", "")
+    if not secret:
+        raise RuntimeError(
+            "Instagram: требуется 2FA при входе, но inst_2fa не задан "
+            "в данных учётки профиля."
+        )
+    _ensure_trust_device_checked(page)
+    otp = get_totp_token(secret)
+    _log("Instagram: вводим TOTP-код на экране 2FA входа…")
+    if not _fill_login_2fa_code(page, otp):
+        raise RuntimeError(
+            "Instagram: не найдено поле Code на экране 2FA входа."
+        )
+    page.wait_for_timeout(400)
+    deadline = time.monotonic() + max(10.0, float(max_seconds))
+    while time.monotonic() < deadline:
+        _ensure_trust_device_checked(page)
+        if _click_login_2fa_continue(page):
+            _log("Instagram: нажали Continue после 2FA.")
+            return
+        page.wait_for_timeout(350)
+    raise RuntimeError(
+        "Instagram: не удалось нажать Continue на экране 2FA входа."
+    )
 
 
 def _is_save_login_info_screen(page) -> bool:
@@ -865,10 +1139,10 @@ def _click_save_login_info(page) -> bool:
 
 def try_instagram_saved_profile_login(page, password: str) -> str | None:
     """
-    Экран сохранённого профиля: Continue → пароль (yt_password) → Log in → Save info.
+    Экран сохранённого профиля: Continue → пароль → Log in → Save info.
 
-    Returns:
-        username при успехе, иначе None (экрана нет / не удалось).
+    Мягкий путь для регистрации: при неудаче возвращает None
+    (можно продолжить signup). Без 2FA и без ошибки на неверный пароль.
     """
     if not _is_saved_profile_chooser_screen(page):
         return None
@@ -896,7 +1170,7 @@ def try_instagram_saved_profile_login(page, password: str) -> str | None:
         _log("Instagram: поле пароля после Continue не появилось.")
         return None
 
-    _log("Instagram: вводим yt_password на экране сохранённого профиля…")
+    _log("Instagram: вводим пароль на экране сохранённого профиля…")
     try:
         _fill_onetap_password(page, password)
     except Exception as e:
@@ -910,19 +1184,18 @@ def try_instagram_saved_profile_login(page, password: str) -> str | None:
     _log("Instagram: нажали Log in.")
     page.wait_for_timeout(1000)
 
-    # Save your login info? → Save info
+    # Save your login info? → Save
     save_deadline = time.monotonic() + 25.0
     while time.monotonic() < save_deadline:
         if _is_save_login_info_screen(page):
             if _click_save_login_info(page):
-                _log("Instagram: Save your login info — нажали Save info.")
+                _log("Instagram: Save your login info — нажали Save.")
                 page.wait_for_timeout(1000)
             break
         if _instagram_already_logged_in(page):
             break
         page.wait_for_timeout(400)
 
-    # Дождаться ленты / сессии.
     home_deadline = time.monotonic() + 45.0
     while time.monotonic() < home_deadline:
         if _is_save_login_info_screen(page):
@@ -941,6 +1214,169 @@ def try_instagram_saved_profile_login(page, password: str) -> str | None:
 
     _log("Instagram: после Log in лента не открылась.")
     return None
+
+
+def ensure_instagram_session_relogin(
+    page,
+    *,
+    password: str,
+    twofa_secret: str = "",
+    login: str = "",
+    max_seconds: float = 90.0,
+) -> str | None:
+    """
+    Re-login (все алгоритмы кроме регистрации).
+
+    Варианты:
+    1) Сохранённый профиль: Continue → пароль → Log in
+    2) Классическая form#login_form: логин + пароль → Log in
+
+    Далее: (опц. 2FA + trust device) → Save → главная.
+
+    Returns:
+        username при успешном входе, None если экрана разлогина нет.
+    Raises:
+        RuntimeError при неверном пароле / отсутствии данных / сбое входа.
+    """
+    classic = _is_classic_login_form_visible(page)
+    chooser = _is_saved_profile_chooser_screen(page)
+    onetap = _onetap_password_visible(page)
+    if not (classic or chooser or onetap):
+        return None
+
+    pwd = (password or "").strip()
+    user_login = (login or "").strip()
+    if not pwd:
+        raise RuntimeError(
+            "Instagram: сессия разлогинена, но нет пароля "
+            "(inst_password или gmail_password) в данных учётки."
+        )
+
+    username = _extract_saved_profile_username(page) or user_login
+
+    if classic:
+        if not user_login:
+            raise RuntimeError(
+                "Instagram: форма входа, но нет inst_login в данных учётки."
+            )
+        _log(
+            "Instagram: разлогин — классическая форма входа "
+            f"(login={user_login!r})…"
+        )
+        _fill_classic_login_form(page, user_login, pwd)
+        page.wait_for_timeout(400)
+        login_deadline = time.monotonic() + 15.0
+        clicked = False
+        while time.monotonic() < login_deadline:
+            if _click_classic_log_in(page):
+                clicked = True
+                break
+            page.wait_for_timeout(350)
+        if not clicked:
+            raise RuntimeError("Instagram: не удалось нажать «Log in» / «Войти».")
+        _log("Instagram: нажали «Log in».")
+        page.wait_for_timeout(1000)
+    else:
+        if chooser:
+            _log(
+                "Instagram: разлогин — экран сохранённого профиля"
+                + (f" (@{username})" if username else "")
+                + " — жмём Continue…"
+            )
+            if not _click_saved_profile_continue(page):
+                raise RuntimeError(
+                    "Instagram: не удалось нажать «Продолжить» на экране "
+                    "сохранённого профиля."
+                )
+            page.wait_for_timeout(800)
+
+        deadline = time.monotonic() + max(15.0, float(max_seconds))
+        while time.monotonic() < deadline:
+            if _onetap_password_visible(page):
+                break
+            if _is_classic_login_form_visible(page):
+                # После Continue иногда уходят на полную форму входа.
+                return ensure_instagram_session_relogin(
+                    page,
+                    password=pwd,
+                    twofa_secret=twofa_secret,
+                    login=user_login,
+                    max_seconds=max(20.0, deadline - time.monotonic()),
+                )
+            if _instagram_already_logged_in(page):
+                uname = (
+                    username or _extract_logged_in_username(page) or "saved_profile"
+                )
+                _log(f"Instagram: после Continue сразу вошли (@{uname}).")
+                return uname
+            if _is_login_2fa_challenge_screen(page):
+                break
+            page.wait_for_timeout(400)
+        else:
+            raise RuntimeError(
+                "Instagram: после «Продолжить» не появилось поле пароля / 2FA."
+            )
+
+        if _onetap_password_visible(page):
+            _log("Instagram: вводим пароль (inst_password / gmail_password)…")
+            _fill_onetap_password(page, pwd)
+            page.wait_for_timeout(400)
+            login_deadline = time.monotonic() + 15.0
+            clicked = False
+            while time.monotonic() < login_deadline:
+                if _click_onetap_log_in(page):
+                    clicked = True
+                    break
+                page.wait_for_timeout(350)
+            if not clicked:
+                raise RuntimeError("Instagram: не удалось нажать «Войти».")
+            _log("Instagram: нажали «Войти».")
+            page.wait_for_timeout(1000)
+
+    # После пароля: ошибка / 2FA / Save / лента
+    settle_deadline = time.monotonic() + max(20.0, float(max_seconds))
+    while time.monotonic() < settle_deadline:
+        if _wrong_login_credentials_visible(page):
+            raise RuntimeError(
+                "Instagram: введены неверные данные для входа "
+                "(неверный логин или пароль)."
+            )
+        if _is_login_2fa_challenge_screen(page):
+            _handle_login_2fa_challenge(
+                page,
+                twofa_secret,
+                max_seconds=min(60.0, settle_deadline - time.monotonic()),
+            )
+            page.wait_for_timeout(1000)
+            continue
+        if _is_save_login_info_screen(page):
+            if _click_save_login_info(page):
+                _log("Instagram: Save your login info — нажали Save.")
+                page.wait_for_timeout(1000)
+            continue
+        if _instagram_already_logged_in(page):
+            uname = (
+                username
+                or _extract_logged_in_username(page)
+                or user_login
+                or "saved_profile"
+            )
+            _log(f"Instagram: re-login успешен (@{uname}).")
+            return uname
+        if _onetap_password_visible(page) or _is_classic_login_form_visible(page):
+            page.wait_for_timeout(400)
+            continue
+        page.wait_for_timeout(400)
+
+    if _wrong_login_credentials_visible(page):
+        raise RuntimeError(
+            "Instagram: введены неверные данные для входа "
+            "(неверный логин или пароль)."
+        )
+    raise RuntimeError(
+        "Instagram: после ввода пароля не удалось войти в аккаунт "
+        f"(URL={(page.url or '')!r})."
+    )
 
 
 def _wait_signup_form(

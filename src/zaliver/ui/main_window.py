@@ -5414,6 +5414,9 @@ class MainWindow(QWidget):
 
         def _check_one(pid: str) -> None:
             if is_instagram:
+                sess_login, sess_pwd, sess_2fa = self._instagram_session_credentials(
+                    pid
+                )
                 if _is_own_antidetect_kind(kind_s):
                     u = (base_url or "").strip()
                     if not u:
@@ -5425,12 +5428,18 @@ class MainWindow(QWidget):
                         base_url=u,
                         headless=headless,
                         remote_cdp=remote_cdp,
+                        session_login=sess_login,
+                        session_password=sess_pwd,
+                        session_twofa=sess_2fa,
                     )
                 else:
                     check_instagram_availability_in_profile(
                         pid,
                         local_token=token or None,
                         headless=headless,
+                        session_login=sess_login,
+                        session_password=sess_pwd,
+                        session_twofa=sess_2fa,
                     )
                 return
 
@@ -5839,6 +5848,7 @@ class MainWindow(QWidget):
 
         def _check_one(pid: str) -> None:
             creds = self._profile_login_credentials(pid)
+            sess_login, sess_pwd, sess_2fa = self._instagram_session_credentials(pid)
             if _is_own_antidetect_kind(kind_s):
                 u = (base_url or "").strip()
                 if not u:
@@ -5851,6 +5861,9 @@ class MainWindow(QWidget):
                     headless=headless,
                     remote_cdp=remote_cdp,
                     login_credentials=creds,
+                    session_login=sess_login,
+                    session_password=sess_pwd,
+                    session_twofa=sess_2fa,
                     keep_open_on_error=False,
                 )
             else:
@@ -5859,6 +5872,9 @@ class MainWindow(QWidget):
                     local_token=token or None,
                     headless=headless,
                     login_credentials=creds,
+                    session_login=sess_login,
+                    session_password=sess_pwd,
+                    session_twofa=sess_2fa,
                     keep_open_on_error=False,
                 )
 
@@ -7307,6 +7323,28 @@ class MainWindow(QWidget):
                 return gmail_or_yt_credentials_from_custom_data(cd)
             return credentials_from_custom_data(cd)
         return None
+
+    def _instagram_session_credentials(self, profile_id: str) -> tuple[str, str, str]:
+        """Логин/пароль/2FA для re-login Instagram (не регистрация)."""
+        from zaliver.instagram_upload.instagram_availability import (
+            session_login_from_custom_data,
+            session_password_from_custom_data,
+            session_twofa_from_custom_data,
+        )
+
+        pid = (profile_id or "").strip()
+        for p in self._profiles_raw or []:
+            if _profile_id(p) != pid:
+                continue
+            cd = p.get("custom_data")
+            if not isinstance(cd, dict):
+                return "", "", ""
+            return (
+                session_login_from_custom_data(cd),
+                session_password_from_custom_data(cd),
+                session_twofa_from_custom_data(cd),
+            )
+        return "", "", ""
 
     def _profile_yt_oldest_name(self, profile_id: str) -> str:
         from zaliver.youtube_upload.google_login import oldest_name_from_custom_data

@@ -1380,6 +1380,212 @@ def upload_instagram_reel_in_local_antidetect_profile(
         api.close()
 
 
+def _instagram_sessionid_from_page(page) -> str:
+    """Cookie sessionid с instagram.com (пусто, если нет рабочей сессии)."""
+    from zaliver.instagram_upload.instagrapi_session import normalize_instagram_sessionid
+
+    cookies = []
+    try:
+        try:
+            cookies = page.context.cookies(
+                ["https://www.instagram.com", "https://instagram.com"]
+            )
+        except TypeError:
+            cookies = page.context.cookies()
+        except Exception:
+            cookies = page.context.cookies()
+    except Exception:
+        cookies = []
+    if not cookies:
+        try:
+            cookies = page.context.cookies()
+        except Exception:
+            cookies = []
+
+    best = ""
+    for c in cookies or []:
+        if not isinstance(c, dict):
+            continue
+        if (c.get("name") or "").strip().lower() != "sessionid":
+            continue
+        domain = (c.get("domain") or "").lower()
+        if domain and "instagram" not in domain:
+            continue
+        val = normalize_instagram_sessionid(c.get("value") or "")
+        if val and val not in ("0", '""', "null") and len(val) > len(best):
+            best = val
+    return best
+
+
+def _ensure_instagram_page_for_cookies(page) -> None:
+    """
+    Достать sessionid из уже сохранённых cookies профиля.
+    Навигацию на Instagram делаем только если cookie ещё нет
+    (не ждём полной загрузки ленты — иначе «белый» браузер).
+    """
+    from zaliver.instagram_upload.register import INSTAGRAM_URL
+
+    sid = _instagram_sessionid_from_page(page)
+    if sid:
+        _log("Instagram cookies: sessionid уже есть в профиле, goto не нужен.")
+        return
+
+    # После launch вкладка часто about:blank — короткая пауза, не блокируем минутами.
+    try:
+        for _ in range(20):
+            try:
+                url = (page.url or "").lower()
+            except Exception:
+                url = ""
+            if url and url not in ("about:blank", "about:srcdoc", ""):
+                break
+            try:
+                page.wait_for_timeout(250)
+            except Exception:
+                time.sleep(0.25)
+    except Exception:
+        pass
+
+    sid = _instagram_sessionid_from_page(page)
+    if sid:
+        _log("Instagram cookies: sessionid появился после settle blank.")
+        return
+
+    _log("Instagram cookies: sessionid нет — короткий goto instagram.com…")
+    try:
+        # commit = первый байт ответа, не ждём DOM/networkidle (часто зависает).
+        page.goto(INSTAGRAM_URL, wait_until="commit", timeout=25_000)
+    except Exception as e:
+        _log(f"Instagram cookies: goto commit failed: {e!r}")
+        try:
+            page.goto(INSTAGRAM_URL, wait_until="domcontentloaded", timeout=20_000)
+        except Exception as e2:
+            _log(f"Instagram cookies: goto domcontentloaded failed: {e2!r}")
+    try:
+        page.wait_for_timeout(1200)
+    except Exception:
+        time.sleep(1.2)
+
+
+@with_log_profile
+def extract_instagram_sessionid_from_profile(
+    profile_id: str,
+    *,
+    local_token: str | None = None,
+    headless: bool = True,
+) -> str:
+    """Dolphin: sessionid Instagram из cookies профиля."""
+    # Для чекера всегда headless: видимое окно часто зависает на blank.
+    use_headless = True
+    _log(
+        "Dolphin: извлечение Instagram sessionid. "
+        f"profile_id={profile_id!r}, headless={use_headless} "
+        f"(requested={headless})"
+    )
+    api = DolphinAntyLocalAPI()
+    try:
+        tok = (local_token or "").strip()
+        if tok:
+            api.login_with_token(tok)
+        conn = api.start_profile(profile_id, headless=use_headless)
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_cdp(
+                p, (conn.ws_url(), conn.http_url())
+            )
+            try:
+                _ensure_instagram_page_for_cookies(page)
+                sid = _instagram_sessionid_from_page(page)
+                if not sid:
+                    raise DolphinAntyError(
+                        "В профиле нет cookie sessionid Instagram "
+                        "(войдите в аккаунт в этом профиле)."
+                    )
+                _log("Dolphin: Instagram sessionid получен.")
+                return sid
+            finally:
+                _close_playwright_browser(browser)
+    except Exception as e:
+        _log(f"Ошибка извлечения sessionid: {type(e).__name__}: {e!r}")
+        raise _wrap_exc(e) from e
+    finally:
+        try:
+            api.stop_profile(profile_id)
+        except Exception as e:
+            _log(f"Dolphin: stop_profile: {e!r}")
+        api.close()
+
+
+@with_log_profile
+def extract_instagram_sessionid_from_local_antidetect_profile(
+    profile_id: str,
+    *,
+    base_url: str,
+    headless: bool = True,
+    remote_cdp=None,
+) -> str:
+    """Локальный/удалённый антидетект: sessionid Instagram из cookies профиля."""
+    from zaliver.antydetect.local_antidetect_api import (
+        LocalAntidetectError,
+        LocalAntidetectHttpAPI,
+    )
+    from zaliver.antydetect.local_active_sessions import (
+        register_local_session,
+        unregister_local_session,
+    )
+
+    use_headless = True
+    _log(
+        "Local antidetect: извлечение Instagram sessionid. "
+        f"profile_id={profile_id!r}, base_url={base_url!r}, "
+        f"headless={use_headless} (requested={headless})"
+    )
+    api = LocalAntidetectHttpAPI(base_url)
+    session_id: str | None = None
+    try:
+        acc = api.launch_profile(
+            profile_id,
+            headless=use_headless,
+            expose_cdp=True,
+            remote_cdp=remote_cdp,
+        )
+        sid = acc.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+        session_id = sid.strip()
+        bu = (base_url or "").strip() or "http://127.0.0.1:18765"
+        register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
+        ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_local_session_cdp(
+                p, api, session_id, ws_url
+            )
+            try:
+                _ensure_instagram_page_for_cookies(page)
+                cookie_sid = _instagram_sessionid_from_page(page)
+                if not cookie_sid:
+                    raise LocalAntidetectError(
+                        "В профиле нет cookie sessionid Instagram "
+                        "(войдите в аккаунт в этом профиле)."
+                    )
+                _log("Local antidetect: Instagram sessionid получен.")
+                return cookie_sid
+            finally:
+                _close_playwright_browser(browser)
+    except Exception as e:
+        _log(f"Ошибка извлечения sessionid: {type(e).__name__}: {e!r}")
+        if isinstance(e, LocalAntidetectError):
+            raise
+        raise LocalAntidetectError(f"Ошибка извлечения Instagram sessionid: {e}") from e
+    finally:
+        if session_id:
+            unregister_local_session(profile_id=profile_id)
+            try:
+                api.stop_session(session_id)
+            except Exception:
+                pass
+        api.close()
+
+
 @with_log_profile
 def register_instagram_account_in_profile(
     profile_id: str,

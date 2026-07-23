@@ -42,6 +42,7 @@ class ProfilesListInteraction(QObject):
         on_account_data_click: Callable[[str], None] | None = None,
         on_gmail_data_click: Callable[[str], None] | None = None,
         on_preview_click: Callable[[str], None] | None = None,
+        single_select: bool = False,
     ) -> None:
         super().__init__(list_widget)
         self.lw = list_widget
@@ -50,6 +51,7 @@ class ProfilesListInteraction(QObject):
         self._on_account_data_click = on_account_data_click
         self._on_gmail_data_click = on_gmail_data_click
         self._on_preview_click = on_preview_click
+        self._single_select = bool(single_select)
 
         self.checked_profile_ids: set[str] = set()
         self._profile_id_to_item: dict[str, QListWidgetItem] = {}
@@ -77,9 +79,10 @@ class ProfilesListInteraction(QObject):
         self.lw.installEventFilter(self)
         self.lw.viewport().installEventFilter(self)
 
-        select_all_sc = QShortcut(QKeySequence.StandardKey.SelectAll, self.lw)
-        select_all_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        select_all_sc.activated.connect(self.select_all_visible)
+        if not self._single_select:
+            select_all_sc = QShortcut(QKeySequence.StandardKey.SelectAll, self.lw)
+            select_all_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            select_all_sc.activated.connect(self.select_all_visible)
 
     def checked_count(self) -> int:
         return len(self.checked_profile_ids)
@@ -127,9 +130,31 @@ class ProfilesListInteraction(QObject):
 
     def select_all_visible(self) -> None:
         """Отметить все профили, видимые в текущем списке (Ctrl+A / ⌘A)."""
+        if self._single_select:
+            return
         self.checked_profile_ids = set(self._profile_id_to_item.keys())
         self._apply_checkbox_visuals()
 
+    def selected_profile_id(self) -> str:
+        """Единственный отмеченный профиль (для single_select) или первый в порядке списка."""
+        ids = self.batch_profile_ids()
+        return ids[0] if ids else ""
+
+    def _clamp_single_checked(self, preferred: str | None = None) -> None:
+        if not self._single_select:
+            return
+        if not self.checked_profile_ids:
+            return
+        keep = (preferred or "").strip()
+        if keep and keep in self.checked_profile_ids:
+            self.checked_profile_ids = {keep}
+            return
+        for pid in self._profile_ids_in_list_order():
+            if pid in self.checked_profile_ids:
+                self.checked_profile_ids = {pid}
+                return
+        # fallback — любой
+        self.checked_profile_ids = {next(iter(self.checked_profile_ids))}
     def focus_profile(
         self,
         profile_id: str,
@@ -245,6 +270,8 @@ class ProfilesListInteraction(QObject):
         if prune_checked_to_existing:
             preserve.intersection_update(existing_ids)
         self.checked_profile_ids = preserve
+        if self._single_select:
+            self._clamp_single_checked()
 
         self._reset_pointer_interaction_state()
 
@@ -358,8 +385,15 @@ class ProfilesListInteraction(QObject):
 
     def _sync_profile_row_widths(self) -> None:
         w = max(0, self.lw.viewport().width() - 8)
-        for row in self._profile_id_to_row.values():
+        for pid, row in self._profile_id_to_row.items():
             row.setMinimumWidth(w)
+            # Задаём ширину строки, чтобы теги пересчитали перенос и высоту.
+            row.resize(w, max(row.height(), 1))
+            hint = row.sizeHint()
+            it = self._profile_id_to_item.get(pid)
+            if it is None:
+                continue
+            it.setSizeHint(QSize(w, max(hint.height() + 6, 1)))
 
     @staticmethod
     def _repolish(w: QWidget) -> None:
@@ -395,11 +429,13 @@ class ProfilesListInteraction(QObject):
         if cb is None:
             return
         if cb.isChecked():
-            self.checked_profile_ids.add(profile_id)
+            if self._single_select:
+                self.checked_profile_ids = {profile_id}
+            else:
+                self.checked_profile_ids.add(profile_id)
         else:
             self.checked_profile_ids.discard(profile_id)
-        self._apply_checked_row_visuals()
-        self.selection_changed.emit()
+        self._apply_checkbox_visuals()
 
     def _on_upload_pause_click(self, profile_id: str) -> None:
         if self._on_upload_pause_click:
@@ -452,6 +488,20 @@ class ProfilesListInteraction(QObject):
 
     def _lmb_select_recompute(self) -> None:
         existing = set(self._profile_id_to_item.keys())
+        if self._single_select:
+            # В режиме одного профиля — только последняя посещённая строка.
+            last_pid = ""
+            if self._lmb_select_last_row is not None:
+                last_pid = self._pid_at_row(self._lmb_select_last_row) or ""
+            if last_pid and last_pid in existing:
+                self.checked_profile_ids = {last_pid}
+            elif self._lmb_select_visited:
+                for pid in self._profile_ids_in_list_order():
+                    if pid in self._lmb_select_visited and pid in existing:
+                        self.checked_profile_ids = {pid}
+                        break
+            self._apply_checkbox_visuals()
+            return
         if self._lmb_select_additive:
             self.checked_profile_ids = (self._lmb_select_base | self._lmb_select_visited) & existing
         else:
@@ -459,6 +509,13 @@ class ProfilesListInteraction(QObject):
         self._apply_checkbox_visuals()
 
     def _lmb_select_visit_row_range(self, r0: int, r1: int) -> None:
+        if self._single_select:
+            # Только текущая строка, без диапазона.
+            pid = self._pid_at_row(r1)
+            self._lmb_select_visited = {pid} if pid else set()
+            self._lmb_select_last_row = r1
+            self._lmb_select_recompute()
+            return
         lo, hi = (r0, r1) if r0 <= r1 else (r1, r0)
         n = self.lw.count()
         lo = max(0, lo)
@@ -479,7 +536,12 @@ class ProfilesListInteraction(QObject):
         if not pid:
             return False
         self._lmb_select_active = True
-        self._lmb_select_additive = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        # В single_select не копим через Ctrl.
+        self._lmb_select_additive = (
+            False
+            if self._single_select
+            else bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        )
         self._lmb_select_base = (
             set(self.checked_profile_ids) if self._lmb_select_additive else set()
         )
@@ -546,7 +608,10 @@ class ProfilesListInteraction(QObject):
         pid = self._pid_at_row(row)
         if not pid:
             return
-        if pid in self.checked_profile_ids:
+        if self._single_select:
+            # Клик по уже выбранному оставляет его; по другому — переключает.
+            self.checked_profile_ids = {pid}
+        elif pid in self.checked_profile_ids:
             self.checked_profile_ids.discard(pid)
         else:
             self.checked_profile_ids.add(pid)

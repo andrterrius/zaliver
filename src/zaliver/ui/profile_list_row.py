@@ -122,7 +122,7 @@ class ProfileListRow(QWidget):
         tag_strings = _profile_tag_list(profile)
         tags_w = make_profile_tags_widget(tag_strings, info)
         if tags_w is not None:
-            info_l.addWidget(tags_w, 0, Qt.AlignmentFlag.AlignLeft)
+            info_l.addWidget(tags_w, 0)
 
         info_l.addStretch(0)
         outer.addWidget(info, 1)

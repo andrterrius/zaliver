@@ -4,16 +4,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QSize, QTimer
 from PyQt6.QtGui import QCursor, QFont, QFontMetrics, QTextDocument, QTextOption
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QSizePolicy,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -30,16 +30,14 @@ from zaliver.ui.antic_profile_row import (
 if TYPE_CHECKING:
     from zaliver.db.upload_store import UploadStore
 
-_PROFILE_TAGS_PER_ROW = 2
 _PROFILE_TAG_CHIP_MIN_WIDTH = 88
-_PROFILE_TAG_CHIP_MAX_WIDTH = 360
-_PROFILE_TAG_ROW_SPACING = 6
 _TAG_CHIP_MARGIN_H = 6
 _TAG_CHIP_MARGIN_V = 4
 _TAG_CHIP_LBL_PAD_H = 6
 _TAG_CHIP_LBL_PAD_V = 4
 _TAG_CHIP_BORDER_W = 2
-_TAG_CHIP_HEIGHT_SLACK = 2
+_TAG_CHIP_HEIGHT_SLACK = 4
+_TAG_CHIP_FONT_PX = 12
 
 
 def _tag_chip_object_name(tag: str) -> str:
@@ -51,48 +49,24 @@ def _tag_chip_object_name(tag: str) -> str:
     return "tagChip"
 
 
-class _TagChip(QFrame):
-    def __init__(self, tag: str, parent: QWidget | None, *, fixed_width: int) -> None:
-        super().__init__(parent)
-        self.setObjectName(_tag_chip_object_name(tag))
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(
-            _TAG_CHIP_MARGIN_H, _TAG_CHIP_MARGIN_V, _TAG_CHIP_MARGIN_H, _TAG_CHIP_MARGIN_V
-        )
-        lbl = QLabel(tag)
-        lbl.setWordWrap(True)
-        lbl.setToolTip(tag)
-        lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        text_w = max(1, fixed_width - _TAG_CHIP_MARGIN_H * 2 - _TAG_CHIP_BORDER_W - _TAG_CHIP_LBL_PAD_H * 2)
-        lbl.setMinimumWidth(max(1, fixed_width - _TAG_CHIP_MARGIN_H * 2 - _TAG_CHIP_BORDER_W))
-        lbl.setMinimumHeight(_tag_chip_text_height(tag, text_w, lbl.font()))
-        lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
-        lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        lay.addWidget(lbl, 1)
-        self.setFixedWidth(fixed_width)
-        self.setMinimumHeight(
-            _tag_chip_text_height(tag, text_w, lbl.font()) + 2 * (_TAG_CHIP_LBL_PAD_V + _TAG_CHIP_MARGIN_V) + _TAG_CHIP_HEIGHT_SLACK
-        )
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
+def _tag_chip_font(base: QFont | None = None) -> QFont:
+    font = QFont(base) if base is not None else QFont()
+    font.setPixelSize(_TAG_CHIP_FONT_PX)
+    return font
 
 
 def _tag_chip_extra_horizontal() -> int:
     return _TAG_CHIP_MARGIN_H * 2 + _TAG_CHIP_BORDER_W + _TAG_CHIP_LBL_PAD_H * 2
 
 
-def _tag_chip_natural_width(tag: str, font: QFont) -> int:
-    fm = QFontMetrics(font)
-    natural = fm.horizontalAdvance(tag) + _tag_chip_extra_horizontal()
-    return max(_PROFILE_TAG_CHIP_MIN_WIDTH, min(natural, _PROFILE_TAG_CHIP_MAX_WIDTH))
-
-
-def _tag_chip_column_widths(tags: list[str], font: QFont) -> list[int]:
-    cols = _PROFILE_TAGS_PER_ROW
-    widths = [_PROFILE_TAG_CHIP_MIN_WIDTH] * cols
-    for idx, tag in enumerate(tags):
-        col = idx % cols
-        widths[col] = max(widths[col], _tag_chip_natural_width(tag, font))
-    return widths
+def _tag_chip_text_width_for_frame(frame_w: int) -> int:
+    return max(
+        1,
+        int(frame_w)
+        - _TAG_CHIP_MARGIN_H * 2
+        - _TAG_CHIP_BORDER_W
+        - _TAG_CHIP_LBL_PAD_H * 2,
+    )
 
 
 def _tag_chip_text_height(tag: str, text_w: int, font: QFont) -> int:
@@ -100,39 +74,119 @@ def _tag_chip_text_height(tag: str, text_w: int, font: QFont) -> int:
     doc.setDefaultFont(font)
     doc.setDocumentMargin(0)
     opt = QTextOption()
-    opt.setWrapMode(QTextOption.WrapMode.WordWrap)
+    opt.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
     doc.setDefaultTextOption(opt)
     doc.setPlainText(tag)
     doc.setTextWidth(float(max(1, text_w)))
-    return int(doc.size().height())
+    return max(1, int(doc.size().height()))
+
+
+def _tag_chip_frame_height(tag: str, frame_w: int, font: QFont) -> int:
+    text_h = _tag_chip_text_height(tag, _tag_chip_text_width_for_frame(frame_w), font)
+    return (
+        text_h
+        + 2 * (_TAG_CHIP_LBL_PAD_V + _TAG_CHIP_MARGIN_V)
+        + _TAG_CHIP_HEIGHT_SLACK
+    )
+
+
+class _TagChip(QFrame):
+    def __init__(self, tag: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._tag = tag
+        self._chip_font = _tag_chip_font(parent.font() if parent is not None else None)
+        self.setObjectName(_tag_chip_object_name(tag))
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(
+            _TAG_CHIP_MARGIN_H, _TAG_CHIP_MARGIN_V, _TAG_CHIP_MARGIN_H, _TAG_CHIP_MARGIN_V
+        )
+        lbl = QLabel(tag)
+        lbl.setFont(self._chip_font)
+        lbl.setWordWrap(True)
+        lbl.setTextFormat(Qt.TextFormat.PlainText)
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        lbl.setToolTip(tag)
+        lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._lbl = lbl
+        lay.addWidget(lbl, 1)
+        natural = QFontMetrics(self._chip_font).horizontalAdvance(tag) + _tag_chip_extra_horizontal()
+        self.setMinimumWidth(max(_PROFILE_TAG_CHIP_MIN_WIDTH, min(natural, 240)))
+        self.setMinimumHeight(_tag_chip_frame_height(tag, self.minimumWidth(), self._chip_font))
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return _tag_chip_frame_height(self._tag, max(1, width), self._chip_font)
+
+    def minimumSizeHint(self) -> QSize:
+        w = max(self.minimumWidth(), 1)
+        return QSize(w, self.heightForWidth(w))
+
+    def sizeHint(self) -> QSize:
+        w = max(self.width(), self.minimumWidth(), 1)
+        return QSize(w, self.heightForWidth(w))
+
+    def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().resizeEvent(event)
+        h = self.heightForWidth(max(1, self.width()))
+        if self.minimumHeight() != h:
+            self.setMinimumHeight(h)
+        self._lbl.setMinimumHeight(
+            _tag_chip_text_height(
+                self._tag,
+                _tag_chip_text_width_for_frame(max(1, self.width())),
+                self._chip_font,
+            )
+        )
+
+
+class _ProfileTagsWidget(QWidget):
+    def __init__(self, tags: list[str], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._chips: list[_TagChip] = []
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        for tag in tags:
+            chip = _TagChip(tag, self)
+            self._chips.append(chip)
+            lay.addWidget(chip, 0)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        if not self._chips:
+            return 0
+        spacing = self.layout().spacing() if self.layout() is not None else 4
+        total = sum(chip.heightForWidth(width) for chip in self._chips)
+        total += max(0, len(self._chips) - 1) * spacing
+        return total
+
+    def minimumSizeHint(self) -> QSize:
+        w = max((chip.minimumWidth() for chip in self._chips), default=_PROFILE_TAG_CHIP_MIN_WIDTH)
+        return QSize(w, self.heightForWidth(w))
+
+    def sizeHint(self) -> QSize:
+        w = max(self.width(), self.minimumWidth(), 1)
+        return QSize(w, self.heightForWidth(w))
+
+    def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().resizeEvent(event)
+        h = self.heightForWidth(max(1, self.width()))
+        if self.minimumHeight() != h:
+            self.setMinimumHeight(h)
 
 
 def make_profile_tags_widget(tags: list[str], parent: QWidget | None = None) -> QWidget | None:
     if not tags:
         return None
-    w = QWidget(parent)
-    cols = _PROFILE_TAGS_PER_ROW
-    grid = QGridLayout(w)
-    grid.setContentsMargins(0, 0, 0, 0)
-    grid.setHorizontalSpacing(_PROFILE_TAG_ROW_SPACING)
-    grid.setVerticalSpacing(4)
-    col_widths = _tag_chip_column_widths(tags, w.font())
-    for c in range(cols):
-        grid.setColumnMinimumWidth(c, col_widths[c])
-        grid.setColumnStretch(c, 1)
-    row_heights: dict[int, int] = {}
-    for idx, tag in enumerate(tags):
-        row_i = idx // cols
-        col_i = idx % cols
-        chip = _TagChip(tag, w, fixed_width=col_widths[col_i])
-        row_heights[row_i] = max(row_heights.get(row_i, 0), chip.minimumHeight())
-        grid.addWidget(chip, row_i, col_i, Qt.AlignmentFlag.AlignTop)
-    for row_i, mh in row_heights.items():
-        grid.setRowMinimumHeight(row_i, mh)
-    grid_h = sum(row_heights.values()) + max(0, len(row_heights) - 1) * grid.verticalSpacing()
-    w.setMinimumHeight(grid_h)
-    w.adjustSize()
-    return w
+    return _ProfileTagsWidget(tags, parent)
 
 
 def proxy_health_dot_ui(profile: dict[str, object]) -> tuple[str, str, str]:
@@ -190,6 +244,37 @@ def profile_has_account_data(profile: dict[str, object]) -> bool:
     password = str(cd.get(YT_PASSWORD_KEY) or "").strip()
     twofa = str(cd.get(YT_2FA_KEY) or "").strip()
     return bool(login or password or twofa)
+
+
+def profile_has_instagram_account_data(profile: dict[str, object]) -> bool:
+    """В custom_data есть логин/пароль/2FA Instagram."""
+    from zaliver.ui.profile_account_data_dialog import (
+        INST_2FA_KEY,
+        INST_LOGIN_KEY,
+        INST_PASSWORD_KEY,
+    )
+
+    cd = _profile_custom_data(profile)
+    login = str(cd.get(INST_LOGIN_KEY) or "").strip()
+    password = str(cd.get(INST_PASSWORD_KEY) or "").strip()
+    twofa = str(cd.get(INST_2FA_KEY) or "").strip()
+    return bool(login or password or twofa)
+
+
+def profile_instagram_ready_for_checker(profile: dict[str, object]) -> bool:
+    """
+    Профиль подходит для IG-чекера: успешная проверка доступности Instagram
+    или есть данные входа (можно восстановить сессию).
+    """
+    from zaliver.antydetect.profile_tags import INSTAGRAM_AVAILABILITY_SUCCESS_TAG
+
+    tags = set(_profile_tag_list(profile, limit=10_000))
+    if INSTAGRAM_AVAILABILITY_SUCCESS_TAG in tags:
+        return True
+    # legacy до суффикса Instagram
+    if "УСПЕШНАЯ ПРОВЕРКА ДОСТУПНОСТИ INSTAGRAM" in tags:
+        return True
+    return profile_has_instagram_account_data(profile)
 
 
 def profile_has_yt_oldest_name(profile: dict[str, object]) -> bool:

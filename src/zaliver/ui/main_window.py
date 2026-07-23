@@ -119,10 +119,14 @@ from zaliver.ui.profile_promote_dialog import (
     ProfilePromoteSettings,
 )
 from zaliver.ui.profile_preview_dialog import ProfileCdpPreviewDialog
+from zaliver.ui.ig_checker_profile_dialog import IgCheckerProfilePickDialog
 from zaliver.ui.profiles_list_interaction import ProfilesListInteraction
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
 from zaliver.stats_server_client import notify_uploaded_video
 from zaliver.youtube_upload.schedule_publish import MSK, validate_schedule_times
+from zaliver.ui.uploaded_instagram_stats_refresh_worker import (
+    UploadedInstagramStatsRefreshWorker,
+)
 from zaliver.ui.uploaded_stats_refresh_worker import UploadedStatsRefreshWorker
 from zaliver.ui.widgets import (
     AnimatedProgressBar,
@@ -884,7 +888,9 @@ class MainWindow(QWidget):
         self._ff_worker: FfmpegInstallWorker | None = None
         self._ffmpeg_progress_dlg: QProgressDialog | None = None
         self._stats_thread: QThread | None = None
-        self._stats_worker: UploadedStatsRefreshWorker | None = None
+        self._stats_worker: (
+            UploadedStatsRefreshWorker | UploadedInstagramStatsRefreshWorker | None
+        ) = None
         self._stats_progress_dlg: QProgressDialog | None = None
         self._selected_input_files: list[str] = []
         self._background_music_files: list[str] = []
@@ -1738,6 +1744,44 @@ class MainWindow(QWidget):
         uploaded_top.addWidget(self._btn_uploaded_check)
         uploaded_l.addLayout(uploaded_top)
 
+        self._uploaded_ig_checker_row = QWidget()
+        ig_checker_l = QHBoxLayout(self._uploaded_ig_checker_row)
+        ig_checker_l.setContentsMargins(0, 0, 0, 0)
+        ig_checker_l.setSpacing(8)
+        ig_checker_lbl = QLabel("Аккаунт для чека:")
+        ig_checker_lbl.setObjectName("uploadedIgCheckerLabel")
+        self._uploaded_ig_checker_profile_id = (
+            self._settings.value("instagram/stats_checker_profile_id", "", type=str)
+            or ""
+        ).strip()
+        self._uploaded_ig_checker_value = QLabel("— не выбран —")
+        self._uploaded_ig_checker_value.setObjectName("uploadedIgCheckerValue")
+        self._uploaded_ig_checker_value.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._uploaded_ig_checker_value.setToolTip(
+            "Антидетект-профиль для чека метрик (instagrapi). "
+            "Сначала сохранённая сессия / inst_login+пароль из данных профиля "
+            "(без окна браузера), иначе cookies профиля в headless."
+        )
+        self._btn_uploaded_ig_checker_pick = QPushButton("Выбрать профиль")
+        self._btn_uploaded_ig_checker_pick.setObjectName("secondary")
+        self._btn_uploaded_ig_checker_pick.setAutoDefault(False)
+        self._btn_uploaded_ig_checker_pick.setDefault(False)
+        self._btn_uploaded_ig_checker_pick.setToolTip(
+            "Открыть список профилей (как при заливе) и выбрать один "
+            "с залогиненным Instagram"
+        )
+        self._btn_uploaded_ig_checker_pick.clicked.connect(
+            self._pick_uploaded_ig_checker_profile
+        )
+        ig_checker_l.addWidget(ig_checker_lbl)
+        ig_checker_l.addWidget(self._uploaded_ig_checker_value, 1)
+        ig_checker_l.addWidget(self._btn_uploaded_ig_checker_pick)
+        uploaded_l.addWidget(self._uploaded_ig_checker_row)
+        self._uploaded_ig_checker_row.setVisible(self._platform == PLATFORM_INSTAGRAM)
+        self._refresh_uploaded_ig_checker_label()
+
         uploaded_hint = QLabel(
             "История успешных заливов на YouTube"
         )
@@ -2298,6 +2342,7 @@ class MainWindow(QWidget):
         gg.addWidget(self._settings_status, 3, 0, 1, 2)
 
         gb_yt = QGroupBox("YouTube")
+        self._gb_youtube_settings = gb_yt
         gy = _compact_settings_grid(gb_yt)
         self._youtube_api_key = QLineEdit()
         self._youtube_api_key.setPlaceholderText("YOUTUBE_API_KEY (YouTube Data API v3)…")
@@ -2331,6 +2376,8 @@ class MainWindow(QWidget):
         gy.addWidget(self._youtube_search_oldest, 2, 0, 1, 2)
         gy.addWidget(_settings_save_row(self._btn_save_youtube), 3, 0, 1, 2)
         gy.addWidget(self._youtube_settings_status, 4, 0, 1, 2)
+        # В Instagram API-ключ Data API не используется (статистика через сессию профиля).
+        gb_yt.setVisible(self._platform != PLATFORM_INSTAGRAM)
 
         gb_ai = QGroupBox("ИИ")
         gai = _compact_settings_grid(gb_ai)
@@ -2960,6 +3007,156 @@ class MainWindow(QWidget):
         finally:
             combo.blockSignals(False)
 
+    def _uploaded_ig_checker_selected_id(self) -> str:
+        return (getattr(self, "_uploaded_ig_checker_profile_id", "") or "").strip()
+
+    def _set_uploaded_ig_checker_profile_id(self, profile_id: str) -> None:
+        pid = (profile_id or "").strip()
+        self._uploaded_ig_checker_profile_id = pid
+        if pid:
+            self._settings.setValue("instagram/stats_checker_profile_id", pid)
+            try:
+                self._settings.sync()
+            except Exception:
+                pass
+        self._refresh_uploaded_ig_checker_label()
+
+    def _refresh_uploaded_ig_checker_label(self) -> None:
+        if not hasattr(self, "_uploaded_ig_checker_value"):
+            return
+        pid = self._uploaded_ig_checker_selected_id()
+        if not pid:
+            self._uploaded_ig_checker_value.setText("— не выбран —")
+            return
+        name = ""
+        for p in self._profiles_raw or []:
+            if not isinstance(p, dict):
+                continue
+            if _profile_id(p) == pid:
+                name = _profile_name(p)
+                break
+        if name:
+            self._uploaded_ig_checker_value.setText(f"{name}  ({pid})")
+        else:
+            self._uploaded_ig_checker_value.setText(pid)
+
+    def _pick_uploaded_ig_checker_profile(self) -> None:
+        if self._platform != PLATFORM_INSTAGRAM:
+            return
+        profiles = [p for p in (self._profiles_raw or []) if isinstance(p, dict)]
+        if not profiles:
+            QMessageBox.information(
+                self,
+                "Профиль для чека",
+                "Сначала загрузите список профилей (вкладка «Профили» → «Обновить»).",
+            )
+            return
+
+        dlg_holder: list[IgCheckerProfilePickDialog | None] = [None]
+
+        def _pause_click(pid: str) -> None:
+            dlg = dlg_holder[0]
+            self._ask_reset_upload_cooldown_for_profile(
+                pid,
+                dialog_parent=dlg or self,
+                dialog_profiles_interaction=(
+                    dlg._interaction
+                    if dlg is not None and hasattr(dlg, "_interaction")
+                    else None
+                ),
+            )
+
+        dlg = IgCheckerProfilePickDialog(
+            profiles=profiles,
+            upload_store=self._upload_store,
+            platform=self._platform,
+            initially_selected_id=self._uploaded_ig_checker_selected_id(),
+            on_upload_pause_click=_pause_click,
+            parent=self,
+        )
+        dlg_holder[0] = dlg
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._set_uploaded_ig_checker_profile_id(dlg.selected_profile_id())
+
+    def _populate_uploaded_ig_checker_profiles(self) -> None:
+        """Обновить подпись выбранного профиля после загрузки списка."""
+        if hasattr(self, "_uploaded_ig_checker_row"):
+            self._uploaded_ig_checker_row.setVisible(
+                self._platform == PLATFORM_INSTAGRAM
+            )
+        # Если сохранённый id пропал из списка — оставляем id, но покажем без имени.
+        saved = (
+            self._settings.value("instagram/stats_checker_profile_id", "", type=str)
+            or ""
+        ).strip()
+        if saved and not self._uploaded_ig_checker_selected_id():
+            self._uploaded_ig_checker_profile_id = saved
+        self._refresh_uploaded_ig_checker_label()
+        if self._platform == PLATFORM_INSTAGRAM and hasattr(
+            self, "_btn_uploaded_check"
+        ):
+            self._btn_uploaded_check.setToolTip(
+                "Запросить просмотры, лайки и комментарии через сессию "
+                "выбранного профиля (instagrapi, без API-ключа Meta)."
+            )
+
+    def _make_instagram_sessionid_provider(self, profile_id: str):
+        """Callable для воркера: достать sessionid из браузера выбранного профиля."""
+        pid = (profile_id or "").strip()
+        token = ""
+        if hasattr(self, "_dolphin_token"):
+            token = (self._dolphin_token.text() or "").strip()
+        if not token:
+            token = (
+                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
+            ).strip()
+        kind = "dolphin"
+        if hasattr(self, "_default_browser_combo"):
+            k = self._default_browser_combo.currentData()
+            if isinstance(k, str) and k.strip():
+                kind = k.strip()
+        base_url = self._own_antidetect_base_url_from_settings(kind)
+        headless = True
+        if hasattr(self, "_dolphin_headless"):
+            headless = bool(self._dolphin_headless.isChecked())
+        else:
+            headless = bool(
+                self._settings.value("antydetect/dolphin_headless", True, type=bool)
+            )
+        try:
+            remote_cdp = self._remote_cdp_launch_options_for_kind(kind)
+        except Exception:
+            remote_cdp = None
+
+        def _provider() -> str:
+            from zaliver.antydetect.antic_open import (
+                extract_instagram_sessionid_from_local_antidetect_profile,
+                extract_instagram_sessionid_from_profile,
+                set_log_sink,
+            )
+
+            set_log_sink(self._ui_log_line.emit)
+            if _is_own_antidetect_kind(kind):
+                if not (base_url or "").strip():
+                    raise RuntimeError(
+                        f"Укажите базовый URL {_own_antidetect_api_label(kind)} "
+                        "API в настройках."
+                    )
+                return extract_instagram_sessionid_from_local_antidetect_profile(
+                    pid,
+                    base_url=base_url,
+                    headless=headless,
+                    remote_cdp=remote_cdp,
+                )
+            return extract_instagram_sessionid_from_profile(
+                pid,
+                local_token=token or None,
+                headless=headless,
+            )
+
+        return _provider
+
     def _refresh_uploaded_stats_visible(self) -> None:
         if not hasattr(self, "_uploaded_list"):
             return
@@ -2979,16 +3176,44 @@ class MainWindow(QWidget):
                 "Выберите сессию с роликами или нажмите «Список».",
             )
             return
-        key = ""
-        if hasattr(self, "_youtube_api_key"):
-            key = (self._youtube_api_key.text() or "").strip()
 
         self._uploaded_stats_status.setText(
             f"Обновление статистики: 0 / {len(vids)}…"
         )
         self._btn_uploaded_check.setEnabled(False)
         self._stats_thread = QThread()
-        self._stats_worker = UploadedStatsRefreshWorker(vids, key)
+
+        if self._platform == PLATFORM_INSTAGRAM:
+            pid = self._uploaded_ig_checker_selected_id()
+            if not pid:
+                self._btn_uploaded_check.setEnabled(True)
+                self._stats_thread = None
+                QMessageBox.information(
+                    self,
+                    "Zaliver",
+                    "Выберите профиль в «Аккаунт для чека» — "
+                    "с его Instagram-сессии пойдут запросы метрик.",
+                )
+                if hasattr(self, "_uploaded_stats_status"):
+                    self._uploaded_stats_status.setText("")
+                return
+            login, password, twofa = self._instagram_session_credentials(pid)
+            worker = UploadedInstagramStatsRefreshWorker(
+                vids,
+                profile_id=pid,
+                username=login,
+                password=password,
+                twofa_secret=twofa,
+                sessionid_provider=self._make_instagram_sessionid_provider(pid),
+            )
+            self._stats_worker = worker
+            worker.log_line.connect(self._ui_log_line.emit)
+        else:
+            key = ""
+            if hasattr(self, "_youtube_api_key"):
+                key = (self._youtube_api_key.text() or "").strip()
+            self._stats_worker = UploadedStatsRefreshWorker(vids, key)
+
         self._stats_worker.moveToThread(self._stats_thread)
         self._stats_thread.started.connect(self._stats_worker.run)
         self._stats_worker.progress.connect(self._on_uploaded_stats_progress)
@@ -3012,9 +3237,44 @@ class MainWindow(QWidget):
         self._uploaded_persist_stats_batch(successes, errors)
 
     def _on_uploaded_stats_worker_finished(self, successes: object, errors: object) -> None:
-        del successes, errors
+        succ = successes if isinstance(successes, list) else []
+        fails = errors if isinstance(errors, list) else []
+        if (
+            self._platform == PLATFORM_INSTAGRAM
+            and not succ
+            and fails
+        ):
+            sample = ""
+            for item in fails:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    sample = str(item[1] or "").strip()
+                    if sample:
+                        break
+            if sample:
+                # Одна и та же ошибка сессии на все ролики — показать причину.
+                same = True
+                for item in fails:
+                    if not isinstance(item, (list, tuple)) or len(item) < 2:
+                        continue
+                    if str(item[1] or "").strip() != sample:
+                        same = False
+                        break
+                if same:
+                    QMessageBox.warning(
+                        self,
+                        "Zaliver",
+                        "Не удалось обновить статистику Instagram:\n\n"
+                        f"{sample}\n\n"
+                        "Проверьте, что выбранный профиль залогинен в Instagram, "
+                        "и смотрите лог ([ig-stats]).",
+                    )
         if hasattr(self, "_uploaded_stats_status"):
-            self._uploaded_stats_status.setText("")
+            if succ or fails:
+                self._uploaded_stats_status.setText(
+                    f"Готово: ок {len(succ)}, ошибок {len(fails)}"
+                )
+            else:
+                self._uploaded_stats_status.setText("")
         t = self._stats_thread
         if t is not None:
             t.quit()
@@ -3024,8 +3284,6 @@ class MainWindow(QWidget):
         if self._stats_worker is not None:
             self._stats_worker.deleteLater()
             self._stats_worker = None
-        if hasattr(self, "_uploaded_stats_status"):
-            self._uploaded_stats_status.setText("")
         if hasattr(self, "_btn_uploaded_check"):
             self._btn_uploaded_check.setEnabled(True)
         if hasattr(self, "_uploaded_all") and self._uploaded_all:
@@ -4336,6 +4594,10 @@ class MainWindow(QWidget):
         # Прогрев: Shorts (YT) или Reels (IG).
         if hasattr(self, "_btn_profiles_warmup"):
             self._btn_profiles_warmup.setVisible(True)
+        if hasattr(self, "_uploaded_ig_checker_row"):
+            self._uploaded_ig_checker_row.setVisible(is_ig)
+            if is_ig:
+                self._populate_uploaded_ig_checker_profiles()
 
     def _load_antydetect_settings(self) -> None:
         if not hasattr(self, "_dolphin_token"):
@@ -5285,6 +5547,7 @@ class MainWindow(QWidget):
             existing.discard("")
             self._profiles_interaction.checked_profile_ids.intersection_update(existing)
         self._apply_profiles_filter()
+        self._populate_uploaded_ig_checker_profiles()
 
     def _start_profiles_availability_check(self) -> None:
         if self._profiles_availability_running:
@@ -9724,7 +9987,10 @@ class MainWindow(QWidget):
             is_instagram_upload = self._platform == PLATFORM_INSTAGRAM
 
             self._clear_previous_upload_result_tags(
-                profile_ids=profile_ids, kind=kind, base_url=base_url
+                profile_ids=profile_ids,
+                kind=kind,
+                base_url=base_url,
+                for_instagram=is_instagram_upload,
             )
 
             upload_platform_label = "Instagram Reels" if is_instagram_upload else "YouTube"
@@ -10092,6 +10358,7 @@ class MainWindow(QWidget):
                         success=bool(ok),
                         kind=kind,
                         base_url=base_url,
+                        for_instagram=is_instagram_upload,
                     )
                 except Exception:
                     pass
@@ -10357,8 +10624,14 @@ class MainWindow(QWidget):
         profile_ids: list[str],
         kind: str,
         base_url: str,
+        for_instagram: bool = False,
     ) -> None:
-        from zaliver.antydetect.profile_tags import PREVIOUS_UPLOAD_RESULT_TAGS
+        from zaliver.antydetect.profile_tags import (
+            IG_UPLOAD_PREVIOUS_ERROR_TAG,
+            IG_UPLOAD_PREVIOUS_SUCCESS_TAG,
+            UPLOAD_PREVIOUS_ERROR_TAG,
+            UPLOAD_PREVIOUS_SUCCESS_TAG,
+        )
 
         pids = [p.strip() for p in (profile_ids or []) if (p or "").strip()]
         if not pids:
@@ -10370,9 +10643,24 @@ class MainWindow(QWidget):
                 "для своего антидетекта."
             )
             return
+        # Снимаем и актуальные, и старые имена (без суффикса платформы).
+        if for_instagram:
+            tags_to_clear = [
+                IG_UPLOAD_PREVIOUS_SUCCESS_TAG,
+                IG_UPLOAD_PREVIOUS_ERROR_TAG,
+                "УСПЕШНЫЙ ПРОШЛЫЙ ЗАЛИВ",
+                "ОШИБКА ПРОШЛОГО ЗАЛИВА",
+            ]
+        else:
+            tags_to_clear = [
+                UPLOAD_PREVIOUS_SUCCESS_TAG,
+                UPLOAD_PREVIOUS_ERROR_TAG,
+                "УСПЕШНЫЙ ПРОШЛЫЙ ЗАЛИВ",
+                "ОШИБКА ПРОШЛОГО ЗАЛИВА",
+            ]
         try:
             for pid in pids:
-                for tag in PREVIOUS_UPLOAD_RESULT_TAGS:
+                for tag in tags_to_clear:
                     try:
                         api.remove_profile_tag(pid, tag)
                         self._ui_log_line.emit(
@@ -10390,8 +10678,11 @@ class MainWindow(QWidget):
         success: bool,
         kind: str,
         base_url: str,
+        for_instagram: bool = False,
     ) -> None:
         from zaliver.antydetect.profile_tags import (
+            IG_UPLOAD_PREVIOUS_ERROR_TAG,
+            IG_UPLOAD_PREVIOUS_SUCCESS_TAG,
             UPLOAD_PREVIOUS_ERROR_TAG,
             UPLOAD_PREVIOUS_SUCCESS_TAG,
         )
@@ -10399,8 +10690,14 @@ class MainWindow(QWidget):
         pid = (profile_id or "").strip()
         if not pid:
             return
-        tag = UPLOAD_PREVIOUS_SUCCESS_TAG if success else UPLOAD_PREVIOUS_ERROR_TAG
-        other = UPLOAD_PREVIOUS_ERROR_TAG if success else UPLOAD_PREVIOUS_SUCCESS_TAG
+        if for_instagram:
+            success_tag = IG_UPLOAD_PREVIOUS_SUCCESS_TAG
+            error_tag = IG_UPLOAD_PREVIOUS_ERROR_TAG
+        else:
+            success_tag = UPLOAD_PREVIOUS_SUCCESS_TAG
+            error_tag = UPLOAD_PREVIOUS_ERROR_TAG
+        tag = success_tag if success else error_tag
+        other = error_tag if success else success_tag
         api = self._local_antidetect_api_for_profile_tags(kind=kind, base_url=base_url)
         if api is None:
             self._ui_log_line.emit(
@@ -10423,8 +10720,8 @@ class MainWindow(QWidget):
                 [
                     {
                         "success": success,
-                        "success_tag": UPLOAD_PREVIOUS_SUCCESS_TAG,
-                        "error_tag": UPLOAD_PREVIOUS_ERROR_TAG,
+                        "success_tag": success_tag,
+                        "error_tag": error_tag,
                     }
                 ],
             )

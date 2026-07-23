@@ -422,7 +422,8 @@ class SlicingTabPane(QWidget):
         music_grid.addWidget(music_btns_w, 0, 2)
         music_desc = QLabel(
             "Аудио задаёт длительность и моменты смены кадра. "
-            "Треки берутся по очереди и при необходимости повторяются."
+            "Для каждого ролика трек выбирается случайно; "
+            "повторы — только если роликов больше, чем треков."
         )
         music_desc.setObjectName("hint")
         music_desc.setWordWrap(True)

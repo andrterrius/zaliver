@@ -831,6 +831,8 @@ class ReelsWarmupSettings(NamedTuple):
     watch_min_s: int
     watch_max_s: int
     watch_full: bool
+    reels_recommendations: bool
+    reels_search_query: str
 
 
 class MainWindow(QWidget):
@@ -993,7 +995,7 @@ class MainWindow(QWidget):
             self.setStyleSheet(p.read_text(encoding="utf-8"))
 
     def _brand(self, text: str) -> str:
-        """Подмена YouTube → Instagram в UI-тексте (логика залива пока та же)."""
+        """Подмена YouTube → Instagram в UI-тексте."""
         return brand_text(text, getattr(self, "_platform", PLATFORM_YOUTUBE))
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
@@ -6643,8 +6645,8 @@ class MainWindow(QWidget):
 
         hint = QLabel(
             "Для каждого отмеченного профиля: главная Instagram, при необходимости "
-            "вход в аккаунт, переход на /reels/. На каждом рилсе с заданной "
-            "вероятностью ставится лайк и/или подписка, затем — следующий."
+            "вход в аккаунт, затем лента /reels/ или поиск на Explore. На каждом "
+            "рилсе с заданной вероятностью ставится лайк и/или подписка."
         )
         hint.setWordWrap(True)
         hint.setObjectName("hint")
@@ -6704,6 +6706,31 @@ class MainWindow(QWidget):
         watch_full_cb.toggled.connect(_sync_watch_mode)
         _sync_watch_mode(watch_full_cb.isChecked())
 
+        reels_recommend_cb = QCheckBox("Рекомендации Reels")
+        reels_recommend_cb.setChecked(True)
+        reels_recommend_cb.setToolTip(
+            "Открыть ленту рекомендаций /reels/. Если снять галочку — "
+            "укажите поисковый запрос: Explore → аккаунты → их Reels."
+        )
+        form.addRow("", reels_recommend_cb)
+
+        reels_search_row = QWidget()
+        reels_search_row_l = QHBoxLayout(reels_search_row)
+        reels_search_row_l.setContentsMargins(0, 0, 0, 0)
+        reels_search_row_l.setSpacing(8)
+        reels_search_lbl = QLabel("Поисковый запрос:")
+        reels_search_edit = QLineEdit()
+        reels_search_edit.setPlaceholderText("Текст для поиска аккаунтов на Explore")
+        reels_search_row_l.addWidget(reels_search_lbl)
+        reels_search_row_l.addWidget(reels_search_edit, 1)
+        form.addRow("", reels_search_row)
+
+        def _sync_reels_source_fields(checked: bool) -> None:
+            reels_search_row.setVisible(not checked)
+
+        reels_recommend_cb.toggled.connect(_sync_reels_source_fields)
+        _sync_reels_source_fields(reels_recommend_cb.isChecked())
+
         v.addLayout(form)
 
         row = QHBoxLayout()
@@ -6730,6 +6757,17 @@ class MainWindow(QWidget):
                     "больше максимальной.",
                 )
                 return
+            if (
+                not reels_recommend_cb.isChecked()
+                and not reels_search_edit.text().strip()
+            ):
+                QMessageBox.warning(
+                    dlg,
+                    "Прогрев Instagram Reels",
+                    "Укажите поисковый запрос для прогрева Reels "
+                    "или включите «Рекомендации Reels».",
+                )
+                return
             dlg.accept()
 
         btn_start.clicked.connect(_try_accept)
@@ -6744,6 +6782,8 @@ class MainWindow(QWidget):
             watch_min_s=watch_min_spin.value(),
             watch_max_s=watch_max_spin.value(),
             watch_full=watch_full_cb.isChecked(),
+            reels_recommendations=reels_recommend_cb.isChecked(),
+            reels_search_query=(reels_search_edit.text() or "").strip(),
         )
 
     def _start_profiles_warmup(self) -> None:
@@ -6825,8 +6865,13 @@ class MainWindow(QWidget):
                 f"(Reels: {warmup_settings.reels_count}, "
                 f"просмотр {watch_note}, "
                 f"лайк {warmup_settings.like_probability_pct:g}%, "
-                f"подписка {warmup_settings.follow_probability_pct:g}%, "
-                f"{headless_label}, до {max_concurrent} параллельно)…"
+                f"подписка {warmup_settings.follow_probability_pct:g}%"
+                + (
+                    ", Reels: рекомендации"
+                    if warmup_settings.reels_recommendations
+                    else f", Reels: поиск «{warmup_settings.reels_search_query}»"
+                )
+                + f", {headless_label}, до {max_concurrent} параллельно)…"
             )
             worker = self._profiles_reels_warmup_worker
         else:
@@ -7014,6 +7059,8 @@ class MainWindow(QWidget):
                 "watch_min_s": float(warmup_settings.watch_min_s),
                 "watch_max_s": float(warmup_settings.watch_max_s),
                 "watch_full": warmup_settings.watch_full,
+                "reels_recommendations": warmup_settings.reels_recommendations,
+                "search_query": warmup_settings.reels_search_query,
             }
             if _is_own_antidetect_kind(kind_s):
                 u = (base_url or "").strip()
@@ -9615,7 +9662,9 @@ class MainWindow(QWidget):
             ]
             if not video_paths:
                 self._append_session_log(
-                    "Загрузка в YouTube пропущена: не найден путь к сохранённому видео."
+                    self._brand(
+                        "Загрузка в YouTube пропущена: не найден путь к сохранённому видео."
+                    )
                 )
                 self._upload_log_mode = ""
                 self._upload_session_upload_expected = False
@@ -9639,7 +9688,9 @@ class MainWindow(QWidget):
             try:
                 remote_cdp = self._remote_cdp_launch_options_for_kind(kind)
             except LocalAntidetectError as e:
-                self._append_session_log(f"YouTube: заливка пропущена — {e}")
+                self._append_session_log(
+                    self._brand(f"YouTube: заливка пропущена — {e}")
+                )
                 self._upload_log_mode = ""
                 self._upload_session_upload_expected = False
                 self._upload_session_upload_done = True
@@ -9652,7 +9703,9 @@ class MainWindow(QWidget):
             raw_ids = (pending.get("profile_ids", "") or "").strip()
             profile_ids = [p.strip() for p in raw_ids.split(",") if p.strip()]
             if not profile_ids:
-                self._append_session_log("YouTube: профили не выбраны — заливка пропущена.")
+                self._append_session_log(
+                    self._brand("YouTube: профили не выбраны — заливка пропущена.")
+                )
                 self._upload_log_mode = ""
                 self._upload_session_upload_expected = False
                 self._upload_session_upload_done = True
@@ -9668,12 +9721,15 @@ class MainWindow(QWidget):
             )
             from zaliver.youtube_upload.studio import _studio_canonical_watch_url
 
+            is_instagram_upload = self._platform == PLATFORM_INSTAGRAM
+
             self._clear_previous_upload_result_tags(
                 profile_ids=profile_ids, kind=kind, base_url=base_url
             )
 
+            upload_platform_label = "Instagram Reels" if is_instagram_upload else "YouTube"
             self._append_session_log(
-                f"YouTube: многопоточная заливка стартует. "
+                f"{upload_platform_label}: многопоточная заливка стартует. "
                 f"Видео={len(video_paths)}, профили={len(profile_ids)}…"
             )
             self._upload_delete_after_enabled = self._delete_after_upload_enabled()
@@ -9688,7 +9744,7 @@ class MainWindow(QWidget):
             from zaliver.youtube_upload.schedule_publish import parse_msk_datetime
 
             schedule_times: list[datetime] = []
-            if pending.get("schedule_publish"):
+            if pending.get("schedule_publish") and not is_instagram_upload:
                 for raw in pending.get("schedule_times_iso") or []:
                     dt = parse_msk_datetime(raw)
                     if dt is not None:
@@ -9702,6 +9758,10 @@ class MainWindow(QWidget):
             schedule_warmup_search_query = (
                 pending.get("schedule_warmup_search_query") or ""
             ).strip()
+            if is_instagram_upload and pending.get("schedule_publish"):
+                self._append_session_log(
+                    "Instagram Reels: отложка Studio не поддерживается — публикуем сразу."
+                )
 
             upload_var_index = {"n": 0}
             upload_var_index_lock = threading.Lock()
@@ -9724,6 +9784,8 @@ class MainWindow(QWidget):
                     open_google_in_local_antidetect_profile,
                     open_google_in_profile,
                     set_log_sink,
+                    upload_instagram_reel_in_local_antidetect_profile,
+                    upload_instagram_reel_in_profile,
                 )
 
                 set_log_sink(self._ui_log_line.emit)
@@ -9737,97 +9799,150 @@ class MainWindow(QWidget):
                         )
                     )
 
-                creds = self._profile_login_credentials(profile_id)
-                yt_oldest = self._profile_yt_oldest_name(profile_id) or None
-                search_oldest = self._youtube_search_oldest_channel()
                 guser = self._stats_server_username_stripped()
-                task_scheduled = (
-                    task.schedule_publish_at is not None or task.scheduled_batch
-                )
                 var_ctx = TitleVariableContext(
                     profile_name=_profile_display_name(profile_id),
                     video_path=task.video_path,
                     index=_next_upload_var_index(),
                 )
-                title_result = expand_and_limit_title(task.title, var_ctx)
-                resolved_title = title_result.title
-                if title_result.truncated:
-                    try:
-                        self._ui_log_line.emit(
-                            "[upload] Название обрезано до 100 символов "
-                            f"(было {title_result.original_length})."
-                        )
-                    except Exception:
-                        pass
-                resolved_description = expand_title_variables(task.description, var_ctx)
-                resolved_scheduled_batch = None
-                if task.scheduled_batch:
-                    resolved_scheduled_batch = []
-                    for item in task.scheduled_batch:
-                        item_ctx = TitleVariableContext(
-                            profile_name=_profile_display_name(profile_id),
-                            video_path=item.video_path,
-                            index=_next_upload_var_index(),
-                        )
-                        item_title_result = expand_and_limit_title(item.title, item_ctx)
-                        if item_title_result.truncated:
-                            try:
-                                self._ui_log_line.emit(
-                                    "[upload] Название обрезано до 100 символов "
-                                    f"(было {item_title_result.original_length})."
-                                )
-                            except Exception:
-                                pass
-                        resolved_scheduled_batch.append(
-                            ScheduledUploadItem(
-                                video_path=item.video_path,
-                                title=item_title_result.title,
-                                description=expand_title_variables(
-                                    item.description, item_ctx
-                                ),
-                                schedule_publish_at=item.schedule_publish_at,
-                            )
-                        )
-                warmup_kw = {}
-                if schedule_warmup_shorts and task_scheduled:
-                    warmup_kw = dict(
-                        warmup_during_schedule=True,
-                        warmup_shorts_recommendations=schedule_warmup_shorts_recommendations,
-                        warmup_search_query=schedule_warmup_search_query or None,
-                        warmup_shorts_batch_count=5,
-                        warmup_like_probability_pct=10.0,
-                        warmup_subscribe_probability_pct=10.0,
-                        warmup_shorts_watch_min_s=5.0,
-                        warmup_shorts_watch_max_s=25.0,
+                if is_instagram_upload:
+                    # Подпись Reels длиннее лимита названия Studio — только expand.
+                    resolved_title = expand_title_variables(task.title, var_ctx)
+                    resolved_description = expand_title_variables(
+                        task.description, var_ctx
                     )
-                open_kw = dict(
-                    headless=headless,
-                    video_path=task.video_path,
-                    title=resolved_title,
-                    description=resolved_description,
-                    login_credentials=creds,
-                    yt_oldest_name=yt_oldest,
-                    search_oldest_channel=search_oldest,
-                    publish_before_checks=publish_before_checks,
-                    keep_studio_title=keep_studio_title,
-                    schedule_publish_at=task.schedule_publish_at,
-                    scheduled_batch=resolved_scheduled_batch,
-                    stats_server_username=guser or None,
-                    **warmup_kw,
-                )
-                if _is_own_antidetect_kind(kind):
-                    res = open_google_in_local_antidetect_profile(
-                        profile_id,
-                        base_url=(base_url or "").strip(),
-                        remote_cdp=remote_cdp,
-                        **open_kw,
+                    sess_login, sess_pwd, sess_2fa = self._instagram_session_credentials(
+                        profile_id
                     )
+                    ig_kw = dict(
+                        video_path=task.video_path,
+                        title=resolved_title,
+                        description=resolved_description,
+                        headless=headless,
+                        session_login=sess_login,
+                        session_password=sess_pwd,
+                        session_twofa=sess_2fa,
+                    )
+                    if _is_own_antidetect_kind(kind):
+                        res = upload_instagram_reel_in_local_antidetect_profile(
+                            profile_id,
+                            base_url=(base_url or "").strip(),
+                            remote_cdp=remote_cdp,
+                            **ig_kw,
+                        )
+                    else:
+                        res = upload_instagram_reel_in_profile(
+                            profile_id,
+                            local_token=token or None,
+                            **ig_kw,
+                        )
+                    # Первое Reel в профиле уже в БД → новое видео не появилось.
+                    ig_vid = ""
+                    ig_url = ""
+                    if isinstance(res, dict):
+                        ig_vid = str(res.get("video_id") or "").strip()
+                        ig_url = str(res.get("url") or "").strip()
+                    if self._upload_store.has_uploaded_video(
+                        video_id=ig_vid,
+                        url=ig_url,
+                        platform=self._platform,
+                    ):
+                        raise RuntimeError(
+                            "Instagram Reels: первое видео в профиле уже есть в базе "
+                            f"залитых (video_id={ig_vid!r}, url={ig_url!r}) — "
+                            "заливка не подтверждена."
+                        )
+                    resolved_scheduled_batch = None
                 else:
-                    res = open_google_in_profile(
-                        profile_id,
-                        local_token=token or None,
-                        **open_kw,
+                    creds = self._profile_login_credentials(profile_id)
+                    yt_oldest = self._profile_yt_oldest_name(profile_id) or None
+                    search_oldest = self._youtube_search_oldest_channel()
+                    task_scheduled = (
+                        task.schedule_publish_at is not None or task.scheduled_batch
                     )
+                    title_result = expand_and_limit_title(task.title, var_ctx)
+                    resolved_title = title_result.title
+                    if title_result.truncated:
+                        try:
+                            self._ui_log_line.emit(
+                                "[upload] Название обрезано до 100 символов "
+                                f"(было {title_result.original_length})."
+                            )
+                        except Exception:
+                            pass
+                    resolved_description = expand_title_variables(
+                        task.description, var_ctx
+                    )
+                    resolved_scheduled_batch = None
+                    if task.scheduled_batch:
+                        resolved_scheduled_batch = []
+                        for item in task.scheduled_batch:
+                            item_ctx = TitleVariableContext(
+                                profile_name=_profile_display_name(profile_id),
+                                video_path=item.video_path,
+                                index=_next_upload_var_index(),
+                            )
+                            item_title_result = expand_and_limit_title(
+                                item.title, item_ctx
+                            )
+                            if item_title_result.truncated:
+                                try:
+                                    self._ui_log_line.emit(
+                                        "[upload] Название обрезано до 100 символов "
+                                        f"(было {item_title_result.original_length})."
+                                    )
+                                except Exception:
+                                    pass
+                            resolved_scheduled_batch.append(
+                                ScheduledUploadItem(
+                                    video_path=item.video_path,
+                                    title=item_title_result.title,
+                                    description=expand_title_variables(
+                                        item.description, item_ctx
+                                    ),
+                                    schedule_publish_at=item.schedule_publish_at,
+                                )
+                            )
+                    warmup_kw = {}
+                    if schedule_warmup_shorts and task_scheduled:
+                        warmup_kw = dict(
+                            warmup_during_schedule=True,
+                            warmup_shorts_recommendations=schedule_warmup_shorts_recommendations,
+                            warmup_search_query=schedule_warmup_search_query or None,
+                            warmup_shorts_batch_count=5,
+                            warmup_like_probability_pct=10.0,
+                            warmup_subscribe_probability_pct=10.0,
+                            warmup_shorts_watch_min_s=5.0,
+                            warmup_shorts_watch_max_s=25.0,
+                        )
+                    open_kw = dict(
+                        headless=headless,
+                        video_path=task.video_path,
+                        title=resolved_title,
+                        description=resolved_description,
+                        login_credentials=creds,
+                        yt_oldest_name=yt_oldest,
+                        search_oldest_channel=search_oldest,
+                        publish_before_checks=publish_before_checks,
+                        keep_studio_title=keep_studio_title,
+                        schedule_publish_at=task.schedule_publish_at,
+                        scheduled_batch=resolved_scheduled_batch,
+                        stats_server_username=guser or None,
+                        **warmup_kw,
+                    )
+                    if _is_own_antidetect_kind(kind):
+                        res = open_google_in_local_antidetect_profile(
+                            profile_id,
+                            base_url=(base_url or "").strip(),
+                            remote_cdp=remote_cdp,
+                            **open_kw,
+                        )
+                    else:
+                        res = open_google_in_profile(
+                            profile_id,
+                            local_token=token or None,
+                            **open_kw,
+                        )
 
                 def _record_one(
                     *,
@@ -9843,16 +9958,28 @@ class MainWindow(QWidget):
                         vid = str(one_res.get("video_id") or "").strip()
                         url = str(one_res.get("url") or "").strip()
                     if not vid and url:
-                        try:
-                            from zaliver.youtube_parsing.video_stats import extract_video_id
+                        if is_instagram_upload:
+                            for marker in ("/reel/", "/p/"):
+                                if marker in url:
+                                    part = url.split(marker, 1)[1]
+                                    vid = part.split("/", 1)[0].split("?", 1)[0].strip()
+                                    break
+                        else:
+                            try:
+                                from zaliver.youtube_parsing.video_stats import (
+                                    extract_video_id,
+                                )
 
-                            vid = extract_video_id(url)
-                        except Exception:
-                            pass
+                                vid = extract_video_id(url)
+                            except Exception:
+                                pass
                     if not vid:
                         raise RuntimeError(f"Empty video_id (res={one_res!r})")
                     if not url:
-                        url = _studio_canonical_watch_url(vid)
+                        if is_instagram_upload:
+                            url = f"https://www.instagram.com/reel/{vid}/"
+                        else:
+                            url = _studio_canonical_watch_url(vid)
                     if not url:
                         raise RuntimeError(f"Empty url (res={one_res!r})")
 
@@ -9878,38 +10005,41 @@ class MainWindow(QWidget):
                     except Exception:
                         pass
                     try:
-                        stats_notified = bool(
-                            isinstance(one_res, dict) and one_res.get("stats_notified")
-                        )
-                        if guser and not stats_notified:
-                            scheduled_unix = None
-                            sched_dt = parse_msk_datetime(schedule_publish_at)
-                            if sched_dt is not None:
-                                scheduled_unix = int(sched_dt.timestamp())
-                            ok = notify_uploaded_video(
-                                video_id=vid,
-                                username=guser,
-                                profile_id=profile_id,
-                                scheduled=scheduled_unix,
+                        if is_instagram_upload:
+                            pass
+                        else:
+                            stats_notified = bool(
+                                isinstance(one_res, dict) and one_res.get("stats_notified")
                             )
-                            try:
-                                if ok:
-                                    self._ui_log_line.emit(
-                                        f"[stats_server] уведомление отправлено: videoId={vid}"
-                                    )
-                                else:
-                                    self._ui_log_line.emit(
-                                        f"[stats_server] сервер не принял уведомление: videoId={vid}"
-                                    )
-                            except Exception:
-                                pass
-                        elif not guser:
-                            try:
-                                self._ui_log_line.emit(
-                                    "[stats_server] username не задан — уведомление пропущено."
+                            if guser and not stats_notified:
+                                scheduled_unix = None
+                                sched_dt = parse_msk_datetime(schedule_publish_at)
+                                if sched_dt is not None:
+                                    scheduled_unix = int(sched_dt.timestamp())
+                                ok = notify_uploaded_video(
+                                    video_id=vid,
+                                    username=guser,
+                                    profile_id=profile_id,
+                                    scheduled=scheduled_unix,
                                 )
-                            except Exception:
-                                pass
+                                try:
+                                    if ok:
+                                        self._ui_log_line.emit(
+                                            f"[stats_server] уведомление отправлено: videoId={vid}"
+                                        )
+                                    else:
+                                        self._ui_log_line.emit(
+                                            f"[stats_server] сервер не принял уведомление: videoId={vid}"
+                                        )
+                                except Exception:
+                                    pass
+                            elif not guser:
+                                try:
+                                    self._ui_log_line.emit(
+                                        "[stats_server] username не задан — уведомление пропущено."
+                                    )
+                                except Exception:
+                                    pass
                     except Exception as e:
                         try:
                             self._ui_log_line.emit(

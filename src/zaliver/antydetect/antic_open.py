@@ -1024,13 +1024,16 @@ def warmup_instagram_reels_in_profile(
     watch_min_s: float | None = None,
     watch_max_s: float | None = None,
     watch_full: bool = False,
+    reels_recommendations: bool = True,
+    search_query: str | None = None,
 ) -> None:
-    """Dolphin → Instagram → /reels/ → прогрев с лайком/подпиской."""
+    """Dolphin → Instagram → /reels/ или поиск Explore → прогрев."""
     from zaliver.instagram_upload.reels_warmup import run_instagram_reels_warmup
 
     _log(
         "Dolphin: прогрев Instagram Reels. "
-        f"profile_id={profile_id!r}, headless={headless}"
+        f"profile_id={profile_id!r}, headless={headless}, "
+        f"recommendations={reels_recommendations}"
     )
     api = DolphinAntyLocalAPI()
     try:
@@ -1054,6 +1057,8 @@ def warmup_instagram_reels_in_profile(
                     "session_password": session_password,
                     "session_twofa": session_twofa,
                     "watch_full": bool(watch_full),
+                    "reels_recommendations": bool(reels_recommendations),
+                    "search_query": (search_query or "").strip(),
                     "profile_id": profile_id,
                 }
                 if reels_count is not None:
@@ -1099,8 +1104,10 @@ def warmup_instagram_reels_in_local_antidetect_profile(
     watch_min_s: float | None = None,
     watch_max_s: float | None = None,
     watch_full: bool = False,
+    reels_recommendations: bool = True,
+    search_query: str | None = None,
 ) -> None:
-    """Локальный антидетект → Instagram → /reels/ → прогрев."""
+    """Локальный антидетект → Instagram → /reels/ или поиск Explore → прогрев."""
     from zaliver.instagram_upload.reels_warmup import run_instagram_reels_warmup
     from zaliver.antydetect.local_antidetect_api import (
         LocalAntidetectError,
@@ -1162,6 +1169,8 @@ def warmup_instagram_reels_in_local_antidetect_profile(
                     "session_password": pwd,
                     "session_twofa": twofa,
                     "watch_full": bool(watch_full),
+                    "reels_recommendations": bool(reels_recommendations),
+                    "search_query": (search_query or "").strip(),
                     "profile_id": profile_id,
                 }
                 if reels_count is not None:
@@ -1193,6 +1202,177 @@ def warmup_instagram_reels_in_local_antidetect_profile(
         try:
             _log(
                 "Local antidetect: прогрев Reels завершён за "
+                f"{time.perf_counter() - started_at:.1f} с."
+            )
+        except Exception:
+            pass
+        api.close()
+
+
+@with_log_profile
+def upload_instagram_reel_in_profile(
+    profile_id: str,
+    *,
+    video_path: str,
+    title: str = "",
+    description: str = "",
+    local_token: str | None = None,
+    headless: bool = True,
+    session_login: str = "",
+    session_password: str = "",
+    session_twofa: str = "",
+) -> dict:
+    """Dolphin → Instagram → «Новая публикация» → файл → Share (Reels)."""
+    from zaliver.instagram_upload.reels_upload import run_instagram_reels_upload
+
+    _log(
+        "Dolphin: залив Instagram Reels. "
+        f"profile_id={profile_id!r}, headless={headless}, "
+        f"video_path={video_path!r}"
+    )
+    api = DolphinAntyLocalAPI()
+    try:
+        tok = (local_token or "").strip()
+        if tok:
+            _log("Dolphin: login_with_token…")
+            api.login_with_token(tok)
+        _log("Dolphin: start_profile…")
+        conn = api.start_profile(profile_id, headless=headless)
+        _log(
+            "Dolphin: профиль запущен. "
+            f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+        )
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_cdp(
+                p, (conn.ws_url(), conn.http_url())
+            )
+            try:
+                return run_instagram_reels_upload(
+                    page,
+                    video_path=video_path,
+                    title=title,
+                    description=description,
+                    session_login=session_login,
+                    session_password=session_password,
+                    session_twofa=session_twofa,
+                    profile_id=profile_id,
+                )
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        _log(f"Ошибка залива Reels: {type(e).__name__}: {e!r}")
+        raise _wrap_exc(e) from e
+    finally:
+        try:
+            api.stop_profile(profile_id)
+        except Exception as e:
+            _log(f"Dolphin: stop_profile: {e!r}")
+        api.close()
+
+
+@with_log_profile
+def upload_instagram_reel_in_local_antidetect_profile(
+    profile_id: str,
+    *,
+    video_path: str,
+    base_url: str,
+    title: str = "",
+    description: str = "",
+    headless: bool = True,
+    remote_cdp=None,
+    session_login: str = "",
+    session_password: str = "",
+    session_twofa: str = "",
+) -> dict:
+    """Локальный антидетект → Instagram → «Новая публикация» → файл → Share (Reels)."""
+    from zaliver.instagram_upload.reels_upload import run_instagram_reels_upload
+    from zaliver.antydetect.local_antidetect_api import (
+        LocalAntidetectError,
+        LocalAntidetectHttpAPI,
+    )
+    from zaliver.antydetect.local_active_sessions import (
+        register_local_session,
+        unregister_local_session,
+    )
+
+    _log(
+        "Local antidetect: залив Instagram Reels. "
+        f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}, "
+        f"video_path={video_path!r}"
+    )
+    api = LocalAntidetectHttpAPI(base_url)
+    session_id: str | None = None
+    started_at = time.perf_counter()
+    try:
+        login = (session_login or "").strip()
+        pwd = (session_password or "").strip()
+        twofa = (session_twofa or "").strip()
+        if not pwd or not login:
+            try:
+                prof = api.get_profile(profile_id)
+                loaded_login, loaded_pwd, loaded_twofa = (
+                    _instagram_session_creds_from_profile_dict(prof)
+                )
+                if not login:
+                    login = loaded_login
+                if not pwd:
+                    pwd = loaded_pwd
+                if not twofa:
+                    twofa = loaded_twofa
+            except Exception as e:
+                _log(f"Local antidetect: не удалось прочитать custom_data: {e!r}")
+
+        acc = api.launch_profile(
+            profile_id,
+            headless=headless,
+            expose_cdp=True,
+            remote_cdp=remote_cdp,
+        )
+        sid = acc.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+        session_id = sid.strip()
+        bu = (base_url or "").strip() or "http://127.0.0.1:18765"
+        register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
+        ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+        _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_local_session_cdp(
+                p, api, session_id, ws_url
+            )
+            try:
+                return run_instagram_reels_upload(
+                    page,
+                    video_path=video_path,
+                    title=title,
+                    description=description,
+                    session_login=login,
+                    session_password=pwd,
+                    session_twofa=twofa,
+                    profile_id=profile_id,
+                )
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        _log(f"Ошибка залива Reels: {type(e).__name__}: {e!r}")
+        raise LocalAntidetectError(f"Ошибка залива Instagram Reels: {e}") from e
+    finally:
+        if session_id:
+            unregister_local_session(profile_id=profile_id)
+            try:
+                api.stop_session(session_id)
+            except Exception:
+                pass
+        try:
+            _log(
+                "Local antidetect: залив Reels завершён за "
                 f"{time.perf_counter() - started_at:.1f} с."
             )
         except Exception:

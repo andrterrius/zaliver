@@ -665,6 +665,70 @@ class UploadStore:
             )
             return int(cur.lastrowid or 0)
 
+    def has_uploaded_video(
+        self,
+        *,
+        video_id: str = "",
+        url: str = "",
+        platform: str = "youtube",
+    ) -> bool:
+        """Есть ли уже запись с таким video_id или url для платформы."""
+        import re
+
+        plat = _normalize_platform(platform)
+        vid = (video_id or "").strip()
+        raw_url = (url or "").strip()
+        if not vid and raw_url:
+            m = re.search(r"/(?:reel|p|shorts)/([^/?#]+)", raw_url, re.I)
+            if m:
+                vid = m.group(1)
+        if not vid and not raw_url:
+            return False
+        with self._connect() as con:
+            if vid:
+                row = con.execute(
+                    """
+                    SELECT 1 FROM uploaded_videos
+                    WHERE platform=? AND video_id=?
+                    LIMIT 1;
+                    """,
+                    (plat, vid),
+                ).fetchone()
+                if row is not None:
+                    return True
+                # Старые записи могли сохранить полный path-url без канонического id.
+                row = con.execute(
+                    """
+                    SELECT 1 FROM uploaded_videos
+                    WHERE platform=? AND (
+                        url LIKE ? OR url LIKE ? OR url LIKE ?
+                    )
+                    LIMIT 1;
+                    """,
+                    (
+                        plat,
+                        f"%/reel/{vid}/%",
+                        f"%/reel/{vid}",
+                        f"%/p/{vid}%",
+                    ),
+                ).fetchone()
+                if row is not None:
+                    return True
+            if raw_url:
+                variants = {raw_url, raw_url.rstrip("/"), raw_url.rstrip("/") + "/"}
+                ph = ",".join("?" for _ in variants)
+                row = con.execute(
+                    f"""
+                    SELECT 1 FROM uploaded_videos
+                    WHERE platform=? AND url IN ({ph})
+                    LIMIT 1;
+                    """,
+                    (plat, *variants),
+                ).fetchone()
+                if row is not None:
+                    return True
+        return False
+
     def list_recent_upload_titles(
         self,
         limit: int = _RECENT_UPLOAD_TITLES_UI_LIMIT,

@@ -209,6 +209,30 @@ _COOKIE_CONSENT_HEADING_RE = re.compile(
     r"файлов\s+cookie\s+от\s+instagram\s+в\s+этом\s+браузере",
     re.IGNORECASE,
 )
+# /consent/?flow=user_cookie_choice_v2 — primary Accept/Allow, не accordion.
+_COOKIE_WORD_BUTTON_RE = re.compile(
+    r"(allow|accept|разреш|принят).{0,40}cookie|cookie.{0,20}(allow|accept)",
+    re.IGNORECASE,
+)
+# Accordion / Learn more на cookie-экране — не кликать.
+_COOKIE_NON_ACTION_RE = re.compile(
+    r"how\s+we\s+use|"
+    r"what\s+are\s+cookies|"
+    r"why\s+do\s+we\s+use|"
+    r"learn\s+more|"
+    r"see\s+more|"
+    r"expand|"
+    r"choose\s+cookies|"
+    r"select\s+all|"
+    r"optional\s+cookies|"
+    r"your\s+cookie\s+choices|"
+    r"meta\s+products|"
+    r"подробнее|"
+    r"узнать\s+больше|"
+    r"как\s+мы\s+используем|"
+    r"что\s+такое\s+cookie",
+    re.IGNORECASE,
+)
 # Только код из письма. НЕ «enter the code» — совпадает с image captcha
 # («Enter the code from the image»).
 _CONFIRM_CODE_HEADING_RE = re.compile(
@@ -663,6 +687,7 @@ def _instagram_logged_in_nav_visible(page) -> bool:
         pass
     try:
         c = page.locator(
+            'svg[aria-label="Новая публикация"], '
             'svg[aria-label="New post"], svg[aria-label="Create"], '
             'svg[aria-label="Создать"]'
         ).first
@@ -1506,9 +1531,10 @@ def _cookie_allow_buttons(page):
     Кнопки Accept all / «Разрешить все cookie».
     Новый UI (/consent): div[role=button] в dialog.
     Старый UI: <button class="_a9-- _asz1">.
+    user_cookie_choice_v2: любая кнопка со словом cookie (не Decline).
     """
     dialog = _cookie_dialog(page)
-    return (
+    locs = [
         # Новый Meta-dialog — приоритет.
         dialog.locator('[role="button"]').filter(has_text=_ALLOW_ALL_COOKIES_RE),
         dialog.get_by_role("button", name=re.compile(r"^allow\s+all\s+cookies$", re.I)),
@@ -1532,7 +1558,19 @@ def _cookie_allow_buttons(page):
         page.get_by_text(
             re.compile(r"^разрешить\s+все\s+(файлы\s+)?cookie[s]?$", re.I)
         ),
-    )
+    ]
+    # Широкий матч Accept/Allow+cookie — только на /consent (не accordion).
+    try:
+        if _is_cookie_consent_url(_page_url(page)):
+            locs.append(
+                page.locator('button, [role="button"]')
+                .filter(has_text=_COOKIE_WORD_BUTTON_RE)
+                .filter(has_not_text=_DECLINE_OPTIONAL_COOKIES_RE)
+                .filter(has_not_text=_COOKIE_NON_ACTION_RE)
+            )
+    except Exception:
+        pass
+    return tuple(locs)
 
 
 def _cookie_allow_button_present(page) -> bool:
@@ -1599,45 +1637,109 @@ def _click_allow_all_cookies_via_js(page) -> bool:
                     'принять все файлы cookie',
                 ];
                 const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                const isAllow = (t) => needles.some((n) => t === n);
+                const labelOf = (el) => norm(
+                    el.getAttribute('aria-label') || el.innerText || el.textContent || ''
+                );
+                const isDecline = (t) =>
+                    /decline|отклонить|reject|отказаться|не\\s+сейчас|not\\s+now/.test(t);
+                // Accordion / FAQ — «How we use these cookies», Learn more и т.п.
+                const isNonAction = (el, t) => {
+                    const al = norm(el.getAttribute('aria-label') || '');
+                    if (/\\bexpand\\b|\\bcollapse\\b|learn\\s+more|see\\s+more|подробнее/.test(al))
+                        return true;
+                    if (/\\bexpand\\b|\\bcollapse\\b|learn\\s+more|see\\s+more/.test(t))
+                        return true;
+                    if (/how\\s+we\\s+use|what\\s+are\\s+cookies|why\\s+do\\s+we\\s+use/.test(t))
+                        return true;
+                    if (/choose\\s+cookies|select\\s+all|your\\s+cookie\\s+choices/.test(t))
+                        return true;
+                    if (/как\\s+мы\\s+используем|что\\s+такое\\s+cookie|узнать\\s+больше/.test(t))
+                        return true;
+                    // Длинный текст — не primary CTA (Allow all обычно короткая кнопка).
+                    if (t.length > 60) return true;
+                    return false;
+                };
+                const isExactAllow = (t) => needles.some((n) => t === n || t.startsWith(n));
+                // Только Accept/Allow + cookie. Без fallback на любой текст с «cookie»
+                // (иначе кликаем accordion «How we use these cookies»).
+                const isCookieWordAllow = (t) => {
+                    if (!t || isDecline(t)) return false;
+                    if (!/cookie/.test(t)) return false;
+                    if (/optional|необязательн/.test(t) && !/allow\\s+all|разрешить\\s+все/.test(t))
+                        return false;
+                    return /allow|accept|разреш|принят|соглас|enable|включ/.test(t);
+                };
+                const onConsent = /instagram\\.com.*\\/consent/i.test(
+                    location.href || ''
+                );
 
-                // 1) Сначала внутри aria-modal dialog.
+                const score = (el) => {
+                    const t = labelOf(el);
+                    let s = (el.className || '').includes('_asz1') ? 0 : 10;
+                    if (isExactAllow(t)) s -= 20;
+                    if (/^allow\\s+all\\s+cookies$|^разрешить\\s+все/.test(t)) s -= 15;
+                    if (/allow\\s+all|разрешить\\s+все|принять\\s+все/.test(t)) s -= 8;
+                    if (isDecline(t) || isNonAction(el, t)) s += 100;
+                    return s;
+                };
+
+                const tryClick = (nodes, prefix) => {
+                    const sorted = Array.from(nodes).sort((a, b) => score(a) - score(b));
+                    for (const el of sorted) {
+                        const t = labelOf(el);
+                        if (isNonAction(el, t)) continue;
+                        if (isExactAllow(t)) {
+                            // ok
+                        } else if (onConsent && isCookieWordAllow(t)) {
+                            // ok
+                        } else {
+                            continue;
+                        }
+                        try { el.scrollIntoView({block: 'center', inline: 'nearest'}); } catch (e) {}
+                        el.click();
+                        return (prefix || '') + t;
+                    }
+                    return null;
+                };
+
+                // 1) Сначала внутри aria-modal dialog (exact Allow all — выше по score).
                 const dialogs = Array.from(
                     document.querySelectorAll('[role="dialog"][aria-modal="true"]')
                 );
                 for (const dlg of dialogs) {
-                    const nodes = Array.from(
-                        dlg.querySelectorAll('button, [role="button"]')
-                    );
-                    for (const el of nodes) {
-                        const t = norm(el.innerText || el.textContent);
-                        if (!isAllow(t)) continue;
-                        try { el.scrollIntoView({block: 'center', inline: 'nearest'}); } catch (e) {}
-                        el.click();
-                        return 'dialog:' + t;
-                    }
+                    const nodes = dlg.querySelectorAll('button, [role="button"]');
+                    const hit = tryClick(nodes, 'dialog:');
+                    if (hit) return hit;
                 }
 
-                // 2) По всей странице — только точное совпадение текста.
-                const nodes = Array.from(
-                    document.querySelectorAll('button, [role="button"]')
+                // 2) По всей странице.
+                return tryClick(
+                    document.querySelectorAll('button, [role="button"]'),
+                    ''
                 );
-                nodes.sort((a, b) => {
-                    const as = (a.className || '').includes('_asz1') ? 0 : 1;
-                    const bs = (b.className || '').includes('_asz1') ? 0 : 1;
-                    return as - bs;
-                });
-                for (const el of nodes) {
-                    const t = norm(el.innerText || el.textContent);
-                    if (!isAllow(t)) continue;
-                    try { el.scrollIntoView({block: 'center', inline: 'nearest'}); } catch (e) {}
-                    el.click();
-                    return t;
-                }
-                return null;
             }"""
         )
         if clicked:
+            clicked_l = str(clicked).lower()
+            if re.search(
+                r"how\s+we\s+use|learn\s+more|see\s+more|expand|choose\s+cookies",
+                clicked_l,
+            ):
+                _log(
+                    f"Instagram: cookie consent — JS попал не в Allow "
+                    f"({clicked!r}), пропускаем."
+                )
+                return False
+            if not re.search(
+                r"allow\s+all|разрешить\s+все|принять\s+все|"
+                r"allow.*cookie|accept.*cookie|разреш.*cookie|принят.*cookie",
+                clicked_l,
+            ):
+                _log(
+                    f"Instagram: cookie consent — JS click без Allow "
+                    f"({clicked!r}), пропускаем."
+                )
+                return False
             _log(f"Instagram: cookie consent — JS click ({clicked!r})")
             return True
     except Exception as e:
@@ -2661,6 +2763,7 @@ def handle_instagram_human_confirmation(
     После кода из почты: если «Confirm you're human» / /accounts/suspended /
     image captcha — сразу SMS-ошибка (Continue не жмём).
     """
+    accept_instagram_cookie_consent_if_present(page, appear_seconds=2.0)
     if _instagram_home_ready(page, username):
         return
 
@@ -2669,6 +2772,7 @@ def handle_instagram_human_confirmation(
 
     deadline = time.monotonic() + max(0.0, float(appear_timeout_s))
     while time.monotonic() < deadline:
+        accept_instagram_cookie_consent_if_present(page)
         if _instagram_home_ready(page, username):
             return
         abort_if_instagram_sms_image_captcha(page)
@@ -2698,6 +2802,8 @@ def wait_instagram_home_with_username(
     name_re = re.compile(rf"^{re.escape(username)}$", re.IGNORECASE)
     deadline = time.monotonic() + max_seconds
     while time.monotonic() < deadline:
+        # После кода часто редирект на /consent/?flow=user_cookie_choice_v2.
+        accept_instagram_cookie_consent_if_present(page)
         abort_if_instagram_sms_image_captcha(page)
         try:
             link = page.locator(f'a[href="/{username}/"], a[href="/{username}"]').first
@@ -2749,6 +2855,8 @@ def wait_instagram_home_with_username(
 
 def _left_email_confirmation_screen(page, username: str) -> bool:
     """True если уже не экран кода из почты (human check / главная / SMS и т.п.)."""
+    if _is_cookie_consent_screen(page) or _is_cookie_consent_url(_page_url(page)):
+        return True
     if _is_human_confirm_intro_screen(page):
         return True
     if _is_accounts_suspended(page) or _is_image_captcha_screen(page):
@@ -2783,7 +2891,8 @@ def complete_instagram_email_confirmation(
     username: str,
 ) -> None:
     """
-    Экран кода → Gmail (код) → ввод → Продолжить → (human check) → главная.
+    Экран кода → Gmail (код) → ввод → Продолжить →
+    (/consent cookie choice) → (human check) → главная.
 
     Новое письмо ищем только если код явно отклонён или всё ещё
     именно экран кода из почты (не image captcha / human check).
@@ -2823,6 +2932,13 @@ def complete_instagram_email_confirmation(
 
         settle_deadline = time.monotonic() + _AFTER_EMAIL_CODE_SETTLE_S
         while time.monotonic() < settle_deadline:
+            # Сразу после кода часто /consent/?flow=user_cookie_choice_v2.
+            if _is_cookie_consent_url(_page_url(ig_page)) or _is_cookie_consent_screen(
+                ig_page
+            ):
+                accept_instagram_cookie_consent_if_present(
+                    ig_page, appear_seconds=1.0, max_seconds=25.0
+                )
             if _left_email_confirmation_screen(ig_page, username):
                 break
             if _email_confirmation_code_rejected(ig_page):
@@ -2863,6 +2979,10 @@ def complete_instagram_email_confirmation(
             f"(URL={ig_page.url!r})"
         )
 
+    # После кода: /consent/?flow=user_cookie_choice_v2 → кнопка со словом cookie.
+    accept_instagram_cookie_consent_if_present(
+        ig_page, appear_seconds=8.0, max_seconds=30.0
+    )
     handle_instagram_human_confirmation(ig_page, username)
     wait_instagram_home_with_username(ig_page, username)
     _log(f"Instagram: регистрация подтверждена, username={username!r}.")

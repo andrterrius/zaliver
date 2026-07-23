@@ -57,6 +57,21 @@ def _unique_slice_filename(music_stem: str) -> str:
     return f"{safe}_s_{secrets.token_hex(8)}.mp4"
 
 
+def _pick_random_tracks_for_jobs(music_pool: List[str], output_count: int) -> List[str]:
+    """Случайные треки для роликов: без повторов, пока хватает пула; иначе циклы с shuffle."""
+    n = max(0, int(output_count))
+    if n <= 0 or not music_pool:
+        return []
+    if n <= len(music_pool):
+        return random.sample(music_pool, n)
+    assigned: List[str] = []
+    while len(assigned) < n:
+        batch = list(music_pool)
+        random.shuffle(batch)
+        assigned.extend(batch)
+    return assigned[:n]
+
+
 def _slice_music_try_order(primary: Path, pool: List[str]) -> List[Path]:
     """Основной трек (дважды), затем остальные треки из пула в случайном порядке."""
     try:
@@ -377,20 +392,24 @@ class SlicingController(QObject):
                 return
 
             n_tracks = len(music_pool)
+            assigned_tracks = _pick_random_tracks_for_jobs(music_pool, output_count)
+            use_totals: Dict[str, int] = {}
+            for music in assigned_tracks:
+                key = os.path.normcase(music)
+                use_totals[key] = use_totals.get(key, 0) + 1
+            use_seen: Dict[str, int] = {}
             jobs: List[SliceJob] = []
-            for i in range(output_count):
-                track_index = i % n_tracks
-                music = music_pool[track_index]
-                copy_index = i // n_tracks + 1
-                track_use_total = (output_count - track_index + n_tracks - 1) // n_tracks
+            for i, music in enumerate(assigned_tracks):
+                key = os.path.normcase(music)
+                use_seen[key] = use_seen.get(key, 0) + 1
                 stem = Path(music).stem
                 outp = out_dir / _unique_slice_filename(stem)
                 jobs.append(
                     SliceJob(
                         job_idx=i + 1,
                         music_path=Path(music),
-                        copy_index=copy_index,
-                        track_use_total=track_use_total,
+                        copy_index=use_seen[key],
+                        track_use_total=use_totals[key],
                         output_path=outp,
                     )
                 )

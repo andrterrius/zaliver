@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -11,11 +13,10 @@ from typing import Any
 _SHORTCODE_RE = re.compile(r"^[A-Za-z0-9_-]{5,}$")
 _REEL_IN_URL_RE = re.compile(r"/(?:reel|p)/([A-Za-z0-9_-]+)/?", re.I)
 
-# Важно: параллель с одной sessionid жжёт аккаунты (TooManyRedirects / logout в браузере).
-# Чекер — только последовательно, с паузой между запросами.
-DEFAULT_STATS_WORKERS = 1
-MAX_STATS_WORKERS = 1
-DEFAULT_REQUEST_PAUSE_S = 1.4
+# Параллель: у каждого воркера свой Client (clone), не шарим один Session.
+DEFAULT_STATS_WORKERS = 5
+MAX_STATS_WORKERS = 5
+DEFAULT_REQUEST_PAUSE_S = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,11 +123,14 @@ def fetch_reel_stats_many(
     on_item: Callable[[InstagramReelStats | None, str, str | None], None] | None = None,
 ) -> tuple[list[InstagramReelStats], list[tuple[str, str]]]:
     """
-    Запросить метрики **последовательно** (workers игнорируется / всегда 1).
+    Запросить метрики. При workers>1 — пул клонов Client (не один Session на всех).
 
-    При ошибке сессии (redirects / login_required) — сразу стоп, остаток не долбим.
+    При ошибке сессии (redirects / login_required) — стоп, остаток помечаем fail.
     """
-    from zaliver.instagram_upload.instagrapi_session import is_instagrapi_session_error
+    from zaliver.instagram_upload.instagrapi_session import (
+        clone_instagrapi_client,
+        is_instagrapi_session_error,
+    )
 
     ordered = _unique_shortcodes(shortcodes)
     ok: list[InstagramReelStats] = []
@@ -135,36 +139,94 @@ def fetch_reel_stats_many(
     if total <= 0:
         return ok, fail
 
-    # Параллель намеренно отключена — жжёт sessionid и ломает Instagram в антике.
-    _ = workers
+    n_workers = max(1, min(int(workers or 1), MAX_STATS_WORKERS, total))
     pause = max(0.0, float(request_pause_s or 0.0))
 
     if on_progress is not None:
         on_progress(0, total, ordered[0])
 
-    for i, code in enumerate(ordered):
+    if n_workers <= 1:
+        for i, code in enumerate(ordered):
+            if on_progress is not None:
+                on_progress(i, total, code)
+            if i > 0 and pause > 0:
+                time.sleep(pause)
+            try:
+                st = fetch_reel_stats(cl, code)
+                ok.append(st)
+                if on_item is not None:
+                    on_item(st, code, None)
+            except Exception as e:
+                msg = str(e) or type(e).__name__
+                fail.append((code, msg))
+                if on_item is not None:
+                    on_item(None, code, msg)
+                if abort_on_session_error and is_instagrapi_session_error(msg):
+                    stop_msg = f"остановлено: сессия Instagram (после {code}: {msg})"
+                    for left in ordered[i + 1 :]:
+                        fail.append((left, stop_msg))
+                        if on_item is not None:
+                            on_item(None, left, stop_msg)
+                    break
         if on_progress is not None:
-            on_progress(i, total, code)
-        if i > 0 and pause > 0:
+            on_progress(total, total, ordered[-1])
+        return ok, fail
+
+    # --- parallel: thread-local clone of Client ---
+    tls = threading.local()
+    stop = threading.Event()
+    lock = threading.Lock()
+    done = 0
+
+    def _worker_client() -> Any:
+        c = getattr(tls, "client", None)
+        if c is None:
+            c = clone_instagrapi_client(cl, fast=True)
+            try:
+                c.delay_range = [0.05, 0.2]
+            except Exception:
+                pass
+            tls.client = c
+        return c
+
+    def _one(code: str) -> tuple[str, InstagramReelStats | None, str | None]:
+        if stop.is_set():
+            return code, None, "остановлено: сессия Instagram"
+        if pause > 0:
             time.sleep(pause)
         try:
-            st = fetch_reel_stats(cl, code)
-            ok.append(st)
-            if on_item is not None:
-                on_item(st, code, None)
+            st = fetch_reel_stats(_worker_client(), code)
+            return code, st, None
         except Exception as e:
             msg = str(e) or type(e).__name__
-            fail.append((code, msg))
-            if on_item is not None:
-                on_item(None, code, msg)
             if abort_on_session_error and is_instagrapi_session_error(msg):
-                # Не добиваем аккаунт остальными запросами.
-                stop_msg = f"остановлено: сессия Instagram (после {code}: {msg})"
-                for left in ordered[i + 1 :]:
-                    fail.append((left, stop_msg))
-                    if on_item is not None:
-                        on_item(None, left, stop_msg)
-                break
+                stop.set()
+            return code, None, msg
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = {pool.submit(_one, code): code for code in ordered}
+        for fut in as_completed(futures):
+            code, st, err = fut.result()
+            with lock:
+                done += 1
+                cur = done
+            if on_progress is not None:
+                on_progress(cur, total, code)
+            if err is None and st is not None:
+                with lock:
+                    ok.append(st)
+                if on_item is not None:
+                    on_item(st, code, None)
+            else:
+                msg = err or "unknown error"
+                if stop.is_set() and not is_instagrapi_session_error(msg):
+                    # уже остановились по чужой session-ошибке
+                    if "остановлено" not in msg:
+                        msg = f"остановлено: сессия Instagram ({msg})"
+                with lock:
+                    fail.append((code, msg))
+                if on_item is not None:
+                    on_item(None, code, msg)
 
     if on_progress is not None:
         on_progress(total, total, ordered[-1])

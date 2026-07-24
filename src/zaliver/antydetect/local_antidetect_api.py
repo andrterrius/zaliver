@@ -417,7 +417,14 @@ def normalize_local_profile_for_ui(raw: dict[str, Any]) -> dict[str, object]:
     proxy: dict[str, object] | None = None
     server = raw.get("proxy_server")
     if isinstance(server, str) and server.strip():
-        proxy = {}
+        # server без auth; логин/пароль — отдельные поля API.
+        proxy = {"server": server.strip()}
+        user = raw.get("proxy_username")
+        if isinstance(user, str) and user.strip():
+            proxy["login"] = user.strip()
+        pwd = raw.get("proxy_password")
+        if isinstance(pwd, str) and pwd:
+            proxy["password"] = pwd
         if raw.get("proxy_health_ok") is not None:
             lc: dict[str, object] = {
                 "status": bool(raw.get("proxy_health_ok")),

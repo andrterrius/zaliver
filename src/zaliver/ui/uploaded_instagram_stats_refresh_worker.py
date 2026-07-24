@@ -26,9 +26,8 @@ class UploadedInstagramStatsRefreshWorker(QObject):
     """
     Запросы к private API Instagram через instagrapi в потоке Qt.
 
-    Важно: только последовательно + паузы. Параллель и агрессивный refresh
-    убивают sessionid → Instagram в антидетект-браузере перестаёт грузиться
-    (``Exceeded 30 redirects``).
+    По умолчанию до 3 воркеров, у каждого свой clone Client + тот же прокси
+    профиля. Агрессивный refresh всё ещё может убить sessionid.
     """
 
     progress = pyqtSignal(int, int, str)
@@ -45,6 +44,7 @@ class UploadedInstagramStatsRefreshWorker(QObject):
         password: str = "",
         twofa_secret: str = "",
         sessionid_provider: Callable[[], str] | None = None,
+        proxy: str = "",
     ) -> None:
         super().__init__()
         self._video_ids = list(video_ids)
@@ -53,6 +53,7 @@ class UploadedInstagramStatsRefreshWorker(QObject):
         self._password = (password or "").strip()
         self._twofa_secret = (twofa_secret or "").strip()
         self._sessionid_provider = sessionid_provider
+        self._proxy = (proxy or "").strip()
 
     def _log(self, msg: str) -> None:
         line = f"[ig-stats] {msg}"
@@ -69,6 +70,7 @@ class UploadedInstagramStatsRefreshWorker(QObject):
             twofa_secret=self._twofa_secret,
             sessionid_provider=self._sessionid_provider,
             allow_dump=True,
+            proxy=self._proxy,
         )
 
     def run(self) -> None:
@@ -80,12 +82,38 @@ class UploadedInstagramStatsRefreshWorker(QObject):
             self.finished.emit(successes, failures)
             return
         self.progress.emit(0, total, ids[0])
+        from zaliver.antydetect.proxy_dsn import mask_proxy_dsn, proxy_dsn_has_auth
+
+        proxy_label = mask_proxy_dsn(self._proxy) if self._proxy else "none"
+        auth = (
+            "yes"
+            if self._proxy and proxy_dsn_has_auth(self._proxy)
+            else ("no" if self._proxy else "n/a")
+        )
         self._log(
             f"Старт: {total} рилсов, profile_id={self._profile_id!r}, "
             f"creds={'yes' if self._username and self._password else 'no'}, "
-            f"mode=sequential pause≈{DEFAULT_REQUEST_PAUSE_S}s "
+            f"proxy={proxy_label!r}, proxy_auth={auth}, "
+            f"mode=parallel pause≈{DEFAULT_REQUEST_PAUSE_S}s "
             f"workers={DEFAULT_STATS_WORKERS}"
         )
+        if self._proxy and not proxy_dsn_has_auth(self._proxy):
+            msg = (
+                "Прокси без логина/пароля — будет 407. "
+                "Перезапустите Zaliver после обновления и повторите чек."
+            )
+            self._log(msg)
+            for v in ids:
+                failures.append((v, msg, False))
+            self.batch_done.emit([], list(failures))
+            self.progress.emit(total, total, ids[-1])
+            self.finished.emit(successes, failures)
+            return
+        if not self._proxy:
+            self._log(
+                "Прокси профиля не найден — запросы пойдут с IP машины. "
+                "Это часто ломает sessionid в антидетекте."
+            )
 
         try:
             cl, source = self._open_session()
@@ -115,8 +143,7 @@ class UploadedInstagramStatsRefreshWorker(QObject):
             return
 
         try:
-            # Soft delays поверх Client.delay_range.
-            cl.delay_range = [1.0, 2.2]
+            cl.delay_range = [0.05, 0.25]
         except Exception:
             pass
 
@@ -166,7 +193,7 @@ class UploadedInstagramStatsRefreshWorker(QObject):
             fetch_reel_stats_many(
                 cl,
                 ids,
-                workers=1,
+                workers=DEFAULT_STATS_WORKERS,
                 request_pause_s=DEFAULT_REQUEST_PAUSE_S,
                 abort_on_session_error=True,
                 on_progress=None,

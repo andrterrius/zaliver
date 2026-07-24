@@ -3206,6 +3206,7 @@ class MainWindow(QWidget):
                 password=password,
                 twofa_secret=twofa,
                 sessionid_provider=self._make_instagram_sessionid_provider(pid),
+                proxy=self._instagram_checker_proxy_dsn(pid),
             )
             self._stats_worker = worker
             worker.log_line.connect(self._ui_log_line.emit)
@@ -7904,6 +7905,48 @@ class MainWindow(QWidget):
                 session_twofa_from_custom_data(cd),
             )
         return "", "", ""
+
+    def _instagram_checker_proxy_dsn(self, profile_id: str) -> str:
+        """Прокси выбранного профиля антидетекта → DSN для instagrapi.
+
+        Для своего антидетекта всегда читаем get_profile: в списке/кэше
+        легко остаться без proxy_username/password → 407 Proxy Authentication.
+        """
+        from zaliver.antydetect.proxy_dsn import proxy_dsn_from_profile
+
+        pid = (profile_id or "").strip()
+        if not pid:
+            return ""
+
+        kind = "dolphin"
+        if hasattr(self, "_default_browser_combo"):
+            k = self._default_browser_combo.currentData()
+            if isinstance(k, str) and k.strip():
+                kind = k.strip()
+
+        if _is_own_antidetect_kind(kind):
+            base_url = self._own_antidetect_base_url_from_settings(kind)
+            if (base_url or "").strip():
+                try:
+                    api = LocalAntidetectHttpAPI(base_url)
+                    try:
+                        raw = api.get_profile(pid)
+                    finally:
+                        api.close()
+                    if isinstance(raw, dict):
+                        dsn = proxy_dsn_from_profile(raw) or proxy_dsn_from_profile(
+                            normalize_local_profile_for_ui(raw)
+                        )
+                        if dsn:
+                            return dsn
+                except Exception:
+                    pass
+
+        for p in self._profiles_raw or []:
+            if not isinstance(p, dict) or _profile_id(p) != pid:
+                continue
+            return proxy_dsn_from_profile(p)
+        return ""
 
     def _profile_yt_oldest_name(self, profile_id: str) -> str:
         from zaliver.youtube_upload.google_login import oldest_name_from_custom_data

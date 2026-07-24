@@ -43,7 +43,17 @@ def normalize_instagram_sessionid(raw: str) -> str:
     return s.strip()
 
 
-def _new_client(*, fast: bool = False):
+def _apply_proxy(cl: Any, proxy: str = "") -> None:
+    dsn = (proxy or "").strip()
+    if not dsn:
+        return
+    try:
+        cl.set_proxy(dsn)
+    except Exception as e:
+        raise InstagrapiSessionError(f"Не удалось установить прокси: {e}") from e
+
+
+def _new_client(*, fast: bool = False, proxy: str = ""):
     from instagrapi import Client
 
     cl = Client()
@@ -52,6 +62,7 @@ def _new_client(*, fast: bool = False):
         cl.delay_range = [0.15, 0.45] if fast else [1.0, 2.2]
     except Exception:
         pass
+    _apply_proxy(cl, proxy)
     return cl
 
 
@@ -78,11 +89,16 @@ def client_username(cl: Any) -> str:
     return ""
 
 
-def clone_instagrapi_client(source: Any, *, fast: bool = False) -> Any:
+def clone_instagrapi_client(
+    source: Any, *, fast: bool = False, proxy: str = ""
+) -> Any:
     """Копия сессии в новый Client (по умолчанию soft delay)."""
+    dsn = (proxy or "").strip() or str(getattr(source, "proxy", "") or "").strip()
     settings = source.get_settings()
-    cl = _new_client(fast=fast)
+    cl = _new_client(fast=fast, proxy=dsn)
     cl.set_settings(settings)
+    # set_settings может сбросить proxies — вернуть явно.
+    _apply_proxy(cl, dsn)
     # Перенести уже известный username/user_id без лишних запросов.
     try:
         u = client_username(source)
@@ -244,6 +260,7 @@ def ensure_instagrapi_client(
     twofa_secret: str = "",
     sessionid_provider: Callable[[], str] | None = None,
     allow_dump: bool = True,
+    proxy: str = "",
 ) -> tuple[Any, str]:
     """
     Вернуть ``(Client, source)`` для profile_id.
@@ -254,25 +271,30 @@ def ensure_instagrapi_client(
     1) сохранённый dump сессии (если allow_dump; без сетевого пинга);
     2) логин по username/password (+ TOTP), с device fingerprint из dump если есть;
     3) sessionid из cookies антидетект-профиля.
+
+    ``proxy`` — DSN того же прокси, что у антидетект-профиля
+    (иначе login_by_sessionid с другого IP ломает cookies в браузере).
     """
     pid = (profile_id or "").strip()
     if not pid:
         raise InstagrapiSessionError("Не выбран профиль для чекера Instagram.")
 
+    proxy_dsn = (proxy or "").strip()
     path = session_settings_path(pid)
     # Чекер и dump: soft delay, без агрессивного fast.
-    cl = _new_client(fast=False)
+    cl = _new_client(fast=False, proxy=proxy_dsn)
     dump_loaded = False
     if path.is_file():
         try:
             cl.load_settings(str(path))
+            _apply_proxy(cl, proxy_dsn)
             dump_loaded = True
             if allow_dump and _sessionid_from_loaded_client(cl):
                 # Dump без username почти всегда битый → не доверяем, идём в re-auth.
                 if client_username(cl):
                     return cl, "dump"
         except Exception:
-            cl = _new_client(fast=False)
+            cl = _new_client(fast=False, proxy=proxy_dsn)
             dump_loaded = False
 
     errors: list[str] = []
@@ -295,13 +317,14 @@ def ensure_instagrapi_client(
                     return cl, "relogin"
                 except Exception as e:
                     errors.append(f"relogin: {e}")
-                    cl = _new_client(fast=False)
+                    cl = _new_client(fast=False, proxy=proxy_dsn)
                     if path.is_file():
                         try:
                             cl.load_settings(str(path))
+                            _apply_proxy(cl, proxy_dsn)
                             dump_loaded = True
                         except Exception:
-                            cl = _new_client(fast=False)
+                            cl = _new_client(fast=False, proxy=proxy_dsn)
                             dump_loaded = False
             _login_with_password(
                 cl, username=user, password=pwd, twofa_secret=twofa_secret
@@ -310,7 +333,7 @@ def ensure_instagrapi_client(
             return cl, "password"
         except Exception as e:
             errors.append(str(e) or type(e).__name__)
-            cl = _new_client(fast=False)
+            cl = _new_client(fast=False, proxy=proxy_dsn)
             dump_loaded = False
 
     if sessionid_provider is not None:
@@ -320,13 +343,14 @@ def ensure_instagrapi_client(
                 raise InstagrapiSessionError(
                     "В профиле нет cookie sessionid — войдите в Instagram в этом профиле."
                 )
-            cl = _new_client(fast=False)
+            cl = _new_client(fast=False, proxy=proxy_dsn)
             if path.is_file():
                 try:
                     # Сохранить fingerprint устройства, подменить cookies через sessionid.
                     cl.load_settings(str(path))
+                    _apply_proxy(cl, proxy_dsn)
                 except Exception:
-                    cl = _new_client(fast=False)
+                    cl = _new_client(fast=False, proxy=proxy_dsn)
             _login_by_sessionid(cl, sid)
             _dump(cl, pid)
             return cl, "browser_cookies"
@@ -348,6 +372,7 @@ def refresh_instagrapi_client(
     password: str = "",
     twofa_secret: str = "",
     sessionid_provider: Callable[[], str] | None = None,
+    proxy: str = "",
 ) -> tuple[Any, str]:
     """
     Принудительно обновить сессию: не доверять cookies из dump, перелогиниться.
@@ -360,6 +385,7 @@ def refresh_instagrapi_client(
         twofa_secret=twofa_secret,
         sessionid_provider=sessionid_provider,
         allow_dump=False,
+        proxy=proxy,
     )
 
 

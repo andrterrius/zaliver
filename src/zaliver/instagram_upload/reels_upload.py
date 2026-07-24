@@ -24,6 +24,12 @@ _NEW_POST_ARIA = (
     "Create",
     "Создать",
 )
+# Подменю после Create: Post / Live video / Ad (EN) или Публикация / …
+_CREATE_MENU_POST_ARIA = (
+    "Post",
+    "Публикация",
+)
+_CREATE_MENU_POST_RE = re.compile(r"^(post|публикация)$", re.I)
 _CREATE_DIALOG_ARIA = (
     "Создание публикации",
     "Create new post",
@@ -128,6 +134,52 @@ def _click_new_post_in_sidebar(page) -> None:
         "Не удалось нажать «Новая публикация» в сайдбаре Instagram."
         + (f" last_err={last_err!r}" if last_err else "")
     )
+
+
+def _click_create_submenu_post_if_present(
+    page, *, timeout_ms: float = 4_000
+) -> bool:
+    """
+    После Create иногда выпадает меню (Post / Live video / Ad).
+    Кликаем Post / Публикация; если меню нет — False (диалог уже открыт).
+    """
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
+    while time.monotonic() < deadline:
+        # Диалог уже открыт — подменю не нужно.
+        try:
+            if _create_dialog_locator(page).first.is_visible(timeout=200):
+                return False
+        except Exception:
+            pass
+
+        for aria in _CREATE_MENU_POST_ARIA:
+            try:
+                svg = page.locator(f'svg[aria-label="{aria}"]').first
+                if not svg.count() or not svg.is_visible(timeout=400):
+                    continue
+                clickable = svg.locator(
+                    "xpath=ancestor::*[@role='button' or @role='link' "
+                    "or self::a or self::button][1]"
+                )
+                target = clickable if clickable.count() else svg
+                target.click(timeout=8_000)
+                _log(f"Reels upload: в меню Create выбрали «{aria}».")
+                return True
+            except Exception:
+                continue
+
+        try:
+            link = page.get_by_role("link", name=_CREATE_MENU_POST_RE).first
+            if link.count() and link.is_visible(timeout=400):
+                link.click(timeout=8_000)
+                _log("Reels upload: в меню Create выбрали Post/Публикация (link).")
+                return True
+        except Exception:
+            pass
+
+        time.sleep(0.2)
+
+    return False
 
 
 def _create_dialog_locator(page):
@@ -445,12 +497,18 @@ def _attach_video_file(page, dialog, video_path: Path) -> None:
     _log(f"Reels upload: файл передан — {video_path.name!r}.")
 
 
-# Кнопка «Select crop» / «Выбрать размер и обрезать» (RU UI Instagram).
+# Кнопка «Select Crop» / «Выбрать размер и обрезать» (RU UI Instagram).
+# aria-label EN: «Select Crop» (C заглавная) — селектор чувствителен к регистру.
 _CROP_BTN_ARIA = (
+    "Select Crop",
     "Select crop",
     "Выбрать размер и обрезать",
     "Выбрать обрезку",
     "Обрезка",
+)
+_CROP_BTN_ARIA_RE = re.compile(
+    r"select\s*crop|выбрать\s+размер\s+и\s+обрезать|выбрать\s+обрезку|^обрезка$",
+    re.I,
 )
 _CROP_BTN_SVG_SEL = ", ".join(f'svg[aria-label="{a}"]' for a in _CROP_BTN_ARIA)
 
@@ -463,20 +521,27 @@ _CROP_9_16_ARIA = (
 _CROP_9_16_SVG_SEL = ", ".join(f'svg[aria-label="{a}"]' for a in _CROP_9_16_ARIA)
 
 
+def _crop_btn_svg_locator(page):
+    """svg кнопки кропа: точные aria-label + case-insensitive fallback."""
+    exact = page.locator(_CROP_BTN_SVG_SEL)
+    by_role = page.get_by_role("img", name=_CROP_BTN_ARIA_RE)
+    return exact.or_(by_role)
+
+
 def _select_crop_9_16(page) -> None:
-    """Сразу после файла: Select crop → 9:16 (портрет для Reels)."""
+    """Сразу после файла: Select Crop → 9:16 (портрет для Reels)."""
     _log("Reels upload: выбираем обрезку 9:16…")
-    # Дождаться экрана кропа (кнопка Select crop / Выбрать размер и обрезать).
-    crop_btn = page.locator(_CROP_BTN_SVG_SEL)
+    # Дождаться экрана кропа (кнопка Select Crop / Выбрать размер и обрезать).
+    crop_btn = _crop_btn_svg_locator(page)
     try:
         crop_btn.first.wait_for(state="visible", timeout=60_000)
     except Exception as e:
         raise InstagramReelsUploadError(
-            "Кнопка Select crop не появилась после передачи файла."
+            "Кнопка Select Crop не появилась после передачи файла."
         ) from e
 
     try:
-        svg = page.locator(_CROP_BTN_SVG_SEL).first
+        svg = _crop_btn_svg_locator(page).first
         btn = svg.locator("xpath=ancestor::button[1]")
         target = btn if btn.count() else svg.locator(
             "xpath=ancestor::*[@role='button'][1]"
@@ -484,10 +549,10 @@ def _select_crop_9_16(page) -> None:
         if not target.count():
             target = svg
         target.click(timeout=10_000)
-        _log("Reels upload: открыли меню Select crop.")
+        _log("Reels upload: открыли меню Select Crop.")
     except Exception as e:
         raise InstagramReelsUploadError(
-            f"Не удалось нажать Select crop: {e!r}"
+            f"Не удалось нажать Select Crop: {e!r}"
         ) from e
 
     page.wait_for_timeout(500)
@@ -1065,6 +1130,7 @@ def run_instagram_reels_upload(
     )
 
     _click_new_post_in_sidebar(page)
+    _click_create_submenu_post_if_present(page)
     dialog = _wait_create_dialog(page)
     _attach_video_file(page, dialog, upload_file)
     _select_crop_9_16(page)

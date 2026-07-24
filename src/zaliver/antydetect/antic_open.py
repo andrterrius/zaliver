@@ -1023,11 +1023,11 @@ def warmup_instagram_reels_in_profile(
     follow_probability_pct: float | None = None,
     watch_min_s: float | None = None,
     watch_max_s: float | None = None,
-    watch_full: bool = False,
+    watch_full: bool = True,
     reels_recommendations: bool = True,
     search_query: str | None = None,
 ) -> None:
-    """Dolphin → Instagram → /reels/ или поиск Explore → прогрев."""
+    """Dolphin → Instagram → /reels/ или keyword search → прогрев."""
     from zaliver.instagram_upload.reels_warmup import run_instagram_reels_warmup
 
     _log(
@@ -1103,11 +1103,11 @@ def warmup_instagram_reels_in_local_antidetect_profile(
     follow_probability_pct: float | None = None,
     watch_min_s: float | None = None,
     watch_max_s: float | None = None,
-    watch_full: bool = False,
+    watch_full: bool = True,
     reels_recommendations: bool = True,
     search_query: str | None = None,
 ) -> None:
-    """Локальный антидетект → Instagram → /reels/ или поиск Explore → прогрев."""
+    """Локальный антидетект → Instagram → /reels/ или keyword search → прогрев."""
     from zaliver.instagram_upload.reels_warmup import run_instagram_reels_warmup
     from zaliver.antydetect.local_antidetect_api import (
         LocalAntidetectError,

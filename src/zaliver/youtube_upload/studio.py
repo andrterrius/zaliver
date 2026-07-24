@@ -6980,13 +6980,17 @@ def _studio_try_notify_stats_server(
         _log("Studio: stats_server — username не задан, уведомление пропущено.")
         return False
     try:
-        from zaliver.stats_server_client import notify_uploaded_video
+        from zaliver.stats_server_client import (
+            PLATFORM_YOUTUBE,
+            notify_uploaded_video,
+        )
 
         ok = notify_uploaded_video(
             video_id=vid,
             username=user,
             profile_id=(profile_id or "").strip(),
             scheduled=_schedule_publish_at_to_unix(schedule_at),
+            platform=PLATFORM_YOUTUBE,
         )
         if ok:
             _log(f"Studio: stats_server — уведомление отправлено (videoId={vid}).")

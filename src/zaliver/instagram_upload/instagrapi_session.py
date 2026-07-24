@@ -48,22 +48,46 @@ def _new_client(*, fast: bool = False):
 
     cl = Client()
     try:
-        # fast: для параллельного чека метрик; иначе мягче к антиботу.
-        cl.delay_range = [0.0, 0.05] if fast else [0.35, 0.9]
+        # soft — для чекера/антибота; fast почти не использовать (жжёт сессии).
+        cl.delay_range = [0.15, 0.45] if fast else [1.0, 2.2]
     except Exception:
         pass
     return cl
 
 
-def clone_instagrapi_client(source: Any, *, fast: bool = True) -> Any:
-    """Копия сессии в новый Client (поток-безопасный экземпляр)."""
+def client_username(cl: Any) -> str:
+    """Известный username клиента (атрибут или settings dump)."""
+    try:
+        u = (getattr(cl, "username", None) or "").strip()
+        if u:
+            return u
+    except Exception:
+        pass
+    try:
+        raw = cl.get_settings()
+        if isinstance(raw, dict):
+            u = str(raw.get("username") or "").strip()
+            if u:
+                try:
+                    cl.username = u
+                except Exception:
+                    pass
+                return u
+    except Exception:
+        pass
+    return ""
+
+
+def clone_instagrapi_client(source: Any, *, fast: bool = False) -> Any:
+    """Копия сессии в новый Client (по умолчанию soft delay)."""
     settings = source.get_settings()
     cl = _new_client(fast=fast)
     cl.set_settings(settings)
     # Перенести уже известный username/user_id без лишних запросов.
     try:
-        if getattr(source, "username", None):
-            cl.username = source.username
+        u = client_username(source)
+        if u:
+            cl.username = u
     except Exception:
         pass
     try:
@@ -187,6 +211,31 @@ def _login_by_sessionid(cl: Any, sessionid: str) -> None:
         raise InstagrapiSessionError(f"login_by_sessionid не удался: {e}") from e
 
 
+_SESSION_ERR_MARKERS = (
+    "login_required",
+    "login required",
+    "challenge_required",
+    "challenge",
+    "checkpoint_required",
+    "unauthorized",
+    "exceeded 30 redirects",
+    "toomanyredirects",
+    "too many redirects",
+    "user has been logged out",
+    "session expired",
+    "please wait a few minutes",
+    "feedback_required",
+)
+
+
+def is_instagrapi_session_error(err: object) -> bool:
+    """Ошибка похожа на мёртвую/заблокированную сессию (нужен re-login)."""
+    s = (str(err) or "").strip().lower()
+    if not s:
+        return False
+    return any(m in s for m in _SESSION_ERR_MARKERS)
+
+
 def ensure_instagrapi_client(
     profile_id: str,
     *,
@@ -194,15 +243,16 @@ def ensure_instagrapi_client(
     password: str = "",
     twofa_secret: str = "",
     sessionid_provider: Callable[[], str] | None = None,
+    allow_dump: bool = True,
 ) -> tuple[Any, str]:
     """
     Вернуть ``(Client, source)`` для profile_id.
 
-    source: ``dump`` | ``password`` | ``browser_cookies``.
+    source: ``dump`` | ``password`` | ``browser_cookies`` | ``relogin``.
 
     Порядок:
-    1) сохранённый dump сессии (без лишнего сетевого пинга — живёт дни–месяцы);
-    2) логин по username/password (+ TOTP);
+    1) сохранённый dump сессии (если allow_dump; без сетевого пинга);
+    2) логин по username/password (+ TOTP), с device fingerprint из dump если есть;
     3) sessionid из cookies антидетект-профиля.
     """
     pid = (profile_id or "").strip()
@@ -210,17 +260,20 @@ def ensure_instagrapi_client(
         raise InstagrapiSessionError("Не выбран профиль для чекера Instagram.")
 
     path = session_settings_path(pid)
-    cl = _new_client(fast=True)
+    # Чекер и dump: soft delay, без агрессивного fast.
+    cl = _new_client(fast=False)
+    dump_loaded = False
     if path.is_file():
         try:
             cl.load_settings(str(path))
-            if _sessionid_from_loaded_client(cl):
-                # Не пингуем Instagram каждый раз: dump переиспользуем.
-                # Если протух — упадёт media_info, тогда удалим и перелогинимся.
-                return cl, "dump"
+            dump_loaded = True
+            if allow_dump and _sessionid_from_loaded_client(cl):
+                # Dump без username почти всегда битый → не доверяем, идём в re-auth.
+                if client_username(cl):
+                    return cl, "dump"
         except Exception:
-            pass
-        cl = _new_client(fast=True)
+            cl = _new_client(fast=False)
+            dump_loaded = False
 
     errors: list[str] = []
 
@@ -228,6 +281,28 @@ def ensure_instagrapi_client(
     pwd = (password or "").strip()
     if user and pwd:
         try:
+            # При обновлении сессии: сначала relogin (сохраняет device UUID из dump).
+            if dump_loaded and not allow_dump:
+                try:
+                    cl.username = user
+                    cl.password = pwd
+                    secret = (twofa_secret or "").strip().replace(" ", "")
+                    if secret:
+                        cl.login(user, pwd, verification_code=get_totp_token(secret))
+                    else:
+                        cl.relogin()
+                    _dump(cl, pid)
+                    return cl, "relogin"
+                except Exception as e:
+                    errors.append(f"relogin: {e}")
+                    cl = _new_client(fast=False)
+                    if path.is_file():
+                        try:
+                            cl.load_settings(str(path))
+                            dump_loaded = True
+                        except Exception:
+                            cl = _new_client(fast=False)
+                            dump_loaded = False
             _login_with_password(
                 cl, username=user, password=pwd, twofa_secret=twofa_secret
             )
@@ -235,7 +310,8 @@ def ensure_instagrapi_client(
             return cl, "password"
         except Exception as e:
             errors.append(str(e) or type(e).__name__)
-            cl = _new_client(fast=True)
+            cl = _new_client(fast=False)
+            dump_loaded = False
 
     if sessionid_provider is not None:
         try:
@@ -244,7 +320,13 @@ def ensure_instagrapi_client(
                 raise InstagrapiSessionError(
                     "В профиле нет cookie sessionid — войдите в Instagram в этом профиле."
                 )
-            cl = _new_client(fast=True)
+            cl = _new_client(fast=False)
+            if path.is_file():
+                try:
+                    # Сохранить fingerprint устройства, подменить cookies через sessionid.
+                    cl.load_settings(str(path))
+                except Exception:
+                    cl = _new_client(fast=False)
             _login_by_sessionid(cl, sid)
             _dump(cl, pid)
             return cl, "browser_cookies"
@@ -256,6 +338,28 @@ def ensure_instagrapi_client(
     raise InstagrapiSessionError(
         "Нет сохранённой сессии и нет логина/пароля Instagram в данных профиля. "
         "Укажите inst_login/inst_password или войдите в Instagram в браузере профиля."
+    )
+
+
+def refresh_instagrapi_client(
+    profile_id: str,
+    *,
+    username: str = "",
+    password: str = "",
+    twofa_secret: str = "",
+    sessionid_provider: Callable[[], str] | None = None,
+) -> tuple[Any, str]:
+    """
+    Принудительно обновить сессию: не доверять cookies из dump, перелогиниться.
+    Device fingerprint из dump сохраняется, если файл ещё на диске.
+    """
+    return ensure_instagrapi_client(
+        profile_id,
+        username=username,
+        password=password,
+        twofa_secret=twofa_secret,
+        sessionid_provider=sessionid_provider,
+        allow_dump=False,
     )
 
 

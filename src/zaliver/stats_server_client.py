@@ -1,5 +1,5 @@
 """
-Уведомление stats_server об успешной загрузке ролика на YouTube.
+Уведомление stats_server об успешной загрузке ролика (YouTube / Instagram).
 """
 
 from __future__ import annotations
@@ -12,7 +12,15 @@ import requests
 STATS_SERVER_BASE_URL = "https://feh1kc.site"
 STATS_SERVER_UPLOADED_VIDEO_PATH = "/api/zaliver/uploaded-video"
 
+PLATFORM_YOUTUBE = "youtube"
+PLATFORM_INSTAGRAM = "instagram"
+
 _LOG = logging.getLogger(__name__)
+
+
+def _normalize_platform(value: str | None) -> str:
+    v = (value or "").strip().lower()
+    return PLATFORM_INSTAGRAM if v == PLATFORM_INSTAGRAM else PLATFORM_YOUTUBE
 
 
 def notify_uploaded_video(
@@ -21,16 +29,20 @@ def notify_uploaded_video(
     username: str,
     profile_id: str = "",
     scheduled: int | None = None,
+    platform: str = PLATFORM_YOUTUBE,
     timeout_s: float = 25.0,
 ) -> bool:
     """
-    POST JSON ``{ "username", "video_id", "profile_id", "scheduled"? }`` на stats_server.
+    POST JSON ``{ "username", "video_id", "profile_id", "platform", "scheduled"? }``
+    на stats_server.
+    ``platform`` — ``youtube`` или ``instagram``.
     ``profile_id`` — id профиля антидетект-браузера или пустая строка.
     ``scheduled`` — unix-время отложенной публикации (только для schedule).
     Не бросает исключения наружу (ошибки только в лог).
     """
     vid = (video_id or "").strip()
     user = (username or "").strip()
+    plat = _normalize_platform(platform)
     if not vid or not user:
         return False
     url = STATS_SERVER_BASE_URL.rstrip("/") + STATS_SERVER_UPLOADED_VIDEO_PATH
@@ -39,6 +51,7 @@ def notify_uploaded_video(
             "username": user,
             "video_id": vid,
             "profile_id": (profile_id or "").strip(),
+            "platform": plat,
         }
         if scheduled is not None:
             payload["scheduled"] = int(scheduled)
@@ -53,7 +66,9 @@ def notify_uploaded_video(
             )
         else:
             _LOG.info(
-                "stats_server notify ok: video_id=%s username=%s profile_id=%s scheduled=%s",
+                "stats_server notify ok: platform=%s video_id=%s username=%s "
+                "profile_id=%s scheduled=%s",
+                plat,
                 vid,
                 user,
                 (profile_id or "").strip(),
@@ -66,4 +81,3 @@ def notify_uploaded_video(
     except Exception as e:
         _LOG.warning("stats_server notify failed: %s", e)
         return False
-

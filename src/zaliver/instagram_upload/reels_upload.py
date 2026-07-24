@@ -42,10 +42,14 @@ _POST_SHARED_ARIA = (
     "Reel shared",
     "Публикация отправлена",
     "Reel опубликован",
+    "Видео Reels опубликовано",
+    "Ваше видео Reels опубликовано",
 )
 _POST_SHARED_HEADING_RE = re.compile(
     r"reel shared|post shared|your reel has been shared|"
-    r"публикация отправлена|рилс опубликован|ваше видео опубликовано",
+    r"публикация отправлена|рилс опубликован|"
+    r"ваше видео(?:\s+reels)?\s+опубликовано|"
+    r"видео\s+reels\s+опубликовано",
     re.I,
 )
 _REEL_HREF_RE = re.compile(r"/reel/([^/?#]+)/?", re.I)
@@ -441,16 +445,29 @@ def _attach_video_file(page, dialog, video_path: Path) -> None:
     _log(f"Reels upload: файл передан — {video_path.name!r}.")
 
 
+# Кнопка «Select crop» / «Выбрать размер и обрезать» (RU UI Instagram).
+_CROP_BTN_ARIA = (
+    "Select crop",
+    "Выбрать размер и обрезать",
+    "Выбрать обрезку",
+    "Обрезка",
+)
+_CROP_BTN_SVG_SEL = ", ".join(f'svg[aria-label="{a}"]' for a in _CROP_BTN_ARIA)
+
+# Пункт 9:16 — EN «Crop portrait icon», RU «…в портной ориентации» (опечатка IG).
+_CROP_9_16_ARIA = (
+    "Crop portrait icon",
+    "Значок обрезки в портной ориентации",
+    "Значок обрезки в портретной ориентации",
+)
+_CROP_9_16_SVG_SEL = ", ".join(f'svg[aria-label="{a}"]' for a in _CROP_9_16_ARIA)
+
+
 def _select_crop_9_16(page) -> None:
     """Сразу после файла: Select crop → 9:16 (портрет для Reels)."""
     _log("Reels upload: выбираем обрезку 9:16…")
-    # Дождаться экрана кропа (кнопка Select crop).
-    crop_btn = (
-        page.locator('svg[aria-label="Select crop"]')
-        .or_(page.locator('svg[aria-label="Выбрать обрезку"]'))
-        .or_(page.locator('svg[aria-label="Обрезка"]'))
-        .or_(page.locator('button:has(svg[aria-label="Select crop"])'))
-    )
+    # Дождаться экрана кропа (кнопка Select crop / Выбрать размер и обрезать).
+    crop_btn = page.locator(_CROP_BTN_SVG_SEL)
     try:
         crop_btn.first.wait_for(state="visible", timeout=60_000)
     except Exception as e:
@@ -459,11 +476,7 @@ def _select_crop_9_16(page) -> None:
         ) from e
 
     try:
-        svg = page.locator(
-            'svg[aria-label="Select crop"], '
-            'svg[aria-label="Выбрать обрезку"], '
-            'svg[aria-label="Обрезка"]'
-        ).first
+        svg = page.locator(_CROP_BTN_SVG_SEL).first
         btn = svg.locator("xpath=ancestor::button[1]")
         target = btn if btn.count() else svg.locator(
             "xpath=ancestor::*[@role='button'][1]"
@@ -479,10 +492,10 @@ def _select_crop_9_16(page) -> None:
 
     page.wait_for_timeout(500)
 
-    # Пункт 9:16 / Crop portrait
+    # Пункт 9:16 / Crop portrait (текст «9:16» общий для EN/RU)
     option = (
         page.locator('[role="button"]').filter(has_text=re.compile(r"^9\s*:\s*16$"))
-        .or_(page.locator('svg[aria-label="Crop portrait icon"]'))
+        .or_(page.locator(_CROP_9_16_SVG_SEL))
         .or_(page.get_by_text(re.compile(r"^9\s*:\s*16$"), exact=True))
     )
     try:
@@ -493,7 +506,7 @@ def _select_crop_9_16(page) -> None:
         if text_opt.count() and text_opt.first.is_visible(timeout=3_000):
             text_opt.first.click(timeout=10_000)
         else:
-            svg9 = page.locator('svg[aria-label="Crop portrait icon"]').first
+            svg9 = page.locator(_CROP_9_16_SVG_SEL).first
             if svg9.count() and svg9.is_visible(timeout=2_000):
                 clickable = svg9.locator(
                     "xpath=ancestor::*[@role='button'][1]"

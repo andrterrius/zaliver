@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import re
-import threading
+import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
 _SHORTCODE_RE = re.compile(r"^[A-Za-z0-9_-]{5,}$")
 _REEL_IN_URL_RE = re.compile(r"/(?:reel|p)/([A-Za-z0-9_-]+)/?", re.I)
 
-# Параллельные запросы с одной сессией. 6–8 обычно быстрее без частых challenge.
-DEFAULT_STATS_WORKERS = 8
-MAX_STATS_WORKERS = 12
+# Важно: параллель с одной sessionid жжёт аккаунты (TooManyRedirects / logout в браузере).
+# Чекер — только последовательно, с паузой между запросами.
+DEFAULT_STATS_WORKERS = 1
+MAX_STATS_WORKERS = 1
+DEFAULT_REQUEST_PAUSE_S = 1.4
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,8 +75,8 @@ def fetch_reel_stats(cl: Any, shortcode: str) -> InstagramReelStats:
     pk = cl.media_pk_from_code(code)
     media = None
     last_err: Exception | None = None
-    # v1 быстрее и стабильнее для залогиненной сессии; gql — запасной.
-    for getter_name in ("media_info_v1", "media_info", "media_info_gql"):
+    # Только v1: gql/лишние fallback увеличивают шанс challenge на той же сессии.
+    for getter_name in ("media_info_v1", "media_info"):
         getter = getattr(cl, getter_name, None)
         if not callable(getter):
             continue
@@ -115,15 +116,17 @@ def fetch_reel_stats_many(
     shortcodes: list[str],
     *,
     workers: int = DEFAULT_STATS_WORKERS,
+    request_pause_s: float = DEFAULT_REQUEST_PAUSE_S,
+    abort_on_session_error: bool = True,
     on_progress: Callable[[int, int, str], None] | None = None,
     on_item: Callable[[InstagramReelStats | None, str, str | None], None] | None = None,
 ) -> tuple[list[InstagramReelStats], list[tuple[str, str]]]:
     """
-    Запросить метрики. При workers>1 — параллельно (отдельный Client на поток).
+    Запросить метрики **последовательно** (workers игнорируется / всегда 1).
 
-    on_item(stats|None, shortcode, error|None) — после каждого id.
+    При ошибке сессии (redirects / login_required) — сразу стоп, остаток не долбим.
     """
-    from zaliver.instagram_upload.instagrapi_session import clone_instagrapi_client
+    from zaliver.instagram_upload.instagrapi_session import is_instagrapi_session_error
 
     ordered = _unique_shortcodes(shortcodes)
     ok: list[InstagramReelStats] = []
@@ -132,58 +135,37 @@ def fetch_reel_stats_many(
     if total <= 0:
         return ok, fail
 
-    n_workers = max(1, min(int(workers or 1), MAX_STATS_WORKERS, total))
+    # Параллель намеренно отключена — жжёт sessionid и ломает Instagram в антике.
+    _ = workers
+    pause = max(0.0, float(request_pause_s or 0.0))
+
     if on_progress is not None:
         on_progress(0, total, ordered[0])
 
-    if n_workers <= 1:
-        for i, code in enumerate(ordered):
-            if on_progress is not None:
-                on_progress(i, total, code)
-            try:
-                st = fetch_reel_stats(cl, code)
-                ok.append(st)
-                if on_item is not None:
-                    on_item(st, code, None)
-            except Exception as e:
-                msg = str(e) or type(e).__name__
-                fail.append((code, msg))
-                if on_item is not None:
-                    on_item(None, code, msg)
+    for i, code in enumerate(ordered):
         if on_progress is not None:
-            on_progress(total, total, ordered[-1])
-        return ok, fail
-
-    done_lock = threading.Lock()
-    done_n = 0
-    # Результаты по исходному порядку shortcode.
-    results: dict[str, tuple[InstagramReelStats | None, str | None]] = {}
-
-    def _one(code: str) -> tuple[str, InstagramReelStats | None, str | None]:
-        worker_cl = clone_instagrapi_client(cl, fast=True)
+            on_progress(i, total, code)
+        if i > 0 and pause > 0:
+            time.sleep(pause)
         try:
-            st = fetch_reel_stats(worker_cl, code)
-            return code, st, None
-        except Exception as e:
-            return code, None, (str(e) or type(e).__name__)
-
-    with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futs = {pool.submit(_one, code): code for code in ordered}
-        for fut in as_completed(futs):
-            code, st, err = fut.result()
-            results[code] = (st, err)
-            with done_lock:
-                done_n += 1
-                cur = done_n
-            if on_progress is not None:
-                on_progress(cur, total, code)
-            if on_item is not None:
-                on_item(st, code, err)
-
-    for code in ordered:
-        st, err = results.get(code, (None, "missing result"))
-        if err is None and st is not None:
+            st = fetch_reel_stats(cl, code)
             ok.append(st)
-        else:
-            fail.append((code, err or "unknown error"))
+            if on_item is not None:
+                on_item(st, code, None)
+        except Exception as e:
+            msg = str(e) or type(e).__name__
+            fail.append((code, msg))
+            if on_item is not None:
+                on_item(None, code, msg)
+            if abort_on_session_error and is_instagrapi_session_error(msg):
+                # Не добиваем аккаунт остальными запросами.
+                stop_msg = f"остановлено: сессия Instagram (после {code}: {msg})"
+                for left in ordered[i + 1 :]:
+                    fail.append((left, stop_msg))
+                    if on_item is not None:
+                        on_item(None, left, stop_msg)
+                break
+
+    if on_progress is not None:
+        on_progress(total, total, ordered[-1])
     return ok, fail

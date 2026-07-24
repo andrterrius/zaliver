@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import random
 import re
+import time
 from typing import Any
+from urllib.parse import quote
 
 from zaliver.instagram_upload.instagram_availability import (
     verify_instagram_home_available,
@@ -17,51 +19,17 @@ def _log(message: str) -> None:
     emit_instagram_log(message, tag="[instagram]")
 
 REELS_URL = "https://www.instagram.com/reels/"
-EXPLORE_URL = "https://www.instagram.com/explore/"
+KEYWORD_SEARCH_URL = "https://www.instagram.com/explore/search/keyword/?q="
 
 _DEFAULT_REELS_COUNT = 15
 _DEFAULT_LIKE_PROB_PCT = 35.0
 _DEFAULT_FOLLOW_PROB_PCT = 10.0
 _DEFAULT_WATCH_MIN_S = 4.0
 _DEFAULT_WATCH_MAX_S = 12.0
-_SEARCH_TOP_ACCOUNTS = 3
-_SEARCH_POOL_MAX = 15
 
 _FOLLOW_BTN_RE = re.compile(r"^(Follow|Подписаться)$", re.I)
 _FOLLOWING_BTN_RE = re.compile(
     r"^(Following|Подписки|Requested|Запрошено|Отписаться)$", re.I
-)
-_RESERVED_PATH_SEGMENTS = frozenset(
-    {
-        "explore",
-        "reels",
-        "p",
-        "reel",
-        "stories",
-        "direct",
-        "accounts",
-        "about",
-        "legal",
-        "tags",
-        "locations",
-        "tv",
-        "graphql",
-        "api",
-        "web",
-        "notifications",
-        "popular",
-        "nametag",
-        "directory",
-        "challenge",
-        "privacy",
-        "safety",
-        "meta",
-        "ads",
-        "oembed",
-        "publicapi",
-        "your_activity",
-        "professional_dashboard",
-    }
 )
 
 
@@ -202,7 +170,9 @@ def _current_video_src(page) -> str:
     try:
         src = page.evaluate(
             """() => {
-              const videos = Array.from(document.querySelectorAll('main video'));
+              const videos = Array.from(document.querySelectorAll(
+                '[role="dialog"] video, article video, main video'
+              ));
               const vh = window.innerHeight || 800;
               const mid = vh / 2;
               let best = null, bestScore = -1;
@@ -227,6 +197,87 @@ def _current_video_src(page) -> str:
         return ""
 
 
+def _current_post_key(page) -> str:
+    """Идентификатор текущего поста/рилса: shortcode из URL + src видео."""
+    try:
+        key = page.evaluate(
+            """() => {
+              const path = location.pathname || '';
+              const m = path.match(/\\/(?:p|reel)\\/([^\\/]+)/i);
+              const code = m ? m[1] : '';
+              const videos = Array.from(document.querySelectorAll(
+                '[role="dialog"] video, article video, main video'
+              ));
+              const vh = window.innerHeight || 800;
+              const mid = vh / 2;
+              let bestSrc = '';
+              let bestScore = -1;
+              for (const v of videos) {
+                const r = v.getBoundingClientRect();
+                if (r.height < 40 || r.width < 40) continue;
+                const visible =
+                  Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+                const centerDist = Math.abs((r.top + r.bottom) / 2 - mid);
+                const playingBonus = (!v.paused && v.readyState >= 2) ? 5000 : 0;
+                const score = playingBonus + visible * 2 - centerDist;
+                if (score > bestScore) {
+                  bestScore = score;
+                  bestSrc = v.currentSrc || v.src || '';
+                }
+              }
+              return code + '|' + bestSrc;
+            }"""
+        )
+        return (key or "").strip()
+    except Exception:
+        return ""
+
+
+def _wait_for_post_change(
+    page,
+    prev_key: str,
+    *,
+    timeout_ms: int = 5_000,
+) -> bool:
+    """Ждём смены поста после листания (по URL/video), не по одному тику."""
+    prev = (prev_key or "").strip()
+    deadline = time.monotonic() + max(0.5, timeout_ms / 1000.0)
+    while time.monotonic() < deadline:
+        cur = _current_post_key(page)
+        if cur and cur != prev:
+            page.wait_for_timeout(350)
+            return True
+        page.wait_for_timeout(200)
+    return False
+
+
+def _wait_video_ready(page, *, timeout_ms: int = 8_000) -> bool:
+    """Дождаться появления видео у текущего поста (пропуск фото)."""
+    deadline = time.monotonic() + max(0.5, timeout_ms / 1000.0)
+    while time.monotonic() < deadline:
+        src = _current_video_src(page)
+        if src:
+            try:
+                ready = page.evaluate(
+                    """() => {
+                      const videos = Array.from(document.querySelectorAll(
+                        '[role="dialog"] video, article video, main video'
+                      ));
+                      const v = videos.find((x) => {
+                        const r = x.getBoundingClientRect();
+                        return r.height > 40 && r.width > 40;
+                      });
+                      return !!(v && v.readyState >= 2);
+                    }"""
+                )
+            except Exception:
+                ready = False
+            if ready:
+                return True
+        page.wait_for_timeout(250)
+    return bool(_current_video_src(page))
+
+
 def _watch_current_reel(
     page,
     *,
@@ -242,7 +293,9 @@ def _watch_current_reel(
         try:
             duration = page.evaluate(
                 """() => {
-                  const videos = Array.from(document.querySelectorAll('main video'));
+                  const videos = Array.from(document.querySelectorAll(
+                    '[role="dialog"] video, article video, main video'
+                  ));
                   const playing = videos.find(v => !v.paused && v.readyState >= 2);
                   const v = playing || videos[0];
                   if (!v) return 0;
@@ -468,6 +521,29 @@ def _try_follow_current_reel(page) -> bool:
 
 def _advance_to_next_reel(page, *, prev_src: str, sideways: bool = False) -> bool:
     """Перейти к следующему рилсу (кнопка Далее / стрелки / свайп)."""
+    prev_key = _current_post_key(page) or (prev_src or "").strip()
+
+    def _changed(*, timeout_ms: int = 4_500) -> bool:
+        if _wait_for_post_change(page, prev_key, timeout_ms=timeout_ms):
+            return True
+        cur = _current_post_key(page)
+        return bool(cur and prev_key and cur != prev_key)
+
+    if sideways:
+        # В keyword-search модалке надёжнее только ArrowRight:
+        # общие aria «Next/Далее» часто кликают мимо и дают двойной скролл.
+        for attempt in range(1, 4):
+            try:
+                page.keyboard.press("ArrowRight")
+            except Exception as e:
+                _log(f"Reels: ArrowRight не сработал: {type(e).__name__}")
+                return False
+            if _changed(timeout_ms=5_000 if attempt == 1 else 6_000):
+                return True
+            _log(f"Reels: ArrowRight попытка {attempt}/3 — пост ещё не сменился.")
+        _log("Reels: не удалось перейти к следующему рилсу (вправо).")
+        return False
+
     # 1) Кнопка навигации (лента рекомендаций и модалка профиля)
     for aria in (
         "Navigate to next Reel",
@@ -479,37 +555,26 @@ def _advance_to_next_reel(page, *, prev_src: str, sideways: bool = False) -> boo
     ):
         try:
             btn = page.locator(f'[aria-label="{aria}"]').first
-            if btn.is_visible(timeout=800):
+            if btn.is_visible(timeout=500):
                 btn.click(timeout=3_000)
-                page.wait_for_timeout(800)
-                new_src = _current_video_src(page)
-                if new_src and new_src != prev_src:
-                    return True
-                if not prev_src:
+                if _changed():
                     return True
         except Exception:
             continue
 
-    # 2) Клавиши: в модалке профиля — вправо, в ленте — вниз
-    keys = ("ArrowRight", "ArrowDown") if sideways else ("ArrowDown", "ArrowRight")
-    for key in keys:
+    # 2) Клавиши: в ленте — вниз, запасной вариант — вправо.
+    for key in ("ArrowDown", "ArrowRight"):
         try:
             page.keyboard.press(key)
-            page.wait_for_timeout(900)
-            new_src = _current_video_src(page)
-            if new_src and new_src != prev_src:
-                return True
-            if not prev_src:
+            if _changed():
                 return True
         except Exception as e:
             _log(f"Reels: {key} не сработал: {type(e).__name__}")
 
-    # 3) Колесо мыши
+    # 3) Колесо мыши — только для вертикальной ленты рекомендаций.
     try:
         page.mouse.wheel(0, 900)
-        page.wait_for_timeout(900)
-        new_src = _current_video_src(page)
-        if new_src and new_src != prev_src:
+        if _changed():
             return True
     except Exception:
         pass
@@ -518,517 +583,121 @@ def _advance_to_next_reel(page, *, prev_src: str, sideways: bool = False) -> boo
     return False
 
 
-def _username_from_profile_href(href: str) -> str:
-    h = (href or "").strip()
-    if not h:
-        return ""
-    try:
-        from urllib.parse import urlparse
-
-        path = urlparse(h if "://" in h else f"https://www.instagram.com{h}").path
-    except Exception:
-        path = h
-    parts = [p for p in path.strip("/").split("/") if p]
-    if not parts:
-        return ""
-    user = parts[0].strip().lstrip("@")
-    if not user or user.lower() in _RESERVED_PATH_SEGMENTS:
-        return ""
-    if parts[-1].lower() in {"reels", "tagged", "followers", "following"}:
-        if len(parts) >= 2:
-            user = parts[0].strip().lstrip("@")
-    return user
+def _keyword_search_url(query: str) -> str:
+    """URL выдачи Instagram keyword search (q URL-encoded)."""
+    q = (query or "").strip()
+    return f"{KEYWORD_SEARCH_URL}{quote(q, safe='')}"
 
 
-_SEARCH_INPUT_SELECTORS = (
-    'input[aria-label="Search input"]',
-    'input[placeholder="Search"]',
-    'input[aria-label="Поиск"]',
-    'input[placeholder="Поиск"]',
-    'input[aria-label="Search Input"]',
-    'input[type="text"][placeholder*="Search" i]',
-    'input[type="text"][placeholder*="Поиск" i]',
-)
-
-
-def _find_instagram_search_input(page):
-    for sel in _SEARCH_INPUT_SELECTORS:
-        try:
-            loc = page.locator(sel).first
-            if loc.count() and loc.is_visible(timeout=1_500):
-                return loc
-        except Exception:
-            continue
-    return None
-
-
-def _activate_instagram_search_input(page):
-    """Снять оверлей «Search» поверх input и сфокусировать поле."""
-    # На Explore пустое поле закрыто div[role=button] с иконкой Search.
-    for sel in (
-        'input[aria-label="Search input"] ~ div[role="button"]',
-        'input[placeholder="Search"] ~ div[role="button"]',
-        'input[aria-label="Поиск"] ~ div[role="button"]',
-        'input[placeholder="Поиск"] ~ div[role="button"]',
-    ):
-        try:
-            overlay = page.locator(sel).first
-            if overlay.is_visible(timeout=800):
-                overlay.click(timeout=3_000)
-                page.wait_for_timeout(250)
-                _log("Reels: клик по оверлею Search.")
-                break
-        except Exception:
-            continue
-    # Левый сайдбар: Search / Поиск (если Explore ещё без поля).
-    for aria in ("Search", "Поиск"):
-        try:
-            nav = page.locator(
-                f'a[role="link"]:has(svg[aria-label="{aria}"]), '
-                f'span:has(> svg[aria-label="{aria}"]), '
-                f'div[role="button"]:has(svg[aria-label="{aria}"])'
-            ).first
-            if nav.is_visible(timeout=600):
-                # Не кликаем оверлей Explore повторно — только nav link.
-                tag = ""
-                try:
-                    tag = (nav.evaluate("(n) => (n.tagName || '').toLowerCase()") or "")
-                except Exception:
-                    tag = ""
-                if tag == "a":
-                    nav.click(timeout=3_000)
-                    page.wait_for_timeout(400)
-                    _log("Reels: открыт поиск из навигации.")
-                    break
-        except Exception:
-            continue
-    search_input = _find_instagram_search_input(page)
-    if search_input is None:
-        return None
-    try:
-        search_input.click(timeout=3_000, force=True)
-    except Exception:
-        try:
-            search_input.evaluate("(node) => node.focus()")
-        except Exception:
-            pass
-    page.wait_for_timeout(150)
-    return search_input
-
-
-def _set_instagram_search_value(page, search_input, query: str) -> str:
-    """Ввод запроса: fill → press_sequentially → keyboard → JS InputEvent."""
+def _open_keyword_search(page, query: str) -> str:
+    """Открыть /explore/search/keyword/?q=… и дождаться сетки постов."""
     q = (query or "").strip()
     if not q:
-        return ""
-
-    def _read() -> str:
-        try:
-            return (search_input.input_value(timeout=2_000) or "").strip()
-        except Exception:
-            try:
-                return (
-                    search_input.evaluate("(n) => (n.value || '').trim()") or ""
-                ).strip()
-            except Exception:
-                return ""
-
-    def _clear() -> None:
-        try:
-            search_input.evaluate(
-                """(node) => {
-                  node.focus();
-                  const setter = Object.getOwnPropertyDescriptor(
-                    window.HTMLInputElement.prototype, 'value'
-                  )?.set;
-                  if (setter) setter.call(node, '');
-                  else node.value = '';
-                  node.dispatchEvent(new Event('input', { bubbles: true }));
-                }"""
-            )
-        except Exception:
-            pass
-        try:
-            search_input.press("Control+A")
-            search_input.press("Backspace")
-        except Exception:
-            pass
-
-    # 1) Playwright fill (часто стабильнее на React-контролах).
+        raise RuntimeError("Пустой поисковый запрос для прогрева Instagram Reels.")
+    url = _keyword_search_url(q)
+    _log(f"Reels: открываем поиск по запросу «{q}» → {url}")
+    _navigate_page_to(page, url, label="IG keyword search")
+    page.wait_for_timeout(1_800)
     try:
-        _clear()
-        search_input.fill(q, timeout=5_000)
-        page.wait_for_timeout(350)
-        actual = _read()
-        if actual:
-            return actual
-    except Exception as e:
-        _log(f"Reels: fill поиска не сработал: {type(e).__name__}")
-
-    # 2) Посимвольно.
-    try:
-        search_input = _activate_instagram_search_input(page) or search_input
-        _clear()
-        search_input.press_sequentially(q, delay=25, timeout=20_000)
-        page.wait_for_timeout(400)
-        actual = _read()
-        if actual:
-            return actual
-    except Exception as e:
-        _log(f"Reels: press_sequentially поиска: {type(e).__name__}")
-
-    # 3) keyboard.type после фокуса.
-    try:
-        search_input = _activate_instagram_search_input(page) or search_input
-        _clear()
-        search_input.click(timeout=3_000, force=True)
-        page.keyboard.type(q, delay=20)
-        page.wait_for_timeout(400)
-        actual = _read()
-        if actual:
-            return actual
-    except Exception as e:
-        _log(f"Reels: keyboard.type поиска: {type(e).__name__}")
-
-    # 4) Native value setter + InputEvent (React).
-    try:
-        search_input = _find_instagram_search_input(page) or search_input
-        ok = search_input.evaluate(
-            """(node, text) => {
-              try {
-                node.focus();
-                const setter = Object.getOwnPropertyDescriptor(
-                  window.HTMLInputElement.prototype, 'value'
-                )?.set;
-                if (setter) setter.call(node, text);
-                else node.value = text;
-                node.dispatchEvent(
-                  new InputEvent('input', {
-                    bubbles: true,
-                    cancelable: true,
-                    inputType: 'insertText',
-                    data: text,
-                  })
-                );
-                node.dispatchEvent(new Event('change', { bubbles: true }));
-                return (node.value || '').trim();
-              } catch (e) {
-                return '';
-              }
-            }""",
-            q,
+        page.wait_for_selector(
+            'main a[href*="/p/"], main a[href*="/reel/"]',
+            timeout=45_000,
         )
-        page.wait_for_timeout(500)
-        actual = (ok or "").strip() or _read()
-        if actual:
-            return actual
     except Exception as e:
-        _log(f"Reels: JS-ввод поиска: {type(e).__name__}")
+        _log(f"Reels: сетка поиска не прогрузилась: {type(e).__name__}: {e!r}")
+        raise RuntimeError(
+            f"Не удалось открыть выдачу Instagram по запросу {q!r} "
+            f"(URL={(getattr(page, 'url', None) or '')!r})."
+        ) from e
+    return url
 
-    return _read()
 
-
-def _type_instagram_search_query(page, query: str) -> bool:
-    q = (query or "").strip()
-    if not q:
-        return False
-    search_input = _activate_instagram_search_input(page)
-    if search_input is None:
-        _log("Reels: поле поиска Instagram не найдено.")
-        return False
+def _open_first_keyword_search_reel(page) -> bool:
+    """Клик по первому рилсу в сетке keyword search (слева сверху)."""
     try:
-        actual = _set_instagram_search_value(page, search_input, q)
-        if not actual:
-            _log("Reels: поле поиска пустое после ввода.")
-            return False
-        _log(f"Reels: поисковый запрос введён: {actual!r}")
-        return True
-    except Exception as e:
-        _log(f"Reels: не удалось ввести поиск: {type(e).__name__}: {e!r}")
-        return False
-
-
-def _current_instagram_username(page) -> str:
-    """Юзернейм залогиненного аккаунта (сайдбар Profile), иначе ''."""
-    try:
-        user = page.evaluate(
+        href = page.evaluate(
             """() => {
-              const reserved = new Set([
-                'explore','reels','p','reel','stories','direct','accounts','about',
-                'legal','tags','locations','tv','graphql','api','web','notifications',
-                'popular'
-              ]);
-              const parse = (href) => {
-                const path = (href || '').split('?')[0].split('#')[0];
-                const parts = path.replace(/^\\/+|\\/+$/g, '').split('/').filter(Boolean);
-                if (parts.length !== 1) return '';
-                const u = parts[0];
-                if (!u || reserved.has(u.toLowerCase())) return '';
-                return u;
-              };
               const links = Array.from(
-                document.querySelectorAll('a[href^="/"][role="link"], a[href^="/"]')
+                document.querySelectorAll(
+                  'main a[href*="/p/"], main a[href*="/reel/"]'
+                )
               );
-              for (const a of links) {
-                const u = parse(a.getAttribute('href') || '');
-                if (!u) continue;
-                const blob = (
-                  (a.getAttribute('aria-label') || '') + ' ' +
-                  (a.innerText || a.textContent || '')
-                ).toLowerCase();
-                if (\\bprofile\\b/.test(blob) || blob.includes('профиль')) {
-                  return u;
+              const isReel = (a) => {
+                const href = a.getAttribute('href') || '';
+                if (!(href.includes('/p/') || href.includes('/reel/'))) return false;
+                if (a.querySelector('video')) return true;
+                const svgs = Array.from(a.querySelectorAll('svg[aria-label], svg title'));
+                for (const node of svgs) {
+                  const label = (
+                    node.getAttribute('aria-label') ||
+                    node.textContent ||
+                    ''
+                  ).toLowerCase();
+                  if (
+                    label.includes('reel') ||
+                    label.includes('clip') ||
+                    label.includes('видео')
+                  ) {
+                    return true;
+                  }
                 }
-              }
-              // Fallback: аватар в нижнем/боковом nav без чужого текста.
+                return false;
+              };
+              const scored = [];
               for (const a of links) {
-                const u = parse(a.getAttribute('href') || '');
-                if (!u) continue;
-                const img = a.querySelector(
-                  'img[alt*="profile picture"], img[alt*="фото профиля"]'
-                );
-                if (!img) continue;
+                if (!isReel(a)) continue;
                 const r = a.getBoundingClientRect();
-                // Профиль в nav обычно слева или снизу, компактный.
-                if (r.width > 0 && r.width < 90 && r.left < 120) return u;
-                if (r.width > 0 && r.width < 90 && r.bottom > (window.innerHeight - 90)) {
-                  return u;
-                }
+                if (r.width < 40 || r.height < 40) continue;
+                if (r.bottom < 0 || r.top > (window.innerHeight || 800)) continue;
+                scored.push({
+                  href: a.getAttribute('href') || '',
+                  top: r.top,
+                  left: r.left,
+                });
               }
-              return '';
+              scored.sort((a, b) => (a.top - b.top) || (a.left - b.left));
+              return scored.length ? scored[0].href : '';
             }"""
         )
-        return (user or "").strip().lstrip("@")
-    except Exception:
-        return ""
-
-
-def _collect_search_account_usernames(page, *, limit: int = _SEARCH_POOL_MAX) -> list[str]:
-    """Юзернеймы только из списка подсказок под полем Search (sibling-контейнер)."""
-    reserved_js = sorted(_RESERVED_PATH_SEGMENTS)
-    self_user = _current_instagram_username(page)
-    try:
-        hrefs = page.evaluate(
-            """({ reservedList, selfUser }) => {
-              const reserved = new Set(reservedList);
-              const self = (selfUser || '').toLowerCase();
-              const input = document.querySelector(
-                'input[aria-label="Search input"], input[placeholder="Search"], ' +
-                'input[aria-label="Поиск"], input[placeholder="Поиск"]'
-              );
-              if (!input) return [];
-
-              const parseUser = (href) => {
-                const path = (href || '').split('?')[0].split('#')[0];
-                const parts = path.replace(/^\\/+|\\/+$/g, '').split('/').filter(Boolean);
-                if (parts.length !== 1) return '';
-                const user = parts[0];
-                if (!user || reserved.has(user.toLowerCase())) return '';
-                if (self && user.toLowerCase() === self) return '';
-                return user;
-              };
-
-              const collectFromScope = (scope) => {
-                if (!scope || !scope.querySelectorAll) return [];
-                const rows = Array.from(
-                  scope.querySelectorAll('a[href^="/"][role="link"]')
-                ).filter((a) => {
-                  // Пропуск вложенной ссылки аватарки.
-                  if (a.parentElement && a.parentElement.closest('a[href^="/"]')) {
-                    return false;
-                  }
-                  if (!a.querySelector(
-                    'img[alt*="profile picture"], img[alt*="фото профиля"]'
-                  )) return false;
-                  const r = a.getBoundingClientRect();
-                  if (r.width < 40 || r.height < 24) return false;
-                  // Строка выдачи обычно широкая (не иконка nav).
-                  if (r.width < 120) return false;
-                  return !!parseUser(a.getAttribute('href') || '');
-                }).map((a) => {
-                  const r = a.getBoundingClientRect();
-                  return {
-                    user: parseUser(a.getAttribute('href') || ''),
-                    top: r.top,
-                    left: r.left,
-                  };
-                }).filter((x) => x.user);
-
-                rows.sort((a, b) => (a.top - b.top) || (a.left - b.left));
-                const out = [];
-                const seen = new Set();
-                for (const row of rows) {
-                  const key = row.user.toLowerCase();
-                  if (seen.has(key)) continue;
-                  seen.add(key);
-                  out.push(row.user);
-                  if (out.length >= 30) break;
-                }
-                return out;
-              };
-
-              // Список каналов — sibling-ветка рядом с полем (не предок со всем nav).
-              let el = input;
-              for (let depth = 0; depth < 12 && el; depth++) {
-                const parent = el.parentElement;
-                if (!parent) break;
-                for (const child of Array.from(parent.children)) {
-                  if (child.contains(input)) continue;
-                  const found = collectFromScope(child);
-                  if (found.length) return found;
-                }
-                el = parent;
-              }
-              return [];
-            }""",
-            {"reservedList": reserved_js, "selfUser": self_user},
-        )
     except Exception as e:
-        _log(f"Reels: не удалось собрать аккаунты поиска: {type(e).__name__}")
-        return []
-    users: list[str] = []
-    self_l = self_user.lower()
-    for raw in hrefs or []:
-        u = _username_from_profile_href(f"/{raw}/")
-        if not u:
-            continue
-        if self_l and u.lower() == self_l:
-            continue
-        if u.lower() not in {x.lower() for x in users}:
-            users.append(u)
-        if len(users) >= max(1, int(limit)):
-            break
-    return users
+        _log(f"Reels: поиск первого рилса в выдаче: {type(e).__name__}: {e!r}")
+        href = ""
 
-
-def _open_explore_search(page, query: str) -> list[str]:
-    """Открыть Explore, ввести запрос, вернуть юзернеймы из выдачи."""
-    q = (query or "").strip()
-    if not q:
-        return []
-    _navigate_page_to(page, EXPLORE_URL, label="Explore")
-    page.wait_for_timeout(1_500)
-    try:
-        page.wait_for_selector(
-            ", ".join(_SEARCH_INPUT_SELECTORS[:4]),
-            timeout=30_000,
+    href = (href or "").strip()
+    candidates: list[str] = []
+    if href:
+        candidates.append(f'a[href="{href}"]')
+        if href.startswith("/"):
+            candidates.append(f'a[href="{href.split("?")[0]}"]')
+    candidates.extend(
+        (
+            'main a[href*="/p/"]:has(svg[aria-label*="Reel" i])',
+            'main a[href*="/p/"]:has(svg[aria-label*="Видео" i])',
+            'main a[href*="/p/"]:has(svg[aria-label*="Clip" i])',
+            'main a[href*="/reel/"]',
+            'main a[href*="/p/"]:has(video)',
         )
-    except Exception:
-        # Поле может появиться только после клика по Search в сайдбаре.
-        _log("Reels: Search input сразу не виден — пробуем активировать.")
-        _activate_instagram_search_input(page)
-        page.wait_for_timeout(500)
-        if _find_instagram_search_input(page) is None:
-            raise RuntimeError(
-                "Не удалось открыть поиск Instagram Explore "
-                f"(URL={(getattr(page, 'url', None) or '')!r})."
-            )
-    typed = False
-    for attempt in range(1, 4):
-        if _type_instagram_search_query(page, q):
-            typed = True
-            break
-        _log(f"Reels: повтор ввода поиска ({attempt}/3)…")
-        page.wait_for_timeout(700)
-        _activate_instagram_search_input(page)
-    if not typed:
-        raise RuntimeError(f"Не удалось ввести поисковый запрос Instagram: {q!r}")
-    self_user = _current_instagram_username(page)
-    if self_user:
-        _log(f"Reels: свой аккаунт @{self_user} исключаем из выдачи поиска.")
-    # Ждём список аккаунтов после ввода (подсказки появляются без Enter).
-    deadline = page.evaluate("() => Date.now()") + 18_000
-    users: list[str] = []
-    while True:
-        users = _collect_search_account_usernames(page, limit=_SEARCH_POOL_MAX)
-        if users:
-            break
-        try:
-            now = page.evaluate("() => Date.now()")
-        except Exception:
-            now = deadline
-        if now >= deadline:
-            break
-        page.wait_for_timeout(450)
-    if not users:
-        raise RuntimeError(
-            f"По запросу {q!r} Instagram не показал аккаунты в поиске."
-        )
-    _log(
-        f"Reels: в поиске найдено аккаунтов: {len(users)} "
-        f"(топ: {', '.join(users[:_SEARCH_TOP_ACCOUNTS])})."
     )
-    return users
 
-
-def _goto_profile_reels_tab(page, username: str) -> None:
-    user = (username or "").strip().lstrip("@")
-    if not user:
-        raise RuntimeError("Пустой username профиля Instagram.")
-    reels_url = f"https://www.instagram.com/{user}/reels/"
-    _navigate_page_to(page, reels_url, label=f"@{user}/reels")
-    page.wait_for_timeout(1_500)
-    # Иногда вкладка Reels есть, но URL ещё /username/ — клик по вкладке.
-    try:
-        tab = page.locator(
-            f'a[href="/{user}/reels/"], a[href*="/{user}/reels/"]'
-        ).first
-        if tab.is_visible(timeout=2_000):
-            selected = (tab.get_attribute("aria-selected") or "").strip().lower()
-            if selected != "true":
-                tab.click(timeout=3_000)
-                page.wait_for_timeout(1_000)
-    except Exception:
-        pass
-
-
-def _profile_has_reels(page, username: str) -> bool:
-    user = (username or "").strip().lstrip("@")
-    try:
-        page.wait_for_selector(
-            f'a[href*="/{user}/reel/"], a[href*="/reel/"]',
-            timeout=8_000,
-        )
-    except Exception:
-        pass
-    try:
-        n = page.locator(f'a[href*="/{user}/reel/"]').count()
-        if n > 0:
-            return True
-    except Exception:
-        pass
-    try:
-        n = page.locator('a[href*="/reel/"]').count()
-        return n > 0
-    except Exception:
-        return False
-
-
-def _open_first_profile_reel(page, username: str) -> bool:
-    user = (username or "").strip().lstrip("@")
-    selectors = (
-        f'a[href*="/{user}/reel/"]',
-        'a[href*="/reel/"]',
-    )
-    for sel in selectors:
+    for sel in candidates:
         try:
             link = page.locator(sel).first
-            if not link.is_visible(timeout=3_000):
+            if not link.is_visible(timeout=2_500):
                 continue
-            href = (link.get_attribute("href") or "").strip()
-            _log(f"Reels: открываем первый рилс профиля @{user} ({href!r})…")
+            got_href = (link.get_attribute("href") or href or "").strip()
+            _log(f"Reels: открываем первый рилс из поиска ({got_href!r})…")
             link.click(timeout=5_000)
             page.wait_for_timeout(1_200)
             try:
                 page.wait_for_selector(
                     'article video, [role="dialog"] video, main video',
-                    timeout=20_000,
+                    timeout=25_000,
                 )
             except Exception:
                 pass
             return True
         except Exception as e:
-            _log(f"Reels: клик по рилсу @{user} не удался: {type(e).__name__}")
+            _log(f"Reels: клик по рилсу поиска ({sel!r}): {type(e).__name__}")
             continue
     return False
 
@@ -1056,8 +725,30 @@ def _watch_reels_from_current_player(
     follow_p = _clamp_prob_pct(follow_probability_pct)
     followed = False
     watched = 0
-    for i in range(1, n + 1):
+    # В поиске между рилсами бывают фото — пропускаем без засчёта в count.
+    skip_budget = max(40, n * 8) if sideways else 0
+    skips = 0
+
+    while watched < n:
+        if sideways and not _current_video_src(page):
+            if skips >= skip_budget:
+                _log("Reels: слишком много постов без видео — останавливаем.")
+                break
+            prev_src = _current_video_src(page)
+            _log("Reels: пост без видео — листаем вправо без засчёта.")
+            if not _advance_to_next_reel(page, prev_src=prev_src, sideways=True):
+                _log("Reels: дальше листать не удалось.")
+                break
+            skips += 1
+            page.wait_for_timeout(random.randint(500, 900))
+            continue
+
+        if sideways:
+            _wait_video_ready(page, timeout_ms=8_000)
+
+        i = watched + 1
         prev_src = _current_video_src(page)
+        prev_key = _current_post_key(page)
         _log(f"Reels: рилс {i}/{n} в текущем плеере…")
         _watch_current_reel(
             page,
@@ -1070,20 +761,33 @@ def _watch_reels_from_current_player(
             _try_like_current_reel(page)
         else:
             _log("Reels: лайк пропущен по вероятности.")
-        if follow_once and not followed:
+        if follow_once:
             # Подписка один раз на аккаунт (с учётом вероятности).
+            if not followed:
+                if _roll(follow_p):
+                    if _try_follow_current_reel(page):
+                        followed = True
+                else:
+                    _log("Reels: подписка пропущена по вероятности.")
+                    followed = True  # больше не пытаемся на этом аккаунте
+        else:
             if _roll(follow_p):
-                if _try_follow_current_reel(page):
-                    followed = True
+                _try_follow_current_reel(page)
             else:
                 _log("Reels: подписка пропущена по вероятности.")
-                followed = True  # больше не пытаемся на этом аккаунте
-        if i >= n:
+        if watched >= n:
             break
-        if not _advance_to_next_reel(page, prev_src=prev_src, sideways=sideways):
-            _log("Reels: рилсы аккаунта закончились.")
+        if not _advance_to_next_reel(
+            page,
+            prev_src=prev_src or prev_key,
+            sideways=sideways,
+        ):
+            _log("Reels: дальше листать не удалось.")
             break
-        page.wait_for_timeout(random.randint(400, 900))
+        # Дать модалке догрузить следующий пост до старта просмотра.
+        page.wait_for_timeout(random.randint(800, 1_400))
+        if sideways:
+            _wait_video_ready(page, timeout_ms=6_000)
     return watched
 
 
@@ -1096,13 +800,11 @@ def browse_instagram_reels_from_search(
     follow_probability_pct: float = _DEFAULT_FOLLOW_PROB_PCT,
     watch_min_s: float = _DEFAULT_WATCH_MIN_S,
     watch_max_s: float = _DEFAULT_WATCH_MAX_S,
-    watch_full: bool = False,
+    watch_full: bool = True,
 ) -> None:
     """
-    Прогрев по поиску: Explore → запрос → случайный из топ-3 аккаунтов →
-    вкладка Reels → просмотр. Если у аккаунта нет рилсов — другой из топ-3;
-    если у всех трёх нет — ошибка. Если рилсы кончились раньше цели —
-    возвращаемся в поиск к другим каналам.
+    Прогрев по поиску: /explore/search/keyword/?q=… → первый рилс в сетке →
+    просмотр с листанием вправо. Лайк и подписка — по заданной вероятности.
     """
     q = (query or "").strip()
     if not q:
@@ -1115,133 +817,27 @@ def browse_instagram_reels_from_search(
         f"подписка {follow_p:.0f}%."
     )
 
-    users = _open_explore_search(page, q)
-    top3 = users[:_SEARCH_TOP_ACCOUNTS]
-    if not top3:
-        raise RuntimeError(f"По запросу {q!r} нет аккаунтов в топ-{_SEARCH_TOP_ACCOUNTS}.")
-
-    no_reels: set[str] = set()
-    exhausted: set[str] = set()
-    watched_total = 0
-    pool = list(users[:_SEARCH_POOL_MAX])
-
-    def _pick_next_username() -> str | None:
-        # Сначала — неиспользованные из топ-3 (без no_reels / exhausted).
-        candidates = [
-            u for u in top3 if u.lower() not in {x.lower() for x in no_reels | exhausted}
-        ]
-        if candidates:
-            return random.choice(candidates)
-        # Когда топ-3 исчерпан, но нужно добрать просмотры — остальные из выдачи.
-        rest = [
-            u
-            for u in pool
-            if u.lower() not in {x.lower() for x in no_reels | exhausted | set(top3)}
-        ]
-        # Также можно повторно брать exhausted? Нет — только новые.
-        if rest:
-            return random.choice(rest)
-        # Расширяем пул повторным поиском.
-        return None
-
-    # Сначала проверяем, что хотя бы у одного из топ-3 есть рилсы.
-    probe_order = list(top3)
-    random.shuffle(probe_order)
-    has_any_reels = False
-    for user in probe_order:
-        try:
-            _goto_profile_reels_tab(page, user)
-            if _profile_has_reels(page, user):
-                has_any_reels = True
-                # Вернёмся в поиск и начнём основной цикл с рандомным выбором.
-                break
-            no_reels.add(user)
-            _log(f"Reels: у @{user} нет рилсов — пробуем другой аккаунт.")
-        except Exception as e:
-            no_reels.add(user)
-            _log(f"Reels: профиль @{user} недоступен: {type(e).__name__}")
-    if not has_any_reels:
+    _open_keyword_search(page, q)
+    if not _open_first_keyword_search_reel(page):
         raise RuntimeError(
-            f"У всех {_SEARCH_TOP_ACCOUNTS} аккаунтов из поиска «{q}» нет Reels — "
-            "прогрев остановлен."
+            f"По запросу {q!r} не удалось открыть первый рилс в выдаче."
         )
+    if not _wait_video_ready(page, timeout_ms=12_000):
+        _log("Reels: видео первого рилса ещё не готово — продолжаем.")
 
-    # Основной цикл просмотра
-    while watched_total < n:
-        # Обновляем выдачу поиска перед выбором следующего канала.
-        try:
-            users = _open_explore_search(page, q)
-            for u in users:
-                if u.lower() not in {x.lower() for x in pool}:
-                    pool.append(u)
-            top3 = users[:_SEARCH_TOP_ACCOUNTS] or top3
-        except Exception as e:
-            _log(f"Reels: повторный поиск не удался: {type(e).__name__}: {e!r}")
-            if watched_total > 0:
-                break
-            raise
-
-        username = _pick_next_username()
-        if username is None:
-            # Все топ-3 без рилсов уже отсеяны на пробе — если остались exhausted,
-            # и нет новых в пуле, останавливаемся.
-            available_top = [
-                u
-                for u in top3
-                if u.lower() not in {x.lower() for x in no_reels}
-            ]
-            if not available_top and watched_total == 0:
-                raise RuntimeError(
-                    f"У всех {_SEARCH_TOP_ACCOUNTS} аккаунтов из поиска «{q}» нет Reels — "
-                    "прогрев остановлен."
-                )
-            _log(
-                f"Reels: больше нет новых каналов в поиске "
-                f"(просмотрено {watched_total}/{n})."
-            )
-            break
-
-        _log(f"Reels: выбран аккаунт @{username} из поиска.")
-        try:
-            _goto_profile_reels_tab(page, username)
-        except Exception as e:
-            no_reels.add(username)
-            _log(f"Reels: не удалось открыть @{username}: {type(e).__name__}")
-            continue
-
-        if not _profile_has_reels(page, username):
-            no_reels.add(username)
-            _log(f"Reels: у @{username} нет рилсов.")
-            # Если все топ-3 без рилсов — ошибка.
-            if all(u.lower() in {x.lower() for x in no_reels} for u in top3):
-                raise RuntimeError(
-                    f"У всех {_SEARCH_TOP_ACCOUNTS} аккаунтов из поиска «{q}» нет Reels — "
-                    "прогрев остановлен."
-                )
-            continue
-
-        if not _open_first_profile_reel(page, username):
-            no_reels.add(username)
-            _log(f"Reels: не удалось открыть рилс @{username}.")
-            continue
-
-        got = _watch_reels_from_current_player(
-            page,
-            remaining=n - watched_total,
-            like_probability_pct=like_p,
-            follow_once=True,
-            follow_probability_pct=follow_p,
-            watch_min_s=watch_min_s,
-            watch_max_s=watch_max_s,
-            watch_full=watch_full,
-            sideways=True,
-        )
-        watched_total += got
-        exhausted.add(username)
-        _log(f"Reels: с @{username} просмотрено {got}, всего {watched_total}/{n}.")
-
-    _log(f"Reels: прогрев по поиску завершён ({watched_total}/{n}).")
-    if watched_total <= 0:
+    watched = _watch_reels_from_current_player(
+        page,
+        remaining=n,
+        like_probability_pct=like_p,
+        follow_once=False,
+        follow_probability_pct=follow_p,
+        watch_min_s=watch_min_s,
+        watch_max_s=watch_max_s,
+        watch_full=watch_full,
+        sideways=True,
+    )
+    _log(f"Reels: прогрев по поиску завершён ({watched}/{n}).")
+    if watched <= 0:
         raise RuntimeError(
             f"Прогрев Instagram Reels по поиску «{q}» не просмотрел ни одного ролика."
         )
@@ -1255,7 +851,7 @@ def browse_instagram_reels(
     follow_probability_pct: float = _DEFAULT_FOLLOW_PROB_PCT,
     watch_min_s: float = _DEFAULT_WATCH_MIN_S,
     watch_max_s: float = _DEFAULT_WATCH_MAX_S,
-    watch_full: bool = False,
+    watch_full: bool = True,
 ) -> None:
     """Просмотр ленты Reels с вероятностными лайком и подпиской."""
     n = max(1, int(count))
@@ -1306,12 +902,12 @@ def run_instagram_reels_warmup(
     follow_probability_pct: float = _DEFAULT_FOLLOW_PROB_PCT,
     watch_min_s: float = _DEFAULT_WATCH_MIN_S,
     watch_max_s: float = _DEFAULT_WATCH_MAX_S,
-    watch_full: bool = False,
+    watch_full: bool = True,
     reels_recommendations: bool = True,
     search_query: str = "",
     profile_id: str | None = None,
 ) -> None:
-    """Главная Instagram → вход → лента /reels/ или поиск Explore → прогрев."""
+    """Главная Instagram → вход → лента /reels/ или keyword search → прогрев."""
     _log("Reels: проверка сессии / доступности Instagram…")
     verify_instagram_home_available(
         page,

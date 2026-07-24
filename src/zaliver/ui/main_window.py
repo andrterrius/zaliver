@@ -1760,17 +1760,18 @@ class MainWindow(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         self._uploaded_ig_checker_value.setToolTip(
-            "Антидетект-профиль для чека метрик (instagrapi). "
-            "Сначала сохранённая сессия / inst_login+пароль из данных профиля "
-            "(без окна браузера), иначе cookies профиля в headless."
+            "Антидетект-профиль для чека метрик (instagrapi).\n"
+            "Лучше отдельный «читающий» аккаунт — не тот, с которого льёте.\n"
+            "Параллельный/агрессивный чек с тем же sessionid убивает вход "
+            "в браузере (Exceeded 30 redirects)."
         )
         self._btn_uploaded_ig_checker_pick = QPushButton("Выбрать профиль")
         self._btn_uploaded_ig_checker_pick.setObjectName("secondary")
         self._btn_uploaded_ig_checker_pick.setAutoDefault(False)
         self._btn_uploaded_ig_checker_pick.setDefault(False)
         self._btn_uploaded_ig_checker_pick.setToolTip(
-            "Открыть список профилей (как при заливе) и выбрать один "
-            "с залогиненным Instagram"
+            "Выбрать профиль с Instagram-сессией для чека.\n"
+            "Рекомендуется отдельный аккаунт только для статистики."
         )
         self._btn_uploaded_ig_checker_pick.clicked.connect(
             self._pick_uploaded_ig_checker_profile
@@ -3265,8 +3266,16 @@ class MainWindow(QWidget):
                         "Zaliver",
                         "Не удалось обновить статистику Instagram:\n\n"
                         f"{sample}\n\n"
-                        "Проверьте, что выбранный профиль залогинен в Instagram, "
-                        "и смотрите лог ([ig-stats]).",
+                        "Частая причина: чекер убил sessionid "
+                        "(Exceeded 30 redirects) — Instagram в этом профиле "
+                        "перестаёт грузиться.\n\n"
+                        "Что делать:\n"
+                        "• зайдите в Instagram вручную в антидетект-профиле "
+                        "и перелогиньтесь;\n"
+                        "• для чека лучше отдельный «читающий» аккаунт, "
+                        "не тот, с которого льёте;\n"
+                        "• не гоняйте чек по тысячам рилсов подряд.\n\n"
+                        "Смотрите лог ([ig-stats]).",
                     )
         if hasattr(self, "_uploaded_stats_status"):
             if succ or fails:
@@ -6908,8 +6917,8 @@ class MainWindow(QWidget):
 
         hint = QLabel(
             "Для каждого отмеченного профиля: главная Instagram, при необходимости "
-            "вход в аккаунт, затем лента /reels/ или поиск на Explore. На каждом "
-            "рилсе с заданной вероятностью ставится лайк и/или подписка."
+            "вход в аккаунт, затем лента /reels/ или поиск по ключевому слову. "
+            "На каждом рилсе с заданной вероятностью ставится лайк и/или подписка."
         )
         hint.setWordWrap(True)
         hint.setObjectName("hint")
@@ -6956,6 +6965,7 @@ class MainWindow(QWidget):
         form.addRow(watch_range_lbl, watch_range_w)
 
         watch_full_cb = QCheckBox("Смотреть каждый Reel до конца")
+        watch_full_cb.setChecked(True)
         watch_full_cb.setToolTip(
             "Дождаться конца ролика, затем листать дальше. "
             "Если снять галочку — случайное время в указанном диапазоне."
@@ -6973,7 +6983,8 @@ class MainWindow(QWidget):
         reels_recommend_cb.setChecked(True)
         reels_recommend_cb.setToolTip(
             "Открыть ленту рекомендаций /reels/. Если снять галочку — "
-            "укажите поисковый запрос: Explore → аккаунты → их Reels."
+            "укажите запрос: открывается /explore/search/keyword/, "
+            "первый рилс в сетке, далее листание вправо."
         )
         form.addRow("", reels_recommend_cb)
 
@@ -6983,7 +6994,7 @@ class MainWindow(QWidget):
         reels_search_row_l.setSpacing(8)
         reels_search_lbl = QLabel("Поисковый запрос:")
         reels_search_edit = QLineEdit()
-        reels_search_edit.setPlaceholderText("Текст для поиска аккаунтов на Explore")
+        reels_search_edit.setPlaceholderText("#luxurylifestyle или luxury life")
         reels_search_row_l.addWidget(reels_search_lbl)
         reels_search_row_l.addWidget(reels_search_edit, 1)
         form.addRow("", reels_search_row)
@@ -10271,41 +10282,40 @@ class MainWindow(QWidget):
                     except Exception:
                         pass
                     try:
-                        if is_instagram_upload:
-                            pass
-                        else:
-                            stats_notified = bool(
-                                isinstance(one_res, dict) and one_res.get("stats_notified")
-                            )
-                            if guser and not stats_notified:
-                                scheduled_unix = None
+                        stats_notified = bool(
+                            isinstance(one_res, dict) and one_res.get("stats_notified")
+                        )
+                        if guser and not stats_notified:
+                            scheduled_unix = None
+                            if not is_instagram_upload:
                                 sched_dt = parse_msk_datetime(schedule_publish_at)
                                 if sched_dt is not None:
                                     scheduled_unix = int(sched_dt.timestamp())
-                                ok = notify_uploaded_video(
-                                    video_id=vid,
-                                    username=guser,
-                                    profile_id=profile_id,
-                                    scheduled=scheduled_unix,
-                                )
-                                try:
-                                    if ok:
-                                        self._ui_log_line.emit(
-                                            f"[stats_server] уведомление отправлено: videoId={vid}"
-                                        )
-                                    else:
-                                        self._ui_log_line.emit(
-                                            f"[stats_server] сервер не принял уведомление: videoId={vid}"
-                                        )
-                                except Exception:
-                                    pass
-                            elif not guser:
-                                try:
+                            ok = notify_uploaded_video(
+                                video_id=vid,
+                                username=guser,
+                                profile_id=profile_id,
+                                scheduled=scheduled_unix,
+                                platform=self._platform,
+                            )
+                            try:
+                                if ok:
                                     self._ui_log_line.emit(
-                                        "[stats_server] username не задан — уведомление пропущено."
+                                        f"[stats_server] уведомление отправлено: videoId={vid}"
                                     )
-                                except Exception:
-                                    pass
+                                else:
+                                    self._ui_log_line.emit(
+                                        f"[stats_server] сервер не принял уведомление: videoId={vid}"
+                                    )
+                            except Exception:
+                                pass
+                        elif not guser:
+                            try:
+                                self._ui_log_line.emit(
+                                    "[stats_server] username не задан — уведомление пропущено."
+                                )
+                            except Exception:
+                                pass
                     except Exception as e:
                         try:
                             self._ui_log_line.emit(

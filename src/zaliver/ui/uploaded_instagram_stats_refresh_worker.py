@@ -10,10 +10,13 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from zaliver.instagram_upload.instagrapi_session import (
     InstagrapiSessionError,
+    client_username,
     ensure_instagrapi_client,
     invalidate_instagrapi_session,
+    is_instagrapi_session_error,
 )
 from zaliver.instagram_upload.reel_stats import (
+    DEFAULT_REQUEST_PAUSE_S,
     DEFAULT_STATS_WORKERS,
     fetch_reel_stats_many,
 )
@@ -22,9 +25,10 @@ from zaliver.instagram_upload.reel_stats import (
 class UploadedInstagramStatsRefreshWorker(QObject):
     """
     Запросы к private API Instagram через instagrapi в потоке Qt.
-    Формат результатов совместим с YouTube-воркером:
-      success: (video_id, views, likes, comments, age_restricted=False)
-      failure: (video_id, message, is_api_error=False)
+
+    Важно: только последовательно + паузы. Параллель и агрессивный refresh
+    убивают sessionid → Instagram в антидетект-браузере перестаёт грузиться
+    (``Exceeded 30 redirects``).
     """
 
     progress = pyqtSignal(int, int, str)
@@ -57,6 +61,16 @@ class UploadedInstagramStatsRefreshWorker(QObject):
         except Exception:
             pass
 
+    def _open_session(self) -> tuple[Any, str]:
+        return ensure_instagrapi_client(
+            self._profile_id,
+            username=self._username,
+            password=self._password,
+            twofa_secret=self._twofa_secret,
+            sessionid_provider=self._sessionid_provider,
+            allow_dump=True,
+        )
+
     def run(self) -> None:
         successes: list[tuple[str, int, int | None, int | None, bool]] = []
         failures: list[tuple[str, str, bool]] = []
@@ -69,19 +83,19 @@ class UploadedInstagramStatsRefreshWorker(QObject):
         self._log(
             f"Старт: {total} рилсов, profile_id={self._profile_id!r}, "
             f"creds={'yes' if self._username and self._password else 'no'}, "
+            f"mode=sequential pause≈{DEFAULT_REQUEST_PAUSE_S}s "
             f"workers={DEFAULT_STATS_WORKERS}"
         )
 
         try:
-            cl, source = ensure_instagrapi_client(
-                self._profile_id,
-                username=self._username,
-                password=self._password,
-                twofa_secret=self._twofa_secret,
-                sessionid_provider=self._sessionid_provider,
-            )
-            uname = getattr(cl, "username", None) or "?"
-            self._log(f"Сессия OK (@{uname}, source={source})")
+            cl, source = self._open_session()
+            uname = client_username(cl)
+            self._log(f"Сессия OK (@{uname or '?'}, source={source})")
+            if not uname and source == "dump":
+                self._log(
+                    "Dump без username — не делаю auto-refresh "
+                    "(он часто валит живую сессию в браузере)."
+                )
         except InstagrapiSessionError as e:
             self._log(f"Сессия FAIL: {e}")
             for v in ids:
@@ -100,75 +114,89 @@ class UploadedInstagramStatsRefreshWorker(QObject):
             self.finished.emit(successes, failures)
             return
 
-        # Ускорить мастер-клиент на случай serial fallback.
         try:
-            cl.delay_range = [0.0, 0.05]
+            # Soft delays поверх Client.delay_range.
+            cl.delay_range = [1.0, 2.2]
         except Exception:
             pass
 
         emit_lock = threading.Lock()
+        settled: set[str] = set()
+        session_dead = False
 
-        def _on_progress(done: int, tot: int, code: str) -> None:
-            self.progress.emit(done, tot, code)
+        def _emit_ok(st: Any) -> None:
+            code = st.video_id
+            with emit_lock:
+                if code in settled:
+                    return
+                settled.add(code)
+                row = (
+                    code,
+                    int(st.view_count),
+                    st.like_count,
+                    st.comment_count,
+                    False,
+                )
+                successes.append(row)
+                self.batch_done.emit([row], [])
+                self.progress.emit(len(settled), total, code)
+
+        def _emit_fail(code: str, msg: str) -> None:
+            with emit_lock:
+                if code in settled:
+                    return
+                settled.add(code)
+                self._log(f"{code}: {msg}")
+                row_f = (code, msg, False)
+                failures.append(row_f)
+                self.batch_done.emit([], [row_f])
+                self.progress.emit(len(settled), total, code)
 
         def _on_item(st: Any, code: str, err: str | None) -> None:
-            with emit_lock:
-                if err is None and st is not None:
-                    row = (
-                        st.video_id,
-                        int(st.view_count),
-                        st.like_count,
-                        st.comment_count,
-                        False,
-                    )
-                    successes.append(row)
-                    self.batch_done.emit([row], [])
-                else:
-                    self._log(f"{code}: {err}")
-                    row_f = (code, err or "unknown error", False)
-                    failures.append(row_f)
-                    self.batch_done.emit([], [row_f])
+            nonlocal session_dead
+            if err is None and st is not None:
+                _emit_ok(st)
+                return
+            msg = err or "unknown error"
+            _emit_fail(code, msg)
+            if is_instagrapi_session_error(msg):
+                session_dead = True
 
         try:
             fetch_reel_stats_many(
                 cl,
                 ids,
-                workers=DEFAULT_STATS_WORKERS,
-                on_progress=_on_progress,
+                workers=1,
+                request_pause_s=DEFAULT_REQUEST_PAUSE_S,
+                abort_on_session_error=True,
+                on_progress=None,
                 on_item=_on_item,
             )
         except Exception as e:
             self._log(f"batch crash: {e}")
-            left = [
-                v
-                for v in ids
-                if v not in {s[0] for s in successes}
-                and v not in {f[0] for f in failures}
-            ]
-            batch_fail = [(v, str(e), False) for v in left]
-            failures.extend(batch_fail)
-            if batch_fail:
-                self.batch_done.emit([], batch_fail)
+            for v in ids:
+                if v not in settled:
+                    _emit_fail(v, str(e))
+            if is_instagrapi_session_error(e):
+                session_dead = True
 
-        # Если почти всё упало с login/session — dump протух, сбросим на следующий раз.
-        if successes and failures:
-            pass
-        elif not successes and failures:
-            sample = " ".join(
-                str(f[1]) for f in failures[:3] if isinstance(f, (list, tuple)) and len(f) > 1
-            ).lower()
-            if any(
-                m in sample
-                for m in (
-                    "login_required",
-                    "login required",
-                    "session",
-                    "unauthorized",
-                    "challenge",
-                )
-            ):
-                self._log("Похоже, dump сессии протух — удаляю для перелогина.")
+        for v in ids:
+            if v not in settled:
+                _emit_fail(v, "не удалось получить метрики")
+
+        if session_dead:
+            self._log(
+                "Сессия Instagram умерла (redirects/login_required). "
+                "Dump не трогаю агрессивным re-login — зайдите в Instagram "
+                "в антидетект-профиле вручную. Не используйте тот же профиль "
+                "для чека и для залива одновременно."
+            )
+            # Не удаляем dump автоматически при redirects: invalidate + login_by_sessionid
+            # с IP без прокси доламывает cookies в браузере.
+            if not successes and failures:
                 invalidate_instagrapi_session(self._profile_id)
+                self._log("Удалён локальный dump (сессия уже мёртвая).")
 
+        self.progress.emit(total, total, ids[-1])
         self._log(f"Готово: ok={len(successes)}, fail={len(failures)}")
         self.finished.emit(successes, failures)

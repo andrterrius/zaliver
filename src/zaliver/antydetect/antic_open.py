@@ -3315,6 +3315,218 @@ def promote_youtube_videos_in_local_antidetect_profile(
             pass
         api.close()
 
+
+@with_log_profile
+def promote_instagram_reels_in_profile(
+    profile_id: str,
+    *,
+    videos: list[PromotionTargetVideo],
+    subscribe_to_channels: bool = False,
+    local_token: str | None = None,
+    headless: bool = True,
+    session_login: str = "",
+    session_password: str = "",
+    session_twofa: str = "",
+    shorts_count: int | None = None,
+    like_probability_pct: float | None = None,
+    shorts_watch_min_s: float | None = None,
+    shorts_watch_max_s: float | None = None,
+    watch_full_video: bool = False,
+    enable_comments: bool = False,
+    comments: list[str] | None = None,
+    comment_probability_pct: float | None = None,
+) -> None:
+    """Dolphin → Instagram → рилсы по ссылкам: подписка/лайк/коммент на странице."""
+    from zaliver.instagram_upload.reels_promote import run_instagram_profiles_promotion
+
+    _log(
+        "Dolphin: продвижение Instagram Reels. "
+        f"profile_id={profile_id!r}, headless={headless}, "
+        f"videos={len(videos)}, subscribe={subscribe_to_channels}"
+    )
+    api = DolphinAntyLocalAPI()
+    try:
+        tok = (local_token or "").strip()
+        if tok:
+            _log("Dolphin: login_with_token…")
+            api.login_with_token(tok)
+        _log("Dolphin: start_profile…")
+        conn = api.start_profile(profile_id, headless=headless)
+        _log(
+            "Dolphin: профиль запущен. "
+            f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+        )
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_cdp(
+                p, (conn.ws_url(), conn.http_url())
+            )
+            try:
+                kw: dict = {
+                    "videos": videos,
+                    "subscribe_to_channels": subscribe_to_channels,
+                    "viewer_profile_id": profile_id,
+                    "profile_id": profile_id,
+                    "session_login": session_login,
+                    "session_password": session_password,
+                    "session_twofa": session_twofa,
+                    "watch_full_video": watch_full_video,
+                    "enable_comments": enable_comments,
+                    "comments": comments,
+                }
+                if shorts_count is not None:
+                    kw["shorts_count"] = shorts_count
+                if like_probability_pct is not None:
+                    kw["like_probability_pct"] = like_probability_pct
+                if shorts_watch_min_s is not None:
+                    kw["shorts_watch_min_s"] = shorts_watch_min_s
+                if shorts_watch_max_s is not None:
+                    kw["shorts_watch_max_s"] = shorts_watch_max_s
+                if comment_probability_pct is not None:
+                    kw["comment_probability_pct"] = comment_probability_pct
+                run_instagram_profiles_promotion(page, **kw)
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        _log(f"Ошибка продвижения Reels: {type(e).__name__}: {e!r}")
+        raise _wrap_exc(e) from e
+    finally:
+        try:
+            api.stop_profile(profile_id)
+        except Exception as e:
+            _log(f"Dolphin: stop_profile: {e!r}")
+        api.close()
+
+
+@with_log_profile
+def promote_instagram_reels_in_local_antidetect_profile(
+    profile_id: str,
+    *,
+    base_url: str,
+    videos: list[PromotionTargetVideo],
+    subscribe_to_channels: bool = False,
+    headless: bool = True,
+    remote_cdp=None,
+    session_login: str = "",
+    session_password: str = "",
+    session_twofa: str = "",
+    shorts_count: int | None = None,
+    like_probability_pct: float | None = None,
+    shorts_watch_min_s: float | None = None,
+    shorts_watch_max_s: float | None = None,
+    watch_full_video: bool = False,
+    enable_comments: bool = False,
+    comments: list[str] | None = None,
+    comment_probability_pct: float | None = None,
+) -> None:
+    """Локальный антидетект → Instagram → рилсы по ссылкам: подписка/лайк/коммент."""
+    from zaliver.instagram_upload.reels_promote import run_instagram_profiles_promotion
+    from zaliver.antydetect.local_antidetect_api import (
+        LocalAntidetectError,
+        LocalAntidetectHttpAPI,
+    )
+    from zaliver.antydetect.local_active_sessions import (
+        register_local_session,
+        unregister_local_session,
+    )
+
+    _log(
+        "Local antidetect: продвижение Instagram Reels. "
+        f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}, "
+        f"videos={len(videos)}, subscribe={subscribe_to_channels}"
+    )
+    api = LocalAntidetectHttpAPI(base_url)
+    session_id: str | None = None
+    started_at = time.perf_counter()
+    try:
+        login = (session_login or "").strip()
+        pwd = (session_password or "").strip()
+        twofa = (session_twofa or "").strip()
+        if not pwd or not login:
+            try:
+                prof = api.get_profile(profile_id)
+                loaded_login, loaded_pwd, loaded_twofa = (
+                    _instagram_session_creds_from_profile_dict(prof)
+                )
+                if not login:
+                    login = loaded_login
+                if not pwd:
+                    pwd = loaded_pwd
+                if not twofa:
+                    twofa = loaded_twofa
+            except Exception as e:
+                _log(f"Local antidetect: не удалось прочитать custom_data: {e!r}")
+
+        acc = api.launch_profile(
+            profile_id,
+            headless=headless,
+            expose_cdp=True,
+            remote_cdp=remote_cdp,
+        )
+        sid = acc.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+        session_id = sid.strip()
+        bu = (base_url or "").strip() or "http://127.0.0.1:18765"
+        register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
+        ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+        _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_local_session_cdp(
+                p, api, session_id, ws_url
+            )
+            try:
+                kw: dict = {
+                    "videos": videos,
+                    "subscribe_to_channels": subscribe_to_channels,
+                    "viewer_profile_id": profile_id,
+                    "profile_id": profile_id,
+                    "session_login": login,
+                    "session_password": pwd,
+                    "session_twofa": twofa,
+                    "watch_full_video": watch_full_video,
+                    "enable_comments": enable_comments,
+                    "comments": comments,
+                }
+                if shorts_count is not None:
+                    kw["shorts_count"] = shorts_count
+                if like_probability_pct is not None:
+                    kw["like_probability_pct"] = like_probability_pct
+                if shorts_watch_min_s is not None:
+                    kw["shorts_watch_min_s"] = shorts_watch_min_s
+                if shorts_watch_max_s is not None:
+                    kw["shorts_watch_max_s"] = shorts_watch_max_s
+                if comment_probability_pct is not None:
+                    kw["comment_probability_pct"] = comment_probability_pct
+                run_instagram_profiles_promotion(page, **kw)
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        _log(f"Ошибка продвижения Reels: {type(e).__name__}: {e!r}")
+        raise LocalAntidetectError(f"Ошибка продвижения Instagram Reels: {e}") from e
+    finally:
+        if session_id:
+            unregister_local_session(profile_id=profile_id)
+            try:
+                api.stop_session(session_id)
+            except Exception:
+                pass
+        try:
+            _log(
+                "Local antidetect: продвижение Reels завершено за "
+                f"{time.perf_counter() - started_at:.1f} с."
+            )
+        except Exception:
+            pass
+        api.close()
+
+
 @with_log_profile
 def set_youtube_interface_language_in_profile(
     profile_id: str,

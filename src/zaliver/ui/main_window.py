@@ -2054,10 +2054,10 @@ class MainWindow(QWidget):
         self._btn_profiles_promote.setAutoDefault(False)
         self._btn_profiles_promote.setDefault(False)
         self._btn_profiles_promote.setToolTip(
-            "Только для отмеченных профилей: Studio → проверка аккаунта; "
-            "опционально подписка на каналы по одному видео; затем "
-            "лента подписок → Shorts (просмотр, лайки/комментарии). "
-            "Headless и параллельность — в настройках."
+            "Только для отмеченных профилей. YouTube: Studio → опц. подписка "
+            "на каналы → Shorts. Instagram: сессия → открыть каждый залитый "
+            "рилс по ссылке → Подписаться/лайк/коммент на странице рилса "
+            "(без захода в профиль). Headless и параллельность — в настройках."
         )
         self._btn_profiles_promote.clicked.connect(self._start_profiles_promote)
         self._btn_profiles_cookie_farm = QPushButton("Фарм Cookie")
@@ -4624,9 +4624,9 @@ class MainWindow(QWidget):
             self._btn_profiles_register_accounts.setVisible(is_ig)
         if hasattr(self, "_btn_profiles_connect_2fa"):
             self._btn_profiles_connect_2fa.setVisible(is_ig)
-        # YouTube-only: продвижение. Редактирование каналов/профилей — на обеих платформах.
+        # Продвижение: Shorts (YT) или Reels (IG). Редактирование — на обеих.
         if hasattr(self, "_btn_profiles_promote"):
-            self._btn_profiles_promote.setVisible(not is_ig)
+            self._btn_profiles_promote.setVisible(True)
         if hasattr(self, "_btn_profiles_channel_setup"):
             self._btn_profiles_channel_setup.setVisible(True)
         # Прогрев: Shorts (YT) или Reels (IG).
@@ -7535,6 +7535,7 @@ class MainWindow(QWidget):
                 platform=self._platform
             ),
             ai_generate_fn=self._on_ai_magic_generate,
+            platform=self._platform,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return None
@@ -7577,7 +7578,38 @@ class MainWindow(QWidget):
             return
 
         targets: list = []
-        if promote_settings.subscribe_to_channels:
+        is_ig = self._platform == PLATFORM_INSTAGRAM
+        from zaliver.youtube_upload.studio import PromotionTargetVideo
+
+        if is_ig:
+            # Instagram: все залитые рилсы из БД (не только пересечение
+            # с текущим фильтром списка профилей).
+            videos = self._upload_store.list_promotable_videos(
+                platform=self._platform,
+                profile_ids=None,
+                require_positive_views=False,
+                one_per_profile=True,
+                include_missing_profile_id=True,
+            )
+            if not videos:
+                QMessageBox.warning(
+                    self,
+                    "Продвижение",
+                    "Нет подходящих рилсов в базе: нужны ролики с video_id "
+                    "(не помеченные как недоступные). "
+                    "Сначала залейте рилсы и при необходимости обновите статистику.",
+                )
+                return
+            targets = [
+                PromotionTargetVideo(
+                    profile_id=v.profile_id,
+                    video_id=v.video_id,
+                    url=v.url,
+                    title=v.title,
+                )
+                for v in videos
+            ]
+        elif promote_settings.subscribe_to_channels:
             visible = self._profiles_visible_matched()
             visible_ids = [
                 pid for p in visible if (pid := _profile_id(p))
@@ -7586,7 +7618,7 @@ class MainWindow(QWidget):
                 QMessageBox.warning(
                     self,
                     "Продвижение",
-                    "В списке нет видимых профилей для подбора видео на подписку.",
+                    "В списке нет видимых профилей для подбора видео.",
                 )
                 return
             videos = self._upload_store.list_promotable_videos_for_profiles(
@@ -7602,8 +7634,6 @@ class MainWindow(QWidget):
                     "«Подписаться на каналы».",
                 )
                 return
-            from zaliver.youtube_upload.studio import PromotionTargetVideo
-
             targets = [
                 PromotionTargetVideo(
                     profile_id=v.profile_id,
@@ -7645,11 +7675,22 @@ class MainWindow(QWidget):
         )
         headless_label = "headless" if headless else "с окном браузера"
         max_concurrent = self._max_concurrent_browsers()
-        sub_note = (
-            f"подписка на {len(targets)} каналов, "
-            if promote_settings.subscribe_to_channels
-            else ""
-        )
+        if is_ig:
+            sub_note = (
+                "с подпиской на рилсе, "
+                if promote_settings.subscribe_to_channels
+                else "без подписки, "
+            )
+            feed_label = f"рилсов по ссылкам до {promote_settings.shorts_count}"
+            targets_note = f", целей {len(targets)}"
+        elif promote_settings.subscribe_to_channels:
+            sub_note = f"подписка на {len(targets)} каналов, "
+            feed_label = f"Shorts: {promote_settings.shorts_count}"
+            targets_note = ""
+        else:
+            sub_note = ""
+            feed_label = f"Shorts: {promote_settings.shorts_count}"
+            targets_note = ""
         comments_note = (
             f", комментарии {promote_settings.comment_probability_pct:g}%"
             if promote_settings.enable_comments
@@ -7657,7 +7698,7 @@ class MainWindow(QWidget):
         )
         self._append_log(
             f"[promote] Старт для {len(profile_ids)} профилей "
-            f"({sub_note}Shorts: {promote_settings.shorts_count}, "
+            f"({sub_note}{feed_label}{targets_note}, "
             f"лайк {promote_settings.like_probability_pct:g}%"
             f"{comments_note}, {headless_label}, "
             f"до {max_concurrent} параллельно)…"
@@ -7693,6 +7734,8 @@ class MainWindow(QWidget):
         max_concurrent: int = DEFAULT_MAX_CONCURRENT_BROWSERS,
     ) -> None:
         from zaliver.antydetect.antic_open import (
+            promote_instagram_reels_in_local_antidetect_profile,
+            promote_instagram_reels_in_profile,
             promote_youtube_videos_in_local_antidetect_profile,
             promote_youtube_videos_in_profile,
             set_log_sink,
@@ -7704,11 +7747,11 @@ class MainWindow(QWidget):
 
         set_log_sink(self._ui_log_line.emit)
         kind_s = (kind or "").strip()
+        is_ig = self._platform == PLATFORM_INSTAGRAM
         promote_kw = {
             "subscribe_to_channels": promote_settings.subscribe_to_channels,
             "shorts_count": promote_settings.shorts_count,
             "like_probability_pct": promote_settings.like_probability_pct,
-            "subscribe_probability_pct": 0.0,
             "shorts_watch_min_s": promote_settings.shorts_watch_min_s,
             "shorts_watch_max_s": promote_settings.shorts_watch_max_s,
             "watch_full_video": promote_settings.watch_full_video,
@@ -7716,8 +7759,42 @@ class MainWindow(QWidget):
             "comments": list(promote_settings.comments),
             "comment_probability_pct": promote_settings.comment_probability_pct,
         }
+        if not is_ig:
+            promote_kw["subscribe_probability_pct"] = 0.0
 
         def _promote_one(pid: str) -> None:
+            if is_ig:
+                login, password, twofa = self._instagram_session_credentials(pid)
+                ig_kw = {
+                    **promote_kw,
+                    "session_login": login,
+                    "session_password": password,
+                    "session_twofa": twofa,
+                }
+                if _is_own_antidetect_kind(kind_s):
+                    u = (base_url or "").strip()
+                    if not u:
+                        raise LocalAntidetectError(
+                            f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
+                        )
+                    promote_instagram_reels_in_local_antidetect_profile(
+                        pid,
+                        base_url=u,
+                        videos=videos,
+                        headless=headless,
+                        remote_cdp=remote_cdp,
+                        **ig_kw,
+                    )
+                else:
+                    promote_instagram_reels_in_profile(
+                        pid,
+                        videos=videos,
+                        local_token=token or None,
+                        headless=headless,
+                        **ig_kw,
+                    )
+                return
+
             creds = self._profile_login_credentials(pid)
             yt_oldest = self._profile_yt_oldest_name(pid) or None
             search_oldest = self._youtube_search_oldest_channel()

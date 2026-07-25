@@ -1318,18 +1318,59 @@ class UploadStore:
 
         Профили без подходящего видео пропускаются. Дубликаты video_id — тоже.
         """
+        return self.list_promotable_videos(
+            platform=platform,
+            profile_ids=profile_ids,
+            require_positive_views=True,
+            one_per_profile=True,
+            include_missing_profile_id=False,
+        )
+
+    def list_promotable_videos(
+        self,
+        *,
+        platform: str = "youtube",
+        profile_ids: Iterable[str] | None = None,
+        require_positive_views: bool = True,
+        one_per_profile: bool = True,
+        include_missing_profile_id: bool = False,
+        limit: int | None = None,
+    ) -> list[UploadedVideo]:
+        """
+        Ролики для продвижения.
+
+        profile_ids=None — все профили платформы.
+        require_positive_views=False — достаточно video_id (удобно для Instagram).
+        include_missing_profile_id — включать ролики без profile_id в БД.
+        """
         ordered: list[str] = []
         seen_pids: set[str] = set()
-        for x in profile_ids:
-            pid = (x or "").strip()
-            if not pid or pid in seen_pids:
-                continue
-            seen_pids.add(pid)
-            ordered.append(pid)
-        if not ordered:
-            return []
-        ph = ",".join("?" for _ in ordered)
+        filter_by_profiles = profile_ids is not None
+        if filter_by_profiles:
+            for x in profile_ids or []:
+                pid = (x or "").strip()
+                if not pid or pid in seen_pids:
+                    continue
+                seen_pids.add(pid)
+                ordered.append(pid)
+            if not ordered:
+                return []
+
         plat = _normalize_platform(platform)
+        where = [
+            "v.platform = ?",
+            "trim(v.video_id) <> ''",
+            "COALESCE(v.stats_unavailable, 0) = 0",
+        ]
+        params: list[object] = [plat]
+        if filter_by_profiles:
+            ph = ",".join("?" for _ in ordered)
+            where.append(f"v.profile_id IN ({ph})")
+            params.extend(ordered)
+        if require_positive_views:
+            where.append("v.view_count IS NOT NULL")
+            where.append("v.view_count > 0")
+
         with self._connect() as con:
             rows = con.execute(
                 f"""
@@ -1343,27 +1384,14 @@ class UploadStore:
                     v.age_restricted AS age_restricted
                 FROM uploaded_videos v
                 LEFT JOIN upload_sessions s ON s.id = v.session_id
-                WHERE v.platform = ?
-                  AND v.profile_id IN ({ph})
-                  AND trim(v.video_id) <> ''
-                  AND COALESCE(v.stats_unavailable, 0) = 0
-                  AND v.view_count IS NOT NULL
-                  AND v.view_count > 0
+                WHERE {" AND ".join(where)}
                 ORDER BY v.uploaded_at DESC, v.id DESC;
                 """,
-                (plat, *ordered),
+                tuple(params),
             ).fetchall()
-        by_profile: dict[str, UploadedVideo] = {}
-        used_vids: set[str] = set()
-        for r in rows:
-            pid = str(r["profile_id"] or "").strip()
-            if not pid or pid in by_profile:
-                continue
-            vid = str(r["video_id"] or "").strip()
-            if not vid or vid in used_vids:
-                continue
-            used_vids.add(vid)
-            by_profile[pid] = UploadedVideo(
+
+        def _to_video(r) -> UploadedVideo:
+            return UploadedVideo(
                 id=int(r["id"]),
                 session_id=int(r["session_id"]),
                 session_started_at=str(r["session_started_at"])
@@ -1373,8 +1401,8 @@ class UploadStore:
                 title=str(r["title"] or ""),
                 description=str(r["description"] or ""),
                 url=str(r["url"] or ""),
-                video_id=vid,
-                profile_id=pid,
+                video_id=str(r["video_id"] or "").strip(),
+                profile_id=str(r["profile_id"] or "").strip(),
                 view_count=int(r["view_count"]) if r["view_count"] is not None else None,
                 like_count=int(r["like_count"]) if r["like_count"] is not None else None,
                 comment_count=int(r["comment_count"])
@@ -1393,7 +1421,47 @@ class UploadStore:
                     else bool(int(r["age_restricted"]))
                 ),
             )
-        return [by_profile[pid] for pid in ordered if pid in by_profile]
+
+        used_vids: set[str] = set()
+        out: list[UploadedVideo] = []
+
+        if one_per_profile:
+            by_profile: dict[str, UploadedVideo] = {}
+            orphans: list[UploadedVideo] = []
+            for r in rows:
+                vid = str(r["video_id"] or "").strip()
+                if not vid or vid in used_vids:
+                    continue
+                pid = str(r["profile_id"] or "").strip()
+                if not pid:
+                    if include_missing_profile_id:
+                        used_vids.add(vid)
+                        orphans.append(_to_video(r))
+                    continue
+                if pid in by_profile:
+                    continue
+                used_vids.add(vid)
+                by_profile[pid] = _to_video(r)
+            if filter_by_profiles:
+                out = [by_profile[pid] for pid in ordered if pid in by_profile]
+            else:
+                # Свежие первыми (как в SQL).
+                out = list(by_profile.values())
+            out.extend(orphans)
+        else:
+            for r in rows:
+                vid = str(r["video_id"] or "").strip()
+                if not vid or vid in used_vids:
+                    continue
+                pid = str(r["profile_id"] or "").strip()
+                if not pid and not include_missing_profile_id:
+                    continue
+                used_vids.add(vid)
+                out.append(_to_video(r))
+
+        if limit is not None and limit >= 0:
+            out = out[: int(limit)]
+        return out
 
     def profile_upload_pause_remaining_seconds(
         self, profile_id: str, *, platform: str = "youtube"

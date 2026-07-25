@@ -24,6 +24,7 @@ from zaliver.ui.channel_setup_helpers import (
     field_with_recent_picker,
     make_magic_wand_button,
 )
+from zaliver.ui.platform import PLATFORM_INSTAGRAM
 
 _DEFAULT_PROMOTE_COMMENTS = (
     "nice!\n"
@@ -60,41 +61,74 @@ class ProfilePromoteDialog(QDialog):
         parent: QWidget | None = None,
         recent_comments: list[str] | None = None,
         ai_generate_fn: Callable[..., None] | None = None,
+        platform: str = "",
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Продвижение")
         self.setModal(True)
         self.setMinimumWidth(460)
+        is_ig = (platform or "").strip().lower() == PLATFORM_INSTAGRAM
+        reel_word = "Reels" if is_ig else "Shorts"
+        reel_one = "Reel" if is_ig else "Short"
 
         recent = [c for c in (recent_comments or []) if (c or "").strip()]
 
         root = QVBoxLayout(self)
         root.setSpacing(12)
 
-        hint = QLabel(
-            "1) Studio — проверка, что аккаунт не заблокирован.\n"
-            "2) При галочке «Подписаться на каналы» — по одному видео "
-            "каждого видимого профиля и подписка.\n"
-            "3) Лента подписок → полка Shorts → просмотр "
-            "(лайки / комментарии)."
-        )
+        if is_ig:
+            hint = QLabel(
+                "1) Instagram — проверка, что сессия жива.\n"
+                "2) По ссылке открыть каждый залитый рилс (с просмотрами "
+                "у видимых профилей).\n"
+                "3) На странице рилса: опц. «Подписаться» рядом с ником, "
+                "лайк, комментарий — затем следующий рилс.\n"
+                "В профиль владельца не заходим."
+            )
+            subscribe_label = "Подписаться на профили"
+            subscribe_tip = (
+                "На каждом открытом рилсе нажать «Подписаться» рядом "
+                "с ником автора (без перехода в профиль). "
+                "По умолчанию выключено."
+            )
+            comments_wand_tip = "Сгенерировать через ИИ — «Комментарии Instagram»"
+            comments_wand_title = "Комментарии Instagram"
+            comments_prompt_id = "builtin_youtube_comments"
+        else:
+            hint = QLabel(
+                "1) Studio — проверка, что аккаунт не заблокирован.\n"
+                "2) При галочке «Подписаться на каналы» — по одному видео "
+                "каждого видимого профиля и подписка.\n"
+                "3) Лента подписок → полка Shorts → просмотр "
+                "(лайки / комментарии)."
+            )
+            subscribe_label = "Подписаться на каналы"
+            subscribe_tip = (
+                "Открыть по одному уникальному видео видимых профилей "
+                "(с просмотрами в БД) и подписаться. По умолчанию выключено."
+            )
+            comments_wand_tip = "Сгенерировать через ИИ — «Комментарии YouTube»"
+            comments_wand_title = "Комментарии YouTube"
+            comments_prompt_id = "builtin_youtube_comments"
         hint.setWordWrap(True)
         hint.setObjectName("hint")
         root.addWidget(hint)
 
-        self._subscribe_cb = QCheckBox("Подписаться на каналы")
+        self._subscribe_cb = QCheckBox(subscribe_label)
         self._subscribe_cb.setChecked(False)
-        self._subscribe_cb.setToolTip(
-            "Открыть по одному уникальному видео видимых профилей "
-            "(с просмотрами в БД) и подписаться. По умолчанию выключено."
-        )
+        self._subscribe_cb.setToolTip(subscribe_tip)
         root.addWidget(self._subscribe_cb)
 
         form = QFormLayout()
         self._count_spin = QSpinBox()
         self._count_spin.setRange(1, 9999)
         self._count_spin.setValue(10)
-        form.addRow("Количество просмотренных Shorts:", self._count_spin)
+        count_label = (
+            f"Количество {reel_word} по ссылкам:"
+            if is_ig
+            else f"Количество просмотренных {reel_word}:"
+        )
+        form.addRow(count_label, self._count_spin)
 
         self._like_spin = QDoubleSpinBox()
         self._like_spin.setRange(0.0, 100.0)
@@ -119,16 +153,20 @@ class ProfilePromoteDialog(QDialog):
         watch_range_row.addStretch()
         watch_range_w = QWidget()
         watch_range_w.setLayout(watch_range_row)
-        self._watch_range_lbl = QLabel("Длительность просмотра Short:")
+        self._watch_range_lbl = QLabel(f"Длительность просмотра {reel_one}:")
         form.addRow(self._watch_range_lbl, watch_range_w)
         self._watch_range_w = watch_range_w
 
-        self._watch_full_cb = QCheckBox("Смотреть каждый Short до конца")
+        self._watch_full_cb = QCheckBox(f"Смотреть каждый {reel_one} до конца")
         self._watch_full_cb.setToolTip(
             "Дождаться конца ролика, затем листать дальше. "
             "Если снять галочку — случайное время в указанном диапазоне."
         )
         form.addRow("", self._watch_full_cb)
+        self._reel_one = reel_one
+        self._comments_wand_tip = comments_wand_tip
+        self._comments_wand_title = comments_wand_title
+        self._comments_prompt_id = comments_prompt_id
 
         def _sync_watch_mode(full_watch: bool) -> None:
             self._watch_range_lbl.setVisible(not full_watch)
@@ -172,7 +210,7 @@ class ProfilePromoteDialog(QDialog):
         self._comments_edit.setMinimumHeight(120)
 
         btn_comments_wand = make_magic_wand_button(
-            tooltip="Сгенерировать через ИИ — «Комментарии YouTube»"
+            tooltip=self._comments_wand_tip
         )
         btn_comments_wand.setEnabled(ai_generate_fn is not None)
 
@@ -184,8 +222,8 @@ class ProfilePromoteDialog(QDialog):
                 self._comments_edit.setPlainText(text if text is not None else "")
 
             ai_generate_fn(
-                default_prompt_id="builtin_youtube_comments",
-                window_title="Комментарии YouTube",
+                default_prompt_id=self._comments_prompt_id,
+                window_title=self._comments_wand_title,
                 apply_text=_apply,
                 parent=self,
                 ask_reply_lines=True,
@@ -235,8 +273,8 @@ class ProfilePromoteDialog(QDialog):
             QMessageBox.warning(
                 self,
                 "Продвижение",
-                "Минимальная длительность просмотра Short не может быть "
-                "больше максимальной.",
+                f"Минимальная длительность просмотра {self._reel_one} "
+                "не может быть больше максимальной.",
             )
             return
         if self._comments_cb.isChecked():

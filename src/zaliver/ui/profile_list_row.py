@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import timedelta
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QCursor
@@ -17,12 +18,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from zaliver.db.upload_store import resolve_upload_pause
 from zaliver.ui.antic_profile_row import (
     _profile_description,
     _profile_id,
     _profile_name,
     _profile_tag_list,
     format_upload_cooldown_line,
+    upload_pause_reset_tooltip,
 )
 from zaliver.ui.profile_list_helpers import (
     make_profile_copy_id_button,
@@ -33,7 +36,7 @@ from zaliver.ui.profile_list_helpers import (
 
 
 class ProfileListRow(QWidget):
-    """Checkbox + title/desc/tags + proxy dot + «Пауза 3 ч» (objectName profileRow)."""
+    """Checkbox + title/desc/tags + proxy dot + пауза между заливами (objectName profileRow)."""
 
     def __init__(
         self,
@@ -41,6 +44,7 @@ class ProfileListRow(QWidget):
         parent: QWidget | None = None,
         *,
         last_uploaded_at: str | None = None,
+        upload_pause: timedelta | None = None,
         on_upload_pause_click: Callable[[], None] | None = None,
         show_account_data_button: bool = False,
         on_account_data_click: Callable[[], None] | None = None,
@@ -59,7 +63,10 @@ class ProfileListRow(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.setMouseTracking(True)
 
-        upload_text, upload_kind = format_upload_cooldown_line(last_uploaded_at)
+        self._upload_pause = resolve_upload_pause(upload_pause)
+        upload_text, upload_kind = format_upload_cooldown_line(
+            last_uploaded_at, pause=self._upload_pause
+        )
         self._upload_cooldown_kind = upload_kind
         self._upload_pause_cb = on_upload_pause_click
         self._account_data_cb = on_account_data_click
@@ -192,16 +199,15 @@ class ProfileListRow(QWidget):
     def _apply_upload_pause_interaction(self) -> None:
         if self._upload_pause_cb and self._upload_cooldown_kind == "wait":
             self.upload_label.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            self.upload_label.setToolTip(
-                "Нажмите, чтобы обновить время паузы с последнего залива "
-                "(как если бы прошли 3 часа) и снова разрешить загрузку с этого профиля."
-            )
+            self.upload_label.setToolTip(upload_pause_reset_tooltip(self._upload_pause))
         else:
             self.upload_label.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
             self.upload_label.setToolTip("")
 
     def set_last_upload_cooldown(self, last_uploaded_iso: str | None) -> None:
-        text, kind = format_upload_cooldown_line(last_uploaded_iso)
+        text, kind = format_upload_cooldown_line(
+            last_uploaded_iso, pause=self._upload_pause
+        )
         self.upload_label.setText(text)
         self.upload_label.setProperty("uploadCooldown", kind)
         self._upload_cooldown_kind = kind

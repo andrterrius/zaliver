@@ -44,12 +44,15 @@ class VideoTask:
 
 # Лимит по умолчанию, если вызывающий код не передал max_concurrent_uploads.
 _MAX_CONCURRENT_UPLOADS = DEFAULT_MAX_CONCURRENT_BROWSERS
-# Последние N завершённых загрузок — не назначаем им новое видео, пока есть другие свободные очереди.
+# Последние N успешных загрузок — не назначаем им новое видео, пока есть другие свободные очереди.
 _RECENT_COMPLETED_MAX = 5
-# Если «свободны» только недавно отработавшие профили — пауза диспетчера перед повторным назначением.
+# Если «свободны» только недавно успешные профили — пауза диспетчера перед повторным назначением.
 _RECENT_BATCH_WAIT_S = 10800.0
 # Интервал опроса во время [WAIT] (лог cooldown профиля и sleep диспетчера).
 _WAIT_POLL_CHUNK_S = 60.0
+# keep_browser_open: сколько ждать следующее видео на тот же профиль, прежде чем
+# закрыть браузер и освободить слот параллельности.
+_KEEP_OPEN_IDLE_GRACE_S = 8.0
 
 
 class MultiProfileUploader:
@@ -59,14 +62,16 @@ class MultiProfileUploader:
     - One profile = one thread.
     - At most `max_concurrent_uploads` profiles run `upload_one` at the same time (RAM);
       others wait on a semaphore until a slot frees.
+    - При `keep_browser_open` слот удерживается, пока браузер профиля открыт
+      (чтобы не открыть больше лимита параллельных браузеров).
     - Round-robin assignment via dispatcher thread; среди профилей с пустой per-profile
       очередью сначала выбираются те, кто не входит в последние `_RECENT_COMPLETED_MAX`
-      завершённых загрузок (чтобы не гонять одни и те же 5, если другие свободны).
-    - Если подходят только «недавно отработавшие», диспетчер ждёт `_RECENT_BATCH_WAIT_S` (3 ч),
-      затем сбрасывает список недавних и назначает снова (лог [WAIT]).
+      успешных загрузок (чтобы не гонять одни и те же 5, если другие свободны).
+    - Если подходят только «недавно успешные», диспетчер ждёт `recent_batch_wait_s`
+      (по умолчанию 3 ч), затем сбрасывает список недавних и назначает снова (лог [WAIT]).
     - Per-profile cooldown: wait at least `cooldown_s` from *start time* of previous upload
       in this run, and optionally `profile_upload_pause_remaining_s` (e.g. DB «Пауза 3 ч»).
-    - Errors re-queue the same video to another profile (never the same one immediately),
+    - Errors re-queue the same video (prefer another profile; same one if no alternative),
       max `max_attempts_per_profile` attempts per video per profile.
     - stop() requests graceful shutdown; workers finish current upload and exit.
     - Waiting for a concurrency slot uses short acquire timeouts so stop() is honored
@@ -81,6 +86,9 @@ class MultiProfileUploader:
         max_attempts_per_profile: int = 2,
         max_concurrent_uploads: int = _MAX_CONCURRENT_UPLOADS,
         profile_upload_pause_remaining_s: Callable[[str], float] | None = None,
+        recent_batch_wait_s: float | None = None,
+        keep_browser_open: bool = False,
+        close_kept_browser: Callable[[str], None] | None = None,
         log_sink: Callable[[str], None],
         upload_one: Callable[[str, VideoTask], None],
         on_profile_attempt: Callable[[str, bool, str], None] | None = None,
@@ -90,6 +98,11 @@ class MultiProfileUploader:
         self._profiles = [p.strip() for p in (profile_ids or []) if (p or "").strip()]
         self._cooldown_s = float(cooldown_s)
         self._max_attempts = int(max(1, max_attempts_per_profile))
+        self._recent_batch_wait_s = float(
+            _RECENT_BATCH_WAIT_S if recent_batch_wait_s is None else max(0.0, recent_batch_wait_s)
+        )
+        self._keep_browser_open = bool(keep_browser_open)
+        self._close_kept_browser = close_kept_browser
         n_prof = max(1, len(self._profiles))
         cap = max(
             1,
@@ -124,6 +137,8 @@ class MultiProfileUploader:
         self._last_start_monotonic: dict[str, float] = {pid: 0.0 for pid in self._profiles}
         self._recent_completed: deque[str] = deque(maxlen=_RECENT_COMPLETED_MAX)
         self._recent_lock = threading.Lock()
+        self._active_uploads: set[str] = set()
+        self._active_lock = threading.Lock()
         self._workers: list[threading.Thread] = []
         self._dispatcher: threading.Thread | None = None
 
@@ -242,8 +257,6 @@ class MultiProfileUploader:
 
     def _task_exhausted_on_all_profiles(self, task: VideoTask) -> bool:
         for pid in self._profiles:
-            if pid == task.last_failed_profile:
-                continue
             if int(task.attempts_by_profile.get(pid, 0)) >= self._max_attempts:
                 continue
             return False
@@ -253,14 +266,14 @@ class MultiProfileUploader:
         """Профили, которым можно поставить задачу (очередь пуста, лимиты попыток)."""
         out: list[str] = []
         for pid in self._profiles:
-            if pid == task.last_failed_profile:
-                continue
             if int(task.attempts_by_profile.get(pid, 0)) >= self._max_attempts:
                 continue
             if not self._per_profile_q[pid].empty():
                 continue
             out.append(pid)
-        return out
+        # Сразу после ошибки предпочитаем другой профиль; если других нет — тот же.
+        not_last = [p for p in out if p != task.last_failed_profile]
+        return not_last if not_last else out
 
     def _current_schedule_profile(self) -> str | None:
         if self._schedule_batch_size <= 0:
@@ -320,11 +333,15 @@ class MultiProfileUploader:
         return candidates[0]
 
     def _wait_recent_batch_cooldown(self) -> None:
-        total = float(_RECENT_BATCH_WAIT_S)
+        total = float(self._recent_batch_wait_s)
         self._log(
             f"[{_ts()}] [upload] [WAIT] reason=recent_parallel_profiles_only "
             f"sleep_s={total:.0f}"
         )
+        if total <= 0:
+            with self._recent_lock:
+                self._recent_completed.clear()
+            return
         remaining = total
         while remaining > 0 and not self._stop.is_set():
             chunk = min(_WAIT_POLL_CHUNK_S, remaining)
@@ -503,6 +520,50 @@ class MultiProfileUploader:
             self._global_q.task_done()
         return True, idx
 
+    def should_keep_browser_open(self, profile_id: str) -> bool:
+        """
+        Пауза 0: оставить браузер только если следующий залив снова на этот профиль.
+
+        True, если:
+        - в заливе один профиль, или
+        - остальные профили сейчас заливают (слоты заняты) — свободных нет.
+
+        False, если есть хотя бы один другой свободный профиль — закрываем
+        браузер и отдаём слот ему.
+        """
+        if not self._keep_browser_open:
+            return False
+        pid = (profile_id or "").strip()
+        if not pid:
+            return False
+        if len(self._profiles) <= 1:
+            return True
+        with self._active_lock:
+            active = set(self._active_uploads)
+        for other in self._profiles:
+            if other == pid:
+                continue
+            if other in active:
+                continue
+            # Другой профиль свободен (не заливает) → слот лучше отдать ему.
+            return False
+        return True
+
+    def _release_kept_browser_slot(self, profile_id: str) -> None:
+        """Закрыть keep-open браузер профиля и вернуть слот параллельности."""
+        if self._close_kept_browser is not None:
+            try:
+                self._close_kept_browser(profile_id)
+            except Exception as e:
+                self._log(
+                    f"[{_ts()}] [upload] [STOP] close_kept_browser failed "
+                    f"profile={profile_id!r} err={e!r}"
+                )
+        try:
+            self._upload_slots.release()
+        except Exception:
+            pass
+
     def _worker_loop(self, profile_id: str) -> None:
         from zaliver.log_format import log_profile_context
 
@@ -511,171 +572,248 @@ class MultiProfileUploader:
 
     def _worker_loop_inner(self, profile_id: str) -> None:
         q = self._per_profile_q[profile_id]
-        while not self._stop.is_set():
-            try:
-                task = q.get(timeout=0.25)
-            except Empty:
-                if self._is_all_done():
-                    return
-                continue
-
-            if self._stop.is_set():
+        held_slot = False
+        try:
+            while not self._stop.is_set():
                 try:
-                    self._global_q.put(task)
-                except Exception:
-                    pass
-                q.task_done()
-                return
+                    task = q.get(timeout=0.25)
+                except Empty:
+                    if held_slot:
+                        # Ждём следующее видео на этот же профиль, иначе слот другим.
+                        try:
+                            task = q.get(timeout=_KEEP_OPEN_IDLE_GRACE_S)
+                        except Empty:
+                            self._log(
+                                f"[{_ts()}] [upload] [KEEP_OPEN] profile={profile_id} "
+                                f"idle>{_KEEP_OPEN_IDLE_GRACE_S:.0f}s — закрываем браузер, "
+                                "освобождаем слот"
+                            )
+                            self._release_kept_browser_slot(profile_id)
+                            held_slot = False
+                            if self._is_all_done():
+                                return
+                            continue
+                    else:
+                        if self._is_all_done():
+                            return
+                        continue
 
-            # Cooldown: min interval between starts in this run + optional wall-clock pause (DB).
-            pause_fn = self._profile_upload_pause_remaining_s
-            while True:
                 if self._stop.is_set():
                     try:
                         self._global_q.put(task)
                     except Exception:
                         pass
                     q.task_done()
-                    return
-
-                last_start = float(self._last_start_monotonic.get(profile_id, 0.0))
-                now_m = time.monotonic()
-                elapsed = now_m - last_start if last_start > 0 else self._cooldown_s
-                rem_internal = max(0.0, self._cooldown_s - elapsed)
-                db_rem = 0.0
-                if pause_fn is not None:
-                    try:
-                        db_rem = max(0.0, float(pause_fn(profile_id)))
-                    except Exception:
-                        db_rem = 0.0
-                remaining = max(rem_internal, db_rem)
-                if remaining <= 0:
                     break
 
-                parts: list[str] = []
-                if rem_internal > 0:
-                    parts.append(f"между_стартами≈{rem_internal:.0f}с")
-                if db_rem > 0:
-                    parts.append(f"пауза_1ч≈{db_rem:.0f}с")
-                hint = "+".join(parts) if parts else "cooldown"
-                self._log(
-                    f"[{_ts()}] [upload] [WAIT] profile={profile_id} "
-                    f"sleep_s={remaining:.1f} ({hint}) video={task.video_path!r}"
-                )
-                chunk = min(remaining, _WAIT_POLL_CHUNK_S)
-                self._stop.wait(timeout=chunk)
-                if self._stop.is_set():
-                    try:
-                        self._global_q.put(task)
-                    except Exception:
-                        pass
-                    q.task_done()
-                    return
+                # Cooldown: min interval between starts in this run + optional wall-clock pause (DB).
+                pause_fn = self._profile_upload_pause_remaining_s
+                abandon_after_wait = False
+                while True:
+                    if self._stop.is_set():
+                        try:
+                            self._global_q.put(task)
+                        except Exception:
+                            pass
+                        q.task_done()
+                        abandon_after_wait = True
+                        break
 
-            # Semaphore.acquire() без таймаута не прерывается при stop() — поток «висит» и не
-            # отпускает очередь; отмена с главного окна не доводит сессию до конца.
-            got_slot = False
-            while True:
-                if self._stop.is_set():
-                    break
-                if self._upload_slots.acquire(timeout=0.35):
-                    got_slot = True
-                    break
-            if not got_slot:
-                self._log(
-                    f"[{_ts()}] [upload] [ABANDON] profile={profile_id} "
-                    f"reason=stop_waiting_slot video={task.video_path!r}"
-                )
-                with self._done_lock:
-                    self._abandoned += 1
-                q.task_done()
-                continue
+                    last_start = float(self._last_start_monotonic.get(profile_id, 0.0))
+                    now_m = time.monotonic()
+                    elapsed = now_m - last_start if last_start > 0 else self._cooldown_s
+                    rem_internal = max(0.0, self._cooldown_s - elapsed)
+                    db_rem = 0.0
+                    if pause_fn is not None:
+                        try:
+                            db_rem = max(0.0, float(pause_fn(profile_id)))
+                        except Exception:
+                            db_rem = 0.0
+                    remaining = max(rem_internal, db_rem)
+                    if remaining <= 0:
+                        break
 
-            upload_ran = False
-            try:
-                if self._stop.is_set():
-                    try:
-                        self._global_q.put(task)
-                    except Exception:
-                        pass
-                    q.task_done()
-                    continue
-
-                # Mark start time immediately (requirement: track *start*).
-                self._last_start_monotonic[profile_id] = time.monotonic()
-
-                self._log(
-                    f"[{_ts()}] [upload] [START] profile={profile_id} video={task.video_path!r}"
-                )
-                ok = False
-                err_text = ""
-                try:
-                    self._upload_one(profile_id, task)
-                    ok = True
-                except Exception as e:
-                    ok = False
-                    err_text = str(e) or repr(e)
-                upload_ran = True
-
-                cb_attempt = self._on_profile_attempt
-                if cb_attempt is not None:
-                    try:
-                        cb_attempt(profile_id, ok, err_text)
-                    except Exception:
-                        # Callback errors must not break upload flow.
-                        pass
-
-                if ok:
-                    n_ok = (
-                        len(task.scheduled_batch)
-                        if task.scheduled_batch
-                        else 1
-                    )
+                    parts: list[str] = []
+                    if rem_internal > 0:
+                        parts.append(f"между_стартами≈{rem_internal:.0f}с")
+                    if db_rem > 0:
+                        parts.append(f"пауза_БД≈{db_rem:.0f}с")
+                    hint = "+".join(parts) if parts else "cooldown"
                     self._log(
-                        f"[{_ts()}] [upload] [OK] profile={profile_id} "
+                        f"[{_ts()}] [upload] [WAIT] profile={profile_id} "
+                        f"sleep_s={remaining:.1f} ({hint}) video={task.video_path!r}"
+                    )
+                    chunk = min(remaining, _WAIT_POLL_CHUNK_S)
+                    self._stop.wait(timeout=chunk)
+                    if self._stop.is_set():
+                        try:
+                            self._global_q.put(task)
+                        except Exception:
+                            pass
+                        q.task_done()
+                        abandon_after_wait = True
+                        break
+
+                if abandon_after_wait:
+                    break
+
+                # Semaphore: при keep_open слот уже занят этим профилем — не берём второй.
+                if not held_slot:
+                    got_slot = False
+                    while True:
+                        if self._stop.is_set():
+                            break
+                        if self._upload_slots.acquire(timeout=0.35):
+                            got_slot = True
+                            break
+                    if not got_slot:
+                        if self._stop.is_set():
+                            try:
+                                self._global_q.put(task)
+                            except Exception:
+                                pass
+                            q.task_done()
+                            break
+                        self._log(
+                            f"[{_ts()}] [upload] [ABANDON] profile={profile_id} "
+                            f"reason=stop_waiting_slot video={task.video_path!r}"
+                        )
+                        with self._done_lock:
+                            self._abandoned += 1
+                        q.task_done()
+                        continue
+                    held_slot = True
+
+                upload_ran = False
+                ok = False
+                keep_open_after = False
+                try:
+                    if self._stop.is_set():
+                        try:
+                            self._global_q.put(task)
+                        except Exception:
+                            pass
+                        q.task_done()
+                        break
+
+                    # Mark start time immediately (requirement: track *start*).
+                    self._last_start_monotonic[profile_id] = time.monotonic()
+                    keep_open_after = self.should_keep_browser_open(profile_id)
+
+                    self._log(
+                        f"[{_ts()}] [upload] [START] profile={profile_id} "
                         f"video={task.video_path!r}"
                         + (
-                            f" batch={n_ok}"
-                            if task.scheduled_batch
-                            else ""
+                            " keep_browser_open=1"
+                            if keep_open_after
+                            else (
+                                " keep_browser_open=0"
+                                if self._keep_browser_open
+                                else ""
+                            )
                         )
                     )
-                    with self._done_lock:
-                        self._done_ok += n_ok
-                else:
-                    # Record attempt on this profile and requeue to another one.
-                    task.attempts_by_profile[profile_id] = int(
-                        task.attempts_by_profile.get(profile_id, 0)
-                    ) + 1
-                    task.last_failed_profile = profile_id
-                    if task.scheduled_batch:
-                        slot_start = task.schedule_slot_start
-                        if slot_start is not None:
-                            self._profile_batch_assigned[profile_id] = slot_start
-                        for item in task.scheduled_batch:
-                            retry = VideoTask(
-                                video_path=item.video_path,
-                                title=item.title,
-                                description=item.description,
-                                schedule_publish_at=item.schedule_publish_at,
-                                attempts_by_profile=dict(task.attempts_by_profile),
-                                last_failed_profile=profile_id,
+                    err_text = ""
+                    with self._active_lock:
+                        self._active_uploads.add(profile_id)
+                    try:
+                        self._upload_one(profile_id, task)
+                        ok = True
+                    except Exception as e:
+                        ok = False
+                        err_text = str(e) or repr(e)
+                    finally:
+                        with self._active_lock:
+                            self._active_uploads.discard(profile_id)
+                    upload_ran = True
+
+                    # После залива могли освободиться другие профили — перепроверить.
+                    if keep_open_after and not self.should_keep_browser_open(profile_id):
+                        keep_open_after = False
+                        self._log(
+                            f"[{_ts()}] [upload] [KEEP_OPEN] profile={profile_id} "
+                            "есть другие доступные профили — закрываем браузер"
+                        )
+
+                    cb_attempt = self._on_profile_attempt
+                    if cb_attempt is not None:
+                        try:
+                            cb_attempt(profile_id, ok, err_text)
+                        except Exception:
+                            # Callback errors must not break upload flow.
+                            pass
+
+                    if ok:
+                        n_ok = (
+                            len(task.scheduled_batch)
+                            if task.scheduled_batch
+                            else 1
+                        )
+                        self._log(
+                            f"[{_ts()}] [upload] [OK] profile={profile_id} "
+                            f"video={task.video_path!r}"
+                            + (
+                                f" batch={n_ok}"
+                                if task.scheduled_batch
+                                else ""
                             )
-                            self._global_q.put(retry)
+                        )
+                        with self._done_lock:
+                            self._done_ok += n_ok
                     else:
-                        self._global_q.put(task)
-                    self._log(
-                        f"[{_ts()}] [upload] [ERROR] profile={profile_id} video={task.video_path!r} "
-                        f"attempt={task.attempts_by_profile[profile_id]}/{self._max_attempts} err={err_text!r}"
-                    )
-            finally:
-                self._upload_slots.release()
+                        # Record attempt on this profile and requeue to another one.
+                        task.attempts_by_profile[profile_id] = int(
+                            task.attempts_by_profile.get(profile_id, 0)
+                        ) + 1
+                        task.last_failed_profile = profile_id
+                        if task.scheduled_batch:
+                            slot_start = task.schedule_slot_start
+                            if slot_start is not None:
+                                self._profile_batch_assigned[profile_id] = slot_start
+                            for item in task.scheduled_batch:
+                                retry = VideoTask(
+                                    video_path=item.video_path,
+                                    title=item.title,
+                                    description=item.description,
+                                    schedule_publish_at=item.schedule_publish_at,
+                                    attempts_by_profile=dict(task.attempts_by_profile),
+                                    last_failed_profile=profile_id,
+                                )
+                                self._global_q.put(retry)
+                        else:
+                            self._global_q.put(task)
+                        self._log(
+                            f"[{_ts()}] [upload] [ERROR] profile={profile_id} "
+                            f"video={task.video_path!r} "
+                            f"attempt={task.attempts_by_profile[profile_id]}/"
+                            f"{self._max_attempts} err={err_text!r}"
+                        )
+                finally:
+                    if held_slot and not keep_open_after:
+                        if self._keep_browser_open:
+                            # upload_one мог оставить браузер открытым — гасим явно.
+                            self._release_kept_browser_slot(profile_id)
+                        else:
+                            try:
+                                self._upload_slots.release()
+                            except Exception:
+                                pass
+                        held_slot = False
+                    elif held_slot and keep_open_after:
+                        self._log(
+                            f"[{_ts()}] [upload] [KEEP_OPEN] profile={profile_id} "
+                            "оставляем браузер (следующий залив снова сюда)"
+                        )
 
-            if upload_ran:
-                with self._recent_lock:
-                    self._recent_completed.append(profile_id)
+                if upload_ran and ok:
+                    # Только успех: ошибка не должна блокировать профиль на recent_batch_wait.
+                    with self._recent_lock:
+                        self._recent_completed.append(profile_id)
 
-            q.task_done()
+                q.task_done()
+        finally:
+            if held_slot:
+                self._release_kept_browser_slot(profile_id)
 
     def _is_all_done(self) -> bool:
         # We consider "all done" when we have accounted for every initial task as OK/FAILED

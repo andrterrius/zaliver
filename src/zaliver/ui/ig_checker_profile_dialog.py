@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import timedelta
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
@@ -46,6 +47,7 @@ class IgCheckerProfilePickDialog(QDialog):
         platform: str,
         initially_selected_id: str = "",
         on_upload_pause_click: Callable[[str], None] | None = None,
+        upload_pause: timedelta | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -137,6 +139,7 @@ class IgCheckerProfilePickDialog(QDialog):
             upload_store,
             on_upload_pause_click=_pause_click if on_upload_pause_click else None,
             single_select=True,
+            upload_pause=upload_pause,
         )
         self._interaction.populate(
             self._dlg_profiles,

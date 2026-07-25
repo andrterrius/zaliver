@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt, QSize, QTimer
@@ -210,13 +211,21 @@ def proxy_health_dot_ui(profile: dict[str, object]) -> tuple[str, str, str]:
     return "●", "color: #888;", tip or "Прокси не проверен"
 
 
-def profile_upload_cooldown_kind(last_uploaded_iso: str | None) -> str:
-    return format_upload_cooldown_line(last_uploaded_iso)[1]
+def profile_upload_cooldown_kind(
+    last_uploaded_iso: str | None,
+    *,
+    pause: timedelta | None = None,
+) -> str:
+    return format_upload_cooldown_line(last_uploaded_iso, pause=pause)[1]
 
 
-def profile_is_upload_available(last_uploaded_iso: str | None) -> bool:
+def profile_is_upload_available(
+    last_uploaded_iso: str | None,
+    *,
+    pause: timedelta | None = None,
+) -> bool:
     """True if upload pause elapsed or no prior upload (can upload now)."""
-    return profile_upload_cooldown_kind(last_uploaded_iso) != "wait"
+    return profile_upload_cooldown_kind(last_uploaded_iso, pause=pause) != "wait"
 
 
 def profile_has_tag_error(profile: dict[str, object]) -> bool:

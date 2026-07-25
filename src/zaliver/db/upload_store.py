@@ -47,8 +47,19 @@ def uploaded_at_sort_ts(iso_s: str) -> float:
     return dt.timestamp() if dt is not None else 0.0
 
 
-# Должно совпадать с подписью «Пауза 3 ч» в UI (`antic_profile_row.format_upload_cooldown_line`).
-_UPLOAD_PAUSE_BETWEEN_UPLOADS = timedelta(hours=3)
+# YouTube: фиксированная пауза. Instagram: из настроек (см. upload_pause_hours).
+# Подпись в UI — `antic_profile_row.format_upload_cooldown_line`.
+DEFAULT_UPLOAD_PAUSE_BETWEEN_UPLOADS = timedelta(hours=3)
+_UPLOAD_PAUSE_BETWEEN_UPLOADS = DEFAULT_UPLOAD_PAUSE_BETWEEN_UPLOADS
+
+
+def resolve_upload_pause(pause: timedelta | None = None) -> timedelta:
+    """Пауза между заливами; None / отрицательное — дефолт YouTube (3 ч)."""
+    if pause is None:
+        return DEFAULT_UPLOAD_PAUSE_BETWEEN_UPLOADS
+    if pause.total_seconds() < 0:
+        return DEFAULT_UPLOAD_PAUSE_BETWEEN_UPLOADS
+    return pause
 # Сколько уникальных названий показывать в выпадающем списке перед заливом.
 _RECENT_UPLOAD_TITLES_UI_LIMIT = 5
 # Сколько строк хранить в таблице recent_upload_titles (с запасом).
@@ -1464,15 +1475,20 @@ class UploadStore:
         return out
 
     def profile_upload_pause_remaining_seconds(
-        self, profile_id: str, *, platform: str = "youtube"
+        self,
+        profile_id: str,
+        *,
+        platform: str = "youtube",
+        pause: timedelta | None = None,
     ) -> float:
         """
         Секунды до конца паузы после последнего успешного залива с профиля (по БД),
-        по тем же правилам, что «Пауза 3 ч» в списке профилей. 0 — можно заливать.
+        по тем же правилам, что подпись паузы в списке профилей. 0 — можно заливать.
         """
         pid = (profile_id or "").strip()
         if not pid:
             return 0.0
+        pause_td = resolve_upload_pause(pause)
         m = self.last_uploaded_at_by_profiles([pid], platform=platform)
         iso = (m.get(pid) or "").strip()
         if not iso:
@@ -1482,23 +1498,30 @@ class UploadStore:
             return 0.0
         now = datetime.now(tz=timezone.utc)
         delta = now - dt
-        if delta >= _UPLOAD_PAUSE_BETWEEN_UPLOADS:
+        if delta >= pause_td:
             return 0.0
-        rem = _UPLOAD_PAUSE_BETWEEN_UPLOADS - delta
+        rem = pause_td - delta
         return float(max(0.0, rem.total_seconds()))
 
     def reset_latest_upload_time_for_profile(
-        self, *, profile_id: str, platform: str = "youtube"
+        self,
+        *,
+        profile_id: str,
+        platform: str = "youtube",
+        pause: timedelta | None = None,
     ) -> int:
         """
-        Сдвигает время последнего залива для profile_id на >3 ч назад (по одной последней записи),
-        чтобы в UI пауза 3 ч считалась пройденной. Возвращает число обновлённых строк (0 если записей нет).
+        Сдвигает время последнего залива для profile_id дальше паузы (по одной последней записи),
+        чтобы в UI пауза считалась пройденной. Возвращает число обновлённых строк (0 если записей нет).
         """
         pid = (profile_id or "").strip()
         if not pid:
             return 0
         plat = _normalize_platform(platform)
-        old = (datetime.now(tz=timezone.utc) - timedelta(hours=4)).isoformat()
+        pause_td = resolve_upload_pause(pause)
+        # Чуть больше паузы, чтобы UI сразу показал «можно заливать».
+        shift = pause_td + timedelta(hours=1) if pause_td.total_seconds() > 0 else timedelta(hours=1)
+        old = (datetime.now(tz=timezone.utc) - shift).isoformat()
         with self._connect() as con:
             con.execute(
                 """

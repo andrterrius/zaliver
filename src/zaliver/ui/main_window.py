@@ -66,7 +66,12 @@ from PyQt6.QtWidgets import (
 )
 
 from zaliver.db.video_store import VideoStore
-from zaliver.db.upload_store import UploadedVideo, UploadStore, uploaded_at_sort_ts
+from zaliver.db.upload_store import (
+    DEFAULT_UPLOAD_PAUSE_BETWEEN_UPLOADS,
+    UploadedVideo,
+    UploadStore,
+    uploaded_at_sort_ts,
+)
 from zaliver.antydetect.browser_concurrency import (
     DEFAULT_MAX_CONCURRENT_BROWSERS,
     MAX_CONCURRENT_BROWSERS_MAX,
@@ -92,7 +97,12 @@ from zaliver.processing.text_overlay import (
 )
 from zaliver.processing.thread_worker import ProcessingController
 from zaliver.processing.slicing_worker import SlicingController
-from zaliver.ui.antic_profile_row import _profile_id, _profile_name
+from zaliver.ui.antic_profile_row import (
+    _profile_id,
+    _profile_name,
+    format_upload_pause_human,
+    format_upload_pause_short,
+)
 from zaliver.ui.profile_list_helpers import (
     profile_matches_search,
     profile_matches_tag_filter,
@@ -947,6 +957,7 @@ class MainWindow(QWidget):
         self._load_folder_settings()
         self._load_antydetect_settings()
         self._load_youtube_settings()
+        self._load_instagram_settings()
         self._load_ai_settings()
         self._update_profiles_section_header()
         self._sync_ffmpeg_install_row()
@@ -2114,6 +2125,7 @@ class MainWindow(QWidget):
             on_account_data_click=self._open_profile_account_data_dialog,
             on_gmail_data_click=self._open_profile_gmail_data_dialog,
             on_preview_click=self._open_profile_cdp_preview,
+            upload_pause=self._upload_pause_between_uploads(),
         )
         list_sel_row, self._lbl_checked_profiles_count = self._build_profiles_selection_toolbar(
             self,
@@ -2381,6 +2393,46 @@ class MainWindow(QWidget):
         # В Instagram API-ключ Data API не используется (статистика через сессию профиля).
         gb_yt.setVisible(self._platform != PLATFORM_INSTAGRAM)
 
+        gb_ig = QGroupBox("Instagram")
+        self._gb_instagram_settings = gb_ig
+        gi = _compact_settings_grid(gb_ig)
+        pause_tip = (
+            "Минимальная пауза между успешными заливами с одного профиля Instagram.\n"
+            "0 ч 0 мин — браузер не закрывается между роликами на том же профиле.\n"
+            "У YouTube всегда 3 часа и в настройках не меняется."
+        )
+        self._instagram_upload_pause_hours = QSpinBox()
+        self._instagram_upload_pause_hours.setRange(0, 168)
+        self._instagram_upload_pause_hours.setSingleStep(1)
+        self._instagram_upload_pause_hours.setValue(3)
+        self._instagram_upload_pause_hours.setSuffix(" ч")
+        self._instagram_upload_pause_hours.setToolTip(pause_tip)
+        self._instagram_upload_pause_minutes = QSpinBox()
+        self._instagram_upload_pause_minutes.setRange(0, 59)
+        self._instagram_upload_pause_minutes.setSingleStep(1)
+        self._instagram_upload_pause_minutes.setValue(0)
+        self._instagram_upload_pause_minutes.setSuffix(" мин")
+        self._instagram_upload_pause_minutes.setToolTip(pause_tip)
+        pause_row = QHBoxLayout()
+        pause_row.setContentsMargins(0, 0, 0, 0)
+        pause_row.setSpacing(8)
+        pause_row.addWidget(self._instagram_upload_pause_hours)
+        pause_row.addWidget(self._instagram_upload_pause_minutes)
+        pause_row.addStretch(1)
+        pause_wrap = QWidget()
+        pause_wrap.setLayout(pause_row)
+        self._btn_save_instagram = QPushButton("Сохранить")
+        self._btn_save_instagram.setObjectName("secondary")
+        self._btn_save_instagram.clicked.connect(self._save_instagram_settings)
+        self._instagram_settings_status = QLabel("")
+        self._instagram_settings_status.setObjectName("hint")
+        self._instagram_settings_status.setWordWrap(True)
+        gi.addWidget(QLabel("Пауза между видео:"), 0, 0)
+        gi.addWidget(pause_wrap, 0, 1)
+        gi.addWidget(_settings_save_row(self._btn_save_instagram), 1, 0, 1, 2)
+        gi.addWidget(self._instagram_settings_status, 2, 0, 1, 2)
+        gb_ig.setVisible(self._platform == PLATFORM_INSTAGRAM)
+
         gb_ai = QGroupBox("ИИ")
         gai = _compact_settings_grid(gb_ai)
         ai_hint = QLabel(
@@ -2434,6 +2486,7 @@ class MainWindow(QWidget):
         settings_l.addWidget(self._gb_antydetect_local)
         settings_l.addWidget(self._gb_antydetect_remote)
         settings_l.addWidget(gb_yt)
+        settings_l.addWidget(gb_ig)
         settings_l.addWidget(gb_ai)
         settings_l.addStretch()
         settings_scroll.setWidget(settings_inner)
@@ -3074,6 +3127,7 @@ class MainWindow(QWidget):
             platform=self._platform,
             initially_selected_id=self._uploaded_ig_checker_selected_id(),
             on_upload_pause_click=_pause_click,
+            upload_pause=self._upload_pause_between_uploads(),
             parent=self,
         )
         dlg_holder[0] = dlg
@@ -3884,6 +3938,7 @@ class MainWindow(QWidget):
             lw,
             self._upload_store,
             on_upload_pause_click=_dlg_upload_pause_click,
+            upload_pause=self._upload_pause_between_uploads(),
         )
         dlg_interaction.populate(dlg_profiles, last_upload_map, preserve_checked=preselect)
 
@@ -4552,8 +4607,9 @@ class MainWindow(QWidget):
             kind = "dolphin"
         if kind == "local":
             self._profiles_title.setText("Профили (локальный антидетект)")
+            pause_short = format_upload_pause_short(self._upload_pause_between_uploads())
             self._profiles_hint.setText(
-                "Отметьте квадратиками профили для залива; «Пауза 3 ч» — можно ли снова загружать "
+                f"Отметьте квадратиками профили для залива; «Пауза {pause_short}» — можно ли снова загружать "
                 "(клик по оранжевой подписи сбрасывает паузу)."
             )
             if hasattr(self, "_dolphin_query"):
@@ -4562,8 +4618,9 @@ class MainWindow(QWidget):
                 )
         elif kind == "remote":
             self._profiles_title.setText("Профили (удалённый антидетект)")
+            pause_short = format_upload_pause_short(self._upload_pause_between_uploads())
             self._profiles_hint.setText(
-                "Отметьте квадратиками профили для залива; «Пауза 3 ч» — можно ли снова загружать "
+                f"Отметьте квадратиками профили для залива; «Пауза {pause_short}» — можно ли снова загружать "
                 "(клик по оранжевой подписи сбрасывает паузу)."
             )
             if hasattr(self, "_dolphin_query"):
@@ -4765,6 +4822,92 @@ class MainWindow(QWidget):
                 self._settings.value("stats_server/username", "", type=str) or ""
             ).strip()
             self._stats_server_username.setText(gu)
+
+    def _upload_pause_between_uploads(self) -> timedelta:
+        """Пауза между заливами: YouTube всегда 3 ч, Instagram — из настроек."""
+        if self._platform != PLATFORM_INSTAGRAM:
+            return DEFAULT_UPLOAD_PAUSE_BETWEEN_UPLOADS
+        total_mins: int | None = None
+        if self._settings.contains("upload_pause_minutes"):
+            try:
+                total_mins = int(
+                    self._settings.value("upload_pause_minutes", 180, type=int)
+                )
+            except (TypeError, ValueError):
+                total_mins = None
+        if total_mins is None:
+            # Миграция со старого ключа (только часы).
+            try:
+                hours = int(self._settings.value("upload_pause_hours", 3, type=int))
+            except (TypeError, ValueError):
+                hours = 3
+            total_mins = max(0, min(168, hours)) * 60
+        total_mins = max(0, min(168 * 60 + 59, total_mins))
+        return timedelta(minutes=total_mins)
+
+    def _load_instagram_settings(self) -> None:
+        if not hasattr(self, "_instagram_upload_pause_hours"):
+            return
+        if not hasattr(self, "_instagram_upload_pause_minutes"):
+            return
+        pause = self._upload_pause_between_uploads()
+        total_mins = max(0, int(round(pause.total_seconds() / 60.0)))
+        hours, mins = divmod(total_mins, 60)
+        hours = max(0, min(168, hours))
+        mins = max(0, min(59, mins))
+        self._instagram_upload_pause_hours.blockSignals(True)
+        self._instagram_upload_pause_minutes.blockSignals(True)
+        self._instagram_upload_pause_hours.setValue(hours)
+        self._instagram_upload_pause_minutes.setValue(mins)
+        self._instagram_upload_pause_hours.blockSignals(False)
+        self._instagram_upload_pause_minutes.blockSignals(False)
+
+    def _save_instagram_settings(self) -> None:
+        if not hasattr(self, "_instagram_upload_pause_hours"):
+            return
+        if not hasattr(self, "_instagram_upload_pause_minutes"):
+            return
+        hours = max(0, min(168, int(self._instagram_upload_pause_hours.value())))
+        mins = max(0, min(59, int(self._instagram_upload_pause_minutes.value())))
+        total_mins = hours * 60 + mins
+        self._settings.setValue("upload_pause_minutes", total_mins)
+        # Совместимость со старым ключом (целые часы).
+        self._settings.setValue("upload_pause_hours", hours)
+        try:
+            self._settings.sync()
+        except Exception:
+            pass
+        pause = timedelta(minutes=total_mins)
+        if self._profiles_interaction is not None:
+            self._profiles_interaction.set_upload_pause(pause)
+        self._update_profiles_section_header()
+        self._sync_upload_pause_selection_labels()
+        if self._profiles_raw is not None:
+            self._apply_profiles_filter()
+        if hasattr(self, "_instagram_settings_status"):
+            short = format_upload_pause_short(pause)
+            self._instagram_settings_status.setText(
+                f"Пауза между видео сохранена: {short}."
+            )
+
+    def _sync_upload_pause_selection_labels(self) -> None:
+        """Обновить подписи «Выделить…» / фильтр доступных под текущую паузу."""
+        pause = self._upload_pause_between_uploads()
+        short = format_upload_pause_short(pause)
+        human = format_upload_pause_human(pause)
+        btn = getattr(self, "_profiles_select_btn", None)
+        if btn is not None:
+            btn.setToolTip(
+                f"Отметить профили по условию (пауза {short}, ошибки, "
+                "данные учётки, старейший канал)"
+            )
+        act = getattr(self, "_profiles_select_avail_action", None)
+        if act is not None:
+            act.setText(f"Доступные (пауза {short} прошла)")
+            act.setToolTip(
+                "Профили, с которых снова можно заливать: прошли "
+                f"{human} после последнего залива или заливов ещё не было"
+            )
 
     def _stats_server_username_stripped(self) -> str:
         if not hasattr(self, "_stats_server_username"):
@@ -5180,19 +5323,26 @@ class MainWindow(QWidget):
         btn_select.setObjectName("secondary")
         btn_select.setAutoDefault(False)
         btn_select.setDefault(False)
+        pause_short = format_upload_pause_short(self._upload_pause_between_uploads())
+        pause_human = format_upload_pause_human(self._upload_pause_between_uploads())
         btn_select.setToolTip(
-            "Отметить профили по условию (пауза 3 ч, ошибки, данные учётки, старейший канал)"
+            f"Отметить профили по условию (пауза {pause_short}, ошибки, данные учётки, старейший канал)"
         )
         select_menu = QMenu(parent)
         act_all = select_menu.addAction("Все видимые")
         act_all.setToolTip("Отметить все профили в списке")
         act_all.triggered.connect(lambda: on_select_filter("all"))
-        act_avail = select_menu.addAction("Доступные (пауза 3 ч прошла)")
+        act_avail = select_menu.addAction(f"Доступные (пауза {pause_short} прошла)")
         act_avail.setToolTip(
-            "Профили, с которых снова можно заливать: прошли 3 часа после последнего залива "
+            "Профили, с которых снова можно заливать: прошли "
+            f"{pause_human} после последнего залива "
             "или заливов ещё не было"
         )
         act_avail.triggered.connect(lambda: on_select_filter("available"))
+        # Главная вкладка «Профили» — запомним для обновления после смены паузы.
+        if interaction is self._profiles_interaction:
+            self._profiles_select_btn = btn_select
+            self._profiles_select_avail_action = act_avail
         act_clean = select_menu.addAction("Без ошибок в статусах")
         act_clean.setToolTip(
             "Прокси активен, нет тегов/флагов с «ошибка», профиль не помечен после сбоев залива"
@@ -5312,6 +5462,7 @@ class MainWindow(QWidget):
             on_upload_pause_click=_dlg_upload_pause_click,
             on_account_data_click=self._open_profile_account_data_dialog,
             on_preview_click=self._open_profile_cdp_preview,
+            upload_pause=self._upload_pause_between_uploads(),
         )
         dlg_interaction.populate(
             dlg_profiles,
@@ -6781,6 +6932,14 @@ class MainWindow(QWidget):
                 AVATAR_CHANGE_SUCCESS_TAG,
                 DESCRIPTION_FILL_ERROR_TAG,
                 DESCRIPTION_FILL_SUCCESS_TAG,
+                IG_AVATAR_CHANGE_ERROR_TAG,
+                IG_AVATAR_CHANGE_SUCCESS_TAG,
+                IG_DESCRIPTION_FILL_ERROR_TAG,
+                IG_DESCRIPTION_FILL_SUCCESS_TAG,
+                IG_LANGUAGE_CHANGE_ERROR_TAG,
+                IG_LANGUAGE_CHANGE_SUCCESS_TAG,
+                IG_NAME_CHANGE_ERROR_TAG,
+                IG_NAME_CHANGE_SUCCESS_TAG,
                 LANGUAGE_CHANGE_ERROR_TAG,
                 LANGUAGE_CHANGE_SUCCESS_TAG,
                 LINK_FILL_ERROR_TAG,
@@ -6794,14 +6953,36 @@ class MainWindow(QWidget):
             is_ig = self._platform == PLATFORM_INSTAGRAM
             updates: list[tuple[bool, str, str]] = []
             if change_language:
-                updates.append(
-                    (ok, LANGUAGE_CHANGE_SUCCESS_TAG, LANGUAGE_CHANGE_ERROR_TAG)
-                )
+                if is_ig:
+                    updates.append(
+                        (
+                            ok,
+                            IG_LANGUAGE_CHANGE_SUCCESS_TAG,
+                            IG_LANGUAGE_CHANGE_ERROR_TAG,
+                        )
+                    )
+                else:
+                    updates.append(
+                        (ok, LANGUAGE_CHANGE_SUCCESS_TAG, LANGUAGE_CHANGE_ERROR_TAG)
+                    )
             if has_text_fill:
                 if _description_for_profile(pid):
-                    updates.append(
-                        (ok, DESCRIPTION_FILL_SUCCESS_TAG, DESCRIPTION_FILL_ERROR_TAG)
-                    )
+                    if is_ig:
+                        updates.append(
+                            (
+                                ok,
+                                IG_DESCRIPTION_FILL_SUCCESS_TAG,
+                                IG_DESCRIPTION_FILL_ERROR_TAG,
+                            )
+                        )
+                    else:
+                        updates.append(
+                            (
+                                ok,
+                                DESCRIPTION_FILL_SUCCESS_TAG,
+                                DESCRIPTION_FILL_ERROR_TAG,
+                            )
+                        )
                 if not is_ig and _link_for_profile(pid):
                     updates.append((ok, LINK_FILL_SUCCESS_TAG, LINK_FILL_ERROR_TAG))
 
@@ -6815,11 +6996,27 @@ class MainWindow(QWidget):
                     str(item.get("video_default_title") or "").strip()
                 )
                 if has_avatar:
-                    updates.append(
-                        (ok, AVATAR_CHANGE_SUCCESS_TAG, AVATAR_CHANGE_ERROR_TAG)
-                    )
+                    if is_ig:
+                        updates.append(
+                            (
+                                ok,
+                                IG_AVATAR_CHANGE_SUCCESS_TAG,
+                                IG_AVATAR_CHANGE_ERROR_TAG,
+                            )
+                        )
+                    else:
+                        updates.append(
+                            (ok, AVATAR_CHANGE_SUCCESS_TAG, AVATAR_CHANGE_ERROR_TAG)
+                        )
                 if has_name:
-                    updates.append((ok, NAME_CHANGE_SUCCESS_TAG, NAME_CHANGE_ERROR_TAG))
+                    if is_ig:
+                        updates.append(
+                            (ok, IG_NAME_CHANGE_SUCCESS_TAG, IG_NAME_CHANGE_ERROR_TAG)
+                        )
+                    else:
+                        updates.append(
+                            (ok, NAME_CHANGE_SUCCESS_TAG, NAME_CHANGE_ERROR_TAG)
+                        )
                 if has_video_title:
                     updates.append(
                         (
@@ -9082,9 +9279,11 @@ class MainWindow(QWidget):
         if not pid:
             return
         parent = dialog_parent or self
+        pause = self._upload_pause_between_uploads()
+        pause_short = format_upload_pause_short(pause)
         ans = QMessageBox.question(
             parent,
-            "Пауза 3 ч",
+            f"Пауза {pause_short}",
             "Обновить время паузы с последнего залива? После подтверждения с этим профилем снова можно будет загружать видео.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -9092,7 +9291,7 @@ class MainWindow(QWidget):
         if ans != QMessageBox.StandardButton.Yes:
             return
         n = self._upload_store.reset_latest_upload_time_for_profile(
-            profile_id=pid, platform=self._platform
+            profile_id=pid, platform=self._platform, pause=pause
         )
         if n <= 0:
             QMessageBox.information(
@@ -10299,6 +10498,13 @@ class MainWindow(QWidget):
                     "Instagram Reels: отложка Studio не поддерживается — публикуем сразу."
                 )
 
+            # Пауза 0 → режим keep_browser_open; решение «оставить/закрыть» — в менеджере.
+            ig_keep_browser_open = (
+                is_instagram_upload
+                and self._upload_pause_between_uploads().total_seconds() <= 0
+            )
+            mgr_holder: dict[str, MultiProfileUploader | None] = {"mgr": None}
+
             upload_var_index = {"n": 0}
             upload_var_index_lock = threading.Lock()
 
@@ -10358,6 +10564,16 @@ class MainWindow(QWidget):
                         session_login=sess_login,
                         session_password=sess_pwd,
                         session_twofa=sess_2fa,
+                        # Пауза 0: оставляем браузер только если следующий залив снова сюда
+                        # (один профиль или нет других свободных — см. should_keep_browser_open).
+                        keep_browser_open=(
+                            bool(ig_keep_browser_open)
+                            and (
+                                mgr_holder["mgr"].should_keep_browser_open(profile_id)
+                                if mgr_holder.get("mgr") is not None
+                                else True
+                            )
+                        ),
                     )
                     if _is_own_antidetect_kind(kind):
                         res = upload_instagram_reel_in_local_antidetect_profile(
@@ -10648,13 +10864,72 @@ class MainWindow(QWidget):
                         base_url=base_url,
                     )
 
+            def _close_kept_upload_browser(pid: str) -> None:
+                """Освободить keep-open браузер профиля (лимит параллельных)."""
+                pid = (pid or "").strip()
+                if not pid:
+                    return
+                if _is_own_antidetect_kind(kind):
+                    try:
+                        from zaliver.antydetect.local_active_sessions import (
+                            stop_registered_local_session_sync,
+                        )
+
+                        for line in stop_registered_local_session_sync(pid):
+                            try:
+                                self._ui_log_line.emit(line)
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        try:
+                            self._ui_log_line.emit(
+                                f"[upload] [STOP] local keep-open close "
+                                f"profile={pid!r} err={e!r}"
+                            )
+                        except Exception:
+                            pass
+                    return
+                try:
+                    api = DolphinAntyLocalAPI()
+                    try:
+                        tok = (token or "").strip()
+                        if tok:
+                            api.login_with_token(tok)
+                        api.stop_profile(pid)
+                        try:
+                            self._ui_log_line.emit(
+                                f"[upload] [STOP] Dolphin stop_profile ok "
+                                f"profile={pid!r} (keep-open slot)"
+                            )
+                        except Exception:
+                            pass
+                    finally:
+                        api.close()
+                except Exception as e:
+                    try:
+                        self._ui_log_line.emit(
+                            f"[upload] [STOP] Dolphin keep-open close "
+                            f"profile={pid!r} err={e!r}"
+                        )
+                    except Exception:
+                        pass
+
             mgr = MultiProfileUploader(
                 profile_ids=profile_ids,
                 cooldown_s=10.0,
                 max_attempts_per_profile=2,
                 max_concurrent_uploads=self._max_concurrent_browsers(),
                 profile_upload_pause_remaining_s=lambda pid: self._upload_store.profile_upload_pause_remaining_seconds(
-                    pid, platform=self._platform
+                    pid,
+                    platform=self._platform,
+                    pause=self._upload_pause_between_uploads(),
+                ),
+                recent_batch_wait_s=float(
+                    self._upload_pause_between_uploads().total_seconds()
+                ),
+                keep_browser_open=ig_keep_browser_open,
+                close_kept_browser=(
+                    _close_kept_upload_browser if ig_keep_browser_open else None
                 ),
                 log_sink=self._ui_log_line.emit,
                 upload_one=_upload_one,
@@ -10662,6 +10937,7 @@ class MainWindow(QWidget):
                 schedule_batch_size=schedule_batch_size,
                 schedule_times=schedule_times,
             )
+            mgr_holder["mgr"] = mgr
             self._upload_manager = mgr
             upload_title = pending.get("title", "Название")
             if pending.get("keep_studio_title"):
@@ -10705,6 +10981,11 @@ class MainWindow(QWidget):
                             f"[upload] Очередь завершена: status={status}, "
                             f"ok={mgr.done_ok}, failed={mgr.done_failed}"
                         )
+                    except Exception:
+                        pass
+                    try:
+                        # Закрыть браузеры, оставленные открытыми при паузе 0.
+                        self._stop_upload_antidetect_profiles()
                     except Exception:
                         pass
                     self._cleanup_videos_after_upload_queue_finished(status)

@@ -58,6 +58,20 @@ _POST_SHARED_HEADING_RE = re.compile(
     r"видео\s+reels\s+опубликовано",
     re.I,
 )
+# Ошибка после Share: «Не удалось разместить публикацию» + кнопка «Повторить».
+_POST_FAILED_HEADING_RE = re.compile(
+    r"не удалось разместить публикацию|"
+    r"could(?:\s+not|n't)\s+(?:share|post)|"
+    r"unable to (?:share|post)|"
+    r"your post could not be shared|"
+    r"we could(?:\s+not|n't)\s+post",
+    re.I,
+)
+_POST_FAILED_ARIA_RE = re.compile(
+    r"произошла ошибка|something went wrong|повторите попытку|please try again",
+    re.I,
+)
+_RETRY_BTN_RE = re.compile(r"^(повторить|retry|try again)$", re.I)
 _REEL_HREF_RE = re.compile(r"/reel/([^/?#]+)/?", re.I)
 
 
@@ -92,14 +106,12 @@ def _validate_video_file_path(video_path: str | Path) -> Path:
         time.sleep(0.25)
 
 
-def _click_new_post_in_sidebar(page) -> None:
-    """Сайдбар главной: svg «Новая публикация» / New post → открыть диалог создания."""
-    _log("Reels upload: ищем кнопку «Новая публикация» в сайдбаре…")
-    last_err: Exception | None = None
+def _try_click_new_post_once(page) -> bool:
+    """Одна попытка клика по «Новая публикация»; True если клик прошёл."""
     for aria in _NEW_POST_ARIA:
         try:
             svg = page.locator(f'svg[aria-label="{aria}"]').first
-            if not svg.count() or not svg.is_visible(timeout=1_500):
+            if not svg.count() or not svg.is_visible(timeout=800):
                 continue
             # Кликаем по кликабельному предку (div[role]/ / ссылка / кнопка).
             clickable = svg.locator(
@@ -108,9 +120,8 @@ def _click_new_post_in_sidebar(page) -> None:
             target = clickable if clickable.count() else svg
             target.click(timeout=10_000)
             _log(f"Reels upload: клик по «{aria}».")
-            return
-        except Exception as e:
-            last_err = e
+            return True
+        except Exception:
             continue
 
     # Fallback: любой svg с title «Новая публикация».
@@ -126,13 +137,32 @@ def _click_new_post_in_sidebar(page) -> None:
             target = clickable if clickable.count() else svg
             target.click(timeout=10_000)
             _log("Reels upload: клик по svg через <title>.")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _click_new_post_in_sidebar(page, *, max_seconds: float = 45.0) -> None:
+    """Сайдбар главной: svg «Новая публикация» / New post → открыть диалог создания."""
+    _log("Reels upload: ищем кнопку «Новая публикация» в сайдбаре…")
+    deadline = time.monotonic() + max(5.0, float(max_seconds))
+    last_url = ""
+    while time.monotonic() < deadline:
+        try:
+            last_url = (page.url or "").strip()
+        except Exception:
+            last_url = ""
+        if _try_click_new_post_once(page):
             return
-    except Exception as e:
-        last_err = e
+        try:
+            page.wait_for_timeout(400)
+        except Exception:
+            time.sleep(0.4)
 
     raise InstagramReelsUploadError(
         "Не удалось нажать «Новая публикация» в сайдбаре Instagram."
-        + (f" last_err={last_err!r}" if last_err else "")
+        + (f" URL={last_url!r}" if last_url else "")
     )
 
 
@@ -686,21 +716,58 @@ def _post_shared_dialog_locator(page):
     return loc.or_(heading).or_(text)
 
 
-def _wait_post_shared_and_done(page, *, timeout_s: float = 600.0) -> None:
-    """Ждём диалог Post shared / Reel shared (до 10 мин) и жмём Done."""
-    _log(
-        "Reels upload: ждём экран «Reel shared» / Post shared "
-        f"(таймаут {timeout_s:.0f} с)…"
-    )
-    dialog = _post_shared_dialog_locator(page)
+def _post_share_failed_visible(page) -> bool:
+    """Экран «Не удалось разместить публикацию» / Something went wrong."""
     try:
-        dialog.first.wait_for(state="visible", timeout=max(15.0, float(timeout_s)) * 1000)
-    except Exception as e:
-        raise InstagramReelsUploadError(
-            "Не дождались диалога «Post shared» / «Reel shared» после Share."
-        ) from e
-    _log("Reels upload: диалог Post shared виден.")
+        h = page.get_by_role("heading", name=_POST_FAILED_HEADING_RE)
+        if h.count() and h.first.is_visible(timeout=250):
+            return True
+    except Exception:
+        pass
+    try:
+        # Текст без role=heading (как в разметке Instagram).
+        txt = page.get_by_text(_POST_FAILED_HEADING_RE)
+        if txt.count() and txt.first.is_visible(timeout=250):
+            return True
+    except Exception:
+        pass
+    try:
+        # aria-label на svg: «Произошла ошибка. Повторите попытку.»
+        labeled = page.locator("svg[aria-label]")
+        n = min(int(labeled.count()), 12)
+        for i in range(n):
+            el = labeled.nth(i)
+            try:
+                if not el.is_visible(timeout=150):
+                    continue
+                aria = (el.get_attribute("aria-label") or "").strip()
+                if aria and _POST_FAILED_ARIA_RE.search(aria):
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
 
+
+def _click_post_failed_retry(page) -> bool:
+    """Нажать «Повторить» / Retry на экране ошибки публикации."""
+    btn = (
+        page.get_by_role("button", name=_RETRY_BTN_RE)
+        .or_(page.locator("button").filter(has_text=_RETRY_BTN_RE))
+        .or_(page.locator('[role="button"]').filter(has_text=_RETRY_BTN_RE))
+    )
+    try:
+        if not btn.count() or not btn.first.is_visible(timeout=3_000):
+            return False
+        btn.first.click(timeout=15_000)
+        return True
+    except Exception as e:
+        _log(f"Reels upload: клик «Повторить» не удался: {e!r}")
+        return False
+
+
+def _click_post_shared_done(page, dialog) -> None:
     done = (
         dialog.first.get_by_role("button", name=_DONE_RE)
         .or_(dialog.first.locator('[role="button"]').filter(has_text=_DONE_RE))
@@ -723,6 +790,58 @@ def _wait_post_shared_and_done(page, *, timeout_s: float = 600.0) -> None:
     except Exception:
         pass
     page.wait_for_timeout(2_000)
+
+
+def _wait_post_shared_and_done(page, *, timeout_s: float = 600.0) -> None:
+    """
+    Ждём диалог Post shared / Reel shared (до 10 мин) и жмём Done.
+
+    Если после Share появляется «Не удалось разместить публикацию» —
+    один раз жмём «Повторить»; при повторной ошибке — выход с исключением.
+    """
+    _log(
+        "Reels upload: ждём экран «Reel shared» / Post shared "
+        f"(таймаут {timeout_s:.0f} с)…"
+    )
+    deadline = time.monotonic() + max(15.0, float(timeout_s))
+    retries_used = 0
+    max_auto_retries = 1
+
+    while time.monotonic() < deadline:
+        dialog = _post_shared_dialog_locator(page)
+        try:
+            if dialog.count() and dialog.first.is_visible(timeout=400):
+                _log("Reels upload: диалог Post shared виден.")
+                _click_post_shared_done(page, dialog)
+                return
+        except Exception:
+            pass
+
+        if _post_share_failed_visible(page):
+            if retries_used >= max_auto_retries:
+                raise InstagramReelsUploadError(
+                    "Не удалось разместить публикацию: после «Повторить» "
+                    "ошибка появилась снова."
+                )
+            _log(
+                "Reels upload: ошибка публикации "
+                "(«Не удалось разместить…») — жмём «Повторить» "
+                f"({retries_used + 1}/{max_auto_retries})…"
+            )
+            if not _click_post_failed_retry(page):
+                raise InstagramReelsUploadError(
+                    "Не удалось разместить публикацию: "
+                    "кнопка «Повторить» не найдена."
+                )
+            retries_used += 1
+            page.wait_for_timeout(1_200)
+            continue
+
+        page.wait_for_timeout(500)
+
+    raise InstagramReelsUploadError(
+        "Не дождались диалога «Post shared» / «Reel shared» после Share."
+    )
 
 
 def _absolute_instagram_url(href: str) -> str:

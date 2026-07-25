@@ -11,6 +11,7 @@ from zaliver.instagram_upload.register import (
     ensure_instagram_session_relogin,
     _extract_logged_in_username,
     _instagram_already_logged_in,
+    _instagram_logged_in_nav_visible,
     _instagram_login_form_visible,
     _is_accounts_suspended,
     _is_classic_login_form_visible,
@@ -38,6 +39,33 @@ def _page_url(page) -> str:
         return (page.url or "").strip()
     except Exception:
         return ""
+
+
+def _is_instagram_home_feed_url(url: str) -> bool:
+    """
+    Главная лента Instagram (/), а не /reel/, /p/, профиль и т.п.
+    Нужно при keep_browser_open: после залива часто остаёмся на странице Reel.
+    """
+    u = (url or "").strip()
+    if not _is_instagram_url(u):
+        return False
+    try:
+        from urllib.parse import urlparse
+
+        path = (urlparse(u).path or "/").strip() or "/"
+        # Нормализуем: "" / "/" / лишние слэши → корень.
+        while "//" in path:
+            path = path.replace("//", "/")
+        path = path.rstrip("/") or "/"
+        return path == "/"
+    except Exception:
+        low = u.lower().split("#", 1)[0].split("?", 1)[0].rstrip("/")
+        return low in (
+            "https://www.instagram.com",
+            "http://www.instagram.com",
+            "https://instagram.com",
+            "http://instagram.com",
+        )
 
 
 def _wait_leave_about_blank(page, *, max_seconds: float = _BLANK_SETTLE_S) -> str:
@@ -130,8 +158,16 @@ def verify_instagram_home_available(
     url0 = _page_url(page)
     low0 = url0.lower()
 
-    if _is_instagram_url(url0):
-        _log(f"Instagram: уже на сайте (URL={url0!r}) — без повторной навигации.")
+    if _is_instagram_home_feed_url(url0):
+        _log(f"Instagram: уже на главной (URL={url0!r}) — без повторной навигации.")
+    elif _is_instagram_url(url0):
+        # После залива с keep_browser_open часто /reel/... — сайдбар «Новая публикация»
+        # надёжнее с главной ленты.
+        _log(
+            f"Instagram: на сайте, но не главная (URL={url0!r}) — "
+            "переходим на главную…"
+        )
+        _navigate_page_to(page, INSTAGRAM_URL)
     else:
         if low0 in ("about:blank", "about:srcdoc", ""):
             _log(
@@ -141,8 +177,14 @@ def verify_instagram_home_available(
             url0 = _wait_leave_about_blank(page)
             low0 = url0.lower()
 
-        if _is_instagram_url(url0):
-            _log(f"Instagram: уже на Instagram (URL={url0!r}).")
+        if _is_instagram_home_feed_url(url0):
+            _log(f"Instagram: уже на главной (URL={url0!r}).")
+        elif _is_instagram_url(url0):
+            _log(
+                f"Instagram: на сайте, но не главная (URL={url0!r}) — "
+                "переходим на главную…"
+            )
+            _navigate_page_to(page, INSTAGRAM_URL)
         else:
             # Обычный page.goto(domcontentloaded) на about:blank в CDP часто
             # зависает на десятки секунд — используем тот же обход, что и регистрация.
@@ -159,6 +201,7 @@ def verify_instagram_home_available(
     deadline = time.monotonic() + max(5.0, float(max_seconds))
     last_url = ""
     relogin_tried = False
+    nav_wait_logged = False
     while time.monotonic() < deadline:
         last_url = _page_url(page)
         _raise_if_accounts_suspended(page)
@@ -173,6 +216,12 @@ def verify_instagram_home_available(
             )
             if uname:
                 _raise_if_accounts_suspended(page)
+                # После re-login UI может ещё не успеть отрисоваться.
+                nav_deadline = min(deadline, time.monotonic() + 20.0)
+                while time.monotonic() < nav_deadline:
+                    if _instagram_logged_in_nav_visible(page):
+                        break
+                    page.wait_for_timeout(400)
                 _log(
                     "Instagram: вход после re-login подтверждён"
                     + (f" (@{uname})" if uname not in ("", "saved_profile") else "")
@@ -189,6 +238,17 @@ def verify_instagram_home_available(
                 f"(экран логина, URL={last_url!r})."
             )
         if _instagram_already_logged_in(page):
+            # sessionid часто есть раньше, чем отрисуется сайдбар
+            # («Новая публикация» / Home / Profile).
+            if not _instagram_logged_in_nav_visible(page):
+                if not nav_wait_logged:
+                    nav_wait_logged = True
+                    _log(
+                        "Instagram: сессия есть, ждём UI сайдбара… "
+                        f"URL={last_url!r}"
+                    )
+                page.wait_for_timeout(500)
+                continue
             username = _extract_logged_in_username(page)
             _log(
                 "Instagram: вход в аккаунт подтверждён"

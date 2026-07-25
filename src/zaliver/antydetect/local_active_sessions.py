@@ -28,6 +28,35 @@ def unregister_local_session(*, profile_id: str) -> None:
         _active.pop(pid, None)
 
 
+def stop_registered_local_session_sync(profile_id: str) -> List[str]:
+    """Остановить одну зарегистрированную сессию (освобождение слота keep_browser_open)."""
+    pid = (profile_id or "").strip()
+    if not pid:
+        return []
+    with _lock:
+        item = _active.pop(pid, None)
+    if item is None:
+        return []
+    bu, sid = item
+    from zaliver.antydetect.local_antidetect_api import LocalAntidetectHttpAPI
+
+    try:
+        api = LocalAntidetectHttpAPI(bu)
+        try:
+            api.stop_session(sid)
+            return [
+                f"[upload] [STOP] local antidetect stop_session ok "
+                f"profile={pid!r} session_id={sid!r}"
+            ]
+        finally:
+            api.close()
+    except Exception as e:
+        return [
+            f"[upload] [STOP] local antidetect stop_session failed "
+            f"profile={pid!r} session_id={sid!r} err={e!r}"
+        ]
+
+
 def stop_all_registered_local_sessions_sync() -> List[str]:
     """
     Останавливает все зарегистрированные сессии (отмена залива).

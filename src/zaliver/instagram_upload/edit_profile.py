@@ -522,39 +522,135 @@ def _username_candidate(base: str, *, suffix: int | None = None) -> str:
     return f"{stem}{suf}"[:_USERNAME_MAX_LEN]
 
 
-def _wait_accounts_center_profiles(page, *, timeout_ms: int = _PAGE_READY_TIMEOUT_MS) -> None:
+def _dismiss_accounts_center_banner_if_present(page) -> None:
+    """Закрыть баннер «О вашем Аккаунте Meta», если мешает."""
+    try:
+        btn = page.locator(
+            '[aria-label="Dismiss banner"], '
+            '[aria-label*="Dismiss" i], '
+            '[aria-label*="Закрыть" i]'
+        ).first
+        if btn.count() > 0 and btn.is_visible():
+            btn.click(timeout=3_000)
+            _log("Accounts Center: баннер закрыт.")
+            page.wait_for_timeout(400)
+    except Exception:
+        pass
+
+
+def _accounts_center_has_profiles_list(page) -> bool:
+    """Вариант A: список Profiles с карточкой Instagram."""
+    try:
+        link = page.locator(
+            'a[href*="/profiles/"][aria-label*="Instagram"]'
+        ).first
+        if link.count() > 0 and link.is_visible():
+            return True
+    except Exception:
+        pass
+    try:
+        heading = page.get_by_role(
+            "heading",
+            name=re.compile(r"Profiles|Профили", re.I),
+        )
+        if heading.count() > 0 and heading.first.is_visible():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _accounts_center_has_home_overview(page) -> bool:
+    """Вариант B: «Главная» с карточкой аккаунта → /account_overview/."""
+    try:
+        link = page.locator('a[href*="/account_overview/"]').first
+        if link.count() > 0 and link.is_visible():
+            return True
+    except Exception:
+        pass
+    try:
+        heading = page.get_by_role(
+            "heading",
+            name=re.compile(r"^(Home|Главная)$", re.I),
+        )
+        if heading.count() > 0 and heading.first.is_visible():
+            # На главной обычно есть ссылка overview или «профиль».
+            overview = page.locator(
+                'a[href*="/account_overview/"], '
+                'a[aria-label*="профиль" i], '
+                'a[aria-label*="profile" i]'
+            ).first
+            if overview.count() > 0:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _wait_accounts_center_ready(page, *, timeout_ms: int = _PAGE_READY_TIMEOUT_MS) -> str:
+    """
+    Ждём готовности Accounts Center.
+    Возвращает 'profiles' (старый UI) или 'home' (новая «Главная»).
+    """
     deadline = time.monotonic() + max(5.0, timeout_ms / 1000.0)
     while time.monotonic() < deadline:
-        try:
-            link = page.locator(
-                'a[href*="/profiles/"][aria-label*="Instagram"]'
-            ).first
-            if link.count() > 0 and link.is_visible():
-                _log("Accounts Center: список Profiles готов.")
-                return
-        except Exception:
-            pass
-        try:
-            heading = page.get_by_role(
-                "heading",
-                name=re.compile(r"Profiles|Профили", re.I),
-            )
-            if heading.count() > 0 and heading.first.is_visible():
-                page.wait_for_timeout(400)
-                return
-        except Exception:
-            pass
+        _dismiss_accounts_center_banner_if_present(page)
+        if _accounts_center_has_profiles_list(page):
+            _log("Accounts Center: вариант UI = profiles (список Profiles).")
+            return "profiles"
+        if _accounts_center_has_home_overview(page):
+            _log("Accounts Center: вариант UI = home (Главная / account_overview).")
+            return "home"
         try:
             page.wait_for_timeout(250)
         except Exception:
             time.sleep(0.25)
     raise InstagramEditProfileError(
-        "Не дождались списка Profiles в Accounts Center "
+        "Не дождались Accounts Center (ни Profiles, ни Главная) "
         f"(URL={_page_url(page)!r})."
     )
 
 
+# Обратная совместимость для старых вызовов.
+def _wait_accounts_center_profiles(page, *, timeout_ms: int = _PAGE_READY_TIMEOUT_MS) -> None:
+    _wait_accounts_center_ready(page, timeout_ms=timeout_ms)
+
+
+def _click_account_overview_from_home(page) -> None:
+    """Вариант B: с «Главной» открыть /account_overview/."""
+    _dismiss_accounts_center_banner_if_present(page)
+    candidates = [
+        page.locator('a[href*="/account_overview/"]').first,
+        page.get_by_role(
+            "link",
+            name=re.compile(r"профиль|profile|@", re.I),
+        ).first,
+    ]
+    link = None
+    for cand in candidates:
+        try:
+            if cand.count() > 0 and cand.is_visible():
+                link = cand
+                break
+        except Exception:
+            continue
+    if link is None:
+        raise InstagramEditProfileError(
+            "На Главной Accounts Center нет ссылки /account_overview/."
+        )
+    _log("Accounts Center: открываем Account overview…")
+    try:
+        link.click(timeout=15_000)
+    except Exception:
+        link.click(timeout=10_000, force=True)
+    try:
+        page.wait_for_timeout(900)
+    except Exception:
+        time.sleep(0.9)
+
+
 def _click_own_instagram_profile(page) -> None:
+    """Клик по карточке Instagram в списке Profiles (оба варианта UI)."""
     link = page.locator('a[href*="/profiles/"][aria-label*="Instagram"]').first
     # Не кликать ссылки username/manage / photo/manage — только карточка профиля.
     n = 0
@@ -581,25 +677,153 @@ def _click_own_instagram_profile(page) -> None:
         if "/profiles/" in href and chosen is None:
             chosen = cand
     if chosen is None:
+        # Иногда Instagram без слова в aria-label — берём /profiles/<id>.
+        try:
+            all_prof = page.locator('a[href*="/profiles/"]')
+            for i in range(min(all_prof.count(), 12)):
+                cand = all_prof.nth(i)
+                try:
+                    if not cand.is_visible():
+                        continue
+                    href = (cand.get_attribute("href") or "").strip()
+                except Exception:
+                    continue
+                if "/username/" in href or "/photo/" in href or "/name/" in href:
+                    continue
+                if re.search(r"/profiles/\d+", href):
+                    chosen = cand
+                    break
+        except Exception:
+            pass
+    if chosen is None:
         chosen = link
+    if chosen is None or chosen.count() <= 0:
+        raise InstagramEditProfileError(
+            "Не найдена карточка Instagram-профиля в Accounts Center."
+        )
     chosen.wait_for(state="visible", timeout=30_000)
     _log("Accounts Center: открываем свой Instagram-профиль…")
-    chosen.click(timeout=15_000)
+    try:
+        chosen.click(timeout=15_000)
+    except Exception:
+        chosen.click(timeout=10_000, force=True)
     try:
         page.wait_for_timeout(800)
     except Exception:
         time.sleep(0.8)
 
 
+def _open_own_instagram_profile_from_accounts_center(page) -> None:
+    """
+    Открыть карточку Instagram для смены юзернейма.
+    Вариант A (profiles): сразу клик по Instagram в списке.
+    Вариант B (home): Главная → account_overview → Instagram.
+    """
+    layout = _wait_accounts_center_ready(page)
+    if layout == "home":
+        _click_account_overview_from_home(page)
+        # После overview ждём список профилей (как в варианте A).
+        deadline = time.monotonic() + 45.0
+        while time.monotonic() < deadline:
+            if _accounts_center_has_profiles_list(page):
+                _log("Accounts Center: после overview — список Profiles готов.")
+                break
+            # Иногда overview сразу показывает детали / Username.
+            try:
+                if page.locator(_USERNAME_MENU_LOCATOR).first.count() > 0:
+                    if page.locator(_USERNAME_MENU_LOCATOR).first.is_visible():
+                        _log(
+                            "Accounts Center: после overview сразу "
+                            "доступен Username — список Profiles не нужен."
+                        )
+                        return
+            except Exception:
+                pass
+            try:
+                page.wait_for_timeout(300)
+            except Exception:
+                time.sleep(0.3)
+        else:
+            # Последний шанс: прямая навигация на /profiles/.
+            try:
+                _log("Accounts Center: overview без Profiles — пробуем /profiles/…")
+                _navigate_page_to(
+                    page,
+                    "https://accountscenter.instagram.com/profiles/",
+                    label="IG accounts center profiles",
+                )
+                accept_instagram_cookie_consent_if_present(page, appear_seconds=2.0)
+            except Exception:
+                pass
+            if not _accounts_center_has_profiles_list(page):
+                # Если Username уже виден — ок.
+                try:
+                    if page.locator(_USERNAME_MENU_LOCATOR).first.is_visible():
+                        return
+                except Exception:
+                    pass
+                raise InstagramEditProfileError(
+                    "После Account overview не появился список Profiles "
+                    f"(URL={_page_url(page)!r})."
+                )
+
+    # Если Username уже на экране (редкий shortcut) — не кликаем профиль.
+    try:
+        if page.locator(_USERNAME_MENU_LOCATOR).first.count() > 0:
+            if page.locator(_USERNAME_MENU_LOCATOR).first.is_visible():
+                _log("Accounts Center: Username уже на экране.")
+                return
+    except Exception:
+        pass
+
+    _click_own_instagram_profile(page)
+
+
+_USERNAME_MENU_LOCATOR = (
+    'a[href*="/username/manage/"], '
+    'a[href*="/username/"], '
+    'a[aria-label="Username" i], '
+    'a[aria-label*="Username" i], '
+    'a[aria-label*="Имя пользователя" i], '
+    '[role="link"][href*="/username/"], '
+    '[role="button"][aria-label*="Username" i], '
+    '[role="button"][aria-label*="Имя пользователя" i]'
+)
+# Диалог смены юзернейма в RU UI часто имеет заголовок
+# «Форма для подтверждения личности», а aria-label — «Имя пользователя».
+_USERNAME_DIALOG_NAME_RE = re.compile(
+    r"Username|Имя\s+пользователя|"
+    r"Форма\s+для\s+подтверждения\s+личности|"
+    r"подтвержден\w*\s+личност|"
+    r"Confirm\s+your\s+identity|"
+    r"identity",
+    re.I,
+)
+_USERNAME_FIELD_HINT_RE = re.compile(
+    r"Username|Имя\s+пользователя|"
+    r"адрес\s+профиля|"
+    r"profile\s+URL|"
+    r"change\s+your\s+username",
+    re.I,
+)
+
+
 def _wait_profile_details_dialog(page, *, timeout_ms: int = 45_000) -> None:
     deadline = time.monotonic() + max(5.0, timeout_ms / 1000.0)
     while time.monotonic() < deadline:
         try:
-            username_link = page.locator(
-                'a[href*="/username/manage/"], a[aria-label="Username"]'
-            ).first
+            username_link = page.locator(_USERNAME_MENU_LOCATOR).first
             if username_link.count() > 0 and username_link.is_visible():
                 _log("Accounts Center: диалог профиля открыт.")
+                return
+        except Exception:
+            pass
+        try:
+            by_text = page.get_by_text(
+                re.compile(r"^\s*(Username|Имя\s+пользователя)\s*$", re.I)
+            )
+            if by_text.count() > 0 and by_text.first.is_visible():
+                _log("Accounts Center: диалог профиля открыт (по тексту).")
                 return
         except Exception:
             pass
@@ -613,80 +837,423 @@ def _wait_profile_details_dialog(page, *, timeout_ms: int = 45_000) -> None:
 
 
 def _click_username_menu(page) -> None:
-    link = page.locator(
-        'a[href*="/username/manage/"], a[aria-label="Username"]'
-    ).first
+    candidates = [
+        page.locator(_USERNAME_MENU_LOCATOR).first,
+        page.get_by_role(
+            "link", name=re.compile(r"Username|Имя\s+пользователя", re.I)
+        ).first,
+        page.get_by_role(
+            "button", name=re.compile(r"Username|Имя\s+пользователя", re.I)
+        ).first,
+        page.locator('a[href*="/username/"]').first,
+        page.get_by_text(
+            re.compile(r"^\s*(Username|Имя\s+пользователя)\s*$", re.I)
+        ).first,
+    ]
+    link = None
+    for cand in candidates:
+        try:
+            if cand.count() > 0 and cand.is_visible():
+                link = cand
+                break
+        except Exception:
+            continue
+    if link is None:
+        raise InstagramEditProfileError(
+            "Не найден пункт меню Username / «Имя пользователя»."
+        )
     link.wait_for(state="visible", timeout=20_000)
     _log("Accounts Center: открываем Username…")
-    link.click(timeout=15_000)
     try:
-        page.wait_for_timeout(700)
+        link.click(timeout=15_000)
     except Exception:
-        time.sleep(0.7)
+        link.click(timeout=10_000, force=True)
+    try:
+        page.wait_for_timeout(900)
+    except Exception:
+        time.sleep(0.9)
+
+
+def _dialog_looks_like_username_edit(dialog) -> bool:
+    """True если в диалоге есть поле смены юзернейма."""
+    try:
+        inp = dialog.locator('input[type="text"]').first
+        if inp.count() <= 0:
+            return False
+    except Exception:
+        return False
+    try:
+        aria = (dialog.get_attribute("aria-label") or "").strip()
+        if _USERNAME_DIALOG_NAME_RE.search(aria) or _USERNAME_FIELD_HINT_RE.search(
+            aria
+        ):
+            return True
+    except Exception:
+        pass
+    try:
+        txt = (dialog.inner_text(timeout=2_000) or "")[:900]
+        if _USERNAME_FIELD_HINT_RE.search(txt) or _USERNAME_DIALOG_NAME_RE.search(txt):
+            return True
+    except Exception:
+        pass
+    try:
+        if dialog.locator("label").filter(
+            has_text=_USERNAME_FIELD_HINT_RE
+        ).count() > 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _log_visible_dialogs(page) -> None:
+    """Диагностика: какие dialog видны после клика Username."""
+    try:
+        info = page.evaluate(
+            """() => {
+                return Array.from(document.querySelectorAll('[role="dialog"]'))
+                    .slice(0, 6)
+                    .map((d) => ({
+                        aria: (d.getAttribute('aria-label') || '').slice(0, 80),
+                        text: (d.innerText || '').replace(/\\s+/g, ' ').slice(0, 120),
+                        inputs: d.querySelectorAll('input').length,
+                        visible: !!(d.offsetWidth || d.offsetHeight),
+                    }));
+            }"""
+        )
+        _log(f"Accounts Center: dialogs после Username: {info!r}")
+    except Exception as exc:
+        _log(f"Accounts Center: не удалось перечислить dialogs: {exc!r}")
 
 
 def _wait_username_edit_dialog(page, *, timeout_ms: int = 45_000):
     deadline = time.monotonic() + max(5.0, timeout_ms / 1000.0)
+    logged_diag = False
     while time.monotonic() < deadline:
+        # 1) По accessible name (Username / Имя / подтверждение личности).
         try:
-            dlg = page.get_by_role("dialog", name=re.compile(r"Username", re.I))
-            if dlg.count() > 0:
-                d = dlg.last
-                inp = d.locator('input[type="text"]').first
-                if inp.count() > 0 and inp.is_visible():
+            dlg = page.get_by_role("dialog", name=_USERNAME_DIALOG_NAME_RE)
+            n = dlg.count()
+            for i in range(n - 1, -1, -1):
+                d = dlg.nth(i)
+                try:
+                    if not d.is_visible():
+                        continue
+                except Exception:
+                    continue
+                if _dialog_looks_like_username_edit(d):
                     _log("Accounts Center: форма Username готова.")
                     return d
         except Exception:
             pass
+
+        # 2) Любой видимый dialog с text input + текстом про username.
         try:
-            dlg = page.locator('[role="dialog"]').filter(
-                has=page.locator('input[type="text"]')
-            ).last
-            inp = dlg.locator('input[type="text"]').first
-            if inp.count() > 0 and inp.is_visible():
-                # Заголовок Username рядом.
-                txt = (dlg.inner_text(timeout=2_000) or "")[:400]
-                if re.search(r"Username|Имя\s+пользователя", txt, re.I):
-                    _log("Accounts Center: форма Username готова (fallback).")
-                    return dlg
+            dialogs = page.locator('[role="dialog"]')
+            n = dialogs.count()
+            for i in range(n - 1, -1, -1):
+                d = dialogs.nth(i)
+                try:
+                    if not d.is_visible():
+                        continue
+                except Exception:
+                    continue
+                if _dialog_looks_like_username_edit(d):
+                    _log("Accounts Center: форма Username готова (scan).")
+                    return d
+        except Exception:
+            pass
+
+        # 3) Мягкий fallback: верхний dialog с одним text input
+        # (RU Accounts Center: заголовок «подтверждение личности»).
+        try:
+            dialogs = page.locator('[role="dialog"]:visible')
+            n = dialogs.count()
+            if n > 0:
+                d = dialogs.last
+                inp = d.locator('input[type="text"]')
+                if inp.count() == 1:
+                    _log(
+                        "Accounts Center: форма Username готова "
+                        "(fallback: один text input в dialog)."
+                    )
+                    return d
+        except Exception:
+            pass
+
+        if not logged_diag:
+            _log_visible_dialogs(page)
+            logged_diag = True
+
+        try:
+            page.wait_for_timeout(300)
+        except Exception:
+            time.sleep(0.3)
+
+    _log_visible_dialogs(page)
+    raise InstagramEditProfileError(
+        "Не дождались поля ввода Username в Accounts Center."
+    )
+
+
+def _username_input_locator(dialog):
+    """Поле юзернейма строго внутри dialog (не page-level — иначе можно промахнуться)."""
+    try:
+        lab = dialog.locator("label").filter(
+            has_text=_USERNAME_FIELD_HINT_RE
+        ).first
+        if lab.count() > 0:
+            for_id = (lab.get_attribute("for") or "").strip()
+            if for_id:
+                scoped = dialog.locator(f'input#{for_id}')
+                if scoped.count() > 0:
+                    return scoped.first
+            inner = lab.locator("input").first
+            if inner.count() > 0:
+                return inner
+    except Exception:
+        pass
+    try:
+        by_label = dialog.get_by_label(_USERNAME_FIELD_HINT_RE)
+        if by_label.count() > 0:
+            return by_label.first
+    except Exception:
+        pass
+    return dialog.locator('input[type="text"]').first
+
+
+def _read_username_input_value(dialog) -> str:
+    inp = _username_input_locator(dialog)
+    try:
+        return (inp.input_value(timeout=3_000) or "").strip()
+    except Exception:
+        pass
+    try:
+        return (inp.evaluate("el => (el && el.value) || ''") or "").strip()
+    except Exception:
+        return ""
+
+
+def _set_username_via_dom(page, want: str) -> dict:
+    """
+    Атомарно найти input в диалоге Username и заменить value.
+    document.execCommand('insertText') — основной способ для React/Meta.
+    """
+    return page.evaluate(
+        """(want) => {
+            const re = /username|имя\\s+пользователя|подтвержден|identity/i;
+            const dialogs = Array.from(
+                document.querySelectorAll('[role="dialog"]')
+            );
+            let dialog = null;
+            for (let i = dialogs.length - 1; i >= 0; i--) {
+                const d = dialogs[i];
+                const aria = d.getAttribute('aria-label') || '';
+                const txt = (d.innerText || '').slice(0, 800);
+                if (re.test(aria) || re.test(txt)) {
+                    dialog = d;
+                    break;
+                }
+            }
+            if (!dialog) {
+                return { ok: false, value: '', error: 'dialog not found' };
+            }
+            const input = dialog.querySelector('input[type="text"]');
+            if (!input) {
+                return { ok: false, value: '', error: 'input not found' };
+            }
+            const before = input.value || '';
+            input.focus();
+            try { input.click(); } catch (e) {}
+            try {
+                if (typeof input.select === 'function') input.select();
+                else input.setSelectionRange(0, before.length);
+            } catch (e) {}
+
+            let inserted = false;
+            try {
+                inserted = document.execCommand('insertText', false, want);
+            } catch (e) {
+                inserted = false;
+            }
+
+            if ((input.value || '') !== want) {
+                try {
+                    document.execCommand('selectAll', false);
+                    document.execCommand('delete', false);
+                    inserted = document.execCommand('insertText', false, want);
+                } catch (e) {}
+            }
+
+            if ((input.value || '') !== want) {
+                const last = input.value || '';
+                const proto = window.HTMLInputElement.prototype;
+                const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                if (desc && desc.set) desc.set.call(input, want);
+                else input.value = want;
+                const tracker = input._valueTracker;
+                if (tracker && typeof tracker.setValue === 'function') {
+                    tracker.setValue(last);
+                }
+                try {
+                    input.dispatchEvent(new InputEvent('beforeinput', {
+                        bubbles: true, cancelable: true, composed: true,
+                        data: want, inputType: 'insertReplacementText',
+                    }));
+                } catch (e) {}
+                input.dispatchEvent(new InputEvent('input', {
+                    bubbles: true, cancelable: true, composed: true,
+                    data: want, inputType: 'insertReplacementText',
+                }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+
+            const after = input.value || '';
+            return {
+                ok: after === want,
+                value: after,
+                before: before,
+                error: after === want ? '' : 'value not stuck',
+            };
+        }""",
+        want,
+    )
+
+
+def _fill_username_input(page, dialog, username: str) -> None:
+    """
+    Заменить уже введённый юзернейм на новый.
+
+    Meta floating-label + React: Playwright fill/keyboard часто не меняют
+    контролируемый value. Надёжнее — execCommand('insertText') в DOM диалога.
+    """
+    want = (username or "").strip()
+    if not want:
+        raise InstagramEditProfileError("Пустой юзернейм для ввода.")
+
+    inp = _username_input_locator(dialog)
+    try:
+        inp.wait_for(state="visible", timeout=15_000)
+    except Exception:
+        pass
+
+    current = _read_username_input_value(dialog)
+    _log(
+        f"Accounts Center: поле юзернейма сейчас {current!r}, "
+        f"вводим {want!r}."
+    )
+
+    last_actual = current
+    errors: list[str] = []
+
+    # --- 1) DOM: execCommand insertText + React _valueTracker ---
+    try:
+        # Клик по input (force), чтобы снять floating label.
+        try:
+            inp.click(timeout=5_000, force=True)
+            page.wait_for_timeout(150)
+        except Exception:
+            pass
+        result = _set_username_via_dom(page, want)
+        last_actual = str((result or {}).get("value") or "")
+        _log(
+            "Accounts Center: после execCommand/DOM → "
+            f"{last_actual!r} (ok={bool((result or {}).get('ok'))}, "
+            f"before={((result or {}).get('before') or '')!r}, "
+            f"err={((result or {}).get('error') or '')!r})."
+        )
+        if not (result or {}).get("ok"):
+            errors.append(f"dom: {(result or {}).get('error')!r}")
+    except Exception as exc:
+        errors.append(f"dom: {exc!r}")
+        _log(f"Accounts Center: execCommand/DOM не удался: {exc!r}")
+
+    # --- 2) Посимвольное удаление старого + keyboard.type ---
+    if last_actual.lower() != want.lower():
+        try:
+            try:
+                inp.click(timeout=5_000, force=True)
+            except Exception:
+                pass
+            page.wait_for_timeout(100)
+            # Курсор в конец, стереть всё Backspace.
+            try:
+                inp.evaluate(
+                    """(el) => {
+                        el.focus();
+                        const n = (el.value || '').length;
+                        el.setSelectionRange(n, n);
+                    }"""
+                )
+            except Exception:
+                pass
+            wipe_n = max(len(current), len(last_actual), 30) + 5
+            for _ in range(wipe_n):
+                page.keyboard.press("Backspace")
+            page.wait_for_timeout(120)
+            cleared = _read_username_input_value(dialog)
+            _log(f"Accounts Center: после Backspace×{wipe_n} → {cleared!r}")
+            page.keyboard.type(want, delay=45)
+            page.wait_for_timeout(400)
+            last_actual = _read_username_input_value(dialog)
+            _log(f"Accounts Center: после wipe+type → {last_actual!r}")
+        except Exception as exc:
+            errors.append(f"wipe+type: {exc!r}")
+            _log(f"Accounts Center: wipe+type не удался: {exc!r}")
+
+    # --- 3) press_sequentially ---
+    if last_actual.lower() != want.lower():
+        try:
+            inp.click(timeout=5_000, force=True)
+            page.wait_for_timeout(80)
+            try:
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+            except Exception:
+                pass
+            inp.press_sequentially(want, delay=40, timeout=90_000)
+            page.wait_for_timeout(400)
+            last_actual = _read_username_input_value(dialog)
+            _log(f"Accounts Center: после press_sequentially → {last_actual!r}")
+        except Exception as exc:
+            errors.append(f"press_sequentially: {exc!r}")
+            _log(f"Accounts Center: press_sequentially не удался: {exc!r}")
+
+    # Повторная DOM-проверка (без blur).
+    deadline = time.monotonic() + 4.0
+    while time.monotonic() < deadline:
+        last_actual = _read_username_input_value(dialog)
+        if last_actual.lower() == want.lower():
+            break
+        # Ещё одна DOM-попытка на случай отката React.
+        try:
+            _set_username_via_dom(page, want)
         except Exception:
             pass
         try:
             page.wait_for_timeout(250)
         except Exception:
             time.sleep(0.25)
-    raise InstagramEditProfileError(
-        "Не дождались поля ввода Username в Accounts Center."
-    )
 
-
-def _fill_username_input(dialog, username: str) -> None:
-    inp = dialog.locator('input[type="text"]').first
-    inp.wait_for(state="visible", timeout=15_000)
-    try:
-        inp.click(timeout=5_000)
-    except Exception:
-        pass
-    try:
-        inp.fill("")
-    except Exception:
-        pass
-    try:
-        inp.fill(username, timeout=10_000)
-    except Exception:
-        inp.evaluate(
-            """(el, value) => {
-                const setter = Object.getOwnPropertyDescriptor(
-                    window.HTMLInputElement.prototype, 'value'
-                )?.set;
-                if (setter) setter.call(el, value);
-                else el.value = value;
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-            }""",
-            username,
+    if last_actual.lower() != want.lower():
+        detail = "; ".join(errors) if errors else "без исключений"
+        raise InstagramEditProfileError(
+            "Юзернейм не попал в поле "
+            f"(ожидали {want!r}, в поле {last_actual!r}; {detail})."
         )
-    _log(f"Accounts Center: введён юзернейм {username!r}.")
+
+    try:
+        page.wait_for_timeout(700)
+    except Exception:
+        time.sleep(0.7)
+    # Контрольный read — убедиться, что React не откатил.
+    check = _read_username_input_value(dialog)
+    if check.lower() != want.lower():
+        raise InstagramEditProfileError(
+            "Юзернейм откатился после ввода "
+            f"(ожидали {want!r}, стало {check!r})."
+        )
+    _log(f"Accounts Center: юзернейм в поле подтверждён: {want!r}.")
 
 
 def _username_input_invalid(dialog) -> bool | None:
@@ -842,26 +1409,51 @@ def _change_instagram_username(page, username: str) -> str:
     _log(f"Accounts Center: открываем {ACCOUNTS_CENTER_URL}")
     _navigate_page_to(page, ACCOUNTS_CENTER_URL, label="IG accounts center")
     accept_instagram_cookie_consent_if_present(page, appear_seconds=3.0)
-    _wait_accounts_center_profiles(page)
-    _click_own_instagram_profile(page)
+    _open_own_instagram_profile_from_accounts_center(page)
     _wait_profile_details_dialog(page)
     _click_username_menu(page)
     dialog = _wait_username_edit_dialog(page)
+
+    current0 = _read_username_input_value(dialog)
+    _log(
+        f"Accounts Center: текущий юзернейм в поле {current0!r}, "
+        f"цель {base!r}."
+    )
+    if current0.lower() == base.lower():
+        _log(
+            f"Accounts Center: юзернейм уже {current0!r} — смена не нужна."
+        )
+        return current0
 
     applied = ""
     for attempt in range(1, _USERNAME_RETRY_MAX + 1):
         if attempt == 1:
             candidate = _username_candidate(base)
         else:
-            suffix = random.randint(1, 1000)
+            suffix = random.randint(1, 10_000)
             candidate = _username_candidate(base, suffix=suffix)
             _log(
                 f"Accounts Center: юзернейм занят — пробуем "
                 f"{candidate!r} (попытка {attempt}/{_USERNAME_RETRY_MAX})."
             )
-        _fill_username_input(dialog, candidate)
+            # Диалог мог перемонтироваться после неудачной попытки.
+            try:
+                dialog = _wait_username_edit_dialog(page, timeout_ms=15_000)
+            except Exception:
+                pass
+        _fill_username_input(page, dialog, candidate)
+        # Перечитать dialog — React мог заменить DOM после input.
+        try:
+            dialog = _wait_username_edit_dialog(page, timeout_ms=8_000)
+        except Exception:
+            pass
         ok = _wait_username_validation(dialog, timeout_s=12.0)
         if not ok:
+            still = _read_username_input_value(dialog)
+            _log(
+                f"Accounts Center: валидация не прошла "
+                f"(в поле сейчас {still!r}, Done inactive)."
+            )
             continue
         applied = candidate
         break

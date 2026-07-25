@@ -51,7 +51,7 @@ IG_2FA_RESULT_TAGS: tuple[str, ...] = (
     "УСПЕШНОЕ ПОДКЛЮЧЕНИЕ 2FA INSTAGRAM",
 )
 
-# Смена аватарки канала.
+# Смена аватарки канала (YouTube).
 AVATAR_CHANGE_ERROR_TAG = "ОШИБКА СМЕНЫ АВАТАРКИ YouTube"
 AVATAR_CHANGE_SUCCESS_TAG = "УСПЕШНАЯ СМЕНА АВАТАРКИ YouTube"
 AVATAR_CHANGE_RESULT_TAGS: tuple[str, ...] = (
@@ -59,12 +59,28 @@ AVATAR_CHANGE_RESULT_TAGS: tuple[str, ...] = (
     AVATAR_CHANGE_SUCCESS_TAG,
 )
 
-# Смена названия канала.
+# Смена аватарки профиля (Instagram).
+IG_AVATAR_CHANGE_ERROR_TAG = "ОШИБКА СМЕНЫ АВАТАРКИ Instagram"
+IG_AVATAR_CHANGE_SUCCESS_TAG = "УСПЕШНАЯ СМЕНА АВАТАРКИ Instagram"
+IG_AVATAR_CHANGE_RESULT_TAGS: tuple[str, ...] = (
+    IG_AVATAR_CHANGE_ERROR_TAG,
+    IG_AVATAR_CHANGE_SUCCESS_TAG,
+)
+
+# Смена названия канала (YouTube).
 NAME_CHANGE_ERROR_TAG = "ОШИБКА СМЕНЫ НАЗВАНИЯ YouTube"
 NAME_CHANGE_SUCCESS_TAG = "УСПЕШНАЯ СМЕНА НАЗВАНИЯ YouTube"
 NAME_CHANGE_RESULT_TAGS: tuple[str, ...] = (
     NAME_CHANGE_ERROR_TAG,
     NAME_CHANGE_SUCCESS_TAG,
+)
+
+# Смена юзернейма (Instagram).
+IG_NAME_CHANGE_ERROR_TAG = "ОШИБКА СМЕНЫ ЮЗЕРНЕЙМА Instagram"
+IG_NAME_CHANGE_SUCCESS_TAG = "УСПЕШНАЯ СМЕНА ЮЗЕРНЕЙМА Instagram"
+IG_NAME_CHANGE_RESULT_TAGS: tuple[str, ...] = (
+    IG_NAME_CHANGE_ERROR_TAG,
+    IG_NAME_CHANGE_SUCCESS_TAG,
 )
 
 # Прогрев Shorts (YouTube).
@@ -99,6 +115,14 @@ LANGUAGE_CHANGE_RESULT_TAGS: tuple[str, ...] = (
     LANGUAGE_CHANGE_SUCCESS_TAG,
 )
 
+# Смена языка интерфейса Instagram.
+IG_LANGUAGE_CHANGE_ERROR_TAG = "ОШИБКА СМЕНЫ ЯЗЫКА Instagram"
+IG_LANGUAGE_CHANGE_SUCCESS_TAG = "УСПЕШНАЯ СМЕНА ЯЗЫКА Instagram"
+IG_LANGUAGE_CHANGE_RESULT_TAGS: tuple[str, ...] = (
+    IG_LANGUAGE_CHANGE_ERROR_TAG,
+    IG_LANGUAGE_CHANGE_SUCCESS_TAG,
+)
+
 # Фарм Cookie.
 COOKIE_FARM_ERROR_TAG = "ОШИБКА ФАРМА КУКИ"
 COOKIE_FARM_SUCCESS_TAG = "УСПЕШНО ЗАФАРМИЛ КУКИ"
@@ -107,12 +131,20 @@ COOKIE_FARM_RESULT_TAGS: tuple[str, ...] = (
     COOKIE_FARM_SUCCESS_TAG,
 )
 
-# Заполнение описания канала.
+# Заполнение описания канала (YouTube).
 DESCRIPTION_FILL_ERROR_TAG = "ОШИБКА ЗАПОЛНЕНИЯ ОПИСАНИЯ YouTube"
 DESCRIPTION_FILL_SUCCESS_TAG = "УСПЕШНОЕ ЗАПОЛНЕНИЕ ОПИСАНИЯ YouTube"
 DESCRIPTION_FILL_RESULT_TAGS: tuple[str, ...] = (
     DESCRIPTION_FILL_ERROR_TAG,
     DESCRIPTION_FILL_SUCCESS_TAG,
+)
+
+# Заполнение bio (Instagram).
+IG_DESCRIPTION_FILL_ERROR_TAG = "ОШИБКА ЗАПОЛНЕНИЯ BIO Instagram"
+IG_DESCRIPTION_FILL_SUCCESS_TAG = "УСПЕШНОЕ ЗАПОЛНЕНИЕ BIO Instagram"
+IG_DESCRIPTION_FILL_RESULT_TAGS: tuple[str, ...] = (
+    IG_DESCRIPTION_FILL_ERROR_TAG,
+    IG_DESCRIPTION_FILL_SUCCESS_TAG,
 )
 
 # Заполнение ссылки канала.
@@ -197,8 +229,12 @@ ZALIVER_PROFILE_TAGS: tuple[str, ...] = (
     IG_2FA_SUCCESS_TAG,
     AVATAR_CHANGE_ERROR_TAG,
     AVATAR_CHANGE_SUCCESS_TAG,
+    IG_AVATAR_CHANGE_ERROR_TAG,
+    IG_AVATAR_CHANGE_SUCCESS_TAG,
     NAME_CHANGE_ERROR_TAG,
     NAME_CHANGE_SUCCESS_TAG,
+    IG_NAME_CHANGE_ERROR_TAG,
+    IG_NAME_CHANGE_SUCCESS_TAG,
     WARMUP_ERROR_TAG,
     WARMUP_SUCCESS_TAG,
     IG_WARMUP_ERROR_TAG,
@@ -207,10 +243,14 @@ ZALIVER_PROFILE_TAGS: tuple[str, ...] = (
     PROMOTE_SUCCESS_TAG,
     LANGUAGE_CHANGE_ERROR_TAG,
     LANGUAGE_CHANGE_SUCCESS_TAG,
+    IG_LANGUAGE_CHANGE_ERROR_TAG,
+    IG_LANGUAGE_CHANGE_SUCCESS_TAG,
     COOKIE_FARM_ERROR_TAG,
     COOKIE_FARM_SUCCESS_TAG,
     DESCRIPTION_FILL_ERROR_TAG,
     DESCRIPTION_FILL_SUCCESS_TAG,
+    IG_DESCRIPTION_FILL_ERROR_TAG,
+    IG_DESCRIPTION_FILL_SUCCESS_TAG,
     LINK_FILL_ERROR_TAG,
     LINK_FILL_SUCCESS_TAG,
     VIDEO_TITLE_CHANGE_ERROR_TAG,

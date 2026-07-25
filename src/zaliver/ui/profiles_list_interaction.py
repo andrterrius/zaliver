@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
@@ -15,6 +16,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from zaliver.db.upload_store import resolve_upload_pause
 from zaliver.ui.antic_profile_row import _profile_id
 from zaliver.ui.profile_list_helpers import (
     profile_has_account_data,
@@ -43,6 +45,7 @@ class ProfilesListInteraction(QObject):
         on_gmail_data_click: Callable[[str], None] | None = None,
         on_preview_click: Callable[[str], None] | None = None,
         single_select: bool = False,
+        upload_pause: timedelta | None = None,
     ) -> None:
         super().__init__(list_widget)
         self.lw = list_widget
@@ -52,6 +55,7 @@ class ProfilesListInteraction(QObject):
         self._on_gmail_data_click = on_gmail_data_click
         self._on_preview_click = on_preview_click
         self._single_select = bool(single_select)
+        self._upload_pause = resolve_upload_pause(upload_pause)
 
         self.checked_profile_ids: set[str] = set()
         self._profile_id_to_item: dict[str, QListWidgetItem] = {}
@@ -217,7 +221,9 @@ class ProfilesListInteraction(QObject):
         elif mode == "available":
             picked: set[str] = set()
             for pid in existing:
-                if profile_is_upload_available(last_upload_map.get(pid)):
+                if profile_is_upload_available(
+                    last_upload_map.get(pid), pause=self._upload_pause
+                ):
                     picked.add(pid)
             self.checked_profile_ids = picked
         elif mode == "no_errors":
@@ -295,6 +301,7 @@ class ProfilesListInteraction(QObject):
             row = ProfileListRow(
                 p,
                 last_uploaded_at=last_upload_map.get(pid),
+                upload_pause=self._upload_pause,
                 on_upload_pause_click=(
                     (lambda pid=pid: self._on_upload_pause_click(pid))
                     if self._on_upload_pause_click
@@ -341,6 +348,10 @@ class ProfilesListInteraction(QObject):
         self._sync_profile_row_widths()
         self.lw.verticalScrollBar().setValue(list_scroll)
         self.selection_changed.emit()
+
+    def set_upload_pause(self, pause: timedelta | None) -> None:
+        """Обновить длительность паузы (после смены настроек Instagram)."""
+        self._upload_pause = resolve_upload_pause(pause)
 
     def update_upload_cooldown_for_profile(self, profile_id: str, last_uploaded_iso: str | None) -> None:
         row = self._profile_id_to_row.get(profile_id)

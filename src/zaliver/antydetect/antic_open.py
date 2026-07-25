@@ -1221,14 +1221,16 @@ def upload_instagram_reel_in_profile(
     session_login: str = "",
     session_password: str = "",
     session_twofa: str = "",
+    keep_browser_open: bool = False,
 ) -> dict:
     """Dolphin → Instagram → «Новая публикация» → файл → Share (Reels)."""
     from zaliver.instagram_upload.reels_upload import run_instagram_reels_upload
 
+    keep_open = bool(keep_browser_open)
     _log(
         "Dolphin: залив Instagram Reels. "
         f"profile_id={profile_id!r}, headless={headless}, "
-        f"video_path={video_path!r}"
+        f"keep_browser_open={keep_open}, video_path={video_path!r}"
     )
     api = DolphinAntyLocalAPI()
     try:
@@ -1258,19 +1260,32 @@ def upload_instagram_reel_in_profile(
                     profile_id=profile_id,
                 )
             finally:
-                try:
-                    browser.close()
-                except Exception:
-                    pass
+                if keep_open:
+                    _log(
+                        "Dolphin: браузер оставлен открытым "
+                        f"(profile_id={profile_id!r}) — следующий залив без stop."
+                    )
+                else:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
     except Exception as e:
         _log(f"Ошибка залива Reels: {type(e).__name__}: {e!r}")
         raise _wrap_exc(e) from e
     finally:
-        try:
-            api.stop_profile(profile_id)
-        except Exception as e:
-            _log(f"Dolphin: stop_profile: {e!r}")
-        api.close()
+        if keep_open:
+            _log(
+                "Dolphin: stop_profile пропущен (keep_browser_open) "
+                f"profile_id={profile_id!r}."
+            )
+            api.close()
+        else:
+            try:
+                api.stop_profile(profile_id)
+            except Exception as e:
+                _log(f"Dolphin: stop_profile: {e!r}")
+            api.close()
 
 
 @with_log_profile
@@ -1286,6 +1301,7 @@ def upload_instagram_reel_in_local_antidetect_profile(
     session_login: str = "",
     session_password: str = "",
     session_twofa: str = "",
+    keep_browser_open: bool = False,
 ) -> dict:
     """Локальный антидетект → Instagram → «Новая публикация» → файл → Share (Reels)."""
     from zaliver.instagram_upload.reels_upload import run_instagram_reels_upload
@@ -1298,10 +1314,11 @@ def upload_instagram_reel_in_local_antidetect_profile(
         unregister_local_session,
     )
 
+    keep_open = bool(keep_browser_open)
     _log(
         "Local antidetect: залив Instagram Reels. "
         f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}, "
-        f"video_path={video_path!r}"
+        f"keep_browser_open={keep_open}, video_path={video_path!r}"
     )
     api = LocalAntidetectHttpAPI(base_url)
     session_id: str | None = None
@@ -1325,20 +1342,43 @@ def upload_instagram_reel_in_local_antidetect_profile(
             except Exception as e:
                 _log(f"Local antidetect: не удалось прочитать custom_data: {e!r}")
 
-        acc = api.launch_profile(
-            profile_id,
-            headless=headless,
-            expose_cdp=True,
-            remote_cdp=remote_cdp,
-        )
-        sid = acc.get("session_id")
-        if not isinstance(sid, str) or not sid.strip():
-            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
-        session_id = sid.strip()
         bu = (base_url or "").strip() or "http://127.0.0.1:18765"
-        register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
-        ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
-        _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+        ws_existing, sid_existing, _msg = api.resolve_running_cdp_ws_url_for_profile(
+            profile_id
+        )
+        if (
+            keep_open
+            and isinstance(ws_existing, str)
+            and ws_existing.strip()
+            and isinstance(sid_existing, str)
+            and sid_existing.strip()
+        ):
+            session_id = sid_existing.strip()
+            ws_url = ws_existing.strip()
+            register_local_session(
+                profile_id=profile_id, base_url=bu, session_id=session_id
+            )
+            _log(
+                "Local antidetect: переиспользуем уже запущенную сессию "
+                f"session_id={session_id!r}, cdp_ws_url={ws_url!r}"
+            )
+        else:
+            acc = api.launch_profile(
+                profile_id,
+                headless=headless,
+                expose_cdp=True,
+                remote_cdp=remote_cdp,
+                start_url="https://www.instagram.com/",
+            )
+            sid = acc.get("session_id")
+            if not isinstance(sid, str) or not sid.strip():
+                raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+            session_id = sid.strip()
+            register_local_session(
+                profile_id=profile_id, base_url=bu, session_id=session_id
+            )
+            ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+            _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
 
         with sync_playwright() as p:
             browser, _context, page = _playwright_page_from_local_session_cdp(
@@ -1356,15 +1396,26 @@ def upload_instagram_reel_in_local_antidetect_profile(
                     profile_id=profile_id,
                 )
             finally:
-                try:
-                    browser.close()
-                except Exception:
-                    pass
+                if keep_open:
+                    _log(
+                        "Local antidetect: браузер оставлен открытым "
+                        f"(profile_id={profile_id!r}) — следующий залив без stop."
+                    )
+                else:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
     except Exception as e:
         _log(f"Ошибка залива Reels: {type(e).__name__}: {e!r}")
         raise LocalAntidetectError(f"Ошибка залива Instagram Reels: {e}") from e
     finally:
-        if session_id:
+        if keep_open:
+            _log(
+                "Local antidetect: stop_session пропущен (keep_browser_open) "
+                f"profile_id={profile_id!r}."
+            )
+        elif session_id:
             unregister_local_session(profile_id=profile_id)
             try:
                 api.stop_session(session_id)

@@ -7,6 +7,7 @@ import random
 import secrets
 import shutil
 import tempfile
+import threading
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,8 @@ LogCallback = Callable[[str], None]
 
 # Одновременных роликов при GPU-кодировании (AMF/NVENC/QSV делят один чип).
 SLICE_GPU_MAX_CONCURRENT_JOBS = 2
+# Параллельный залив: не больше одного ролика нарезки одновременно.
+_UPLOAD_THROTTLE_SLICE_JOBS = 1
 
 
 def _max_concurrent_slice_jobs(
@@ -286,9 +289,19 @@ class SlicingController(QObject):
     def __init__(self) -> None:
         super().__init__()
         self._cancelled = False
+        self._upload_throttle = threading.Event()
+        self._upload_throttle_logged = False
 
     def cancel(self) -> None:
         self._cancelled = True
+
+    def set_upload_throttle(self, enabled: bool) -> None:
+        """Приглушить нарезку, пока параллельно идёт залив в браузер."""
+        if enabled:
+            self._upload_throttle.set()
+        else:
+            self._upload_throttle.clear()
+            self._upload_throttle_logged = False
 
     def run(self, options: Dict[str, Any]) -> None:
         def safe_log(msg: str) -> None:
@@ -299,6 +312,8 @@ class SlicingController(QObject):
 
         log: LogCallback = safe_log
         self._cancelled = False
+        self._upload_throttle.clear()
+        self._upload_throttle_logged = False
 
         try:
             out_dir = Path(options["output_dir"])
@@ -506,13 +521,29 @@ class SlicingController(QObject):
                 with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
                     fut_map: Dict[Future, SliceJob] = {}
                     pending = list(jobs)
+                    throttle_logged = False
+
+                    def _slice_slot_limit() -> int:
+                        nonlocal throttle_logged
+                        if self._upload_throttle.is_set():
+                            if not throttle_logged:
+                                throttle_logged = True
+                                self._upload_throttle_logged = True
+                                log(
+                                    "Залив параллельно с нарезкой: параллельность "
+                                    f"сведена к {_UPLOAD_THROTTLE_SLICE_JOBS}, "
+                                    "чтобы браузер успевал кликать."
+                                )
+                            return _UPLOAD_THROTTLE_SLICE_JOBS
+                        return max_concurrent
+
                     while pending or fut_map:
                         if cancelled():
                             for f in fut_map:
                                 f.cancel()
                             self.finished.emit(False, "Отменено.")
                             return
-                        while pending and len(fut_map) < max_concurrent:
+                        while pending and len(fut_map) < _slice_slot_limit():
                             job = pending.pop(0)
                             fut = pool.submit(
                                 _run_slice_job,

@@ -7,6 +7,7 @@ import random
 import secrets
 import shutil
 import sys
+import threading
 import time
 import uuid
 from collections import deque
@@ -156,6 +157,10 @@ _MAX_CHUNKS_PER_VIDEO = 64
 _CHUNKS_PER_WORKER = 6
 # Склейка/mux ffmpeg — в фоне, чтобы не блокировать подачу чанков в process pool.
 _FINALIZE_MAX_THREADS = 48
+# Пока идёт залив «по мере готовности» — сильно режем параллельность encode,
+# иначе Chromium/Playwright конкурируют с ffmpeg за CPU и клики «залипают».
+_UPLOAD_THROTTLE_ENCODE_JOBS = 1
+_UPLOAD_THROTTLE_POOL_SLOTS = 2
 
 
 def _max_concurrent_encode_jobs(num_workers: int) -> int:
@@ -493,10 +498,20 @@ class ProcessingController(QObject):
     def __init__(self) -> None:
         super().__init__()
         self._mp_cancel: Optional[multiprocessing.synchronize.Event] = None
+        self._upload_throttle = threading.Event()
+        self._upload_throttle_logged = False
 
     def cancel(self) -> None:
         if self._mp_cancel is not None:
             self._mp_cancel.set()
+
+    def set_upload_throttle(self, enabled: bool) -> None:
+        """Приглушить encode, пока параллельно идёт залив в браузер."""
+        if enabled:
+            self._upload_throttle.set()
+        else:
+            self._upload_throttle.clear()
+            self._upload_throttle_logged = False
 
     def run(self, options: Dict[str, Any]) -> None:
         def safe_log(msg: str) -> None:
@@ -507,6 +522,8 @@ class ProcessingController(QObject):
 
         log: LogCallback = safe_log
         self._mp_cancel = None
+        self._upload_throttle.clear()
+        self._upload_throttle_logged = False
 
         try:
             out_dir = Path(options["output_dir"])
@@ -895,9 +912,35 @@ class ProcessingController(QObject):
                     finalize_futures: Dict[Future, str] = {}
                     last_emit = 0.0
 
+                    def _throttled() -> bool:
+                        return self._upload_throttle.is_set()
+
+                    def _note_throttle() -> None:
+                        if self._upload_throttle_logged:
+                            return
+                        self._upload_throttle_logged = True
+                        log(
+                            "Залив параллельно с обработкой: encode приглушён "
+                            f"(роликов≤{_UPLOAD_THROTTLE_ENCODE_JOBS}, "
+                            f"задач пула≤{_UPLOAD_THROTTLE_POOL_SLOTS}), "
+                            "чтобы браузер успевал кликать."
+                        )
+
+                    def _encode_job_limit() -> int:
+                        if _throttled():
+                            _note_throttle()
+                            return _UPLOAD_THROTTLE_ENCODE_JOBS
+                        return max_encode_jobs
+
+                    def _pool_slot_limit() -> int:
+                        if _throttled():
+                            _note_throttle()
+                            return max(1, min(_UPLOAD_THROTTLE_POOL_SLOTS, num_workers))
+                        return num_workers
+
                     def _activate_encode_jobs() -> None:
                         while (
-                            len(active_encode) < max_encode_jobs and job_wait_queue
+                            len(active_encode) < _encode_job_limit() and job_wait_queue
                         ):
                             jid = job_wait_queue.popleft()
                             if jid not in job_encode:
@@ -1096,7 +1139,8 @@ class ProcessingController(QObject):
                         return False
 
                     def fill_pool() -> None:
-                        while len(futures) < num_workers:
+                        limit = _pool_slot_limit()
+                        while len(futures) < limit:
                             meta = _pick_next_encode_task()
                             if meta is None:
                                 break

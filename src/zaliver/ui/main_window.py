@@ -3500,6 +3500,30 @@ class MainWindow(QWidget):
             hasattr(self, "delete_after_upload") and self.delete_after_upload.isChecked()
         )
 
+    def _set_processing_upload_throttle(self, enabled: bool) -> None:
+        """Пока идёт залив параллельно с обработкой — режем ffmpeg, чтобы браузер не тормозил."""
+        for ctrl in (
+            getattr(self, "_processor", None),
+            getattr(self, "_slice_processor", None),
+        ):
+            if ctrl is None:
+                continue
+            fn = getattr(ctrl, "set_upload_throttle", None)
+            if not callable(fn):
+                continue
+            try:
+                fn(bool(enabled))
+            except Exception:
+                pass
+        if enabled:
+            try:
+                self._append_session_log(
+                    "[upload] Обработка приглушена на время залива "
+                    "(меньше параллельного ffmpeg) — браузер должен кликать быстрее."
+                )
+            except Exception:
+                pass
+
     def _enqueue_or_start_streaming_upload(self, video_path: str) -> None:
         """При «по мере готовности»: стартуем залив с первого видео, дальше — в очередь."""
         if not getattr(self, "_upload_streaming_active", False):
@@ -3535,6 +3559,7 @@ class MainWindow(QWidget):
         self._upload_log_mode = self._active_work_mode
         if self._start_upload_queue_from_pending(pending, [path], streaming=True):
             self._pending_upload = None
+            self._set_processing_upload_throttle(True)
             try:
                 self._append_session_log(
                     f"[upload] Залив по мере готовности: первое видео {Path(path).name}"
@@ -3545,6 +3570,7 @@ class MainWindow(QWidget):
             # Старт не удался — откат к обычному режиму (всё, потом залив).
             self._upload_streaming_active = False
             self._upload_log_mode = ""
+            self._set_processing_upload_throttle(False)
 
     def _delete_output_video_after_upload(self, video_path: str) -> None:
         p = Path(str(video_path or "").strip()).expanduser()
@@ -10117,6 +10143,8 @@ class MainWindow(QWidget):
         self._upload_streaming_active = bool(
             raw_prof and pending.get("upload_as_ready")
         )
+        if self._upload_streaming_active:
+            opts["num_workers"] = 1
 
         # Upload session starts only on "Start".
         try:
@@ -10144,7 +10172,8 @@ class MainWindow(QWidget):
 
         if self._upload_streaming_active:
             self._append_log(
-                "Залив по мере готовности: браузеры откроются после первого готового видео."
+                "Залив по мере готовности: обработка в 1 поток "
+                "(чтобы браузер не тормозил), залив — после первого готового видео."
             )
 
         self._work_thread = QThread()
@@ -10221,6 +10250,8 @@ class MainWindow(QWidget):
         self._upload_streaming_active = bool(
             raw_prof and pending.get("upload_as_ready")
         )
+        if self._upload_streaming_active:
+            opts["num_workers"] = 1
 
         try:
             planned = len(list(opts.get("music_files") or [])) * max(
@@ -10246,7 +10277,8 @@ class MainWindow(QWidget):
 
         if self._upload_streaming_active:
             self._append_slice_log(
-                "Залив по мере готовности: браузеры откроются после первого готового видео."
+                "Залив по мере готовности: нарезка в 1 поток "
+                "(чтобы браузер не тормозил), залив — после первого готового видео."
             )
 
         self._work_thread = QThread()
@@ -10398,6 +10430,7 @@ class MainWindow(QWidget):
         self._upload_streaming_active = False
         self._upload_streaming_title = ""
         self._upload_streaming_description = ""
+        self._set_processing_upload_throttle(False)
         self._upload_cancel_profile_ids = []
         self._upload_cancel_kind = ""
         self._upload_cancel_dolphin_token = ""
@@ -11060,6 +11093,7 @@ class MainWindow(QWidget):
 
         if not ok:
             self._upload_streaming_active = False
+            self._set_processing_upload_throttle(False)
             mgr = getattr(self, "_upload_manager", None)
             if mgr is not None:
                 try:
@@ -11109,6 +11143,7 @@ class MainWindow(QWidget):
 
         # Режим «по мере готовности»: залив уже идёт — только закрываем producer.
         self._upload_streaming_active = False
+        self._set_processing_upload_throttle(False)
         mgr = getattr(self, "_upload_manager", None)
         if mgr is not None:
             self._pending_upload = None

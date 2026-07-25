@@ -967,6 +967,9 @@ class MainWindow(QWidget):
         self._upload_success_video_paths: set[str] = set()
         self._upload_success_lock = threading.Lock()
         self._upload_manager = None
+        self._upload_streaming_active = False
+        self._upload_streaming_title = ""
+        self._upload_streaming_description = ""
         self._progress_hold_youtube = False
         self._upload_cancel_kind = ""
         self._upload_cancel_dolphin_token = ""
@@ -3497,6 +3500,52 @@ class MainWindow(QWidget):
             hasattr(self, "delete_after_upload") and self.delete_after_upload.isChecked()
         )
 
+    def _enqueue_or_start_streaming_upload(self, video_path: str) -> None:
+        """При «по мере готовности»: стартуем залив с первого видео, дальше — в очередь."""
+        if not getattr(self, "_upload_streaming_active", False):
+            return
+        path = (video_path or "").strip()
+        if not path:
+            return
+        mgr = getattr(self, "_upload_manager", None)
+        if mgr is not None:
+            try:
+                mgr.enqueue_videos(
+                    video_paths=[path],
+                    title=getattr(self, "_upload_streaming_title", "") or "",
+                    description=getattr(self, "_upload_streaming_description", "") or "",
+                )
+                try:
+                    self._append_session_log(
+                        f"[upload] В очередь по мере готовности: {Path(path).name}"
+                    )
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    self._append_session_log(
+                        f"[upload] Не удалось добавить в очередь: {Path(path).name} ({e!r})"
+                    )
+                except Exception:
+                    pass
+            return
+        pending = self._pending_upload
+        if pending is None:
+            return
+        self._upload_log_mode = self._active_work_mode
+        if self._start_upload_queue_from_pending(pending, [path], streaming=True):
+            self._pending_upload = None
+            try:
+                self._append_session_log(
+                    f"[upload] Залив по мере готовности: первое видео {Path(path).name}"
+                )
+            except Exception:
+                pass
+        else:
+            # Старт не удался — откат к обычному режиму (всё, потом залив).
+            self._upload_streaming_active = False
+            self._upload_log_mode = ""
+
     def _delete_output_video_after_upload(self, video_path: str) -> None:
         p = Path(str(video_path or "").strip()).expanduser()
         if not str(p):
@@ -3557,6 +3606,7 @@ class MainWindow(QWidget):
             p = path.strip()
             if include_in_upload:
                 self._just_saved_outputs.append(p)
+                self._enqueue_or_start_streaming_upload(p)
             else:
                 self._append_log(
                     f"Исключено из залива в YouTube: {Path(p).name}"
@@ -3590,7 +3640,7 @@ class MainWindow(QWidget):
             except Exception:
                 pass
             self._refresh_antydetect_profiles()
-            return {"title": "", "description": "", "profile_ids": "", "publish_before_checks": True, "keep_studio_title": False, "schedule_publish": False, "schedule_times_iso": [], "schedule_warmup_shorts": False, "schedule_warmup_shorts_recommendations": True, "schedule_warmup_search_query": ""}
+            return {"title": "", "description": "", "profile_ids": "", "publish_before_checks": True, "keep_studio_title": False, "upload_as_ready": False, "schedule_publish": False, "schedule_times_iso": [], "schedule_warmup_shorts": False, "schedule_warmup_shorts_recommendations": True, "schedule_warmup_search_query": ""}
 
         dlg = QDialog(self)
         dlg_title = (
@@ -3662,6 +3712,16 @@ class MainWindow(QWidget):
         keep_studio_title_cb.setToolTip(
             "Если включено — в YouTube Studio не очищаем поле «Название»: "
             "остаётся значение из настроек канала или имени файла."
+        )
+
+        upload_as_ready_cb = QCheckBox("Заливать по мере готовности")
+        upload_as_ready_cb.setChecked(
+            bool(self._settings.value("upload_as_ready", False, type=bool))
+        )
+        upload_as_ready_cb.setToolTip(
+            "Если включено: как только видео обработалось — сразу ставим его в очередь "
+            "залива (браузеры открываются параллельно с обработкой).\n"
+            "Если выключено: сначала обрабатываются все видео, затем начинается залив."
         )
 
         btn_title_wand = make_magic_wand_button(
@@ -4116,9 +4176,10 @@ class MainWindow(QWidget):
         grid.addWidget(desc_row, 1, 1)
         grid.addWidget(publish_before_checks_cb, 2, 1)
         grid.addWidget(keep_studio_title_cb, 3, 1)
-        grid.addWidget(schedule_publish_cb, 4, 1)
-        grid.addWidget(schedule_warmup_group, 5, 1)
-        grid.addWidget(schedule_times_widget, 6, 1)
+        grid.addWidget(upload_as_ready_cb, 4, 1)
+        grid.addWidget(schedule_publish_cb, 5, 1)
+        grid.addWidget(schedule_warmup_group, 6, 1)
+        grid.addWidget(schedule_times_widget, 7, 1)
         if is_ig_upload:
             # YouTube-only: описание, проверки Studio, название из настроек, отложка.
             for w in (
@@ -4153,10 +4214,10 @@ class MainWindow(QWidget):
         profiles_col_l.addLayout(dlg_sel_row)
         profiles_col_l.addWidget(lw, 1)
 
-        grid.addWidget(QLabel("Профили:"), 7, 0, Qt.AlignmentFlag.AlignTop)
-        grid.addWidget(profiles_col, 7, 1)
-        grid.addWidget(btns, 8, 0, 1, 2)
-        grid.setRowStretch(7, 1)
+        grid.addWidget(QLabel("Профили:"), 8, 0, Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(profiles_col, 8, 1)
+        grid.addWidget(btns, 9, 0, 1, 2)
+        grid.setRowStretch(8, 1)
 
         if title_le is not None:
             title_le.setFocus()
@@ -4212,6 +4273,11 @@ class MainWindow(QWidget):
         publish_before_checks = (
             True if is_ig_upload else publish_before_checks_cb.isChecked()
         )
+        upload_as_ready = bool(upload_as_ready_cb.isChecked())
+        try:
+            self._settings.setValue("upload_as_ready", upload_as_ready)
+        except Exception:
+            pass
         picked = dlg_interaction.batch_profile_ids()
 
         # Если профили не выбраны, считаем, что пользователь хочет только уникализировать видео,
@@ -4223,6 +4289,7 @@ class MainWindow(QWidget):
                 "profile_ids": "",
                 "publish_before_checks": publish_before_checks,
                 "keep_studio_title": keep_studio_title,
+                "upload_as_ready": upload_as_ready,
                 "schedule_publish": schedule_publish,
                 "schedule_times_iso": schedule_times_iso,
                 "schedule_warmup_shorts": schedule_warmup_shorts,
@@ -4239,6 +4306,7 @@ class MainWindow(QWidget):
             "profile_ids": ",".join(picked),
             "publish_before_checks": publish_before_checks,
             "keep_studio_title": keep_studio_title,
+            "upload_as_ready": upload_as_ready,
             "schedule_publish": schedule_publish,
             "schedule_times_iso": schedule_times_iso,
             "schedule_warmup_shorts": schedule_warmup_shorts,
@@ -9995,6 +10063,9 @@ class MainWindow(QWidget):
             return
         self._pending_upload = pending
         self._just_saved_outputs = []
+        self._upload_streaming_active = False
+        self._upload_streaming_title = ""
+        self._upload_streaming_description = ""
 
         opts = self._build_options()
         if not opts["output_dir"]:
@@ -10043,6 +10114,9 @@ class MainWindow(QWidget):
         self._upload_cancel_profile_ids = []
         self._upload_cancel_kind = ""
         self._upload_cancel_dolphin_token = ""
+        self._upload_streaming_active = bool(
+            raw_prof and pending.get("upload_as_ready")
+        )
 
         # Upload session starts only on "Start".
         try:
@@ -10067,6 +10141,11 @@ class MainWindow(QWidget):
         self.progress_label.setText("Подготовка…")
         self.btn_start.setEnabled(False)
         self.btn_cancel.setEnabled(True)
+
+        if self._upload_streaming_active:
+            self._append_log(
+                "Залив по мере готовности: браузеры откроются после первого готового видео."
+            )
 
         self._work_thread = QThread()
         self._processor = ProcessingController()
@@ -10095,6 +10174,9 @@ class MainWindow(QWidget):
             return
         self._pending_upload = pending
         self._just_saved_outputs = []
+        self._upload_streaming_active = False
+        self._upload_streaming_title = ""
+        self._upload_streaming_description = ""
 
         opts = self._slice_tab.build_options()
         if not opts["output_dir"]:
@@ -10136,6 +10218,9 @@ class MainWindow(QWidget):
         self._upload_cancel_profile_ids = []
         self._upload_cancel_kind = ""
         self._upload_cancel_dolphin_token = ""
+        self._upload_streaming_active = bool(
+            raw_prof and pending.get("upload_as_ready")
+        )
 
         try:
             planned = len(list(opts.get("music_files") or [])) * max(
@@ -10158,6 +10243,11 @@ class MainWindow(QWidget):
         self._slice_tab.progress.setValueImmediate(0)
         self._slice_tab.progress_label.setText("Подготовка…")
         self._slice_tab.set_running(running=True)
+
+        if self._upload_streaming_active:
+            self._append_slice_log(
+                "Залив по мере готовности: браузеры откроются после первого готового видео."
+            )
 
         self._work_thread = QThread()
         self._slice_processor = SlicingController()
@@ -10305,6 +10395,9 @@ class MainWindow(QWidget):
         )
         self._upload_log_mode = ""
         self._upload_manager = None
+        self._upload_streaming_active = False
+        self._upload_streaming_title = ""
+        self._upload_streaming_description = ""
         self._upload_cancel_profile_ids = []
         self._upload_cancel_kind = ""
         self._upload_cancel_dolphin_token = ""
@@ -10356,10 +10449,640 @@ class MainWindow(QWidget):
         if msg:
             self.progress_label.setText(msg)
 
+    def _start_upload_queue_from_pending(
+        self,
+        pending: dict,
+        video_paths: list[str],
+        *,
+        streaming: bool = False,
+    ) -> bool:
+        """Start MultiProfileUploader. Returns False if upload was skipped."""
+        token = (self._dolphin_token.text() or "").strip()
+        if not token:
+            token = (
+                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
+            ).strip()
+
+        kind = self._default_browser_combo.currentData()
+        if not isinstance(kind, str) or not kind.strip():
+            kind = "dolphin"
+        base_url = self._own_antidetect_base_url_from_settings(kind)
+
+        try:
+            remote_cdp = self._remote_cdp_launch_options_for_kind(kind)
+        except LocalAntidetectError as e:
+            self._append_session_log(
+                self._brand(f"YouTube: заливка пропущена — {e}")
+            )
+            if not streaming:
+                self._upload_log_mode = ""
+                self._upload_session_upload_expected = False
+                self._upload_session_upload_done = True
+                self._maybe_finish_upload_session(status="upload_failed")
+                self._release_youtube_progress_hold_if_any()
+                self._finalize_idle_toolbar()
+            QMessageBox.warning(self, "Zaliver", str(e))
+            return False
+
+        raw_ids = (pending.get("profile_ids", "") or "").strip()
+        profile_ids = [p.strip() for p in raw_ids.split(",") if p.strip()]
+        if not profile_ids:
+            self._append_session_log(
+                self._brand("YouTube: профили не выбраны — заливка пропущена.")
+            )
+            if not streaming:
+                self._upload_log_mode = ""
+                self._upload_session_upload_expected = False
+                self._upload_session_upload_done = True
+                self._maybe_finish_upload_session(status="done")
+                self._release_youtube_progress_hold_if_any()
+                self._finalize_idle_toolbar()
+            return False
+
+        from zaliver.youtube_upload.multi_uploader import (
+            MultiProfileUploader,
+            ScheduledUploadItem,
+            VideoTask,
+        )
+        from zaliver.youtube_upload.studio import _studio_canonical_watch_url
+
+        is_instagram_upload = self._platform == PLATFORM_INSTAGRAM
+
+        self._clear_previous_upload_result_tags(
+            profile_ids=profile_ids,
+            kind=kind,
+            base_url=base_url,
+            for_instagram=is_instagram_upload,
+        )
+
+        upload_platform_label = "Instagram Reels" if is_instagram_upload else "YouTube"
+        stream_note = " (по мере готовности)" if streaming else ""
+        self._append_session_log(
+            f"{upload_platform_label}: многопоточная заливка стартует{stream_note}. "
+            f"Видео={len(video_paths)}, профили={len(profile_ids)}…"
+        )
+        self._upload_delete_after_enabled = self._delete_after_upload_enabled()
+        with self._upload_success_lock:
+            self._upload_success_video_paths.clear()
+        self._sync_toolbar_for_upload_phase()
+        self._upload_cancel_kind = (kind or "").strip()
+        self._upload_cancel_dolphin_token = token
+        self._upload_cancel_profile_ids = list(profile_ids)
+        publish_before_checks = bool(pending.get("publish_before_checks", True))
+        keep_studio_title = bool(pending.get("keep_studio_title", False))
+        from zaliver.youtube_upload.schedule_publish import parse_msk_datetime
+
+        schedule_times: list[datetime] = []
+        if pending.get("schedule_publish") and not is_instagram_upload:
+            for raw in pending.get("schedule_times_iso") or []:
+                dt = parse_msk_datetime(raw)
+                if dt is not None:
+                    schedule_times.append(dt)
+            schedule_times = sorted(schedule_times)
+        schedule_batch_size = len(schedule_times)
+        schedule_warmup_shorts = bool(pending.get("schedule_warmup_shorts"))
+        schedule_warmup_shorts_recommendations = bool(
+            pending.get("schedule_warmup_shorts_recommendations", True)
+        )
+        schedule_warmup_search_query = (
+            pending.get("schedule_warmup_search_query") or ""
+        ).strip()
+        if is_instagram_upload and pending.get("schedule_publish"):
+            self._append_session_log(
+                "Instagram Reels: отложка Studio не поддерживается — публикуем сразу."
+            )
+
+        # Пауза 0 → режим keep_browser_open; решение «оставить/закрыть» — в менеджере.
+        ig_keep_browser_open = (
+            is_instagram_upload
+            and self._upload_pause_between_uploads().total_seconds() <= 0
+        )
+        mgr_holder: dict[str, MultiProfileUploader | None] = {"mgr": None}
+
+        upload_var_index = {"n": 0}
+        upload_var_index_lock = threading.Lock()
+
+        def _next_upload_var_index() -> int:
+            with upload_var_index_lock:
+                upload_var_index["n"] += 1
+                return upload_var_index["n"]
+
+        def _profile_display_name(profile_id: str) -> str:
+            for p in self._profiles_raw or []:
+                if not isinstance(p, dict):
+                    continue
+                if _profile_id(p) == profile_id:
+                    return _profile_name(p)
+            return profile_id
+
+        def _upload_one(profile_id: str, task: VideoTask) -> None:
+            from zaliver.antydetect.antic_open import (
+                open_google_in_local_antidetect_profile,
+                open_google_in_profile,
+                set_log_sink,
+                upload_instagram_reel_in_local_antidetect_profile,
+                upload_instagram_reel_in_profile,
+            )
+
+            set_log_sink(self._ui_log_line.emit)
+            headless = True
+            if hasattr(self, "_dolphin_headless"):
+                headless = bool(self._dolphin_headless.isChecked())
+            else:
+                headless = bool(
+                    self._settings.value(
+                        "antydetect/dolphin_headless", True, type=bool
+                    )
+                )
+
+            guser = self._stats_server_username_stripped()
+            var_ctx = TitleVariableContext(
+                profile_name=_profile_display_name(profile_id),
+                video_path=task.video_path,
+                index=_next_upload_var_index(),
+            )
+            if is_instagram_upload:
+                # Подпись Reels длиннее лимита названия Studio — только expand.
+                resolved_title = expand_title_variables(task.title, var_ctx)
+                resolved_description = expand_title_variables(
+                    task.description, var_ctx
+                )
+                sess_login, sess_pwd, sess_2fa = self._instagram_session_credentials(
+                    profile_id
+                )
+                ig_kw = dict(
+                    video_path=task.video_path,
+                    title=resolved_title,
+                    description=resolved_description,
+                    headless=headless,
+                    session_login=sess_login,
+                    session_password=sess_pwd,
+                    session_twofa=sess_2fa,
+                    # Пауза 0: оставляем браузер только если следующий залив снова сюда
+                    # (один профиль или нет других свободных — см. should_keep_browser_open).
+                    keep_browser_open=(
+                        bool(ig_keep_browser_open)
+                        and (
+                            mgr_holder["mgr"].should_keep_browser_open(profile_id)
+                            if mgr_holder.get("mgr") is not None
+                            else True
+                        )
+                    ),
+                )
+                if _is_own_antidetect_kind(kind):
+                    res = upload_instagram_reel_in_local_antidetect_profile(
+                        profile_id,
+                        base_url=(base_url or "").strip(),
+                        remote_cdp=remote_cdp,
+                        **ig_kw,
+                    )
+                else:
+                    res = upload_instagram_reel_in_profile(
+                        profile_id,
+                        local_token=token or None,
+                        **ig_kw,
+                    )
+                # Первое Reel в профиле уже в БД → новое видео не появилось.
+                ig_vid = ""
+                ig_url = ""
+                if isinstance(res, dict):
+                    ig_vid = str(res.get("video_id") or "").strip()
+                    ig_url = str(res.get("url") or "").strip()
+                if self._upload_store.has_uploaded_video(
+                    video_id=ig_vid,
+                    url=ig_url,
+                    platform=self._platform,
+                ):
+                    raise RuntimeError(
+                        "Instagram Reels: первое видео в профиле уже есть в базе "
+                        f"залитых (video_id={ig_vid!r}, url={ig_url!r}) — "
+                        "заливка не подтверждена."
+                    )
+                resolved_scheduled_batch = None
+            else:
+                creds = self._profile_login_credentials(profile_id)
+                yt_oldest = self._profile_yt_oldest_name(profile_id) or None
+                search_oldest = self._youtube_search_oldest_channel()
+                task_scheduled = (
+                    task.schedule_publish_at is not None or task.scheduled_batch
+                )
+                title_result = expand_and_limit_title(task.title, var_ctx)
+                resolved_title = title_result.title
+                if title_result.truncated:
+                    try:
+                        self._ui_log_line.emit(
+                            "[upload] Название обрезано до 100 символов "
+                            f"(было {title_result.original_length})."
+                        )
+                    except Exception:
+                        pass
+                resolved_description = expand_title_variables(
+                    task.description, var_ctx
+                )
+                resolved_scheduled_batch = None
+                if task.scheduled_batch:
+                    resolved_scheduled_batch = []
+                    for item in task.scheduled_batch:
+                        item_ctx = TitleVariableContext(
+                            profile_name=_profile_display_name(profile_id),
+                            video_path=item.video_path,
+                            index=_next_upload_var_index(),
+                        )
+                        item_title_result = expand_and_limit_title(
+                            item.title, item_ctx
+                        )
+                        if item_title_result.truncated:
+                            try:
+                                self._ui_log_line.emit(
+                                    "[upload] Название обрезано до 100 символов "
+                                    f"(было {item_title_result.original_length})."
+                                )
+                            except Exception:
+                                pass
+                        resolved_scheduled_batch.append(
+                            ScheduledUploadItem(
+                                video_path=item.video_path,
+                                title=item_title_result.title,
+                                description=expand_title_variables(
+                                    item.description, item_ctx
+                                ),
+                                schedule_publish_at=item.schedule_publish_at,
+                            )
+                        )
+                warmup_kw = {}
+                if schedule_warmup_shorts and task_scheduled:
+                    warmup_kw = dict(
+                        warmup_during_schedule=True,
+                        warmup_shorts_recommendations=schedule_warmup_shorts_recommendations,
+                        warmup_search_query=schedule_warmup_search_query or None,
+                        warmup_shorts_batch_count=5,
+                        warmup_like_probability_pct=10.0,
+                        warmup_subscribe_probability_pct=10.0,
+                        warmup_shorts_watch_min_s=5.0,
+                        warmup_shorts_watch_max_s=25.0,
+                    )
+                open_kw = dict(
+                    headless=headless,
+                    video_path=task.video_path,
+                    title=resolved_title,
+                    description=resolved_description,
+                    login_credentials=creds,
+                    yt_oldest_name=yt_oldest,
+                    search_oldest_channel=search_oldest,
+                    publish_before_checks=publish_before_checks,
+                    keep_studio_title=keep_studio_title,
+                    schedule_publish_at=task.schedule_publish_at,
+                    scheduled_batch=resolved_scheduled_batch,
+                    stats_server_username=guser or None,
+                    **warmup_kw,
+                )
+                if _is_own_antidetect_kind(kind):
+                    res = open_google_in_local_antidetect_profile(
+                        profile_id,
+                        base_url=(base_url or "").strip(),
+                        remote_cdp=remote_cdp,
+                        **open_kw,
+                    )
+                else:
+                    res = open_google_in_profile(
+                        profile_id,
+                        local_token=token or None,
+                        **open_kw,
+                    )
+
+            def _record_one(
+                *,
+                video_path: str,
+                title: str,
+                description: str,
+                one_res,
+                schedule_publish_at: datetime | None = None,
+            ) -> None:
+                vid = ""
+                url = ""
+                if isinstance(one_res, dict):
+                    vid = str(one_res.get("video_id") or "").strip()
+                    url = str(one_res.get("url") or "").strip()
+                if not vid and url:
+                    if is_instagram_upload:
+                        for marker in ("/reel/", "/p/"):
+                            if marker in url:
+                                part = url.split(marker, 1)[1]
+                                vid = part.split("/", 1)[0].split("?", 1)[0].strip()
+                                break
+                    else:
+                        try:
+                            from zaliver.youtube_parsing.video_stats import (
+                                extract_video_id,
+                            )
+
+                            vid = extract_video_id(url)
+                        except Exception:
+                            pass
+                if not vid:
+                    raise RuntimeError(f"Empty video_id (res={one_res!r})")
+                if not url:
+                    if is_instagram_upload:
+                        url = f"https://www.instagram.com/reel/{vid}/"
+                    else:
+                        url = _studio_canonical_watch_url(vid)
+                if not url:
+                    raise RuntimeError(f"Empty url (res={one_res!r})")
+
+                sid = int(self._upload_session.id) if self._upload_session is not None else 0
+                if sid <= 0:
+                    raise RuntimeError("upload_session is not set (sid=0)")
+
+                stored_title = title or ""
+                if keep_studio_title and not stored_title:
+                    stored_title = Path(video_path).stem
+
+                self._upload_store.add_uploaded_video(
+                    session_id=sid,
+                    title=stored_title,
+                    description=description or "",
+                    url=url,
+                    video_id=vid,
+                    profile_id=profile_id,
+                    platform=self._platform,
+                )
+                try:
+                    self._upload_store.inc_uploaded_ok(session_id=sid, delta=1)
+                except Exception:
+                    pass
+                try:
+                    stats_notified = bool(
+                        isinstance(one_res, dict) and one_res.get("stats_notified")
+                    )
+                    if guser and not stats_notified:
+                        scheduled_unix = None
+                        if not is_instagram_upload:
+                            sched_dt = parse_msk_datetime(schedule_publish_at)
+                            if sched_dt is not None:
+                                scheduled_unix = int(sched_dt.timestamp())
+                        ok = notify_uploaded_video(
+                            video_id=vid,
+                            username=guser,
+                            profile_id=profile_id,
+                            scheduled=scheduled_unix,
+                            platform=self._platform,
+                        )
+                        try:
+                            if ok:
+                                self._ui_log_line.emit(
+                                    f"[stats_server] уведомление отправлено: videoId={vid}"
+                                )
+                            else:
+                                self._ui_log_line.emit(
+                                    f"[stats_server] сервер не принял уведомление: videoId={vid}"
+                                )
+                        except Exception:
+                            pass
+                    elif not guser:
+                        try:
+                            self._ui_log_line.emit(
+                                "[stats_server] username не задан — уведомление пропущено."
+                            )
+                        except Exception:
+                            pass
+                except Exception as e:
+                    try:
+                        self._ui_log_line.emit(
+                            f"[stats_server] ошибка уведомления: {e!r}"
+                        )
+                    except Exception:
+                        pass
+                try:
+                    QTimer.singleShot(0, self._refresh_uploaded_list)
+                except Exception:
+                    pass
+                with self._upload_success_lock:
+                    self._upload_success_video_paths.add(video_path)
+
+            batch_results = []
+            if isinstance(res, dict):
+                raw_batch = res.get("batch_results")
+                if isinstance(raw_batch, list):
+                    batch_results = raw_batch
+
+            if batch_results and task.scheduled_batch:
+                if len(batch_results) != len(task.scheduled_batch):
+                    raise RuntimeError(
+                        "scheduled_batch size mismatch: "
+                        f"{len(batch_results)} results vs "
+                        f"{len(task.scheduled_batch)} tasks"
+                    )
+                items_for_record = resolved_scheduled_batch or task.scheduled_batch
+                for item, item_res in zip(items_for_record, batch_results):
+                    _record_one(
+                        video_path=item.video_path,
+                        title=item.title,
+                        description=item.description,
+                        one_res=item_res,
+                        schedule_publish_at=item.schedule_publish_at,
+                    )
+            else:
+                _record_one(
+                    video_path=task.video_path,
+                    title=resolved_title,
+                    description=resolved_description,
+                    one_res=res,
+                    schedule_publish_at=task.schedule_publish_at,
+                )
+
+        def _on_profile_upload_attempt(pid: str, ok: bool, err: str) -> None:
+            try:
+                self._set_previous_upload_result_tag(
+                    profile_id=pid,
+                    success=bool(ok),
+                    kind=kind,
+                    base_url=base_url,
+                    for_instagram=is_instagram_upload,
+                )
+            except Exception:
+                pass
+            if ok:
+                self._upload_store.reset_profile_upload_errors(profile_id=pid)
+                return
+            n = self._upload_store.inc_profile_upload_error(
+                profile_id=pid, error_text=err
+            )
+            if n >= 3 and not self._upload_store.is_profile_upload_error_flagged(
+                profile_id=pid
+            ):
+                self._on_upload_profile_failed_3x(
+                    profile_id=pid,
+                    n=n,
+                    error_text=err,
+                    kind=kind,
+                    base_url=base_url,
+                )
+
+        def _close_kept_upload_browser(pid: str) -> None:
+            """Освободить keep-open браузер профиля (лимит параллельных)."""
+            pid = (pid or "").strip()
+            if not pid:
+                return
+            if _is_own_antidetect_kind(kind):
+                try:
+                    from zaliver.antydetect.local_active_sessions import (
+                        stop_registered_local_session_sync,
+                    )
+
+                    for line in stop_registered_local_session_sync(pid):
+                        try:
+                            self._ui_log_line.emit(line)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    try:
+                        self._ui_log_line.emit(
+                            f"[upload] [STOP] local keep-open close "
+                            f"profile={pid!r} err={e!r}"
+                        )
+                    except Exception:
+                        pass
+                return
+            try:
+                api = DolphinAntyLocalAPI()
+                try:
+                    tok = (token or "").strip()
+                    if tok:
+                        api.login_with_token(tok)
+                    api.stop_profile(pid)
+                    try:
+                        self._ui_log_line.emit(
+                            f"[upload] [STOP] Dolphin stop_profile ok "
+                            f"profile={pid!r} (keep-open slot)"
+                        )
+                    except Exception:
+                        pass
+                finally:
+                    api.close()
+            except Exception as e:
+                try:
+                    self._ui_log_line.emit(
+                        f"[upload] [STOP] Dolphin keep-open close "
+                        f"profile={pid!r} err={e!r}"
+                    )
+                except Exception:
+                    pass
+
+        mgr = MultiProfileUploader(
+            profile_ids=profile_ids,
+            cooldown_s=10.0,
+            max_attempts_per_profile=2,
+            max_concurrent_uploads=self._max_concurrent_browsers(),
+            profile_upload_pause_remaining_s=lambda pid: self._upload_store.profile_upload_pause_remaining_seconds(
+                pid,
+                platform=self._platform,
+                pause=self._upload_pause_between_uploads(),
+            ),
+            recent_batch_wait_s=float(
+                self._upload_pause_between_uploads().total_seconds()
+            ),
+            keep_browser_open=ig_keep_browser_open,
+            close_kept_browser=(
+                _close_kept_upload_browser if ig_keep_browser_open else None
+            ),
+            log_sink=self._ui_log_line.emit,
+            upload_one=_upload_one,
+            on_profile_attempt=_on_profile_upload_attempt,
+            schedule_batch_size=schedule_batch_size,
+            schedule_times=schedule_times,
+            await_more_videos=bool(streaming),
+        )
+        mgr_holder["mgr"] = mgr
+        self._upload_manager = mgr
+        upload_title = pending.get("title", "Название")
+        if pending.get("keep_studio_title"):
+            upload_title = ""
+        self._upload_streaming_title = upload_title
+        self._upload_streaming_description = pending.get("description", "") or ""
+        mgr.enqueue_videos(
+            video_paths=video_paths,
+            title=upload_title,
+            description=pending.get("description", ""),
+        )
+
+        def _run_mgr() -> None:
+            try:
+                mgr.start()
+                while not mgr.is_finished() and not mgr.stop_requested():
+                    time.sleep(0.5)
+                try:
+                    mgr.join(timeout_s=120.0)
+                except Exception:
+                    pass
+            finally:
+                self._upload_session_upload_done = True
+                stopped = False
+                stop_reason = ""
+                try:
+                    stopped = bool(mgr.stop_requested())
+                    stop_reason = str(mgr.stop_reason or "")
+                except Exception:
+                    stopped = False
+                    stop_reason = ""
+                status = "done"
+                if stopped:
+                    status = "timeout" if stop_reason == "watchdog" else "cancelled"
+                else:
+                    try:
+                        if mgr.done_failed > 0:
+                            status = "upload_failed"
+                    except Exception:
+                        status = "upload_failed"
+                try:
+                    self._ui_log_line.emit(
+                        f"[upload] Очередь завершена: status={status}, "
+                        f"ok={mgr.done_ok}, failed={mgr.done_failed}"
+                    )
+                except Exception:
+                    pass
+                try:
+                    # Закрыть браузеры, оставленные открытыми при паузе 0.
+                    self._stop_upload_antidetect_profiles()
+                except Exception:
+                    pass
+                self._cleanup_videos_after_upload_queue_finished(status)
+                self._maybe_finish_upload_session(status=status)
+                try:
+                    self._youtube_upload_phase_finished.emit(status)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_mgr, daemon=True).start()
+        return True
+
     def _on_finished(self, ok: bool, msg: str) -> None:
         self._upload_session_processing_done = True
 
         if not ok:
+            self._upload_streaming_active = False
+            mgr = getattr(self, "_upload_manager", None)
+            if mgr is not None:
+                try:
+                    if msg != "Отменено.":
+                        mgr.stop(reason="processing_error")
+                except Exception:
+                    pass
+                try:
+                    mgr.mark_producer_done()
+                except Exception:
+                    pass
+                err_line = f"Ошибка: {msg}"
+                if self._active_work_mode == "slicing":
+                    self._append_slice_log(err_line)
+                else:
+                    self._append_log(err_line)
+                if msg and msg != "Отменено.":
+                    QMessageBox.critical(self, "Zaliver", msg)
+                elif msg == "Отменено.":
+                    QMessageBox.information(self, "Zaliver", "Обработка отменена.")
+                # Сессию/тулбар закроет _run_mgr → _on_youtube_upload_phase_finished
+                return
+
             self._finalize_idle_toolbar()
             self._release_youtube_progress_hold_if_any()
             err_line = f"Ошибка: {msg}"
@@ -10383,6 +11106,21 @@ class MainWindow(QWidget):
             self._append_slice_log("Нарезка завершена.")
         else:
             self._append_log("Уникализация завершена.")
+
+        # Режим «по мере готовности»: залив уже идёт — только закрываем producer.
+        self._upload_streaming_active = False
+        mgr = getattr(self, "_upload_manager", None)
+        if mgr is not None:
+            self._pending_upload = None
+            try:
+                mgr.mark_producer_done()
+            except Exception:
+                pass
+            self._append_session_log(
+                "Обработка завершена — очередь залива продолжается."
+            )
+            return
+
         pending = self._pending_upload
         self._pending_upload = None
         if pending is not None:
@@ -10406,596 +11144,10 @@ class MainWindow(QWidget):
                 self._finalize_idle_toolbar()
                 return
 
-            token = (self._dolphin_token.text() or "").strip()
-            if not token:
-                token = (
-                    self._settings.value("antydetect/dolphin_token", "", type=str) or ""
-                ).strip()
-
-            kind = self._default_browser_combo.currentData()
-            if not isinstance(kind, str) or not kind.strip():
-                kind = "dolphin"
-            base_url = self._own_antidetect_base_url_from_settings(kind)
-
-            try:
-                remote_cdp = self._remote_cdp_launch_options_for_kind(kind)
-            except LocalAntidetectError as e:
-                self._append_session_log(
-                    self._brand(f"YouTube: заливка пропущена — {e}")
-                )
-                self._upload_log_mode = ""
-                self._upload_session_upload_expected = False
-                self._upload_session_upload_done = True
-                self._maybe_finish_upload_session(status="upload_failed")
-                self._release_youtube_progress_hold_if_any()
-                self._finalize_idle_toolbar()
-                QMessageBox.warning(self, "Zaliver", str(e))
+            if not self._start_upload_queue_from_pending(
+                pending, video_paths, streaming=False
+            ):
                 return
-
-            raw_ids = (pending.get("profile_ids", "") or "").strip()
-            profile_ids = [p.strip() for p in raw_ids.split(",") if p.strip()]
-            if not profile_ids:
-                self._append_session_log(
-                    self._brand("YouTube: профили не выбраны — заливка пропущена.")
-                )
-                self._upload_log_mode = ""
-                self._upload_session_upload_expected = False
-                self._upload_session_upload_done = True
-                self._maybe_finish_upload_session(status="done")
-                self._release_youtube_progress_hold_if_any()
-                self._finalize_idle_toolbar()
-                return
-
-            from zaliver.youtube_upload.multi_uploader import (
-                MultiProfileUploader,
-                ScheduledUploadItem,
-                VideoTask,
-            )
-            from zaliver.youtube_upload.studio import _studio_canonical_watch_url
-
-            is_instagram_upload = self._platform == PLATFORM_INSTAGRAM
-
-            self._clear_previous_upload_result_tags(
-                profile_ids=profile_ids,
-                kind=kind,
-                base_url=base_url,
-                for_instagram=is_instagram_upload,
-            )
-
-            upload_platform_label = "Instagram Reels" if is_instagram_upload else "YouTube"
-            self._append_session_log(
-                f"{upload_platform_label}: многопоточная заливка стартует. "
-                f"Видео={len(video_paths)}, профили={len(profile_ids)}…"
-            )
-            self._upload_delete_after_enabled = self._delete_after_upload_enabled()
-            with self._upload_success_lock:
-                self._upload_success_video_paths.clear()
-            self._sync_toolbar_for_upload_phase()
-            self._upload_cancel_kind = (kind or "").strip()
-            self._upload_cancel_dolphin_token = token
-            self._upload_cancel_profile_ids = list(profile_ids)
-            publish_before_checks = bool(pending.get("publish_before_checks", True))
-            keep_studio_title = bool(pending.get("keep_studio_title", False))
-            from zaliver.youtube_upload.schedule_publish import parse_msk_datetime
-
-            schedule_times: list[datetime] = []
-            if pending.get("schedule_publish") and not is_instagram_upload:
-                for raw in pending.get("schedule_times_iso") or []:
-                    dt = parse_msk_datetime(raw)
-                    if dt is not None:
-                        schedule_times.append(dt)
-                schedule_times = sorted(schedule_times)
-            schedule_batch_size = len(schedule_times)
-            schedule_warmup_shorts = bool(pending.get("schedule_warmup_shorts"))
-            schedule_warmup_shorts_recommendations = bool(
-                pending.get("schedule_warmup_shorts_recommendations", True)
-            )
-            schedule_warmup_search_query = (
-                pending.get("schedule_warmup_search_query") or ""
-            ).strip()
-            if is_instagram_upload and pending.get("schedule_publish"):
-                self._append_session_log(
-                    "Instagram Reels: отложка Studio не поддерживается — публикуем сразу."
-                )
-
-            # Пауза 0 → режим keep_browser_open; решение «оставить/закрыть» — в менеджере.
-            ig_keep_browser_open = (
-                is_instagram_upload
-                and self._upload_pause_between_uploads().total_seconds() <= 0
-            )
-            mgr_holder: dict[str, MultiProfileUploader | None] = {"mgr": None}
-
-            upload_var_index = {"n": 0}
-            upload_var_index_lock = threading.Lock()
-
-            def _next_upload_var_index() -> int:
-                with upload_var_index_lock:
-                    upload_var_index["n"] += 1
-                    return upload_var_index["n"]
-
-            def _profile_display_name(profile_id: str) -> str:
-                for p in self._profiles_raw or []:
-                    if not isinstance(p, dict):
-                        continue
-                    if _profile_id(p) == profile_id:
-                        return _profile_name(p)
-                return profile_id
-
-            def _upload_one(profile_id: str, task: VideoTask) -> None:
-                from zaliver.antydetect.antic_open import (
-                    open_google_in_local_antidetect_profile,
-                    open_google_in_profile,
-                    set_log_sink,
-                    upload_instagram_reel_in_local_antidetect_profile,
-                    upload_instagram_reel_in_profile,
-                )
-
-                set_log_sink(self._ui_log_line.emit)
-                headless = True
-                if hasattr(self, "_dolphin_headless"):
-                    headless = bool(self._dolphin_headless.isChecked())
-                else:
-                    headless = bool(
-                        self._settings.value(
-                            "antydetect/dolphin_headless", True, type=bool
-                        )
-                    )
-
-                guser = self._stats_server_username_stripped()
-                var_ctx = TitleVariableContext(
-                    profile_name=_profile_display_name(profile_id),
-                    video_path=task.video_path,
-                    index=_next_upload_var_index(),
-                )
-                if is_instagram_upload:
-                    # Подпись Reels длиннее лимита названия Studio — только expand.
-                    resolved_title = expand_title_variables(task.title, var_ctx)
-                    resolved_description = expand_title_variables(
-                        task.description, var_ctx
-                    )
-                    sess_login, sess_pwd, sess_2fa = self._instagram_session_credentials(
-                        profile_id
-                    )
-                    ig_kw = dict(
-                        video_path=task.video_path,
-                        title=resolved_title,
-                        description=resolved_description,
-                        headless=headless,
-                        session_login=sess_login,
-                        session_password=sess_pwd,
-                        session_twofa=sess_2fa,
-                        # Пауза 0: оставляем браузер только если следующий залив снова сюда
-                        # (один профиль или нет других свободных — см. should_keep_browser_open).
-                        keep_browser_open=(
-                            bool(ig_keep_browser_open)
-                            and (
-                                mgr_holder["mgr"].should_keep_browser_open(profile_id)
-                                if mgr_holder.get("mgr") is not None
-                                else True
-                            )
-                        ),
-                    )
-                    if _is_own_antidetect_kind(kind):
-                        res = upload_instagram_reel_in_local_antidetect_profile(
-                            profile_id,
-                            base_url=(base_url or "").strip(),
-                            remote_cdp=remote_cdp,
-                            **ig_kw,
-                        )
-                    else:
-                        res = upload_instagram_reel_in_profile(
-                            profile_id,
-                            local_token=token or None,
-                            **ig_kw,
-                        )
-                    # Первое Reel в профиле уже в БД → новое видео не появилось.
-                    ig_vid = ""
-                    ig_url = ""
-                    if isinstance(res, dict):
-                        ig_vid = str(res.get("video_id") or "").strip()
-                        ig_url = str(res.get("url") or "").strip()
-                    if self._upload_store.has_uploaded_video(
-                        video_id=ig_vid,
-                        url=ig_url,
-                        platform=self._platform,
-                    ):
-                        raise RuntimeError(
-                            "Instagram Reels: первое видео в профиле уже есть в базе "
-                            f"залитых (video_id={ig_vid!r}, url={ig_url!r}) — "
-                            "заливка не подтверждена."
-                        )
-                    resolved_scheduled_batch = None
-                else:
-                    creds = self._profile_login_credentials(profile_id)
-                    yt_oldest = self._profile_yt_oldest_name(profile_id) or None
-                    search_oldest = self._youtube_search_oldest_channel()
-                    task_scheduled = (
-                        task.schedule_publish_at is not None or task.scheduled_batch
-                    )
-                    title_result = expand_and_limit_title(task.title, var_ctx)
-                    resolved_title = title_result.title
-                    if title_result.truncated:
-                        try:
-                            self._ui_log_line.emit(
-                                "[upload] Название обрезано до 100 символов "
-                                f"(было {title_result.original_length})."
-                            )
-                        except Exception:
-                            pass
-                    resolved_description = expand_title_variables(
-                        task.description, var_ctx
-                    )
-                    resolved_scheduled_batch = None
-                    if task.scheduled_batch:
-                        resolved_scheduled_batch = []
-                        for item in task.scheduled_batch:
-                            item_ctx = TitleVariableContext(
-                                profile_name=_profile_display_name(profile_id),
-                                video_path=item.video_path,
-                                index=_next_upload_var_index(),
-                            )
-                            item_title_result = expand_and_limit_title(
-                                item.title, item_ctx
-                            )
-                            if item_title_result.truncated:
-                                try:
-                                    self._ui_log_line.emit(
-                                        "[upload] Название обрезано до 100 символов "
-                                        f"(было {item_title_result.original_length})."
-                                    )
-                                except Exception:
-                                    pass
-                            resolved_scheduled_batch.append(
-                                ScheduledUploadItem(
-                                    video_path=item.video_path,
-                                    title=item_title_result.title,
-                                    description=expand_title_variables(
-                                        item.description, item_ctx
-                                    ),
-                                    schedule_publish_at=item.schedule_publish_at,
-                                )
-                            )
-                    warmup_kw = {}
-                    if schedule_warmup_shorts and task_scheduled:
-                        warmup_kw = dict(
-                            warmup_during_schedule=True,
-                            warmup_shorts_recommendations=schedule_warmup_shorts_recommendations,
-                            warmup_search_query=schedule_warmup_search_query or None,
-                            warmup_shorts_batch_count=5,
-                            warmup_like_probability_pct=10.0,
-                            warmup_subscribe_probability_pct=10.0,
-                            warmup_shorts_watch_min_s=5.0,
-                            warmup_shorts_watch_max_s=25.0,
-                        )
-                    open_kw = dict(
-                        headless=headless,
-                        video_path=task.video_path,
-                        title=resolved_title,
-                        description=resolved_description,
-                        login_credentials=creds,
-                        yt_oldest_name=yt_oldest,
-                        search_oldest_channel=search_oldest,
-                        publish_before_checks=publish_before_checks,
-                        keep_studio_title=keep_studio_title,
-                        schedule_publish_at=task.schedule_publish_at,
-                        scheduled_batch=resolved_scheduled_batch,
-                        stats_server_username=guser or None,
-                        **warmup_kw,
-                    )
-                    if _is_own_antidetect_kind(kind):
-                        res = open_google_in_local_antidetect_profile(
-                            profile_id,
-                            base_url=(base_url or "").strip(),
-                            remote_cdp=remote_cdp,
-                            **open_kw,
-                        )
-                    else:
-                        res = open_google_in_profile(
-                            profile_id,
-                            local_token=token or None,
-                            **open_kw,
-                        )
-
-                def _record_one(
-                    *,
-                    video_path: str,
-                    title: str,
-                    description: str,
-                    one_res,
-                    schedule_publish_at: datetime | None = None,
-                ) -> None:
-                    vid = ""
-                    url = ""
-                    if isinstance(one_res, dict):
-                        vid = str(one_res.get("video_id") or "").strip()
-                        url = str(one_res.get("url") or "").strip()
-                    if not vid and url:
-                        if is_instagram_upload:
-                            for marker in ("/reel/", "/p/"):
-                                if marker in url:
-                                    part = url.split(marker, 1)[1]
-                                    vid = part.split("/", 1)[0].split("?", 1)[0].strip()
-                                    break
-                        else:
-                            try:
-                                from zaliver.youtube_parsing.video_stats import (
-                                    extract_video_id,
-                                )
-
-                                vid = extract_video_id(url)
-                            except Exception:
-                                pass
-                    if not vid:
-                        raise RuntimeError(f"Empty video_id (res={one_res!r})")
-                    if not url:
-                        if is_instagram_upload:
-                            url = f"https://www.instagram.com/reel/{vid}/"
-                        else:
-                            url = _studio_canonical_watch_url(vid)
-                    if not url:
-                        raise RuntimeError(f"Empty url (res={one_res!r})")
-
-                    sid = int(self._upload_session.id) if self._upload_session is not None else 0
-                    if sid <= 0:
-                        raise RuntimeError("upload_session is not set (sid=0)")
-
-                    stored_title = title or ""
-                    if keep_studio_title and not stored_title:
-                        stored_title = Path(video_path).stem
-
-                    self._upload_store.add_uploaded_video(
-                        session_id=sid,
-                        title=stored_title,
-                        description=description or "",
-                        url=url,
-                        video_id=vid,
-                        profile_id=profile_id,
-                        platform=self._platform,
-                    )
-                    try:
-                        self._upload_store.inc_uploaded_ok(session_id=sid, delta=1)
-                    except Exception:
-                        pass
-                    try:
-                        stats_notified = bool(
-                            isinstance(one_res, dict) and one_res.get("stats_notified")
-                        )
-                        if guser and not stats_notified:
-                            scheduled_unix = None
-                            if not is_instagram_upload:
-                                sched_dt = parse_msk_datetime(schedule_publish_at)
-                                if sched_dt is not None:
-                                    scheduled_unix = int(sched_dt.timestamp())
-                            ok = notify_uploaded_video(
-                                video_id=vid,
-                                username=guser,
-                                profile_id=profile_id,
-                                scheduled=scheduled_unix,
-                                platform=self._platform,
-                            )
-                            try:
-                                if ok:
-                                    self._ui_log_line.emit(
-                                        f"[stats_server] уведомление отправлено: videoId={vid}"
-                                    )
-                                else:
-                                    self._ui_log_line.emit(
-                                        f"[stats_server] сервер не принял уведомление: videoId={vid}"
-                                    )
-                            except Exception:
-                                pass
-                        elif not guser:
-                            try:
-                                self._ui_log_line.emit(
-                                    "[stats_server] username не задан — уведомление пропущено."
-                                )
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        try:
-                            self._ui_log_line.emit(
-                                f"[stats_server] ошибка уведомления: {e!r}"
-                            )
-                        except Exception:
-                            pass
-                    try:
-                        QTimer.singleShot(0, self._refresh_uploaded_list)
-                    except Exception:
-                        pass
-                    with self._upload_success_lock:
-                        self._upload_success_video_paths.add(video_path)
-
-                batch_results = []
-                if isinstance(res, dict):
-                    raw_batch = res.get("batch_results")
-                    if isinstance(raw_batch, list):
-                        batch_results = raw_batch
-
-                if batch_results and task.scheduled_batch:
-                    if len(batch_results) != len(task.scheduled_batch):
-                        raise RuntimeError(
-                            "scheduled_batch size mismatch: "
-                            f"{len(batch_results)} results vs "
-                            f"{len(task.scheduled_batch)} tasks"
-                        )
-                    items_for_record = resolved_scheduled_batch or task.scheduled_batch
-                    for item, item_res in zip(items_for_record, batch_results):
-                        _record_one(
-                            video_path=item.video_path,
-                            title=item.title,
-                            description=item.description,
-                            one_res=item_res,
-                            schedule_publish_at=item.schedule_publish_at,
-                        )
-                else:
-                    _record_one(
-                        video_path=task.video_path,
-                        title=resolved_title,
-                        description=resolved_description,
-                        one_res=res,
-                        schedule_publish_at=task.schedule_publish_at,
-                    )
-
-            def _on_profile_upload_attempt(pid: str, ok: bool, err: str) -> None:
-                try:
-                    self._set_previous_upload_result_tag(
-                        profile_id=pid,
-                        success=bool(ok),
-                        kind=kind,
-                        base_url=base_url,
-                        for_instagram=is_instagram_upload,
-                    )
-                except Exception:
-                    pass
-                if ok:
-                    self._upload_store.reset_profile_upload_errors(profile_id=pid)
-                    return
-                n = self._upload_store.inc_profile_upload_error(
-                    profile_id=pid, error_text=err
-                )
-                if n >= 3 and not self._upload_store.is_profile_upload_error_flagged(
-                    profile_id=pid
-                ):
-                    self._on_upload_profile_failed_3x(
-                        profile_id=pid,
-                        n=n,
-                        error_text=err,
-                        kind=kind,
-                        base_url=base_url,
-                    )
-
-            def _close_kept_upload_browser(pid: str) -> None:
-                """Освободить keep-open браузер профиля (лимит параллельных)."""
-                pid = (pid or "").strip()
-                if not pid:
-                    return
-                if _is_own_antidetect_kind(kind):
-                    try:
-                        from zaliver.antydetect.local_active_sessions import (
-                            stop_registered_local_session_sync,
-                        )
-
-                        for line in stop_registered_local_session_sync(pid):
-                            try:
-                                self._ui_log_line.emit(line)
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        try:
-                            self._ui_log_line.emit(
-                                f"[upload] [STOP] local keep-open close "
-                                f"profile={pid!r} err={e!r}"
-                            )
-                        except Exception:
-                            pass
-                    return
-                try:
-                    api = DolphinAntyLocalAPI()
-                    try:
-                        tok = (token or "").strip()
-                        if tok:
-                            api.login_with_token(tok)
-                        api.stop_profile(pid)
-                        try:
-                            self._ui_log_line.emit(
-                                f"[upload] [STOP] Dolphin stop_profile ok "
-                                f"profile={pid!r} (keep-open slot)"
-                            )
-                        except Exception:
-                            pass
-                    finally:
-                        api.close()
-                except Exception as e:
-                    try:
-                        self._ui_log_line.emit(
-                            f"[upload] [STOP] Dolphin keep-open close "
-                            f"profile={pid!r} err={e!r}"
-                        )
-                    except Exception:
-                        pass
-
-            mgr = MultiProfileUploader(
-                profile_ids=profile_ids,
-                cooldown_s=10.0,
-                max_attempts_per_profile=2,
-                max_concurrent_uploads=self._max_concurrent_browsers(),
-                profile_upload_pause_remaining_s=lambda pid: self._upload_store.profile_upload_pause_remaining_seconds(
-                    pid,
-                    platform=self._platform,
-                    pause=self._upload_pause_between_uploads(),
-                ),
-                recent_batch_wait_s=float(
-                    self._upload_pause_between_uploads().total_seconds()
-                ),
-                keep_browser_open=ig_keep_browser_open,
-                close_kept_browser=(
-                    _close_kept_upload_browser if ig_keep_browser_open else None
-                ),
-                log_sink=self._ui_log_line.emit,
-                upload_one=_upload_one,
-                on_profile_attempt=_on_profile_upload_attempt,
-                schedule_batch_size=schedule_batch_size,
-                schedule_times=schedule_times,
-            )
-            mgr_holder["mgr"] = mgr
-            self._upload_manager = mgr
-            upload_title = pending.get("title", "Название")
-            if pending.get("keep_studio_title"):
-                upload_title = ""
-            mgr.enqueue_videos(
-                video_paths=video_paths,
-                title=upload_title,
-                description=pending.get("description", ""),
-            )
-
-            def _run_mgr() -> None:
-                try:
-                    mgr.start()
-                    while not mgr.is_finished() and not mgr.stop_requested():
-                        time.sleep(0.5)
-                    try:
-                        mgr.join(timeout_s=120.0)
-                    except Exception:
-                        pass
-                finally:
-                    self._upload_session_upload_done = True
-                    stopped = False
-                    stop_reason = ""
-                    try:
-                        stopped = bool(mgr.stop_requested())
-                        stop_reason = str(mgr.stop_reason or "")
-                    except Exception:
-                        stopped = False
-                        stop_reason = ""
-                    status = "done"
-                    if stopped:
-                        status = "timeout" if stop_reason == "watchdog" else "cancelled"
-                    else:
-                        try:
-                            if mgr.done_failed > 0:
-                                status = "upload_failed"
-                        except Exception:
-                            status = "upload_failed"
-                    try:
-                        self._ui_log_line.emit(
-                            f"[upload] Очередь завершена: status={status}, "
-                            f"ok={mgr.done_ok}, failed={mgr.done_failed}"
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        # Закрыть браузеры, оставленные открытыми при паузе 0.
-                        self._stop_upload_antidetect_profiles()
-                    except Exception:
-                        pass
-                    self._cleanup_videos_after_upload_queue_finished(status)
-                    self._maybe_finish_upload_session(status=status)
-                    try:
-                        self._youtube_upload_phase_finished.emit(status)
-                    except Exception:
-                        pass
-
-            threading.Thread(target=_run_mgr, daemon=True).start()
             return
 
         self._upload_session_upload_expected = False

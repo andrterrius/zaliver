@@ -94,6 +94,7 @@ class MultiProfileUploader:
         on_profile_attempt: Callable[[str, bool, str], None] | None = None,
         schedule_batch_size: int = 0,
         schedule_times: list[datetime] | None = None,
+        await_more_videos: bool = False,
     ) -> None:
         self._profiles = [p.strip() for p in (profile_ids or []) if (p or "").strip()]
         self._cooldown_s = float(cooldown_s)
@@ -147,6 +148,8 @@ class MultiProfileUploader:
         self._done_failed = 0
         self._abandoned = 0
         self._done_lock = threading.Lock()
+        # False while processing may still enqueue more videos (streaming upload).
+        self._producer_done = not bool(await_more_videos)
 
         self._orig_sigint = None
 
@@ -188,7 +191,13 @@ class MultiProfileUploader:
             self._global_q.put(
                 VideoTask(video_path=path, title=title or "", description=description or "")
             )
-            self._total += 1
+            with self._done_lock:
+                self._total += 1
+
+    def mark_producer_done(self) -> None:
+        """Обработка больше не добавит видео — можно завершать очередь при пустых очередях."""
+        with self._done_lock:
+            self._producer_done = True
 
     def start(self) -> None:
         if not self._profiles:
@@ -816,13 +825,13 @@ class MultiProfileUploader:
                 self._release_kept_browser_slot(profile_id)
 
     def _is_all_done(self) -> bool:
-        # We consider "all done" when we have accounted for every initial task as OK/FAILED
-        # and all queues are drained. This avoids busy loops when there is no work.
+        # All done when producer finished enqueueing, every task is accounted for,
+        # and all queues are drained. With await_more_videos, do not finish early
+        # just because the current total was temporarily fully processed.
         with self._done_lock:
-            finished = (
-                (self._done_ok + self._done_failed + self._abandoned) >= self._total
-                and self._total > 0
-            )
+            if not self._producer_done:
+                return False
+            finished = (self._done_ok + self._done_failed + self._abandoned) >= self._total
         if not finished:
             return False
         if not self._global_q.empty():

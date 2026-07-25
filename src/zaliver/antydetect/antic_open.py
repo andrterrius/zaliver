@@ -2719,6 +2719,212 @@ def setup_channel_in_local_antidetect_profile(
 
 
 @with_log_profile
+def setup_instagram_profile_in_profile(
+    profile_id: str,
+    *,
+    description: str | None = None,
+    avatar_path: str | Path | None = None,
+    username: str | None = None,
+    change_language: bool = False,
+    local_token: str | None = None,
+    headless: bool = True,
+    session_login: str = "",
+    session_password: str = "",
+    session_twofa: str = "",
+) -> None:
+    """Dolphin → (опц. язык) → Edit profile + юзернейм → закрытие профиля."""
+    from zaliver.instagram_upload.edit_profile import run_instagram_edit_profile
+
+    bio = (description or "").strip()
+    has_avatar = bool(avatar_path)
+    uname = (username or "").strip().lstrip("@")
+    do_lang = bool(change_language)
+    if not bio and not has_avatar and not uname and not do_lang:
+        raise DolphinAntyError(
+            "Не заданы смена языка, bio, аватарка или юзернейм для Instagram."
+        )
+    parts: list[str] = []
+    if do_lang:
+        parts.append("язык → русский")
+    if bio:
+        parts.append("bio")
+    if has_avatar:
+        parts.append("фото профиля")
+    if uname:
+        parts.append("юзернейм")
+    _log(
+        "Dolphin: редактирование Instagram-профиля ("
+        + ", ".join(parts)
+        + f"). profile_id={profile_id!r}, headless={headless}"
+    )
+    api = DolphinAntyLocalAPI()
+    try:
+        tok = (local_token or "").strip()
+        if tok:
+            _log("Dolphin: login_with_token…")
+            api.login_with_token(tok)
+        _log("Dolphin: start_profile…")
+        conn = api.start_profile(profile_id, headless=headless)
+        _log(
+            "Dolphin: профиль запущен. "
+            f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+        )
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_cdp(
+                p, (conn.ws_url(), conn.http_url())
+            )
+            try:
+                run_instagram_edit_profile(
+                    page,
+                    description=bio or None,
+                    avatar_path=avatar_path,
+                    username=uname or None,
+                    change_language=do_lang,
+                    session_login=session_login,
+                    session_password=session_password,
+                    session_twofa=session_twofa,
+                    profile_id=profile_id,
+                )
+            finally:
+                _close_playwright_browser(browser)
+    except Exception as e:
+        _log(f"Ошибка редактирования Instagram-профиля: {type(e).__name__}: {e!r}")
+        raise _wrap_exc(e) from e
+    finally:
+        try:
+            api.stop_profile(profile_id)
+        except Exception as e:
+            _log(f"Dolphin: stop_profile: {e!r}")
+        api.close()
+
+
+@with_log_profile
+def setup_instagram_profile_in_local_antidetect_profile(
+    profile_id: str,
+    *,
+    description: str | None = None,
+    avatar_path: str | Path | None = None,
+    username: str | None = None,
+    change_language: bool = False,
+    base_url: str,
+    headless: bool = True,
+    remote_cdp=None,
+    session_login: str = "",
+    session_password: str = "",
+    session_twofa: str = "",
+) -> None:
+    """Локальный антидетект → (опц. язык) → Edit profile + юзернейм."""
+    from zaliver.instagram_upload.edit_profile import run_instagram_edit_profile
+    from zaliver.antydetect.local_antidetect_api import (
+        LocalAntidetectError,
+        LocalAntidetectHttpAPI,
+    )
+    from zaliver.antydetect.local_active_sessions import (
+        register_local_session,
+        unregister_local_session,
+    )
+
+    bio = (description or "").strip()
+    has_avatar = bool(avatar_path)
+    uname = (username or "").strip().lstrip("@")
+    do_lang = bool(change_language)
+    if not bio and not has_avatar and not uname and not do_lang:
+        raise LocalAntidetectError(
+            "Не заданы смена языка, bio, аватарка или юзернейм для Instagram."
+        )
+    parts: list[str] = []
+    if do_lang:
+        parts.append("язык → русский")
+    if bio:
+        parts.append("bio")
+    if has_avatar:
+        parts.append("фото профиля")
+    if uname:
+        parts.append("юзернейм")
+    _log(
+        "Local antidetect: редактирование Instagram-профиля ("
+        + ", ".join(parts)
+        + f"). profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}"
+    )
+
+    api = LocalAntidetectHttpAPI(base_url)
+    session_id: str | None = None
+    started_at = time.perf_counter()
+    try:
+        login = (session_login or "").strip()
+        pwd = (session_password or "").strip()
+        twofa = (session_twofa or "").strip()
+        if not pwd or not login:
+            try:
+                prof = api.get_profile(profile_id)
+                loaded_login, loaded_pwd, loaded_twofa = (
+                    _instagram_session_creds_from_profile_dict(prof)
+                )
+                if not login:
+                    login = loaded_login
+                if not pwd:
+                    pwd = loaded_pwd
+                if not twofa:
+                    twofa = loaded_twofa
+            except Exception as e:
+                _log(f"Local antidetect: не удалось прочитать custom_data: {e!r}")
+
+        acc = api.launch_profile(
+            profile_id,
+            headless=headless,
+            expose_cdp=True,
+            remote_cdp=remote_cdp,
+        )
+        sid = acc.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+        session_id = sid.strip()
+        bu = (base_url or "").strip() or "http://127.0.0.1:18765"
+        register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
+        ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+        _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+
+        with sync_playwright() as p:
+            browser, _context, page = _playwright_page_from_local_session_cdp(
+                p, api, session_id, ws_url
+            )
+            try:
+                run_instagram_edit_profile(
+                    page,
+                    description=bio or None,
+                    avatar_path=avatar_path,
+                    username=uname or None,
+                    change_language=do_lang,
+                    session_login=login,
+                    session_password=pwd,
+                    session_twofa=twofa,
+                    profile_id=profile_id,
+                )
+            finally:
+                _close_playwright_browser(browser)
+    except Exception as e:
+        _log(f"Ошибка редактирования Instagram-профиля: {type(e).__name__}: {e!r}")
+        raise LocalAntidetectError(
+            f"Ошибка редактирования Instagram-профиля: {e}"
+        ) from e
+    finally:
+        if session_id:
+            unregister_local_session(profile_id=profile_id)
+            try:
+                api.stop_session(session_id)
+            except Exception:
+                pass
+        try:
+            _log(
+                "Local antidetect: редактирование Instagram-профиля завершено за "
+                f"{time.perf_counter() - started_at:.1f} с."
+            )
+        except Exception:
+            pass
+        api.close()
+
+
+@with_log_profile
 def warmup_youtube_shorts_in_profile(
     profile_id: str,
     *,

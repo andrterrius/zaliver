@@ -2033,7 +2033,7 @@ class MainWindow(QWidget):
         self._btn_profiles_channel_setup.setDefault(False)
         self._btn_profiles_channel_setup.setToolTip(
             "Переход в раздел «Редактирование каналов» для настройки YouTube Studio "
-            "(описание, ссылка, аватарки, названия). "
+            "(описание, ссылка, аватарки, названия) или профиля Instagram (bio / фото). "
             "Профили выбираются кнопкой «Выбрать профили», как при заливе."
         )
         self._btn_profiles_channel_setup.clicked.connect(
@@ -2135,6 +2135,7 @@ class MainWindow(QWidget):
         profiles_l.addWidget(self._profiles_list, 1)
 
         self._channel_edit_tab = ChannelEditTabPane(
+            platform=self._platform,
             recent_channel_names=self._upload_store.list_recent_channel_name_fields(
                 platform=self._platform
             ),
@@ -4047,10 +4048,12 @@ class MainWindow(QWidget):
         btns.accepted.connect(dlg.accept)
         btns.rejected.connect(dlg.reject)
 
+        is_ig_upload = self._platform == PLATFORM_INSTAGRAM
+        desc_label = QLabel("Описание:")
         grid.addWidget(QLabel("Название:"), 0, 0)
         grid.addWidget(title_row, 0, 1)
         grid.addWidget(
-            QLabel("Описание:"),
+            desc_label,
             1,
             0,
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
@@ -4061,6 +4064,23 @@ class MainWindow(QWidget):
         grid.addWidget(schedule_publish_cb, 4, 1)
         grid.addWidget(schedule_warmup_group, 5, 1)
         grid.addWidget(schedule_times_widget, 6, 1)
+        if is_ig_upload:
+            # YouTube-only: описание, проверки Studio, название из настроек, отложка.
+            for w in (
+                desc_label,
+                desc_row,
+                publish_before_checks_cb,
+                keep_studio_title_cb,
+                schedule_publish_cb,
+                schedule_warmup_group,
+                schedule_times_widget,
+            ):
+                w.setVisible(False)
+            if title_le is not None:
+                title_le.setPlaceholderText(
+                    "Подпись к Reels (необязательно). "
+                    "Можно использовать переменные: {date}, {profile}, {video}, {index}…"
+                )
         profiles_col = QWidget()
         profiles_col_l = QVBoxLayout(profiles_col)
         profiles_col_l.setContentsMargins(0, 0, 0, 0)
@@ -4090,8 +4110,12 @@ class MainWindow(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return None
 
-        keep_studio_title = keep_studio_title_cb.isChecked()
-        schedule_publish = schedule_publish_cb.isChecked()
+        keep_studio_title = (
+            False if is_ig_upload else keep_studio_title_cb.isChecked()
+        )
+        schedule_publish = (
+            False if is_ig_upload else schedule_publish_cb.isChecked()
+        )
         schedule_warmup_shorts = schedule_publish and schedule_warmup_cb.isChecked()
         schedule_warmup_shorts_recommendations = (
             schedule_warmup_recommend_cb.isChecked()
@@ -4124,9 +4148,15 @@ class MainWindow(QWidget):
             schedule_times_iso = [t.isoformat() for t in sorted(schedule_times_msk)]
         title = (title_edit.currentText() or "").strip()
         if title and not keep_studio_title:
-            show_youtube_title_warnings(self, [title])
+            if not is_ig_upload:
+                show_youtube_title_warnings(self, [title])
             self._upload_store.remember_upload_title(title, platform=self._platform)
-        description = (desc_edit.toPlainText() or "").strip()
+        description = (
+            "" if is_ig_upload else (desc_edit.toPlainText() or "").strip()
+        )
+        publish_before_checks = (
+            True if is_ig_upload else publish_before_checks_cb.isChecked()
+        )
         picked = dlg_interaction.batch_profile_ids()
 
         # Если профили не выбраны, считаем, что пользователь хочет только уникализировать видео,
@@ -4136,7 +4166,7 @@ class MainWindow(QWidget):
                 "title": title,
                 "description": description,
                 "profile_ids": "",
-                "publish_before_checks": publish_before_checks_cb.isChecked(),
+                "publish_before_checks": publish_before_checks,
                 "keep_studio_title": keep_studio_title,
                 "schedule_publish": schedule_publish,
                 "schedule_times_iso": schedule_times_iso,
@@ -4144,7 +4174,7 @@ class MainWindow(QWidget):
                 "schedule_warmup_shorts_recommendations": schedule_warmup_shorts_recommendations,
                 "schedule_warmup_search_query": schedule_warmup_search_query,
             }
-        if not keep_studio_title and not title:
+        if not is_ig_upload and not keep_studio_title and not title:
             QMessageBox.warning(self, "Zaliver", "Название видео обязательно для загрузки в YouTube.")
             return None
 
@@ -4152,7 +4182,7 @@ class MainWindow(QWidget):
             "title": title,
             "description": description,
             "profile_ids": ",".join(picked),
-            "publish_before_checks": publish_before_checks_cb.isChecked(),
+            "publish_before_checks": publish_before_checks,
             "keep_studio_title": keep_studio_title,
             "schedule_publish": schedule_publish,
             "schedule_times_iso": schedule_times_iso,
@@ -4594,13 +4624,11 @@ class MainWindow(QWidget):
             self._btn_profiles_register_accounts.setVisible(is_ig)
         if hasattr(self, "_btn_profiles_connect_2fa"):
             self._btn_profiles_connect_2fa.setVisible(is_ig)
-        # YouTube-only массовые действия скрываем в Instagram.
-        for attr in (
-            "_btn_profiles_channel_setup",
-            "_btn_profiles_promote",
-        ):
-            if hasattr(self, attr):
-                getattr(self, attr).setVisible(not is_ig)
+        # YouTube-only: продвижение. Редактирование каналов/профилей — на обеих платформах.
+        if hasattr(self, "_btn_profiles_promote"):
+            self._btn_profiles_promote.setVisible(not is_ig)
+        if hasattr(self, "_btn_profiles_channel_setup"):
+            self._btn_profiles_channel_setup.setVisible(True)
         # Прогрев: Shorts (YT) или Reels (IG).
         if hasattr(self, "_btn_profiles_warmup"):
             self._btn_profiles_warmup.setVisible(True)
@@ -6284,7 +6312,11 @@ class MainWindow(QWidget):
 
         profile_ids = self._prompt_profiles_selection_dialog(
             window_title=title,
-            ok_text="Применить в Studio",
+            ok_text=(
+                "Применить"
+                if self._platform == PLATFORM_INSTAGRAM
+                else "Применить в Studio"
+            ),
             count_label_prefix="Выбрано профилей для редактирования",
             preselect=preselect,
         )
@@ -6345,13 +6377,40 @@ class MainWindow(QWidget):
         has_video_title_fill = tab.has_video_default_title()
         has_customization = tab.has_profile_customization()
         change_language = tab.change_language_before_edit()
+        is_ig = self._platform == PLATFORM_INSTAGRAM
 
-        if has_video_title_fill:
+        if has_video_title_fill and not is_ig:
             show_youtube_title_warnings(
                 self,
                 tab.video_default_titles_for_remember(),
                 window_title="Редактирование канала",
             )
+
+        if is_ig:
+            has_ig_bio = bool(description_lines) or any(
+                str(a.get("channel_description") or "").strip() for a in assignments
+            )
+            has_ig_avatar = any(bool(a.get("avatar_png")) for a in assignments)
+            has_ig_username = any(
+                bool(str(a.get("channel_name") or "").strip())
+                and not bool(a.get("skip_name_change"))
+                for a in assignments
+            )
+            if (
+                not has_ig_bio
+                and not has_ig_avatar
+                and not has_ig_username
+                and not change_language
+            ):
+                QMessageBox.warning(
+                    self,
+                    title,
+                    "Для Instagram укажите юзернейм, фото, bio и/или отметьте "
+                    "«Поменять язык».",
+                )
+                return
+            has_video_title_fill = False
+            has_text_fill = has_ig_bio
 
         if (
             not has_text_fill
@@ -6374,7 +6433,11 @@ class MainWindow(QWidget):
 
         kind = self._default_browser_combo.currentData()
         kind_s = kind if isinstance(kind, str) else "dolphin"
-        if has_customization and not _is_own_antidetect_kind(kind_s):
+        if (
+            has_customization
+            and not is_ig
+            and not _is_own_antidetect_kind(kind_s)
+        ):
             QMessageBox.information(
                 self,
                 title,
@@ -6389,7 +6452,10 @@ class MainWindow(QWidget):
                 self._settings.value("antydetect/dolphin_token", "", type=str) or ""
             ).strip()
         base_url = self._own_antidetect_base_url_from_settings(kind_s)
-        if has_customization and not (base_url or "").strip():
+        need_base = _is_own_antidetect_kind(kind_s) and (
+            has_customization or is_ig
+        )
+        if need_base and not (base_url or "").strip():
             QMessageBox.warning(
                 self,
                 title,
@@ -6409,6 +6475,7 @@ class MainWindow(QWidget):
         assignment_ids = {
             str(a.get("profile_id") or "").strip() for a in assignments
         }
+        # Instagram: bio/аватар/юзернейм из assignments, либо общая смена языка / bio.
         work_profile_ids = [
             pid
             for pid in profile_ids
@@ -6420,7 +6487,10 @@ class MainWindow(QWidget):
         self._profiles_channel_setup_running = True
         self._sync_profiles_tab_action_buttons()
         self._channel_edit_tab.set_running(True)
-        status_line = f"Настройка канала в Studio: 0 / {len(work_profile_ids)}…"
+        setup_label = "Instagram" if is_ig else "Studio"
+        status_line = (
+            f"Редактирование профиля ({setup_label}): 0 / {len(work_profile_ids)}…"
+        )
         self._profiles_status.setText(status_line)
         self._channel_edit_tab.set_status(status_line)
         max_concurrent = self._max_concurrent_browsers()
@@ -6479,6 +6549,8 @@ class MainWindow(QWidget):
             set_log_sink,
             setup_channel_in_local_antidetect_profile,
             setup_channel_in_profile,
+            setup_instagram_profile_in_local_antidetect_profile,
+            setup_instagram_profile_in_profile,
         )
         from zaliver.youtube_upload.multi_availability_checker import (
             MultiProfileAvailabilityChecker,
@@ -6550,10 +6622,7 @@ class MainWindow(QWidget):
             return None
 
         def _setup_one(pid: str) -> None:
-            creds = self._profile_login_credentials(pid)
-            yt_oldest = self._profile_yt_oldest_name(pid) or None
-            search_oldest = self._youtube_search_oldest_channel()
-
+            is_ig = self._platform == PLATFORM_INSTAGRAM
             item = by_id.get(pid)
             png = item.get("avatar_png") if item else None
             avatar_path: Path | None = None
@@ -6561,33 +6630,98 @@ class MainWindow(QWidget):
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
                     tf.write(bytes(png))
                     avatar_path = Path(tf.name)
-            channel_name = (
-                _expand_channel_field(str(item.get("channel_name") or ""), pid) or None
-                if item
-                else None
-            )
-            skip_name_change = bool(item.get("skip_name_change")) if item else False
-            video_default_title = (
-                _expand_channel_field(
-                    str(item.get("video_default_title") or ""),
-                    pid,
-                    limit_title=True,
-                )
-                or None
-                if item
-                else None
-            )
-            has_video_title_fill = bool(video_default_title)
-            profile_description = _description_for_profile(pid) if has_text_fill else ""
-            profile_link = _link_for_profile(pid) if has_text_fill else None
-            profile_links = [profile_link] if profile_link else None
 
             try:
+                if is_ig:
+                    profile_description = (
+                        _description_for_profile(pid) if has_text_fill else ""
+                    )
+                    channel_name = (
+                        _expand_channel_field(
+                            str(item.get("channel_name") or ""), pid
+                        )
+                        or None
+                        if item
+                        else None
+                    )
+                    skip_name_change = (
+                        bool(item.get("skip_name_change")) if item else False
+                    )
+                    ig_username = (
+                        None if skip_name_change else (channel_name or None)
+                    )
+                    ig_login, ig_password, ig_twofa = (
+                        self._instagram_session_credentials(pid)
+                    )
+                    if _is_own_antidetect_kind(kind_s):
+                        u = (base_url or "").strip()
+                        if not u:
+                            raise LocalAntidetectError(
+                                f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} "
+                                "API в настройках."
+                            )
+                        setup_instagram_profile_in_local_antidetect_profile(
+                            pid,
+                            description=profile_description or None,
+                            avatar_path=avatar_path,
+                            username=ig_username,
+                            change_language=change_language,
+                            base_url=u,
+                            headless=headless,
+                            remote_cdp=remote_cdp,
+                            session_login=ig_login,
+                            session_password=ig_password,
+                            session_twofa=ig_twofa,
+                        )
+                    else:
+                        setup_instagram_profile_in_profile(
+                            pid,
+                            description=profile_description or None,
+                            avatar_path=avatar_path,
+                            username=ig_username,
+                            change_language=change_language,
+                            local_token=token or None,
+                            headless=headless,
+                            session_login=ig_login,
+                            session_password=ig_password,
+                            session_twofa=ig_twofa,
+                        )
+                    return
+
+                creds = self._profile_login_credentials(pid)
+                yt_oldest = self._profile_yt_oldest_name(pid) or None
+                search_oldest = self._youtube_search_oldest_channel()
+
+                channel_name = (
+                    _expand_channel_field(str(item.get("channel_name") or ""), pid)
+                    or None
+                    if item
+                    else None
+                )
+                skip_name_change = bool(item.get("skip_name_change")) if item else False
+                video_default_title = (
+                    _expand_channel_field(
+                        str(item.get("video_default_title") or ""),
+                        pid,
+                        limit_title=True,
+                    )
+                    or None
+                    if item
+                    else None
+                )
+                has_video_title_fill = bool(video_default_title)
+                profile_description = (
+                    _description_for_profile(pid) if has_text_fill else ""
+                )
+                profile_link = _link_for_profile(pid) if has_text_fill else None
+                profile_links = [profile_link] if profile_link else None
+
                 if _is_own_antidetect_kind(kind_s):
                     u = (base_url or "").strip()
                     if not u:
                         raise LocalAntidetectError(
-                            f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
+                            f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} "
+                            "API в настройках."
                         )
                     setup_channel_in_local_antidetect_profile(
                         pid,
@@ -6595,7 +6729,9 @@ class MainWindow(QWidget):
                         link_title=profile_link[0] if profile_link else None,
                         link_url=profile_link[1] if profile_link else None,
                         channel_links=profile_links,
-                        video_default_title=video_default_title if has_video_title_fill else None,
+                        video_default_title=(
+                            video_default_title if has_video_title_fill else None
+                        ),
                         avatar_path=avatar_path,
                         channel_name=channel_name,
                         skip_name_change=skip_name_change,
@@ -6614,7 +6750,9 @@ class MainWindow(QWidget):
                         link_title=profile_link[0] if profile_link else None,
                         link_url=profile_link[1] if profile_link else None,
                         channel_links=profile_links,
-                        video_default_title=video_default_title if has_video_title_fill else None,
+                        video_default_title=(
+                            video_default_title if has_video_title_fill else None
+                        ),
                         avatar_path=avatar_path,
                         channel_name=channel_name,
                         skip_name_change=skip_name_change,
@@ -6653,6 +6791,7 @@ class MainWindow(QWidget):
                 VIDEO_TITLE_CHANGE_SUCCESS_TAG,
             )
 
+            is_ig = self._platform == PLATFORM_INSTAGRAM
             updates: list[tuple[bool, str, str]] = []
             if change_language:
                 updates.append(
@@ -6663,16 +6802,16 @@ class MainWindow(QWidget):
                     updates.append(
                         (ok, DESCRIPTION_FILL_SUCCESS_TAG, DESCRIPTION_FILL_ERROR_TAG)
                     )
-                if _link_for_profile(pid):
+                if not is_ig and _link_for_profile(pid):
                     updates.append((ok, LINK_FILL_SUCCESS_TAG, LINK_FILL_ERROR_TAG))
 
             item = by_id.get(pid)
             if item:
                 has_avatar = bool(item.get("avatar_png"))
-                has_name = bool(str(item.get("channel_name") or "").strip()) and not bool(
-                    item.get("skip_name_change")
-                )
-                has_video_title = bool(
+                has_name = bool(
+                    str(item.get("channel_name") or "").strip()
+                ) and not bool(item.get("skip_name_change"))
+                has_video_title = not is_ig and bool(
                     str(item.get("video_default_title") or "").strip()
                 )
                 if has_avatar:

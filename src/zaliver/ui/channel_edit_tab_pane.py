@@ -43,6 +43,7 @@ from zaliver.ui.channel_setup_helpers import (
     make_magic_wand_button,
     recent_picker_has_items,
 )
+from zaliver.ui.platform import PLATFORM_INSTAGRAM, normalize_platform
 from zaliver.ui.title_variables_ui import make_variables_hint_button
 from zaliver.ui.widgets import AnimatedProgressBar, ToggleSwitch
 
@@ -85,6 +86,7 @@ class ChannelEditTabPane(QWidget):
         self,
         parent: QWidget | None = None,
         *,
+        platform: str = "youtube",
         recent_channel_names: list[str] | None = None,
         recent_channel_descriptions: list[str] | None = None,
         recent_link_titles: list[str] | None = None,
@@ -93,6 +95,7 @@ class ChannelEditTabPane(QWidget):
         ai_generate_fn: Callable[..., None] | None = None,
     ) -> None:
         super().__init__(parent)
+        self._platform = normalize_platform(platform)
         self._ai_generate_fn = ai_generate_fn
         self._ai_wand_buttons: list[QToolButton] = []
         self._profiles: list[dict[str, object]] = []
@@ -124,8 +127,27 @@ class ChannelEditTabPane(QWidget):
 
         self._build_ui()
         self._connect_section_toggles()
+        self._apply_platform_ui()
         self._on_section_toggle()
         self._refresh_assignment()
+
+    def _is_instagram(self) -> bool:
+        return self._platform == PLATFORM_INSTAGRAM
+
+    def _names_section_title(self) -> str:
+        return "Юзернейм" if self._is_instagram() else "Название канала"
+
+    def _names_placeholder(self) -> str:
+        if self._is_instagram():
+            return "Юзернейм — по одному на строку…"
+        return "Название канала — по одному на строку…"
+
+    def _names_recent_tooltip(self) -> str:
+        return (
+            "Недавние юзернеймы"
+            if self._is_instagram()
+            else "Недавние названия каналов"
+        )
 
     def _make_ai_wand(
         self,
@@ -194,7 +216,11 @@ class ChannelEditTabPane(QWidget):
     def _apply_responsive_layout(self) -> None:
         width = self.width()
         self._layout_header(width >= _BP_HEADER)
-        self._layout_avatar_names(width >= _BP_AVATAR_NAMES)
+        # Instagram: фото и юзернейм всегда отдельными блоками друг под другом.
+        avatar_names_horizontal = (
+            False if self._is_instagram() else width >= _BP_AVATAR_NAMES
+        )
+        self._layout_avatar_names(avatar_names_horizontal)
         self._layout_avatar_controls(width >= _BP_AVATAR_NAMES)
         self._sync_text_field_heights()
 
@@ -246,8 +272,9 @@ class ChannelEditTabPane(QWidget):
             lay = QVBoxLayout(host)
             lay.setSpacing(8)
             lay.setContentsMargins(0, 0, 0, 0)
-            lay.addWidget(self._avatar_box)
-            lay.addWidget(self._names_box)
+            # Фото — по содержимому; юзернейм/название забирает свободную высоту.
+            lay.addWidget(self._avatar_box, 0)
+            lay.addWidget(self._names_box, 1)
 
     def _layout_avatar_controls(self, horizontal: bool) -> None:
         if self._avatar_controls_horizontal == horizontal:
@@ -294,10 +321,11 @@ class ChannelEditTabPane(QWidget):
 
     def _form_inner_chrome_height(self) -> int:
         """Хром внутри scroll (без шапки/футера вкладки)."""
-        # 4 заголовка секций.
-        chrome = 32 * 4
+        # Заголовки секций: аватар+имя (+ видео/ссылка на YouTube).
+        section_headers = 2 if self._is_instagram() else 4
+        chrome = 32 * section_headers
         # Отступы между блоками формы.
-        chrome += 8 * 5
+        chrome += 8 * (3 if self._is_instagram() else 5)
         # Path + кнопки выбора аватарок.
         chrome += 48
         # Запас: frame GroupBox, «Не обрезать», подписи, округление, низ окна.
@@ -333,37 +361,132 @@ class ChannelEditTabPane(QWidget):
         if not hasattr(self, "_scroll") or not hasattr(self, "_link_title_edit"):
             return
 
-        # Название держим компактным (рядом с фото); остальные 4 поля делят высоту.
-        slots = 4
+        is_ig = self._is_instagram()
         viewport_h = self._scroll.viewport().height()
-        if viewport_h >= 80:
-            available = max(0, viewport_h - self._form_inner_chrome_height() - 28)
-            pane_h = viewport_h
-        else:
-            pane_h = self._pane_window_height()
-            available = max(0, pane_h - self._non_text_chrome_height())
+        if viewport_h < 80:
+            viewport_h = max(120, self._pane_window_height() - 80)
 
-        # Доп. отступ снизу + фиксированная высота названия канала.
+        if is_ig:
+            self._apply_instagram_adaptive_layout(viewport_h)
+            return
+
+        self._scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        if hasattr(self, "_form_host"):
+            self._form_host.setMinimumHeight(0)
+            self._form_host.setMaximumHeight(16777215)
+            self._form_host.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Minimum,
+            )
+
+        available = max(0, viewport_h - self._form_inner_chrome_height() - 28)
+        # Доп. отступ снизу + компактное название канала.
         available = max(0, available - 28 - _NAMES_FIELD_H)
-
-        # Не сжимаем поля ниже минимума — при нехватке высоты появится scroll.
-        height = available // slots if slots else _TEXT_MIN_H
-        if height < _TEXT_MIN_H:
-            height = _TEXT_MIN_H
-        else:
-            height = min(height, max(_TEXT_MIN_H, pane_h // 2))
-
-        self._names_edit.setMinimumHeight(_NAMES_FIELD_H)
-        self._names_edit.setMaximumHeight(_NAMES_FIELD_H)
-
-        for edit in (
+        stretch_edits = (
             self._desc_edit,
             self._video_title_edit,
             self._link_title_edit,
             self._link_url_edit,
-        ):
+        )
+        slots = len(stretch_edits)
+        height = available // slots if slots else _TEXT_MIN_H
+        if height < _TEXT_MIN_H:
+            height = _TEXT_MIN_H
+        else:
+            height = min(height, max(_TEXT_MIN_H, viewport_h // 2))
+
+        self._names_edit.setMinimumHeight(_NAMES_FIELD_H)
+        self._names_edit.setMaximumHeight(_NAMES_FIELD_H)
+        self._names_edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        for edit in stretch_edits:
             edit.setMinimumHeight(height)
             edit.setMaximumHeight(height)
+            edit.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Fixed,
+            )
+
+        # YouTube: лишний воздух уходит в stretch внизу формы.
+        if hasattr(self, "_form_layout"):
+            self._form_layout.setStretch(self._form_idx_avatar_names, 0)
+            self._form_layout.setStretch(self._form_idx_desc, 0)
+            self._form_layout.setStretch(self._form_bottom_stretch_index, 1)
+
+    def _set_expanding_edit(self, edit: QPlainTextEdit, *, min_h: int) -> None:
+        edit.setMinimumHeight(min_h)
+        edit.setMaximumHeight(16777215)
+        edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        parent = edit.parentWidget()
+        if parent is not None:
+            parent.setMinimumHeight(min_h)
+            parent.setMaximumHeight(16777215)
+            parent.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Expanding,
+            )
+
+    def _apply_instagram_adaptive_layout(self, viewport_h: int) -> None:
+        """Адаптивно: форма = 100% viewport, юзернейм/описание делят остаток через stretch."""
+        self._scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        vp = max(1, int(viewport_h))
+
+        # Ровно высота видимой области — layout сам перераспределяет при ресайзе.
+        self._form_host.setMinimumHeight(vp)
+        self._form_host.setMaximumHeight(vp)
+        self._form_host.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+
+        self._avatar_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Maximum,
+        )
+        self._names_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self._desc_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self._avatar_names_host.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+
+        min_edit = 48
+        self._set_expanding_edit(self._names_edit, min_h=min_edit)
+        self._set_expanding_edit(self._desc_edit, min_h=min_edit)
+
+        # stretch: фото по содержимому, юзернейм : описание ≈ 2 : 3
+        self._form_layout.setStretch(self._form_idx_language, 0)
+        self._form_layout.setStretch(self._form_idx_avatar_names, 2)
+        self._form_layout.setStretch(self._form_idx_video, 0)
+        self._form_layout.setStretch(self._form_idx_desc, 3)
+        self._form_layout.setStretch(self._form_idx_link, 0)
+        self._form_layout.setStretch(self._form_bottom_stretch_index, 0)
+
+        host_lay = self._avatar_names_host.layout()
+        if isinstance(host_lay, QVBoxLayout) and host_lay.count() >= 2:
+            host_lay.setStretch(0, 0)
+            host_lay.setStretch(1, 1)
+
+        if hasattr(self, "_names_section_layout"):
+            # header=0, field=1, source label=2
+            self._names_section_layout.setStretch(1, 1)
+        if hasattr(self, "_desc_section_layout"):
+            self._desc_section_layout.setStretch(1, 1)
 
     def _build_ui(self) -> None:
         self.setSizePolicy(
@@ -386,10 +509,7 @@ class ChannelEditTabPane(QWidget):
         root.addWidget(self._header_host)
 
         self._change_language = QCheckBox("Поменять язык")
-        self._change_language.setToolTip(
-            "Перед настройкой канала: главная YouTube → язык интерфейса «Русский», "
-            "затем переход в креативную студию и остальные шаги."
-        )
+        self._change_language.setToolTip(self._change_language_tooltip())
         self._change_language.toggled.connect(self._on_assignment_options_changed)
 
         self._scroll = QScrollArea()
@@ -410,16 +530,26 @@ class ChannelEditTabPane(QWidget):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Minimum,
         )
+        self._form_host = form_host
         form = QVBoxLayout(form_host)
+        self._form_layout = form
         form.setSpacing(6)
         form.setContentsMargins(0, 0, 0, 0)
 
         form.addWidget(self._change_language)
+        self._form_idx_language = form.count() - 1
         form.addWidget(self._build_avatar_names_row())
-        form.addWidget(self._build_video_title_section())
+        self._form_idx_avatar_names = form.count() - 1
+        self._video_title_box = self._build_video_title_section()
+        form.addWidget(self._video_title_box)
+        self._form_idx_video = form.count() - 1
         form.addWidget(self._build_desc_section())
-        form.addWidget(self._build_link_section())
-        form.addStretch()
+        self._form_idx_desc = form.count() - 1
+        self._link_box = self._build_link_section()
+        form.addWidget(self._link_box)
+        self._form_idx_link = form.count() - 1
+        form.addStretch(0)
+        self._form_bottom_stretch_index = form.count() - 1
         self._scroll.setWidget(form_host)
         root.addWidget(self._scroll, 1)
 
@@ -445,7 +575,7 @@ class ChannelEditTabPane(QWidget):
         toggle: ToggleSwitch,
         label: str,
         *trailing: QWidget,
-    ) -> QHBoxLayout:
+    ) -> tuple[QHBoxLayout, QLabel]:
         row = QHBoxLayout()
         row.setSpacing(6)
         row.setContentsMargins(0, 0, 0, 0)
@@ -456,7 +586,35 @@ class ChannelEditTabPane(QWidget):
         row.addStretch()
         for widget in trailing:
             row.addWidget(widget, 0, Qt.AlignmentFlag.AlignRight)
-        return row
+        return row, lbl
+
+    def _change_language_tooltip(self) -> str:
+        if self._is_instagram():
+            return (
+                "Перед редактированием профиля: Language preferences → «Русский». "
+                "После обновления страницы должно появиться слово «язык»."
+            )
+        return (
+            "Перед настройкой канала: главная YouTube → язык интерфейса «Русский», "
+            "затем переход в креативную студию и остальные шаги."
+        )
+
+    def _apply_platform_ui(self) -> None:
+        """Instagram: без названия видео и ссылки; «название канала» → юзернейм."""
+        is_ig = self._is_instagram()
+        self._video_title_box.setVisible(not is_ig)
+        self._link_box.setVisible(not is_ig)
+        if is_ig:
+            self._toggle_video_title.setChecked(False)
+            self._toggle_link.setChecked(False)
+        self._change_language.setToolTip(self._change_language_tooltip())
+        self._names_section_label.setText(self._names_section_title())
+        self._names_edit.setPlaceholderText(self._names_placeholder())
+        self._names_recent_combo.setToolTip(self._names_recent_tooltip())
+        self._btn_names_wand.setToolTip(
+            f"Сгенерировать через ИИ — «{self._names_section_title()}»"
+        )
+        self._sync_text_field_heights()
 
     def _make_import_button(self, slot) -> QPushButton:
         btn = QPushButton("Импорт…")
@@ -485,7 +643,7 @@ class ChannelEditTabPane(QWidget):
         self._no_crop.toggled.connect(self._on_assignment_options_changed)
         self._no_crop.toggled.connect(lambda: self._file_crop_previews.clear())
         avatar_l.addLayout(
-            self._section_header(self._toggle_avatar, "Фото профиля", self._no_crop)
+            self._section_header(self._toggle_avatar, "Фото профиля", self._no_crop)[0]
         )
 
         self._avatar_path = QLineEdit()
@@ -510,42 +668,43 @@ class ChannelEditTabPane(QWidget):
             QSizePolicy.Policy.Preferred,
         )
         names_l = _section_layout(self._names_box)
+        self._names_section_layout = names_l
         self._toggle_names = ToggleSwitch()
         self._toggle_names.setChecked(True)
         self._btn_pick_names = self._make_import_button(self._pick_names_file)
         self._btn_names_hints = make_variables_hint_button(parent=self, field=None)
-        names_l.addLayout(
-            self._section_header(
-                self._toggle_names,
-                "Название канала",
-                self._btn_pick_names,
-                self._btn_names_hints,
-            )
+        names_header, self._names_section_label = self._section_header(
+            self._toggle_names,
+            self._names_section_title(),
+            self._btn_pick_names,
+            self._btn_names_hints,
         )
+        names_l.addLayout(names_header, 0)
         self._names_edit = self._compact_text_edit(
-            "Название канала — по одному на строку…",
+            self._names_placeholder(),
             fixed_height=_NAMES_FIELD_H,
         )
         self._names_edit.textChanged.connect(self._on_names_text_changed)
         self._btn_names_wand = self._make_ai_wand(
             default_prompt_id="builtin_channel_name",
-            window_title="Название канала",
+            window_title=self._names_section_title(),
             field=self._names_edit,
         )
         names_field_row, self._names_recent_combo = field_with_recent_picker(
             self._names_edit,
             recent=self._recent_channel_names,
-            tooltip="Недавние названия каналов",
+            tooltip=self._names_recent_tooltip(),
             on_filled=self._on_names_text_changed,
             side_extras=[self._btn_names_wand],
         )
+        self._names_field_row = names_field_row
         self._wire_hint_button(self._btn_names_hints, self._names_edit)
-        names_l.addWidget(names_field_row)
+        names_l.addWidget(names_field_row, 1)
 
         self._names_source_label_widget = QLabel("")
         self._names_source_label_widget.setObjectName("hint")
         self._names_source_label_widget.setVisible(False)
-        names_l.addWidget(self._names_source_label_widget)
+        names_l.addWidget(self._names_source_label_widget, 0)
 
         return self._avatar_names_host
 
@@ -576,6 +735,7 @@ class ChannelEditTabPane(QWidget):
         self._desc_box = QGroupBox()
         self._desc_box.setObjectName("channelEditSection")
         desc_l = _section_layout(self._desc_box)
+        self._desc_section_layout = desc_l
         self._toggle_desc = ToggleSwitch()
         self._toggle_desc.setChecked(True)
         self._btn_pick_desc = self._make_import_button(self._pick_desc_file)
@@ -586,7 +746,8 @@ class ChannelEditTabPane(QWidget):
                 "Описание канала",
                 self._btn_pick_desc,
                 self._btn_desc_hints,
-            )
+            )[0],
+            0,
         )
         self._desc_edit = self._compact_text_edit(
             "Описание канала — по одному на строку…",
@@ -607,13 +768,14 @@ class ChannelEditTabPane(QWidget):
             on_filled=self._on_channel_fields_changed,
             side_extras=[self._btn_desc_wand],
         )
+        self._desc_field_row = desc_field_row
         self._wire_hint_button(self._btn_desc_hints, self._desc_edit)
-        desc_l.addWidget(desc_field_row)
+        desc_l.addWidget(desc_field_row, 1)
 
         self._desc_source_label_widget = QLabel("")
         self._desc_source_label_widget.setObjectName("hint")
         self._desc_source_label_widget.setVisible(False)
-        desc_l.addWidget(self._desc_source_label_widget)
+        desc_l.addWidget(self._desc_source_label_widget, 0)
         return self._desc_box
 
     def _build_link_section(self) -> QGroupBox:
@@ -622,7 +784,7 @@ class ChannelEditTabPane(QWidget):
         lay = _section_layout(box)
         self._toggle_link = ToggleSwitch()
         self._toggle_link.setChecked(True)
-        lay.addLayout(self._section_header(self._toggle_link, "Ссылка"))
+        lay.addLayout(self._section_header(self._toggle_link, "Ссылка")[0])
 
         row = QHBoxLayout()
         row.setSpacing(8)
@@ -680,7 +842,7 @@ class ChannelEditTabPane(QWidget):
                 "Название видео",
                 self._btn_pick_video_titles,
                 self._btn_video_title_hints,
-            )
+            )[0]
         )
         self._video_title_body = QWidget()
         body_l = QVBoxLayout(self._video_title_body)
@@ -876,12 +1038,41 @@ class ChannelEditTabPane(QWidget):
         links = self.channel_links()
         video_titles = self._current_video_titles()
         msg_parts: list[str] = []
+        desc_count = len(self._current_channel_descriptions())
+        if self._is_instagram():
+            if self.change_language_before_edit():
+                msg_parts.append(
+                    f"• смена языка Instagram на русский — для всех {profile_count} "
+                    "профилей (перед остальными шагами)"
+                )
+            with_username = sum(
+                1
+                for a in assignments
+                if str(a.get("channel_name") or "").strip()
+                and not a.get("skip_name_change")
+            )
+            if with_username:
+                msg_parts.append(
+                    f"• юзернейм — {with_username} из {profile_count}"
+                )
+            if desc_count > 1:
+                msg_parts.append(f"• bio — {desc_count} вариантов по профилям")
+            elif desc_count == 1:
+                msg_parts.append(f"• bio — для всех {profile_count} профилей")
+            with_avatar = sum(1 for a in assignments if a.get("avatar_png"))
+            if with_avatar:
+                msg_parts.append(f"• фото профиля — {with_avatar} из {profile_count}")
+            return (
+                "Применить настройки профиля в Instagram?\n\n"
+                + "\n".join(msg_parts)
+            )
+
         if self.change_language_before_edit():
             msg_parts.append(
                 f"• смена языка YouTube на русский — для всех {profile_count} профилей "
                 "(перед остальными шагами)"
             )
-        desc_count = len(self._current_channel_descriptions())
+
         if desc_count > 1:
             msg_parts.append(f"• описание канала — {desc_count} вариантов по профилям")
         elif desc_count == 1:
@@ -1035,9 +1226,19 @@ class ChannelEditTabPane(QWidget):
     def _pick_names_file(self) -> None:
         if self._is_detecting():
             return
+        import_title = (
+            "Импорт юзернеймов"
+            if self._is_instagram()
+            else "Импорт названий каналов"
+        )
+        empty_msg = (
+            "В файле не найдено юзернеймов."
+            if self._is_instagram()
+            else "В файле не найдено названий."
+        )
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Импорт названий каналов",
+            import_title,
             "",
             "Текстовые файлы (*.txt *.csv);;Все файлы (*.*)",
         )
@@ -1049,7 +1250,7 @@ class ChannelEditTabPane(QWidget):
             QMessageBox.warning(self, "Редактирование канала", f"Не удалось прочитать файл:\n{exc}")
             return
         if not names:
-            QMessageBox.warning(self, "Редактирование канала", "В файле не найдено названий.")
+            QMessageBox.warning(self, "Редактирование канала", empty_msg)
             return
         self._names_edit.setPlainText("\n".join(names))
         self._names_source_label = path
@@ -1281,8 +1482,9 @@ class ChannelEditTabPane(QWidget):
         self._channel_names = self._current_channel_names()
         if not self._names_source_label:
             if self._channel_names:
+                unit = "юзернеймов" if self._is_instagram() else "названий"
                 self._names_source_label_widget.setText(
-                    f"{len(self._channel_names)} названий"
+                    f"{len(self._channel_names)} {unit}"
                 )
                 self._names_source_label_widget.setVisible(True)
             else:
@@ -1349,7 +1551,10 @@ class ChannelEditTabPane(QWidget):
         if self._avatar_pngs and self._toggle_avatar.isChecked():
             parts.append(f"Фото профиля: {len(self._avatar_pngs)}.")
         if self._channel_names:
-            parts.append(f"Названий каналов: {len(self._channel_names)}.")
+            if self._is_instagram():
+                parts.append(f"Юзернеймов: {len(self._channel_names)}.")
+            else:
+                parts.append(f"Названий каналов: {len(self._channel_names)}.")
         desc_count = len(self._current_channel_descriptions()) if self._toggle_desc.isChecked() else 0
         if desc_count:
             parts.append(f"Описаний: {desc_count}.")

@@ -49,7 +49,7 @@ class TitleVariablesDialog(QDialog):
         self._on_insert = on_insert
         self.setWindowTitle("Переменные для названий и описаний")
         self.setModal(True)
-        self.setMinimumWidth(720)
+        self.setMinimumWidth(520)
         self.resize(760, 560)
 
         root = QVBoxLayout(self)
@@ -70,7 +70,7 @@ class TitleVariablesDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll_body = QWidget()
         scroll_body_l = QVBoxLayout(scroll_body)
         scroll_body_l.setContentsMargins(0, 0, 0, 0)

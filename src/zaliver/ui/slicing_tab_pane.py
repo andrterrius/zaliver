@@ -51,6 +51,7 @@ from zaliver.ui.widgets import (
     ToggleSwitch,
     configure_log_splitter,
     make_log_export_button,
+    FlowLayout,
 )
 
 _INT_MAX = 2_147_483_647
@@ -332,7 +333,10 @@ class SlicingTabPane(QWidget):
         self.progress = AnimatedProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValueImmediate(0)
-        self.progress.setMinimumWidth(160)
+        self.progress.setMinimumWidth(80)
+        self.progress.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         self.progress_label = QLabel("")
         self.progress_label.setObjectName("hint")
 
@@ -349,6 +353,8 @@ class SlicingTabPane(QWidget):
 
         io = QGroupBox("Файлы и папка результата")
         io_grid = QGridLayout(io)
+        io_grid.setHorizontalSpacing(8)
+        io_grid.setVerticalSpacing(8)
         self._btn_pick_clips = QPushButton("Выбрать клипы…")
         self._btn_pick_clips.setObjectName("secondary")
         self._btn_pick_clips.clicked.connect(self._browse_clips)
@@ -358,34 +364,58 @@ class SlicingTabPane(QWidget):
         self._btn_clear_clips = QPushButton("Очистить")
         self._btn_clear_clips.setObjectName("secondary")
         self._btn_clear_clips.clicked.connect(self._clear_clips)
-        clip_btns = QHBoxLayout()
-        clip_btns.setContentsMargins(0, 0, 0, 0)
-        clip_btns.setSpacing(6)
+        clip_btns = FlowLayout(hspacing=6, vspacing=6)
         clip_btns.addWidget(self._btn_pick_clips)
         clip_btns.addWidget(self._btn_add_clips)
         clip_btns.addWidget(self._btn_clear_clips)
         clip_btns_w = QWidget()
+        clip_btns_w.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+        )
         clip_btns_w.setLayout(clip_btns)
         self._clip_hint = QLabel("")
         self._clip_hint.setObjectName("hint")
         self._clip_hint.setWordWrap(True)
+        self._clip_hint.setMinimumWidth(0)
+        self._clip_hint.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
         self.output_dir_edit = QLineEdit()
+        self.output_dir_edit.setObjectName("ioPathEdit")
         self.output_dir_edit.setPlaceholderText("Папка для нарезанных роликов…")
+        self.output_dir_edit.setMinimumWidth(0)
+        self.output_dir_edit.setMaximumWidth(480)
+        self.output_dir_edit.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
         btn_out = QPushButton("Выходная папка…")
         btn_out.setObjectName("secondary")
+        btn_out.setSizePolicy(
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+        )
         btn_out.clicked.connect(self._browse_output_dir)
-        io_grid.addWidget(QLabel("Исходные клипы:"), 0, 0)
+        out_row = QHBoxLayout()
+        out_row.setContentsMargins(0, 0, 0, 0)
+        out_row.setSpacing(8)
+        out_row.addWidget(self.output_dir_edit, 1)
+        out_row.addWidget(btn_out, 0)
+        out_row.addStretch(1)
+
+        io_grid.addWidget(QLabel("Исходные клипы:"), 0, 0, Qt.AlignmentFlag.AlignTop)
         io_grid.addWidget(self._clip_hint, 0, 1)
-        io_grid.addWidget(clip_btns_w, 0, 2)
-        io_grid.addWidget(QLabel("Выходная папка:"), 1, 0)
-        io_grid.addWidget(self.output_dir_edit, 1, 1)
-        io_grid.addWidget(btn_out, 1, 2)
+        io_grid.addWidget(clip_btns_w, 1, 1)
+        io_grid.addWidget(QLabel("Выходная папка:"), 2, 0)
+        io_grid.addLayout(out_row, 2, 1)
+        io_grid.setColumnStretch(1, 1)
+        io_grid.setColumnMinimumWidth(0, 0)
+        io_grid.setColumnMinimumWidth(1, 0)
         self.copies_per_track = QSpinBox()
         self.copies_per_track.setRange(1, _INT_MAX)
         self.copies_per_track.setValue(1)
+        self.copies_per_track.setMaximumWidth(120)
         self.copies_per_track.valueChanged.connect(lambda *_: self.save_settings())
-        io_grid.addWidget(QLabel("Количество роликов:"), 2, 0)
-        io_grid.addWidget(self.copies_per_track, 2, 1)
+        io_grid.addWidget(QLabel("Количество роликов:"), 3, 0)
+        io_grid.addWidget(self.copies_per_track, 3, 1)
         self.delete_after_upload = QCheckBox("Удалять после залива")
         self.delete_after_upload.setChecked(False)
         self.delete_after_upload.setToolTip(
@@ -393,7 +423,7 @@ class SlicingTabPane(QWidget):
             "удаляются из выходной папки."
         )
         self.delete_after_upload.toggled.connect(self.save_settings)
-        io_grid.addWidget(self.delete_after_upload, 3, 0, 1, 3)
+        io_grid.addWidget(self.delete_after_upload, 4, 0, 1, 2)
 
         music_gb = QGroupBox("Треки для нарезки")
         music_grid = QGridLayout(music_gb)
@@ -406,13 +436,14 @@ class SlicingTabPane(QWidget):
         self._btn_clear_music = QPushButton("Очистить")
         self._btn_clear_music.setObjectName("secondary")
         self._btn_clear_music.clicked.connect(self._clear_music)
-        music_btns = QHBoxLayout()
-        music_btns.setContentsMargins(0, 0, 0, 0)
-        music_btns.setSpacing(6)
+        music_btns = FlowLayout(hspacing=6, vspacing=6)
         music_btns.addWidget(self._btn_pick_music)
         music_btns.addWidget(self._btn_add_music)
         music_btns.addWidget(self._btn_clear_music)
         music_btns_w = QWidget()
+        music_btns_w.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
+        )
         music_btns_w.setLayout(music_btns)
         self._music_hint = QLabel("")
         self._music_hint.setObjectName("hint")
@@ -702,7 +733,13 @@ class SlicingTabPane(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setMinimumWidth(0)
         inner = QWidget()
+        inner.setMinimumWidth(0)
+        inner.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
+        )
         il = QVBoxLayout(inner)
         il.addWidget(io)
         il.addWidget(music_gb)
@@ -712,6 +749,9 @@ class SlicingTabPane(QWidget):
         il.addWidget(text_gb)
         il.addStretch()
         scroll.setWidget(inner)
+        scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
 
         right = QWidget()
         rl = QVBoxLayout(right)

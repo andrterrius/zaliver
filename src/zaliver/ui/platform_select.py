@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtGui import QMouseEvent, QResizeEvent
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -22,7 +23,10 @@ class _PlatformCard(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("platformCard")
-        self.setFixedSize(280, 200)
+        self.setMinimumSize(180, 150)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+        )
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -39,10 +43,14 @@ class PlatformSelectPane(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("platformSelectRoot")
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(32, 48, 32, 48)
-        root.setSpacing(28)
+        root.setContentsMargins(24, 32, 24, 32)
+        root.setSpacing(24)
 
         root.addStretch(1)
 
@@ -56,23 +64,37 @@ class PlatformSelectPane(QWidget):
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(subtitle)
 
-        cards = QHBoxLayout()
-        cards.setSpacing(24)
-        cards.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._cards_row = QHBoxLayout()
+        self._cards_row.setSpacing(24)
+        self._cards_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._cards: list[_PlatformCard] = []
 
         for platform_id, name, hint in PLATFORM_CHOICES:
-            cards.addWidget(self._make_card(platform_id, name, hint))
+            card = self._make_card(platform_id, name, hint)
+            self._cards.append(card)
+            self._cards_row.addWidget(card)
 
-        root.addLayout(cards)
+        root.addLayout(self._cards_row)
         root.addStretch(2)
 
-    def _make_card(self, platform_id: str, name: str, hint: str) -> QFrame:
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        # Обе карточки всегда в одном ряду; на узком экране чуть сжимаются.
+        n = max(1, len(self._cards))
+        gap = 24 * (n - 1)
+        avail = max(180 * n + gap, self.width() - 64)
+        card_w = min(280, max(180, (avail - gap) // n))
+        card_h = min(200, max(150, int(card_w * 0.72)))
+        for card in self._cards:
+            card.setFixedSize(card_w, card_h)
+
+    def _make_card(self, platform_id: str, name: str, hint: str) -> _PlatformCard:
         card = _PlatformCard()
         card.clicked.connect(lambda: self.platform_chosen.emit(platform_id))
 
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(24, 28, 24, 24)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 24, 20, 20)
+        layout.setSpacing(10)
 
         name_lbl = QLabel(name)
         name_lbl.setObjectName("platformCardName")

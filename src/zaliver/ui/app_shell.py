@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtWidgets import QApplication, QStackedWidget, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 
 from zaliver.ui.desktop_notify import DesktopNotifier
 from zaliver.ui.main_window import MainWindow
@@ -19,6 +19,9 @@ class AppShell(QWidget):
         super().__init__()
         self.setObjectName("zaliverRoot")
         self.setWindowTitle("Zaliver — выбор режима")
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
 
         self._stack = QStackedWidget()
         self._select = PlatformSelectPane()
@@ -34,7 +37,26 @@ class AppShell(QWidget):
         layout.addWidget(self._stack)
 
         self._apply_theme()
+        self._fit_to_available_screen()
         self.showMaximized()
+
+    def _fit_to_available_screen(self) -> None:
+        """Не раздувать min size сверх доступной области (Dock / Stage Manager на macOS)."""
+        app = QApplication.instance()
+        screen = app.primaryScreen() if app is not None else None
+        if screen is None:
+            self.setMinimumSize(720, 480)
+            return
+        geo = screen.availableGeometry()
+        # Окно должно уметь ужаться в доступную геометрию, иначе Qt обрежет справа.
+        min_w = min(720, max(560, geo.width()))
+        min_h = min(480, max(400, geo.height()))
+        self.setMinimumSize(min_w, min_h)
+        if geo.width() < 1100 or geo.height() < 700:
+            self.resize(
+                min(1100, geo.width()),
+                min(720, geo.height()),
+            )
 
     @property
     def desktop_notifier(self) -> DesktopNotifier:

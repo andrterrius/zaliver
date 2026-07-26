@@ -73,10 +73,17 @@ from zaliver.db.upload_store import (
     uploaded_at_sort_ts,
 )
 from zaliver.antydetect.browser_concurrency import (
+    DEFAULT_INSTAGRAM_TABS_PER_PROFILE,
     DEFAULT_MAX_CONCURRENT_BROWSERS,
+    INSTAGRAM_TABS_PER_PROFILE_MAX,
+    INSTAGRAM_TABS_PER_PROFILE_MIN,
     MAX_CONCURRENT_BROWSERS_MAX,
     MAX_CONCURRENT_BROWSERS_MIN,
+    SETTINGS_KEY_INSTAGRAM_TABS_PER_PROFILE,
+    clamp_instagram_tabs_per_profile,
     clamp_max_concurrent_browsers,
+    compute_instagram_tabs_per_profile,
+    instagram_tabs_per_profile_from_settings,
     max_concurrent_browsers_from_settings,
 )
 from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI, DolphinAntyPublicAPI
@@ -141,6 +148,7 @@ from zaliver.ui.uploaded_stats_refresh_worker import UploadedStatsRefreshWorker
 from zaliver.ui.widgets import (
     AnimatedProgressBar,
     CollapsibleSection,
+    FlowLayout,
     SmoothSlider,
     ToggleSwitch,
     configure_log_splitter,
@@ -1049,7 +1057,7 @@ class MainWindow(QWidget):
         self.progress = AnimatedProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValueImmediate(0)
-        self.progress.setMinimumWidth(160)
+        self.progress.setMinimumWidth(80)
         self.progress.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
@@ -1070,6 +1078,8 @@ class MainWindow(QWidget):
 
         io = QGroupBox("Файлы и папка результата")
         io_grid = QGridLayout(io)
+        io_grid.setHorizontalSpacing(8)
+        io_grid.setVerticalSpacing(8)
         self._btn_pick_input_files = QPushButton("Выбрать файлы…")
         self._btn_pick_input_files.setObjectName("secondary")
         self._btn_pick_input_files.clicked.connect(self._browse_input_files)
@@ -1079,31 +1089,55 @@ class MainWindow(QWidget):
         self._btn_clear_input_files = QPushButton("Очистить")
         self._btn_clear_input_files.setObjectName("secondary")
         self._btn_clear_input_files.clicked.connect(self._clear_input_files)
-        input_files_btns = QHBoxLayout()
-        input_files_btns.setContentsMargins(0, 0, 0, 0)
-        input_files_btns.setSpacing(6)
+        input_files_btns = FlowLayout(hspacing=6, vspacing=6)
         input_files_btns.addWidget(self._btn_pick_input_files)
         input_files_btns.addWidget(self._btn_add_input_files)
         input_files_btns.addWidget(self._btn_clear_input_files)
         input_files_btns_w = QWidget()
+        input_files_btns_w.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+        )
         input_files_btns_w.setLayout(input_files_btns)
         self._input_files_hint = QLabel("")
         self._input_files_hint.setObjectName("hint")
         self._input_files_hint.setWordWrap(True)
+        self._input_files_hint.setMinimumWidth(0)
+        self._input_files_hint.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
         self.output_dir_edit = QLineEdit()
+        self.output_dir_edit.setObjectName("ioPathEdit")
         self.output_dir_edit.setPlaceholderText("Папка для уникализированных файлов…")
+        self.output_dir_edit.setMinimumWidth(0)
+        self.output_dir_edit.setMaximumWidth(480)
+        self.output_dir_edit.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
         btn_out = QPushButton("Выходная папка…")
         btn_out.setObjectName("secondary")
+        btn_out.setSizePolicy(
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+        )
         btn_out.clicked.connect(self._browse_output_dir)
-        io_grid.addWidget(QLabel("Исходные видео:"), 0, 0)
+        out_row = QHBoxLayout()
+        out_row.setContentsMargins(0, 0, 0, 0)
+        out_row.setSpacing(8)
+        out_row.addWidget(self.output_dir_edit, 1)
+        out_row.addWidget(btn_out, 0)
+        out_row.addStretch(1)
+
+        io_grid.addWidget(QLabel("Исходные видео:"), 0, 0, Qt.AlignmentFlag.AlignTop)
         io_grid.addWidget(self._input_files_hint, 0, 1)
-        io_grid.addWidget(input_files_btns_w, 0, 2)
-        io_grid.addWidget(QLabel("Выходная папка:"), 1, 0)
-        io_grid.addWidget(self.output_dir_edit, 1, 1)
-        io_grid.addWidget(btn_out, 1, 2)
+        io_grid.addWidget(input_files_btns_w, 1, 1)
+        io_grid.addWidget(QLabel("Выходная папка:"), 2, 0)
+        io_grid.addLayout(out_row, 2, 1)
+        io_grid.setColumnStretch(1, 1)
+        io_grid.setColumnMinimumWidth(0, 0)
+        io_grid.setColumnMinimumWidth(1, 0)
         self.copies_per_file = QSpinBox()
         self.copies_per_file.setRange(1, _INT_MAX)
         self.copies_per_file.setValue(1)
+        self.copies_per_file.setMaximumWidth(120)
         self.one_copy_no_effects = QCheckBox("1 копия без эффектов")
         self.one_copy_no_effects.setChecked(False)
         self.one_copy_no_effects.setToolTip(
@@ -1111,22 +1145,27 @@ class MainWindow(QWidget):
             "яркость, контраст, шум и прочие эффекты не применяются; "
             "добавляются только фоновый трек и текст на видео."
         )
-        io_grid.addWidget(QLabel("Копий на исходник:"), 2, 0)
-        io_grid.addWidget(self.copies_per_file, 2, 1)
-        io_grid.addWidget(self.one_copy_no_effects, 2, 2)
+        copies_row = QHBoxLayout()
+        copies_row.setContentsMargins(0, 0, 0, 0)
+        copies_row.setSpacing(8)
+        copies_row.addWidget(self.copies_per_file, 0)
+        copies_row.addWidget(self.one_copy_no_effects, 0)
+        copies_row.addStretch(1)
+        io_grid.addWidget(QLabel("Копий на исходник:"), 3, 0)
+        io_grid.addLayout(copies_row, 3, 1)
         copies_hint = QLabel(
             "Каждая копия — отдельный прогон со своими случайными параметрами "
             "(при включённой случайной уникализации). Например: 10 видео × 5 = 50 файлов."
         )
         copies_hint.setObjectName("hint")
         copies_hint.setWordWrap(True)
-        io_grid.addWidget(copies_hint, 3, 0, 1, 3)
+        io_grid.addWidget(copies_hint, 4, 0, 1, 2)
         io_hint = QLabel(
             "Имена: имя_u_<случайные hex>.mp4 — у каждого выхода свой суффикс (не счётчик)."
         )
         io_hint.setObjectName("hint")
         io_hint.setWordWrap(True)
-        io_grid.addWidget(io_hint, 4, 0, 1, 3)
+        io_grid.addWidget(io_hint, 5, 0, 1, 2)
         self.delete_after_upload = QCheckBox("Удалять после залива")
         self.delete_after_upload.setChecked(False)
         self.delete_after_upload.setToolTip(
@@ -1134,7 +1173,7 @@ class MainWindow(QWidget):
             "удаляются из выходной папки."
         )
         self.delete_after_upload.toggled.connect(self._save_folder_settings)
-        io_grid.addWidget(self.delete_after_upload, 5, 0, 1, 3)
+        io_grid.addWidget(self.delete_after_upload, 6, 0, 1, 2)
 
         bg_tracks = QGroupBox("Фоновые треки")
         bg_tracks_l = QVBoxLayout(bg_tracks)
@@ -1639,8 +1678,15 @@ class MainWindow(QWidget):
         scroll_left = QScrollArea()
         scroll_left.setWidgetResizable(True)
         scroll_left.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll_left.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_left.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        scroll_left.setMinimumWidth(0)
         inner_left = QWidget()
+        inner_left.setMinimumWidth(0)
+        inner_left.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
+        )
         inner_left_l = QVBoxLayout(inner_left)
         inner_left_l.addWidget(io)
         inner_left_l.addWidget(bg_tracks)
@@ -1734,9 +1780,14 @@ class MainWindow(QWidget):
         self._uploaded_render_timer.timeout.connect(self._tick_uploaded_list_render)
 
         uploaded_top = QHBoxLayout()
+        uploaded_top.setSpacing(8)
         self._uploaded_session_filter = QComboBox()
         self._uploaded_session_filter.setObjectName("uploadedSessionFilter")
-        self._uploaded_session_filter.setMinimumWidth(320)
+        self._uploaded_session_filter.setMinimumWidth(360)
+        self._uploaded_session_filter.setMaxVisibleItems(16)
+        self._uploaded_session_filter.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         self._uploaded_session_filter.setToolTip(
             "Сессия залива. В скобках: успешно залито / всего уникализировано по данным сессии."
         )
@@ -1754,8 +1805,8 @@ class MainWindow(QWidget):
         )
         self._btn_uploaded_check.clicked.connect(self._refresh_uploaded_stats_visible)
         uploaded_top.addWidget(self._uploaded_session_filter, 1)
-        uploaded_top.addWidget(self._btn_uploaded_refresh)
-        uploaded_top.addWidget(self._btn_uploaded_check)
+        uploaded_top.addWidget(self._btn_uploaded_refresh, 0)
+        uploaded_top.addWidget(self._btn_uploaded_check, 0)
         uploaded_l.addLayout(uploaded_top)
 
         self._uploaded_ig_checker_row = QWidget()
@@ -1814,7 +1865,11 @@ class MainWindow(QWidget):
 
         side = QFrame()
         side.setObjectName("uploadedSidePanel")
-        side.setFixedWidth(278)
+        side.setMinimumWidth(180)
+        side.setMaximumWidth(300)
+        side.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding
+        )
         side_l = QVBoxLayout(side)
         side_l.setSpacing(10)
         side_l.setContentsMargins(12, 12, 12, 12)
@@ -1905,8 +1960,7 @@ class MainWindow(QWidget):
         right_l = QVBoxLayout(right)
         right_l.setSpacing(8)
         right_l.setContentsMargins(0, 0, 0, 0)
-        sort_row = QHBoxLayout()
-        sort_row.setSpacing(8)
+        sort_row = FlowLayout(hspacing=8, vspacing=6)
         sort_cap = QLabel("Сортировка:")
         sort_cap.setObjectName("uploadedSortCaption")
         sort_row.addWidget(sort_cap)
@@ -1922,7 +1976,6 @@ class MainWindow(QWidget):
         )
         sort_row.addWidget(self._btn_uploaded_sort_views)
         sort_row.addWidget(self._btn_uploaded_sort_likes)
-        sort_row.addStretch()
         right_l.addLayout(sort_row)
 
         self._uploaded_list = QListWidget()
@@ -1981,8 +2034,7 @@ class MainWindow(QWidget):
         profiles_search_row.addWidget(self._btn_profiles_refresh)
         self._sync_profiles_tag_filter_button()
 
-        profiles_actions_row = QHBoxLayout()
-        profiles_actions_row.setSpacing(8)
+        profiles_actions_row = FlowLayout(hspacing=8, vspacing=8)
         self._btn_profiles_check_availability = QPushButton("Проверить доступность YouTube")
         self._btn_profiles_check_availability.setObjectName("secondary")
         self._btn_profiles_check_availability.setAutoDefault(False)
@@ -2105,7 +2157,6 @@ class MainWindow(QWidget):
         profiles_actions_row.addWidget(self._btn_profiles_register_accounts)
         profiles_actions_row.addWidget(self._btn_profiles_connect_2fa)
         profiles_actions_row.addWidget(self._btn_profiles_import_accounts)
-        profiles_actions_row.addStretch()
         self._sync_profiles_platform_actions_visibility()
 
         self._profiles_status = QLabel("")
@@ -2207,16 +2258,18 @@ class MainWindow(QWidget):
         settings_scroll.setWidgetResizable(True)
         settings_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         settings_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
         settings_scroll.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
+        settings_scroll.setMinimumWidth(0)
         settings_scroll.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
         )
         settings_inner = QWidget()
+        settings_inner.setMinimumWidth(0)
         settings_inner.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Minimum,
@@ -2401,7 +2454,8 @@ class MainWindow(QWidget):
         gi = _compact_settings_grid(gb_ig)
         pause_tip = (
             "Минимальная пауза между успешными заливами с одного профиля Instagram.\n"
-            "0 ч 0 мин — браузер не закрывается между роликами на том же профиле.\n"
+            "0 ч 0 мин — браузер не закрывается между роликами на том же профиле;\n"
+            "появляется настройка «Вкладок на профиль» для параллельного залива.\n"
             "У YouTube всегда 3 часа и в настройках не меняется."
         )
         self._instagram_upload_pause_hours = QSpinBox()
@@ -2424,6 +2478,32 @@ class MainWindow(QWidget):
         pause_row.addStretch(1)
         pause_wrap = QWidget()
         pause_wrap.setLayout(pause_row)
+
+        tabs_tip = (
+            "Сколько вкладок Instagram открывать в одном профиле при паузе 0,\n"
+            "чтобы заливать ролики параллельно в одном окне браузера.\n"
+            f"Диапазон {INSTAGRAM_TABS_PER_PROFILE_MIN}–"
+            f"{INSTAGRAM_TABS_PER_PROFILE_MAX}, по умолчанию "
+            f"{DEFAULT_INSTAGRAM_TABS_PER_PROFILE}."
+        )
+        self._instagram_tabs_per_profile_label = QLabel("Вкладок на профиль:")
+        self._instagram_tabs_per_profile_label.setToolTip(tabs_tip)
+        self._instagram_tabs_per_profile = QSpinBox()
+        self._instagram_tabs_per_profile.setRange(
+            INSTAGRAM_TABS_PER_PROFILE_MIN, INSTAGRAM_TABS_PER_PROFILE_MAX
+        )
+        self._instagram_tabs_per_profile.setSingleStep(1)
+        self._instagram_tabs_per_profile.setValue(DEFAULT_INSTAGRAM_TABS_PER_PROFILE)
+        self._instagram_tabs_per_profile.setToolTip(tabs_tip)
+        self._instagram_tabs_per_profile_label.setVisible(False)
+        self._instagram_tabs_per_profile.setVisible(False)
+        self._instagram_upload_pause_hours.valueChanged.connect(
+            self._sync_instagram_tabs_setting_visibility
+        )
+        self._instagram_upload_pause_minutes.valueChanged.connect(
+            self._sync_instagram_tabs_setting_visibility
+        )
+
         self._btn_save_instagram = QPushButton("Сохранить")
         self._btn_save_instagram.setObjectName("secondary")
         self._btn_save_instagram.clicked.connect(self._save_instagram_settings)
@@ -2432,8 +2512,10 @@ class MainWindow(QWidget):
         self._instagram_settings_status.setWordWrap(True)
         gi.addWidget(QLabel("Пауза между видео:"), 0, 0)
         gi.addWidget(pause_wrap, 0, 1)
-        gi.addWidget(_settings_save_row(self._btn_save_instagram), 1, 0, 1, 2)
-        gi.addWidget(self._instagram_settings_status, 2, 0, 1, 2)
+        gi.addWidget(self._instagram_tabs_per_profile_label, 1, 0)
+        gi.addWidget(self._instagram_tabs_per_profile, 1, 1)
+        gi.addWidget(_settings_save_row(self._btn_save_instagram), 2, 0, 1, 2)
+        gi.addWidget(self._instagram_settings_status, 3, 0, 1, 2)
         gb_ig.setVisible(self._platform == PLATFORM_INSTAGRAM)
 
         gb_ai = QGroupBox("ИИ")
@@ -2508,7 +2590,15 @@ class MainWindow(QWidget):
 
         self._nav = QListWidget()
         self._nav.setObjectName("sideNav")
-        self._nav.setFixedWidth(210)
+        self._nav.setMinimumWidth(140)
+        self._nav.setMaximumWidth(210)
+        self._nav.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding
+        )
+        self._nav.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._nav.setTextElideMode(Qt.TextElideMode.ElideRight)
         self._nav.addItems(
             [
                 "Уникализация",
@@ -2538,10 +2628,14 @@ class MainWindow(QWidget):
         nav_col.addWidget(self._btn_back_modes, 0)
 
         outer = QHBoxLayout(self)
-        outer.setSpacing(12)
-        outer.setContentsMargins(16, 12, 16, 12)
-        outer.addLayout(nav_col)
+        outer.setSpacing(8)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.addLayout(nav_col, 0)
         outer.addWidget(self._stack, 1)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
 
     def _on_nav_row_changed(self, row: int) -> None:
         self._stack.setCurrentIndex(max(0, min(row, self._stack.count() - 1)))
@@ -3676,8 +3770,19 @@ class MainWindow(QWidget):
         )
         dlg.setWindowTitle(dlg_title)
         dlg.setModal(True)
-        dlg.setMinimumSize(QSize(980, 780))
-        dlg.resize(1100, 860)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            geo = screen.availableGeometry()
+            dlg.setMinimumSize(
+                QSize(
+                    min(980, max(560, geo.width() - 48)),
+                    min(780, max(420, geo.height() - 48)),
+                )
+            )
+            dlg.resize(min(1100, geo.width() - 24), min(860, geo.height() - 24))
+        else:
+            dlg.setMinimumSize(QSize(980, 780))
+            dlg.resize(1100, 860)
 
         grid = QGridLayout(dlg)
         grid.setHorizontalSpacing(10)
@@ -4955,6 +5060,34 @@ class MainWindow(QWidget):
         self._instagram_upload_pause_minutes.setValue(mins)
         self._instagram_upload_pause_hours.blockSignals(False)
         self._instagram_upload_pause_minutes.blockSignals(False)
+        if hasattr(self, "_instagram_tabs_per_profile"):
+            tabs_n = instagram_tabs_per_profile_from_settings(self._settings)
+            self._instagram_tabs_per_profile.blockSignals(True)
+            self._instagram_tabs_per_profile.setValue(tabs_n)
+            self._instagram_tabs_per_profile.blockSignals(False)
+        self._sync_instagram_tabs_setting_visibility()
+
+    def _sync_instagram_tabs_setting_visibility(self, *_args) -> None:
+        """Показывать «Вкладок на профиль» только при паузе 0 ч 0 мин."""
+        if not hasattr(self, "_instagram_tabs_per_profile"):
+            return
+        hours = 0
+        mins = 0
+        if hasattr(self, "_instagram_upload_pause_hours"):
+            hours = int(self._instagram_upload_pause_hours.value())
+        if hasattr(self, "_instagram_upload_pause_minutes"):
+            mins = int(self._instagram_upload_pause_minutes.value())
+        show = hours == 0 and mins == 0
+        self._instagram_tabs_per_profile.setVisible(show)
+        if hasattr(self, "_instagram_tabs_per_profile_label"):
+            self._instagram_tabs_per_profile_label.setVisible(show)
+
+    def _instagram_tabs_per_profile_value(self) -> int:
+        if hasattr(self, "_instagram_tabs_per_profile"):
+            return clamp_instagram_tabs_per_profile(
+                self._instagram_tabs_per_profile.value()
+            )
+        return instagram_tabs_per_profile_from_settings(self._settings)
 
     def _save_instagram_settings(self) -> None:
         if not hasattr(self, "_instagram_upload_pause_hours"):
@@ -4967,6 +5100,8 @@ class MainWindow(QWidget):
         self._settings.setValue("upload_pause_minutes", total_mins)
         # Совместимость со старым ключом (целые часы).
         self._settings.setValue("upload_pause_hours", hours)
+        tabs_n = self._instagram_tabs_per_profile_value()
+        self._settings.setValue(SETTINGS_KEY_INSTAGRAM_TABS_PER_PROFILE, tabs_n)
         try:
             self._settings.sync()
         except Exception:
@@ -4976,12 +5111,16 @@ class MainWindow(QWidget):
             self._profiles_interaction.set_upload_pause(pause)
         self._update_profiles_section_header()
         self._sync_upload_pause_selection_labels()
+        self._sync_instagram_tabs_setting_visibility()
         if self._profiles_raw is not None:
             self._apply_profiles_filter()
         if hasattr(self, "_instagram_settings_status"):
             short = format_upload_pause_short(pause)
+            extra = ""
+            if total_mins <= 0:
+                extra = f" Вкладок на профиль: {tabs_n}."
             self._instagram_settings_status.setText(
-                f"Пауза между видео сохранена: {short}."
+                f"Пауза между видео сохранена: {short}.{extra}"
             )
 
     def _sync_upload_pause_selection_labels(self) -> None:
@@ -5397,9 +5536,9 @@ class MainWindow(QWidget):
         *,
         on_select_filter: Callable[[str], None],
         on_clear: Callable[[], None] | None = None,
-    ) -> tuple[QHBoxLayout, QLabel]:
+    ) -> tuple[FlowLayout, QLabel]:
         """Строка «Выделено» + «Выделить…» + «Снять выделение» для списка профилей."""
-        row = QHBoxLayout()
+        row = FlowLayout(hspacing=8, vspacing=6)
         lbl = QLabel("Выделено: 0")
         lbl.setObjectName("hint")
         lbl.setToolTip("Число профилей, отмеченных для залива")
@@ -5461,7 +5600,6 @@ class MainWindow(QWidget):
         btn_select.setMenu(select_menu)
 
         row.addWidget(lbl)
-        row.addStretch()
         row.addWidget(btn_select)
         row.addWidget(btn_clear)
 
@@ -5485,8 +5623,19 @@ class MainWindow(QWidget):
         dlg = QDialog(self)
         dlg.setWindowTitle(window_title)
         dlg.setModal(True)
-        dlg.setMinimumSize(QSize(720, 620))
-        dlg.resize(860, 720)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            geo = screen.availableGeometry()
+            dlg.setMinimumSize(
+                QSize(
+                    min(720, max(480, geo.width() - 48)),
+                    min(620, max(360, geo.height() - 48)),
+                )
+            )
+            dlg.resize(min(860, geo.width() - 24), min(720, geo.height() - 24))
+        else:
+            dlg.setMinimumSize(QSize(720, 620))
+            dlg.resize(860, 720)
 
         layout = QVBoxLayout(dlg)
         layout.setSpacing(10)
@@ -10144,7 +10293,7 @@ class MainWindow(QWidget):
             raw_prof and pending.get("upload_as_ready")
         )
         if self._upload_streaming_active:
-            opts["num_workers"] = 1
+            opts["num_workers"] = 2
 
         # Upload session starts only on "Start".
         try:
@@ -10172,8 +10321,8 @@ class MainWindow(QWidget):
 
         if self._upload_streaming_active:
             self._append_log(
-                "Залив по мере готовности: обработка в 1 поток "
-                "(чтобы браузер не тормозил), залив — после первого готового видео."
+                "Залив по мере готовности: обработка в 2 потока, "
+                "залив — после первого готового видео."
             )
 
         self._work_thread = QThread()
@@ -10251,7 +10400,7 @@ class MainWindow(QWidget):
             raw_prof and pending.get("upload_as_ready")
         )
         if self._upload_streaming_active:
-            opts["num_workers"] = 1
+            opts["num_workers"] = 2
 
         try:
             planned = len(list(opts.get("music_files") or [])) * max(
@@ -10277,8 +10426,8 @@ class MainWindow(QWidget):
 
         if self._upload_streaming_active:
             self._append_slice_log(
-                "Залив по мере готовности: нарезка в 1 поток "
-                "(чтобы браузер не тормозил), залив — после первого готового видео."
+                "Залив по мере готовности: нарезка в 2 потока, "
+                "залив — после первого готового видео."
             )
 
         self._work_thread = QThread()
@@ -10323,6 +10472,16 @@ class MainWindow(QWidget):
     def _stop_upload_antidetect_profiles(self) -> None:
         kind_u = (getattr(self, "_upload_cancel_kind", "") or "").strip()
         ids = [p for p in getattr(self, "_upload_cancel_profile_ids", []) if str(p).strip()]
+        try:
+            from zaliver.antydetect.antic_open import close_instagram_keep_open_hub
+
+            for pid in ids:
+                try:
+                    close_instagram_keep_open_hub(str(pid).strip())
+                except Exception:
+                    pass
+        except Exception:
+            pass
         if _is_own_antidetect_kind(kind_u):
             try:
                 from zaliver.antydetect.local_active_sessions import (
@@ -10550,9 +10709,10 @@ class MainWindow(QWidget):
 
         upload_platform_label = "Instagram Reels" if is_instagram_upload else "YouTube"
         stream_note = " (по мере готовности)" if streaming else ""
+        ids_preview = ",".join(profile_ids)
         self._append_session_log(
             f"{upload_platform_label}: многопоточная заливка стартует{stream_note}. "
-            f"Видео={len(video_paths)}, профили={len(profile_ids)}…"
+            f"Видео={len(video_paths)}, профили={len(profile_ids)} [{ids_preview}]…"
         )
         self._upload_delete_after_enabled = self._delete_after_upload_enabled()
         with self._upload_success_lock:
@@ -10590,6 +10750,33 @@ class MainWindow(QWidget):
             is_instagram_upload
             and self._upload_pause_between_uploads().total_seconds() <= 0
         )
+        max_browsers = int(self._max_concurrent_browsers())
+        ig_tabs_n = int(self._instagram_tabs_per_profile_value())
+        ig_tabs_per_profile: dict[str, int] | None = None
+        if (
+            is_instagram_upload
+            and ig_keep_browser_open
+            and ig_tabs_n > 1
+            and len(profile_ids) <= max_browsers
+        ):
+            ig_tabs_per_profile = compute_instagram_tabs_per_profile(
+                profile_ids,
+                ig_tabs_n,
+                max_concurrent_browsers=max_browsers,
+            )
+            if max(ig_tabs_per_profile.values(), default=1) <= 1:
+                ig_tabs_per_profile = None
+            else:
+                tabs_fmt = ", ".join(
+                    f"{pid}×{n}" for pid, n in ig_tabs_per_profile.items()
+                )
+                total_slots = sum(ig_tabs_per_profile.values())
+                self._append_session_log(
+                    "Instagram Reels: multi-tab — пауза 0, "
+                    f"вкладок на профиль={ig_tabs_n}, "
+                    f"профилей ≤ лимита окон ({max_browsers}). "
+                    f"Вкладки: {tabs_fmt} (всего слотов={total_slots})."
+                )
         mgr_holder: dict[str, MultiProfileUploader | None] = {"mgr": None}
 
         upload_var_index = {"n": 0}
@@ -10608,7 +10795,7 @@ class MainWindow(QWidget):
                     return _profile_name(p)
             return profile_id
 
-        def _upload_one(profile_id: str, task: VideoTask) -> None:
+        def _upload_one(profile_id: str, task: VideoTask, tab_index: int = 0) -> None:
             from zaliver.antydetect.antic_open import (
                 open_google_in_local_antidetect_profile,
                 open_google_in_profile,
@@ -10643,6 +10830,31 @@ class MainWindow(QWidget):
                 sess_login, sess_pwd, sess_2fa = self._instagram_session_credentials(
                     profile_id
                 )
+                mgr_now = mgr_holder.get("mgr")
+                multi_tab = bool(
+                    mgr_now is not None and getattr(mgr_now, "multi_tab_mode", False)
+                )
+                # Multi-tab: браузер всегда keep-open (закрытие только через менеджер),
+                # иначе параллельная вкладка могла бы stop_profile чужому заливу.
+                # tab0 = уже открытая вкладка Instagram; остальные — new_page().
+                if multi_tab:
+                    keep_open = True
+                    dedicated_tab = int(tab_index) > 0
+                    top_reels_scan = 5
+                    tabs_n = int(
+                        mgr_now.tabs_for_profile(profile_id)
+                        if mgr_now is not None
+                        else 1
+                    )
+                else:
+                    keep_open = bool(ig_keep_browser_open) and (
+                        mgr_now.should_keep_browser_open(profile_id)
+                        if mgr_now is not None
+                        else True
+                    )
+                    dedicated_tab = False
+                    top_reels_scan = 1
+                    tabs_n = 1
                 ig_kw = dict(
                     video_path=task.video_path,
                     title=resolved_title,
@@ -10651,16 +10863,11 @@ class MainWindow(QWidget):
                     session_login=sess_login,
                     session_password=sess_pwd,
                     session_twofa=sess_2fa,
-                    # Пауза 0: оставляем браузер только если следующий залив снова сюда
-                    # (один профиль или нет других свободных — см. should_keep_browser_open).
-                    keep_browser_open=(
-                        bool(ig_keep_browser_open)
-                        and (
-                            mgr_holder["mgr"].should_keep_browser_open(profile_id)
-                            if mgr_holder.get("mgr") is not None
-                            else True
-                        )
-                    ),
+                    keep_browser_open=keep_open,
+                    dedicated_tab=dedicated_tab,
+                    top_reels_scan=top_reels_scan,
+                    tab_index=int(tab_index),
+                    tabs_per_profile=max(1, tabs_n),
                 )
                 if _is_own_antidetect_kind(kind):
                     res = upload_instagram_reel_in_local_antidetect_profile(
@@ -10675,22 +10882,73 @@ class MainWindow(QWidget):
                         local_token=token or None,
                         **ig_kw,
                     )
-                # Первое Reel в профиле уже в БД → новое видео не появилось.
+                # После залива: первое Reel в сетке. В multi-tab параллельные
+                # вкладки могут уже записать соседние ролики — берём первый
+                # из топ-5, которого ещё нет в базе.
                 ig_vid = ""
                 ig_url = ""
+                candidates: list[dict] = []
                 if isinstance(res, dict):
                     ig_vid = str(res.get("video_id") or "").strip()
                     ig_url = str(res.get("url") or "").strip()
-                if self._upload_store.has_uploaded_video(
-                    video_id=ig_vid,
-                    url=ig_url,
-                    platform=self._platform,
-                ):
-                    raise RuntimeError(
-                        "Instagram Reels: первое видео в профиле уже есть в базе "
-                        f"залитых (video_id={ig_vid!r}, url={ig_url!r}) — "
-                        "заливка не подтверждена."
+                    raw_cands = res.get("candidate_reels")
+                    if isinstance(raw_cands, list):
+                        for item in raw_cands:
+                            if not isinstance(item, dict):
+                                continue
+                            c_vid = str(item.get("video_id") or "").strip()
+                            c_url = str(item.get("url") or "").strip()
+                            if c_vid or c_url:
+                                candidates.append(
+                                    {"video_id": c_vid, "url": c_url}
+                                )
+                if not candidates and (ig_vid or ig_url):
+                    candidates = [{"video_id": ig_vid, "url": ig_url}]
+
+                chosen = None
+                skipped: list[str] = []
+                for cand in candidates:
+                    c_vid = str(cand.get("video_id") or "").strip()
+                    c_url = str(cand.get("url") or "").strip()
+                    if self._upload_store.has_uploaded_video(
+                        video_id=c_vid,
+                        url=c_url,
+                        platform=self._platform,
+                    ):
+                        skipped.append(c_vid or c_url)
+                        continue
+                    chosen = cand
+                    break
+                if chosen is None:
+                    detail = (
+                        f"проверено={len(candidates)}, already={skipped!r}"
+                        if multi_tab
+                        else f"video_id={ig_vid!r}, url={ig_url!r}"
                     )
+                    raise RuntimeError(
+                        "Instagram Reels: "
+                        + (
+                            "все первые ролики в профиле уже есть в базе залитых"
+                            if multi_tab and len(candidates) > 1
+                            else "первое видео в профиле уже есть в базе залитых"
+                        )
+                        + f" ({detail}) — заливка не подтверждена."
+                    )
+                ig_vid = str(chosen.get("video_id") or "").strip()
+                ig_url = str(chosen.get("url") or "").strip()
+                if multi_tab and skipped:
+                    try:
+                        self._ui_log_line.emit(
+                            "[upload] Instagram multi-tab: пропущены уже "
+                            f"известные Reels {skipped!r}, берём "
+                            f"video_id={ig_vid!r}"
+                        )
+                    except Exception:
+                        pass
+                if isinstance(res, dict):
+                    res = dict(res)
+                    res["video_id"] = ig_vid
+                    res["url"] = ig_url
                 resolved_scheduled_batch = None
             else:
                 creds = self._profile_login_credentials(profile_id)
@@ -10956,6 +11214,12 @@ class MainWindow(QWidget):
             pid = (pid or "").strip()
             if not pid:
                 return
+            try:
+                from zaliver.antydetect.antic_open import close_instagram_keep_open_hub
+
+                close_instagram_keep_open_hub(pid)
+            except Exception:
+                pass
             if _is_own_antidetect_kind(kind):
                 try:
                     from zaliver.antydetect.local_active_sessions import (
@@ -10976,6 +11240,12 @@ class MainWindow(QWidget):
                     except Exception:
                         pass
                 return
+            try:
+                from zaliver.antydetect.antic_open import clear_dolphin_keep_open_cdp
+
+                clear_dolphin_keep_open_cdp(pid)
+            except Exception:
+                pass
             try:
                 api = DolphinAntyLocalAPI()
                 try:
@@ -11005,7 +11275,7 @@ class MainWindow(QWidget):
             profile_ids=profile_ids,
             cooldown_s=10.0,
             max_attempts_per_profile=2,
-            max_concurrent_uploads=self._max_concurrent_browsers(),
+            max_concurrent_uploads=max_browsers,
             profile_upload_pause_remaining_s=lambda pid: self._upload_store.profile_upload_pause_remaining_seconds(
                 pid,
                 platform=self._platform,
@@ -11024,6 +11294,7 @@ class MainWindow(QWidget):
             schedule_batch_size=schedule_batch_size,
             schedule_times=schedule_times,
             await_more_videos=bool(streaming),
+            tabs_per_profile=ig_tabs_per_profile,
         )
         mgr_holder["mgr"] = mgr
         self._upload_manager = mgr

@@ -61,6 +61,7 @@ class ProfileListRow(QWidget):
         self.setObjectName("profileRow")
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        self.setMinimumWidth(0)
         self.setMouseTracking(True)
 
         self._upload_pause = resolve_upload_pause(upload_pause)
@@ -74,8 +75,8 @@ class ProfileListRow(QWidget):
         self._preview_cb = on_preview_click
 
         outer = QHBoxLayout(self)
-        outer.setContentsMargins(10, 6, 10, 6)
-        outer.setSpacing(10)
+        outer.setContentsMargins(8, 6, 8, 6)
+        outer.setSpacing(8)
 
         self.checkbox = QCheckBox()
         self.checkbox.setToolTip(
@@ -86,6 +87,7 @@ class ProfileListRow(QWidget):
         outer.addWidget(self.checkbox, 0, Qt.AlignmentFlag.AlignVCenter)
 
         info = QWidget()
+        info.setMinimumWidth(0)
         info.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         info_l = QVBoxLayout(info)
         info_l.setContentsMargins(0, 0, 0, 0)
@@ -101,7 +103,8 @@ class ProfileListRow(QWidget):
         self.title_label = QLabel(name)
         self.title_label.setObjectName("profileRowTitle")
         self.title_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByKeyboard)
-        title_row.addWidget(self.title_label, 0)
+        self.title_label.setWordWrap(True)
+        title_row.addWidget(self.title_label, 1)
 
         self.id_label: QLabel | None = None
         self.copy_id_btn: QToolButton | None = None
@@ -115,7 +118,6 @@ class ProfileListRow(QWidget):
         if self.copy_id_btn is not None:
             title_row.addWidget(self.copy_id_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        title_row.addStretch(1)
         info_l.addWidget(title_row_w, 0)
 
         desc = (_profile_description(profile) or "").strip()
@@ -134,6 +136,14 @@ class ProfileListRow(QWidget):
         info_l.addStretch(0)
         outer.addWidget(info, 1)
 
+        # Жёсткий горизонтальный ряд: FlowLayout занижал min-width до одной кнопки —
+        # остальные обрезались справа и «пропадали».
+        trailing = QWidget()
+        trailing.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
+        trailing_l = QHBoxLayout(trailing)
+        trailing_l.setContentsMargins(0, 0, 0, 0)
+        trailing_l.setSpacing(6)
+
         dot_text, dot_css, dot_tip = proxy_health_dot_ui(profile)
         self.proxy_dot = QLabel(dot_text)
         self.proxy_dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -141,20 +151,21 @@ class ProfileListRow(QWidget):
         if dot_css:
             self.proxy_dot.setStyleSheet(dot_css)
         self.proxy_dot.setToolTip(dot_tip)
-        outer.addWidget(self.proxy_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        trailing_l.addWidget(self.proxy_dot, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.upload_label = QLabel(upload_text)
         self.upload_label.setObjectName("profileListUpload")
         self.upload_label.setProperty("uploadCooldown", upload_kind)
+        self.upload_label.setWordWrap(False)
         self._apply_upload_pause_interaction()
-        outer.addWidget(self.upload_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        trailing_l.addWidget(self.upload_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.account_data_btn: QPushButton | None = None
         if show_account_data_button and on_account_data_click is not None:
             self.account_data_btn = QPushButton(
                 (account_data_button_text or "").strip() or "Данные учетки"
             )
-            self.account_data_btn.setObjectName("secondary")
+            self.account_data_btn.setObjectName("profileRowAction")
             self.account_data_btn.setAutoDefault(False)
             self.account_data_btn.setDefault(False)
             self.account_data_btn.setToolTip(
@@ -162,12 +173,12 @@ class ProfileListRow(QWidget):
                 or "Логин, пароль и 2FA (custom_data локального антидетекта)"
             )
             self.account_data_btn.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
-            outer.addWidget(self.account_data_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+            trailing_l.addWidget(self.account_data_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.gmail_data_btn: QPushButton | None = None
         if show_gmail_data_button and on_gmail_data_click is not None:
             self.gmail_data_btn = QPushButton("Данные Gmail")
-            self.gmail_data_btn.setObjectName("secondary")
+            self.gmail_data_btn.setObjectName("profileRowAction")
             self.gmail_data_btn.setAutoDefault(False)
             self.gmail_data_btn.setDefault(False)
             self.gmail_data_btn.setToolTip(
@@ -175,12 +186,12 @@ class ProfileListRow(QWidget):
                 or "Логин и пароль Gmail (custom_data локального антидетекта)"
             )
             self.gmail_data_btn.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
-            outer.addWidget(self.gmail_data_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+            trailing_l.addWidget(self.gmail_data_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.preview_btn: QPushButton | None = None
         if show_preview_button and on_preview_click is not None:
             self.preview_btn = QPushButton("Просмотр")
-            self.preview_btn.setObjectName("secondary")
+            self.preview_btn.setObjectName("profileRowAction")
             self.preview_btn.setAutoDefault(False)
             self.preview_btn.setDefault(False)
             self.preview_btn.setToolTip(
@@ -189,7 +200,13 @@ class ProfileListRow(QWidget):
             )
             self.preview_btn.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
             self.preview_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            outer.addWidget(self.preview_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+            trailing_l.addWidget(self.preview_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        outer.addWidget(trailing, 0, Qt.AlignmentFlag.AlignVCenter)
+        # Правый блок не сжимаем — info уступает ширину.
+        outer.setStretch(0, 0)  # checkbox
+        outer.setStretch(1, 1)  # info
+        outer.setStretch(2, 0)  # trailing
 
         tip_lines = [profile_row_title_text(profile), upload_text]
         if dot_tip:

@@ -114,8 +114,13 @@ class AiTabPane(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setMinimumWidth(0)
         self._body = QWidget()
+        self._body.setMinimumWidth(0)
+        self._body.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
+        )
         self._body_l = QVBoxLayout(self._body)
         self._body_l.setSpacing(14)
         self._body_l.setContentsMargins(0, 0, 0, 0)

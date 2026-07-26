@@ -92,14 +92,24 @@ class ProfilesListInteraction(QObject):
         return len(self.checked_profile_ids)
 
     def batch_profile_ids(self) -> list[str]:
-        """Отмеченные профили сверху вниз (только checked, без Qt-selection)."""
+        """Все отмеченные профили: сначала видимые (порядок списка), затем скрытые фильтром.
+
+        Раньше учитывались только строки в QListWidget — при активном поиске/теге
+        checked_count мог быть 2, а в залив уходил один ID.
+        """
         if not self.checked_profile_ids:
             return []
-        return [
-            pid
-            for pid in self._profile_ids_in_list_order()
-            if pid in self.checked_profile_ids
-        ]
+        out: list[str] = []
+        seen: set[str] = set()
+        for pid in self._profile_ids_in_list_order():
+            if pid in self.checked_profile_ids and pid not in seen:
+                out.append(pid)
+                seen.add(pid)
+        for pid in self.checked_profile_ids:
+            if pid not in seen:
+                out.append(pid)
+                seen.add(pid)
+        return out
 
     def _profile_ids_in_list_order(self) -> list[str]:
         out: list[str] = []

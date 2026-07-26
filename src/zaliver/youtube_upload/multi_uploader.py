@@ -59,18 +59,23 @@ class MultiProfileUploader:
     """
     Queue-based multi-threaded uploader.
 
-    - One profile = one thread.
-    - At most `max_concurrent_uploads` profiles run `upload_one` at the same time (RAM);
+    - One profile = one or more worker threads (вкладки при Instagram multi-tab).
+    - At most `max_concurrent_uploads` uploads run `upload_one` at the same time;
       others wait on a semaphore until a slot frees.
+    - При `tabs_per_profile` с суммой > числа профилей: несколько воркеров на профиль
+      (параллельные вкладки). Назначение — волнами: сначала tab0 (первичная) каждого
+      профиля, затем tab1, tab2…; у каждой вкладки своя очередь (без гонки воркеров).
+      Освободившаяся вкладка сразу берёт следующее видео из своей очереди.
     - При `keep_browser_open` слот удерживается, пока браузер профиля открыт
-      (чтобы не открыть больше лимита параллельных браузеров).
-    - Round-robin assignment via dispatcher thread; среди профилей с пустой per-profile
-      очередью сначала выбираются те, кто не входит в последние `_RECENT_COMPLETED_MAX`
-      успешных загрузок (чтобы не гонять одни и те же 5, если другие свободны).
+      (чтобы не открыть больше лимита параллельных браузеров/вкладок).
+    - Round-robin assignment via dispatcher thread; среди профилей с незаполненной
+      per-profile очередью сначала выбираются те, кто не входит в последние
+      `_RECENT_COMPLETED_MAX` успешных загрузок.
     - Если подходят только «недавно успешные», диспетчер ждёт `recent_batch_wait_s`
       (по умолчанию 3 ч), затем сбрасывает список недавних и назначает снова (лог [WAIT]).
     - Per-profile cooldown: wait at least `cooldown_s` from *start time* of previous upload
-      in this run, and optionally `profile_upload_pause_remaining_s` (e.g. DB «Пауза 3 ч»).
+      in this run (для multi-tab профиля cooldown между вкладками отключён), and optionally
+      `profile_upload_pause_remaining_s` (e.g. DB «Пауза 3 ч»).
     - Errors re-queue the same video (prefer another profile; same one if no alternative),
       max `max_attempts_per_profile` attempts per video per profile.
     - stop() requests graceful shutdown; workers finish current upload and exit.
@@ -90,13 +95,23 @@ class MultiProfileUploader:
         keep_browser_open: bool = False,
         close_kept_browser: Callable[[str], None] | None = None,
         log_sink: Callable[[str], None],
-        upload_one: Callable[[str, VideoTask], None],
+        upload_one: Callable[..., None],
         on_profile_attempt: Callable[[str, bool, str], None] | None = None,
         schedule_batch_size: int = 0,
         schedule_times: list[datetime] | None = None,
         await_more_videos: bool = False,
+        tabs_per_profile: dict[str, int] | None = None,
     ) -> None:
-        self._profiles = [p.strip() for p in (profile_ids or []) if (p or "").strip()]
+        # Deduplicate, preserve order (UI may pass the same id twice).
+        seen: set[str] = set()
+        profiles: list[str] = []
+        for raw in profile_ids or []:
+            pid = (raw or "").strip()
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            profiles.append(pid)
+        self._profiles = profiles
         self._cooldown_s = float(cooldown_s)
         self._max_attempts = int(max(1, max_attempts_per_profile))
         self._recent_batch_wait_s = float(
@@ -104,15 +119,27 @@ class MultiProfileUploader:
         )
         self._keep_browser_open = bool(keep_browser_open)
         self._close_kept_browser = close_kept_browser
+        self._tabs_per_profile: dict[str, int] = {}
+        for pid in self._profiles:
+            n_tabs = 1
+            if tabs_per_profile:
+                try:
+                    n_tabs = int(tabs_per_profile.get(pid, 1))
+                except (TypeError, ValueError):
+                    n_tabs = 1
+            self._tabs_per_profile[pid] = max(1, n_tabs)
+        total_tabs = sum(self._tabs_per_profile.values()) if self._profiles else 1
+        self._multi_tab = total_tabs > len(self._profiles)
         n_prof = max(1, len(self._profiles))
-        cap = max(
-            1,
-            min(
-                clamp_max_concurrent_browsers(max_concurrent_uploads),
-                MAX_CONCURRENT_BROWSERS_MAX,
-                n_prof,
-            ),
-        )
+        requested = clamp_max_concurrent_browsers(max_concurrent_uploads)
+        if self._multi_tab:
+            # Вкладки — отдельные слоты залива; лимит окон браузера их не режет.
+            cap = max(1, min(MAX_CONCURRENT_BROWSERS_MAX * 2, total_tabs))
+        else:
+            cap = max(
+                1,
+                min(requested, MAX_CONCURRENT_BROWSERS_MAX, n_prof),
+            )
         self._max_parallel = cap
         self._upload_slots = threading.Semaphore(cap)
         self._log = log_sink
@@ -131,15 +158,26 @@ class MultiProfileUploader:
         self._stop_reason = ""
 
         self._global_q: Queue[VideoTask] = Queue()
-        self._per_profile_q: dict[str, Queue[VideoTask]] = {
-            pid: Queue(maxsize=1) for pid in self._profiles
-        }
+        # Отдельная очередь на каждую вкладку: иначе воркеры tab1/tab2
+        # перехватывают задачи, и первичная вкладка (tab0) простаивает.
+        self._per_tab_q: dict[tuple[str, int], Queue[VideoTask]] = {}
+        for pid in self._profiles:
+            for tab_i in range(int(self._tabs_per_profile[pid])):
+                self._per_tab_q[(pid, tab_i)] = Queue(maxsize=1)
 
         self._last_start_monotonic: dict[str, float] = {pid: 0.0 for pid in self._profiles}
+        self._last_start_lock = threading.Lock()
         self._recent_completed: deque[str] = deque(maxlen=_RECENT_COMPLETED_MAX)
         self._recent_lock = threading.Lock()
-        self._active_uploads: set[str] = set()
+        self._active_counts: dict[str, int] = {pid: 0 for pid in self._profiles}
         self._active_lock = threading.Lock()
+        # Назначено сейчас (очередь + в работе) — лимит параллельных вкладок.
+        self._assigned_counts: dict[str, int] = {pid: 0 for pid in self._profiles}
+        self._assigned_lock = threading.Lock()
+        # Сколько раз профиль уже брал видео за этот прогон (только ↑) — волны вкладок.
+        self._wave_counts: dict[str, int] = {pid: 0 for pid in self._profiles}
+        self._held_slot_counts: dict[str, int] = {pid: 0 for pid in self._profiles}
+        self._held_slot_lock = threading.Lock()
         self._workers: list[threading.Thread] = []
         self._dispatcher: threading.Thread | None = None
 
@@ -152,6 +190,14 @@ class MultiProfileUploader:
         self._producer_done = not bool(await_more_videos)
 
         self._orig_sigint = None
+
+    @property
+    def multi_tab_mode(self) -> bool:
+        return bool(self._multi_tab)
+
+    def tabs_for_profile(self, profile_id: str) -> int:
+        pid = (profile_id or "").strip()
+        return int(self._tabs_per_profile.get(pid, 1))
 
     @property
     def total(self) -> int:
@@ -211,13 +257,31 @@ class MultiProfileUploader:
         self._dispatcher.start()
 
         for pid in self._profiles:
-            t = threading.Thread(target=self._worker_loop, args=(pid,), daemon=True)
-            self._workers.append(t)
-            t.start()
+            n_tabs = int(self._tabs_per_profile.get(pid, 1))
+            for tab_i in range(n_tabs):
+                t = threading.Thread(
+                    target=self._worker_loop,
+                    args=(pid, tab_i),
+                    daemon=True,
+                    name=f"upload-{pid}-tab{tab_i}",
+                )
+                self._workers.append(t)
+                t.start()
 
+        tabs_note = ""
+        if self._multi_tab:
+            tabs_note = (
+                ", tabs={"
+                + ", ".join(
+                    f"{pid}:{self._tabs_per_profile[pid]}" for pid in self._profiles
+                )
+                + "}"
+            )
+        ids_note = ",".join(self._profiles)
         self._log(
-            f"[{_ts()}] [upload] started: profiles={len(self._profiles)}, "
+            f"[{_ts()}] [upload] started: profiles={len(self._profiles)} [{ids_note}], "
             f"max_parallel={self._max_parallel}, total={self._total}"
+            f"{tabs_note}"
         )
 
     def stop(self, *, reason: str = "user") -> None:
@@ -271,14 +335,83 @@ class MultiProfileUploader:
             return False
         return True
 
+    def _tab_queue(self, profile_id: str, tab_index: int = 0) -> Queue[VideoTask]:
+        pid = (profile_id or "").strip()
+        n = max(1, int(self._tabs_per_profile.get(pid, 1)))
+        tab_i = max(0, min(int(tab_index), n - 1))
+        return self._per_tab_q[(pid, tab_i)]
+
+    def _profile_has_queued_task(self, profile_id: str) -> bool:
+        pid = (profile_id or "").strip()
+        n = max(1, int(self._tabs_per_profile.get(pid, 1)))
+        for tab_i in range(n):
+            try:
+                if not self._per_tab_q[(pid, tab_i)].empty():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _pick_tab_index_for_profile(self, profile_id: str) -> int | None:
+        """Свободная вкладка: волна 0 → tab0 (первичная), затем 1, 2, …"""
+        pid = (profile_id or "").strip()
+        n = max(1, int(self._tabs_per_profile.get(pid, 1)))
+        free = [
+            t
+            for t in range(n)
+            if not self._per_tab_q[(pid, t)].full()
+        ]
+        if not free:
+            return None
+        free_set = set(free)
+        start = self._profile_wave_count(pid) % n
+        for i in range(n):
+            t = (start + i) % n
+            if t in free_set:
+                return t
+        return free[0]
+
+    def _profile_dispatch_load(self, profile_id: str) -> int:
+        """Сколько видео сейчас занято на профиле (очередь + заливы)."""
+        pid = (profile_id or "").strip()
+        with self._assigned_lock:
+            return int(self._assigned_counts.get(pid, 0))
+
+    def _profile_wave_count(self, profile_id: str) -> int:
+        """Сколько назначений профиль уже получил за прогон (для волн вкладок)."""
+        pid = (profile_id or "").strip()
+        with self._assigned_lock:
+            return int(self._wave_counts.get(pid, 0))
+
+    def _assign_to_profile(self, profile_id: str) -> None:
+        pid = (profile_id or "").strip()
+        with self._assigned_lock:
+            self._assigned_counts[pid] = int(self._assigned_counts.get(pid, 0)) + 1
+            self._wave_counts[pid] = int(self._wave_counts.get(pid, 0)) + 1
+
+    def _release_profile_assignment(self, profile_id: str) -> None:
+        pid = (profile_id or "").strip()
+        with self._assigned_lock:
+            self._assigned_counts[pid] = max(
+                0, int(self._assigned_counts.get(pid, 0)) - 1
+            )
+
     def _eligible_profiles_for_dispatch(self, task: VideoTask) -> list[str]:
-        """Профили, которым можно поставить задачу (очередь пуста, лимиты попыток)."""
+        """Профили, которым можно поставить задачу (есть место в очереди, лимиты попыток)."""
         out: list[str] = []
         for pid in self._profiles:
             if int(task.attempts_by_profile.get(pid, 0)) >= self._max_attempts:
                 continue
-            if not self._per_profile_q[pid].empty():
-                continue
+            # Multi-tab: не больше вкладок на профиль одновременно.
+            if self._multi_tab:
+                tabs = int(self._tabs_per_profile.get(pid, 1))
+                if self._profile_dispatch_load(pid) >= tabs:
+                    continue
+                if self._pick_tab_index_for_profile(pid) is None:
+                    continue
+            else:
+                if self._tab_queue(pid, 0).full():
+                    continue
             out.append(pid)
         # Сразу после ошибки предпочитаем другой профиль; если других нет — тот же.
         not_last = [p for p in out if p != task.last_failed_profile]
@@ -316,6 +449,20 @@ class MultiProfileUploader:
 
     def _pick_profile_for_task(self, task: VideoTask, eligible: list[str], start_idx: int) -> str | None:
         if self._schedule_batch_size <= 0:
+            # Multi-tab: волна по числу уже выданных видео (не сбрасывается после OK).
+            # Сначала у каждого профиля по 1, потом вторые вкладки, затем третьи.
+            if self._multi_tab:
+                if not eligible:
+                    return None
+                waves = {p: self._profile_wave_count(p) for p in eligible}
+                min_wave = min(waves.values())
+                candidates = [p for p in eligible if waves[p] == min_wave]
+                # Среди одной волны — кто меньше сейчас занят, затем RR.
+                loads = {p: self._profile_dispatch_load(p) for p in candidates}
+                min_load = min(loads.values())
+                candidates = [p for p in candidates if loads[p] == min_load]
+                return self._pick_round_robin(candidates, start_idx)
+
             with self._recent_lock:
                 recent = set(self._recent_completed)
             preferred = [p for p in eligible if p not in recent]
@@ -401,19 +548,22 @@ class MultiProfileUploader:
                     continue
 
                 if self._schedule_batch_size <= 0:
-                    with self._recent_lock:
-                        recent = set(self._recent_completed)
-                    preferred = [p for p in eligible if p not in recent]
-                    if not preferred:
-                        self._wait_recent_batch_cooldown()
-                        if self._stop.is_set():
-                            try:
-                                self._global_q.put(task)
-                            except Exception:
-                                pass
-                            return
-                        continue
-                    chosen = self._pick_profile_for_task(task, eligible, idx)
+                    if self._multi_tab:
+                        chosen = self._pick_profile_for_task(task, eligible, idx)
+                    else:
+                        with self._recent_lock:
+                            recent = set(self._recent_completed)
+                        preferred = [p for p in eligible if p not in recent]
+                        if not preferred:
+                            self._wait_recent_batch_cooldown()
+                            if self._stop.is_set():
+                                try:
+                                    self._global_q.put(task)
+                                except Exception:
+                                    pass
+                                return
+                            continue
+                        chosen = self._pick_profile_for_task(task, eligible, idx)
                 else:
                     chosen = self._pick_profile_for_task(task, eligible, idx)
                     if chosen is None:
@@ -433,13 +583,38 @@ class MultiProfileUploader:
                     pos = 0
                 idx = (pos + 1) % max(1, len(self._profiles))
 
-                self._per_profile_q[chosen].put(task)
+                tab_i = 0
+                if self._multi_tab:
+                    picked_tab = self._pick_tab_index_for_profile(chosen)
+                    if picked_tab is None:
+                        time.sleep(0.05)
+                        continue
+                    tab_i = int(picked_tab)
+                self._assign_to_profile(chosen)
+                try:
+                    self._tab_queue(chosen, tab_i).put(task)
+                except Exception:
+                    self._release_profile_assignment(chosen)
+                    raise
                 sched_note = ""
                 if task.schedule_publish_at is not None:
                     sched_note = f" schedule_at={task.schedule_publish_at.isoformat()}"
+                load_note = ""
+                if self._multi_tab:
+                    waves_snap = ",".join(
+                        f"{p}:{self._profile_wave_count(p)}" for p in self._profiles
+                    )
+                    load_note = (
+                        f" tab={tab_i}"
+                        f" load={self._profile_dispatch_load(chosen)}/"
+                        f"{self._tabs_per_profile.get(chosen, 1)}"
+                        f" wave={self._profile_wave_count(chosen)}"
+                        f" waves=[{waves_snap}]"
+                    )
                 self._log(
                     f"[{_ts()}] [upload] [QUEUED] profile={chosen} video={task.video_path!r} "
-                    f"attempts={int(task.attempts_by_profile.get(chosen, 0)) + 1}{sched_note}"
+                    f"attempts={int(task.attempts_by_profile.get(chosen, 0)) + 1}"
+                    f"{sched_note}{load_note}"
                 )
                 self._global_q.task_done()
                 break
@@ -448,7 +623,8 @@ class MultiProfileUploader:
         """Пакет отложенных загрузок на один профиль без закрытия браузера."""
         eligible: list[str] = []
         for pid in self._profiles:
-            if not self._per_profile_q[pid].empty():
+            # Пакет целиком — только в пустую очередь tab0.
+            if not self._tab_queue(pid, 0).empty():
                 continue
             if self._profile_batch_assigned.get(pid, 0) >= self._schedule_batch_size:
                 continue
@@ -515,7 +691,7 @@ class MultiProfileUploader:
             pos = 0
         idx = (pos + 1) % max(1, len(self._profiles))
 
-        self._per_profile_q[sched_pid].put(merged)
+        self._tab_queue(sched_pid, 0).put(merged)
         times_note = ", ".join(
             item.schedule_publish_at.isoformat()
             for item in batch_items
@@ -535,10 +711,11 @@ class MultiProfileUploader:
 
         True, если:
         - в заливе один профиль, или
+        - у профиля ещё есть задачи / другие вкладки заливают, или
         - остальные профили сейчас заливают (слоты заняты) — свободных нет.
 
         False, если есть хотя бы один другой свободный профиль — закрываем
-        браузер и отдаём слот ему.
+        браузер и отдаём слот ему (если нет активных вкладок на этом профиле).
         """
         if not self._keep_browser_open:
             return False
@@ -548,40 +725,72 @@ class MultiProfileUploader:
         if len(self._profiles) <= 1:
             return True
         with self._active_lock:
-            active = set(self._active_uploads)
+            active_here = int(self._active_counts.get(pid, 0))
+            active_map = dict(self._active_counts)
+        # Другая вкладка того же профиля ещё заливает / очередь не пуста.
+        if active_here > 0:
+            return True
+        try:
+            if self._profile_has_queued_task(pid):
+                return True
+        except Exception:
+            pass
         for other in self._profiles:
             if other == pid:
                 continue
-            if other in active:
+            if int(active_map.get(other, 0)) > 0:
                 continue
             # Другой профиль свободен (не заливает) → слот лучше отдать ему.
             return False
         return True
 
-    def _release_kept_browser_slot(self, profile_id: str) -> None:
-        """Закрыть keep-open браузер профиля и вернуть слот параллельности."""
-        if self._close_kept_browser is not None:
-            try:
-                self._close_kept_browser(profile_id)
-            except Exception as e:
-                self._log(
-                    f"[{_ts()}] [upload] [STOP] close_kept_browser failed "
-                    f"profile={profile_id!r} err={e!r}"
-                )
+    def _release_profile_slot(
+        self, profile_id: str, *, close_browser: bool
+    ) -> None:
+        """Вернуть один слот параллельности; браузер закрыть только если больше нет держателей."""
+        pid = (profile_id or "").strip()
+        with self._held_slot_lock:
+            cur = int(self._held_slot_counts.get(pid, 0))
+            self._held_slot_counts[pid] = max(0, cur - 1)
+            remaining_held = int(self._held_slot_counts[pid])
+        with self._active_lock:
+            active_here = int(self._active_counts.get(pid, 0))
         try:
             self._upload_slots.release()
         except Exception:
             pass
+        if close_browser and remaining_held <= 0 and active_here <= 0:
+            if self._close_kept_browser is not None:
+                try:
+                    self._close_kept_browser(pid)
+                except Exception as e:
+                    self._log(
+                        f"[{_ts()}] [upload] [STOP] close_kept_browser failed "
+                        f"profile={pid!r} err={e!r}"
+                    )
 
-    def _worker_loop(self, profile_id: str) -> None:
+    def _release_kept_browser_slot(self, profile_id: str) -> None:
+        """Закрыть keep-open браузер профиля (если можно) и вернуть слот."""
+        self._release_profile_slot(profile_id, close_browser=True)
+
+    def _finish_assigned_profile_task(self, profile_id: str, q: Queue) -> None:
+        """Снять назначение multi-tab load и отметить задачу очереди выполненной."""
+        self._release_profile_assignment(profile_id)
+        try:
+            q.task_done()
+        except Exception:
+            pass
+
+    def _worker_loop(self, profile_id: str, tab_index: int = 0) -> None:
         from zaliver.log_format import log_profile_context
 
         with log_profile_context(profile_id):
-            self._worker_loop_inner(profile_id)
+            self._worker_loop_inner(profile_id, tab_index=tab_index)
 
-    def _worker_loop_inner(self, profile_id: str) -> None:
-        q = self._per_profile_q[profile_id]
+    def _worker_loop_inner(self, profile_id: str, *, tab_index: int = 0) -> None:
+        q = self._tab_queue(profile_id, tab_index)
         held_slot = False
+        tab_note = f" tab={tab_index}" if self._multi_tab else ""
         try:
             while not self._stop.is_set():
                 try:
@@ -593,9 +802,14 @@ class MultiProfileUploader:
                             task = q.get(timeout=_KEEP_OPEN_IDLE_GRACE_S)
                         except Empty:
                             self._log(
-                                f"[{_ts()}] [upload] [KEEP_OPEN] profile={profile_id} "
-                                f"idle>{_KEEP_OPEN_IDLE_GRACE_S:.0f}s — закрываем браузер, "
+                                f"[{_ts()}] [upload] [KEEP_OPEN] profile={profile_id}"
+                                f"{tab_note} idle>{_KEEP_OPEN_IDLE_GRACE_S:.0f}s — "
                                 "освобождаем слот"
+                                + (
+                                    " (браузер закроем, если нет других вкладок)"
+                                    if self._multi_tab
+                                    else " — закрываем браузер"
+                                )
                             )
                             self._release_kept_browser_slot(profile_id)
                             held_slot = False
@@ -612,11 +826,16 @@ class MultiProfileUploader:
                         self._global_q.put(task)
                     except Exception:
                         pass
-                    q.task_done()
+                    self._finish_assigned_profile_task(profile_id, q)
                     break
 
                 # Cooldown: min interval between starts in this run + optional wall-clock pause (DB).
+                # Multi-tab: не сериализуем параллельные вкладки одного профиля.
                 pause_fn = self._profile_upload_pause_remaining_s
+                profile_tabs = int(self._tabs_per_profile.get(profile_id, 1))
+                effective_cooldown = (
+                    0.0 if profile_tabs > 1 else float(self._cooldown_s)
+                )
                 abandon_after_wait = False
                 while True:
                     if self._stop.is_set():
@@ -624,14 +843,19 @@ class MultiProfileUploader:
                             self._global_q.put(task)
                         except Exception:
                             pass
-                        q.task_done()
+                        self._finish_assigned_profile_task(profile_id, q)
                         abandon_after_wait = True
                         break
 
-                    last_start = float(self._last_start_monotonic.get(profile_id, 0.0))
+                    with self._last_start_lock:
+                        last_start = float(
+                            self._last_start_monotonic.get(profile_id, 0.0)
+                        )
                     now_m = time.monotonic()
-                    elapsed = now_m - last_start if last_start > 0 else self._cooldown_s
-                    rem_internal = max(0.0, self._cooldown_s - elapsed)
+                    elapsed = (
+                        now_m - last_start if last_start > 0 else effective_cooldown
+                    )
+                    rem_internal = max(0.0, effective_cooldown - elapsed)
                     db_rem = 0.0
                     if pause_fn is not None:
                         try:
@@ -649,7 +873,7 @@ class MultiProfileUploader:
                         parts.append(f"пауза_БД≈{db_rem:.0f}с")
                     hint = "+".join(parts) if parts else "cooldown"
                     self._log(
-                        f"[{_ts()}] [upload] [WAIT] profile={profile_id} "
+                        f"[{_ts()}] [upload] [WAIT] profile={profile_id}{tab_note} "
                         f"sleep_s={remaining:.1f} ({hint}) video={task.video_path!r}"
                     )
                     chunk = min(remaining, _WAIT_POLL_CHUNK_S)
@@ -659,14 +883,14 @@ class MultiProfileUploader:
                             self._global_q.put(task)
                         except Exception:
                             pass
-                        q.task_done()
+                        self._finish_assigned_profile_task(profile_id, q)
                         abandon_after_wait = True
                         break
 
                 if abandon_after_wait:
                     break
 
-                # Semaphore: при keep_open слот уже занят этим профилем — не берём второй.
+                # Semaphore: при keep_open слот уже занят этим воркером — не берём второй.
                 if not held_slot:
                     got_slot = False
                     while True:
@@ -681,16 +905,21 @@ class MultiProfileUploader:
                                 self._global_q.put(task)
                             except Exception:
                                 pass
-                            q.task_done()
+                            self._finish_assigned_profile_task(profile_id, q)
                             break
                         self._log(
-                            f"[{_ts()}] [upload] [ABANDON] profile={profile_id} "
-                            f"reason=stop_waiting_slot video={task.video_path!r}"
+                            f"[{_ts()}] [upload] [ABANDON] profile={profile_id}"
+                            f"{tab_note} reason=stop_waiting_slot "
+                            f"video={task.video_path!r}"
                         )
                         with self._done_lock:
                             self._abandoned += 1
-                        q.task_done()
+                        self._finish_assigned_profile_task(profile_id, q)
                         continue
+                    with self._held_slot_lock:
+                        self._held_slot_counts[profile_id] = (
+                            int(self._held_slot_counts.get(profile_id, 0)) + 1
+                        )
                     held_slot = True
 
                 upload_ran = False
@@ -702,15 +931,20 @@ class MultiProfileUploader:
                             self._global_q.put(task)
                         except Exception:
                             pass
-                        q.task_done()
+                        self._finish_assigned_profile_task(profile_id, q)
                         break
 
                     # Mark start time immediately (requirement: track *start*).
-                    self._last_start_monotonic[profile_id] = time.monotonic()
+                    with self._last_start_lock:
+                        self._last_start_monotonic[profile_id] = time.monotonic()
                     keep_open_after = self.should_keep_browser_open(profile_id)
+                    # Multi-tab: браузер гасит только менеджер (close_kept_browser),
+                    # upload_one всегда оставляем с keep_open.
+                    if self._multi_tab and self._keep_browser_open:
+                        keep_open_after = True
 
                     self._log(
-                        f"[{_ts()}] [upload] [START] profile={profile_id} "
+                        f"[{_ts()}] [upload] [START] profile={profile_id}{tab_note} "
                         f"video={task.video_path!r}"
                         + (
                             " keep_browser_open=1"
@@ -724,25 +958,51 @@ class MultiProfileUploader:
                     )
                     err_text = ""
                     with self._active_lock:
-                        self._active_uploads.add(profile_id)
+                        self._active_counts[profile_id] = (
+                            int(self._active_counts.get(profile_id, 0)) + 1
+                        )
                     try:
-                        self._upload_one(profile_id, task)
+                        self._upload_one(profile_id, task, tab_index)
                         ok = True
+                    except TypeError:
+                        # Старые колбэки без tab_index.
+                        try:
+                            self._upload_one(profile_id, task)
+                            ok = True
+                        except Exception as e:
+                            ok = False
+                            err_text = str(e) or repr(e)
                     except Exception as e:
                         ok = False
                         err_text = str(e) or repr(e)
                     finally:
                         with self._active_lock:
-                            self._active_uploads.discard(profile_id)
+                            self._active_counts[profile_id] = max(
+                                0, int(self._active_counts.get(profile_id, 0)) - 1
+                            )
                     upload_ran = True
 
                     # После залива могли освободиться другие профили — перепроверить.
-                    if keep_open_after and not self.should_keep_browser_open(profile_id):
+                    if (
+                        keep_open_after
+                        and not self._multi_tab
+                        and not self.should_keep_browser_open(profile_id)
+                    ):
                         keep_open_after = False
                         self._log(
                             f"[{_ts()}] [upload] [KEEP_OPEN] profile={profile_id} "
                             "есть другие доступные профили — закрываем браузер"
                         )
+                    elif keep_open_after and self._multi_tab:
+                        # В multi-tab держим браузер, но слот можно отдать, если
+                        # профиль больше не должен удерживать ёмкость.
+                        if not self.should_keep_browser_open(profile_id):
+                            keep_open_after = False
+                            self._log(
+                                f"[{_ts()}] [upload] [KEEP_OPEN] profile={profile_id}"
+                                f"{tab_note} есть другие доступные профили — "
+                                "освобождаем слот вкладки"
+                            )
 
                     cb_attempt = self._on_profile_attempt
                     if cb_attempt is not None:
@@ -759,7 +1019,7 @@ class MultiProfileUploader:
                             else 1
                         )
                         self._log(
-                            f"[{_ts()}] [upload] [OK] profile={profile_id} "
+                            f"[{_ts()}] [upload] [OK] profile={profile_id}{tab_note} "
                             f"video={task.video_path!r}"
                             + (
                                 f" batch={n_ok}"
@@ -792,26 +1052,27 @@ class MultiProfileUploader:
                         else:
                             self._global_q.put(task)
                         self._log(
-                            f"[{_ts()}] [upload] [ERROR] profile={profile_id} "
-                            f"video={task.video_path!r} "
+                            f"[{_ts()}] [upload] [ERROR] profile={profile_id}"
+                            f"{tab_note} video={task.video_path!r} "
                             f"attempt={task.attempts_by_profile[profile_id]}/"
                             f"{self._max_attempts} err={err_text!r}"
                         )
                 finally:
                     if held_slot and not keep_open_after:
                         if self._keep_browser_open:
-                            # upload_one мог оставить браузер открытым — гасим явно.
+                            # upload_one мог оставить браузер открытым — гасим явно,
+                            # если нет других держателей слота/активных вкладок.
                             self._release_kept_browser_slot(profile_id)
                         else:
-                            try:
-                                self._upload_slots.release()
-                            except Exception:
-                                pass
+                            self._release_profile_slot(
+                                profile_id, close_browser=False
+                            )
                         held_slot = False
                     elif held_slot and keep_open_after:
                         self._log(
-                            f"[{_ts()}] [upload] [KEEP_OPEN] profile={profile_id} "
-                            "оставляем браузер (следующий залив снова сюда)"
+                            f"[{_ts()}] [upload] [KEEP_OPEN] profile={profile_id}"
+                            f"{tab_note} оставляем браузер "
+                            "(следующий залив снова сюда)"
                         )
 
                 if upload_ran and ok:
@@ -819,7 +1080,7 @@ class MultiProfileUploader:
                     with self._recent_lock:
                         self._recent_completed.append(profile_id)
 
-                q.task_done()
+                self._finish_assigned_profile_task(profile_id, q)
         finally:
             if held_slot:
                 self._release_kept_browser_slot(profile_id)
@@ -836,7 +1097,7 @@ class MultiProfileUploader:
             return False
         if not self._global_q.empty():
             return False
-        for q in self._per_profile_q.values():
+        for q in self._per_tab_q.values():
             if not q.empty():
                 return False
         return True

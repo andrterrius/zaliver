@@ -195,7 +195,7 @@ def verify_instagram_home_available(
             _navigate_page_to(page, INSTAGRAM_URL)
 
     _raise_if_accounts_suspended(page)
-    accept_instagram_cookie_consent_if_present(page, appear_seconds=8.0)
+    accept_instagram_cookie_consent_if_present(page, appear_seconds=2.0)
     _raise_if_accounts_suspended(page)
 
     deadline = time.monotonic() + max(5.0, float(max_seconds))

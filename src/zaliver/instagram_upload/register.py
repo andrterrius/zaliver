@@ -662,7 +662,11 @@ def _instagram_session_cookie_present(page) -> bool:
 
 
 def _instagram_logged_in_nav_visible(page) -> bool:
-    """UI залогиненного приложения (Direct / Profile / Home+Create)."""
+    """UI залогиненного приложения (Direct / Profile / Home+Create).
+
+    На фоновых вкладках Chromium часто не считает элементы visible —
+    достаточно наличия в DOM (count > 0).
+    """
     strong = (
         'a[href="/direct/inbox/"], a[href*="/direct/inbox"]',
         'svg[aria-label="Profile"], svg[aria-label="Профиль"]',
@@ -670,8 +674,8 @@ def _instagram_logged_in_nav_visible(page) -> bool:
     )
     for sel in strong:
         try:
-            loc = page.locator(sel).first
-            if loc.count() > 0 and loc.is_visible(timeout=250):
+            loc = page.locator(sel)
+            if int(loc.count()) > 0:
                 return True
         except Exception:
             continue
@@ -681,8 +685,8 @@ def _instagram_logged_in_nav_visible(page) -> bool:
     try:
         h = page.locator(
             'svg[aria-label="Home"], svg[aria-label="Главная"]'
-        ).first
-        home_ok = h.count() > 0 and h.is_visible(timeout=200)
+        )
+        home_ok = int(h.count()) > 0
     except Exception:
         pass
     try:
@@ -690,8 +694,8 @@ def _instagram_logged_in_nav_visible(page) -> bool:
             'svg[aria-label="Новая публикация"], '
             'svg[aria-label="New post"], svg[aria-label="Create"], '
             'svg[aria-label="Создать"]'
-        ).first
-        create_ok = c.count() > 0 and c.is_visible(timeout=200)
+        )
+        create_ok = int(c.count()) > 0
     except Exception:
         pass
     return bool(home_ok and create_ok)

@@ -39,8 +39,8 @@ LogCallback = Callable[[str], None]
 
 # Одновременных роликов при GPU-кодировании (AMF/NVENC/QSV делят один чип).
 SLICE_GPU_MAX_CONCURRENT_JOBS = 2
-# Параллельный залив: не больше одного ролика нарезки одновременно.
-_UPLOAD_THROTTLE_SLICE_JOBS = 1
+# Пока идёт залив «по мере готовности» — оставляем несколько нарезок параллельно.
+_UPLOAD_THROTTLE_SLICE_JOBS = 2
 
 
 def _max_concurrent_slice_jobs(

@@ -157,9 +157,9 @@ _MAX_CHUNKS_PER_VIDEO = 64
 _CHUNKS_PER_WORKER = 6
 # Склейка/mux ffmpeg — в фоне, чтобы не блокировать подачу чанков в process pool.
 _FINALIZE_MAX_THREADS = 48
-# Пока идёт залив «по мере готовности» — сильно режем параллельность encode,
-# иначе Chromium/Playwright конкурируют с ffmpeg за CPU и клики «залипают».
-_UPLOAD_THROTTLE_ENCODE_JOBS = 1
+# Пока идёт залив «по мере готовности» — умеренно режем encode
+# (не до 1: очередь готовых роликов должна успевать за заливом).
+_UPLOAD_THROTTLE_ENCODE_JOBS = 2
 _UPLOAD_THROTTLE_POOL_SLOTS = 2
 
 

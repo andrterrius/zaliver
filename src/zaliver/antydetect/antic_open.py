@@ -43,6 +43,534 @@ def _close_playwright_browser(browser) -> None:
         pass
 
 
+# Сериализация start_profile / launch при параллельных вкладках одного профиля.
+_PROFILE_LAUNCH_LOCKS: dict[str, threading.Lock] = {}
+_PROFILE_LAUNCH_LOCKS_GUARD = threading.Lock()
+# CDP endpoints keep-open для Dolphin (повторный start не всегда нужен).
+_DOLPHIN_KEEP_OPEN_CDP: dict[str, tuple[str, ...]] = {}
+_DOLPHIN_KEEP_OPEN_CDP_LOCK = threading.Lock()
+
+
+def _profile_launch_lock(profile_id: str) -> threading.Lock:
+    pid = (profile_id or "").strip()
+    with _PROFILE_LAUNCH_LOCKS_GUARD:
+        lock = _PROFILE_LAUNCH_LOCKS.get(pid)
+        if lock is None:
+            lock = threading.Lock()
+            _PROFILE_LAUNCH_LOCKS[pid] = lock
+        return lock
+
+
+def _cache_dolphin_keep_open_cdp(profile_id: str, endpoints: tuple[str, ...]) -> None:
+    pid = (profile_id or "").strip()
+    cleaned = tuple(e.strip() for e in endpoints if (e or "").strip())
+    if not pid or not cleaned:
+        return
+    with _DOLPHIN_KEEP_OPEN_CDP_LOCK:
+        _DOLPHIN_KEEP_OPEN_CDP[pid] = cleaned
+
+
+def _get_dolphin_keep_open_cdp(profile_id: str) -> tuple[str, ...] | None:
+    pid = (profile_id or "").strip()
+    if not pid:
+        return None
+    with _DOLPHIN_KEEP_OPEN_CDP_LOCK:
+        cached = _DOLPHIN_KEEP_OPEN_CDP.get(pid)
+    if not cached:
+        return None
+    return tuple(cached)
+
+
+def clear_dolphin_keep_open_cdp(profile_id: str) -> None:
+    """Сбросить кэш CDP после stop_profile (в т.ч. close_kept_browser)."""
+    pid = (profile_id or "").strip()
+    if not pid:
+        return
+    with _DOLPHIN_KEEP_OPEN_CDP_LOCK:
+        _DOLPHIN_KEEP_OPEN_CDP.pop(pid, None)
+
+
+# Keep-open: метаданные сессии + событие «вкладки заранее открыты».
+# Долгий CDP-клиент не держим: каждый залив connect'ится сам (лок только на connect).
+_IG_KEEP_OPEN_META: dict[str, dict] = {}
+_IG_KEEP_OPEN_META_GUARD = threading.Lock()
+
+
+def _ig_meta_get(profile_id: str) -> dict | None:
+    pid = (profile_id or "").strip()
+    if not pid:
+        return None
+    with _IG_KEEP_OPEN_META_GUARD:
+        return _IG_KEEP_OPEN_META.get(pid)
+
+
+def _ig_meta_set(profile_id: str, meta: dict) -> None:
+    pid = (profile_id or "").strip()
+    if not pid:
+        return
+    with _IG_KEEP_OPEN_META_GUARD:
+        _IG_KEEP_OPEN_META[pid] = meta
+
+
+def close_instagram_keep_open_hub(profile_id: str) -> None:
+    """Сбросить keep-open метаданные профиля (браузер гасит вызывающий код)."""
+    pid = (profile_id or "").strip()
+    if not pid:
+        return
+    with _IG_KEEP_OPEN_META_GUARD:
+        meta = _IG_KEEP_OPEN_META.pop(pid, None)
+    if not meta:
+        return
+    ready = meta.get("tabs_ready")
+    if isinstance(ready, threading.Event):
+        ready.set()
+    _log(f"Instagram Reels: keep-open meta сброшена profile_id={pid!r}.")
+
+
+def _ig_hub_page_alive(page) -> bool:
+    if page is None:
+        return False
+    try:
+        return not page.is_closed()
+    except Exception:
+        return False
+
+
+def _ig_hub_navigate_home_quick(page) -> None:
+    """Быстро открыть главную на новой вкладке (без полной verify-сессии)."""
+    try:
+        from zaliver.instagram_upload.register import INSTAGRAM_URL
+
+        page.goto(INSTAGRAM_URL, wait_until="domcontentloaded", timeout=45_000)
+    except Exception as e:
+        _log(f"Instagram Reels: goto главной на новой вкладке: {e!r}")
+    # Уникальная метка вкладки (для claim между connect'ами).
+    try:
+        _ig_page_target_id(page)
+    except Exception:
+        pass
+
+
+def _ig_alive_context_pages(context) -> list:
+    pages: list = []
+    for pg in list(getattr(context, "pages", None) or []):
+        if _ig_hub_page_alive(pg):
+            pages.append(pg)
+    return pages
+
+
+def _ig_page_url_lower(page) -> str:
+    try:
+        return (page.url or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _ig_instagram_pages(context) -> list:
+    """Только вкладки Instagram — служебные Dolphin/chrome в лимит не считаем."""
+    out: list = []
+    for pg in _ig_alive_context_pages(context):
+        if "instagram.com" in _ig_page_url_lower(pg):
+            out.append(pg)
+    return out
+
+
+def _ig_reusable_blank_pages(context) -> list:
+    """about:blank / пустой URL — можно превратить в IG вместо new_page."""
+    out: list = []
+    for pg in _ig_alive_context_pages(context):
+        url = _ig_page_url_lower(pg)
+        if url in ("about:blank", "about:srcdoc", ""):
+            out.append(pg)
+    return out
+
+
+def _ig_new_page_background(context, *, seed_page=None, url: str = "about:blank"):
+    """
+    Новая вкладка БЕЗ переключения на неё (CDP Target.createTarget background=true).
+    Fallback: context.new_page() — в Chrome обычно активирует вкладку.
+    """
+    seed = seed_page
+    if seed is None:
+        alive = _ig_alive_context_pages(context)
+        seed = alive[0] if alive else None
+    if seed is None:
+        return context.new_page()
+
+    before_ids = {id(p) for p in _ig_alive_context_pages(context)}
+    cdp = None
+    try:
+        cdp = context.new_cdp_session(seed)
+        params: dict = {
+            "url": (url or "about:blank").strip() or "about:blank",
+            "background": True,
+        }
+        # Привязка к тому же browser context, если CDP отдаёт id.
+        try:
+            info = cdp.send("Target.getTargetInfo")
+            ti = (info or {}).get("targetInfo") if isinstance(info, dict) else None
+            if isinstance(ti, dict):
+                bcid = ti.get("browserContextId")
+                if bcid:
+                    params["browserContextId"] = bcid
+        except Exception:
+            pass
+        cdp.send("Target.createTarget", params)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            for p in _ig_alive_context_pages(context):
+                if id(p) not in before_ids:
+                    _log("Instagram Reels: вкладка открыта в фоне (CDP background).")
+                    return p
+            time.sleep(0.05)
+        _log(
+            "Instagram Reels: CDP createTarget не появился в context.pages — "
+            "fallback new_page()."
+        )
+    except Exception as e:
+        _log(
+            f"Instagram Reels: фоновое createTarget не удалось ({e!r}) — "
+            "fallback new_page()."
+        )
+    finally:
+        if cdp is not None:
+            try:
+                cdp.detach()
+            except Exception:
+                pass
+    return context.new_page()
+
+
+def _ig_preopen_sibling_tabs(context, tabs_per_profile: int, meta: dict | None) -> None:
+    """
+    После «Новая публикация» добрать вкладки до лимита tabs_per_profile.
+    Лимит считаем только по Instagram-вкладкам (не по всем context.pages:
+    иначе служебные вкладки Dolphin «съедают» слоты и new_page не вызывается).
+    Открываем в фоне — без переключения активной вкладки.
+    """
+    want = max(1, int(tabs_per_profile or 1))
+    if want <= 1 or context is None:
+        if meta is not None:
+            ready = meta.get("tabs_ready")
+            if isinstance(ready, threading.Event):
+                ready.set()
+            meta["preopened"] = True
+        return
+
+    ig_have = len(_ig_instagram_pages(context))
+    all_have = len(_ig_alive_context_pages(context))
+    if meta is not None and meta.get("preopened") and ig_have >= want:
+        ready = meta.get("tabs_ready")
+        if isinstance(ready, threading.Event):
+            ready.set()
+        _log(
+            f"Instagram Reels: вкладки уже готовы "
+            f"(ig={ig_have}/{want}, all={all_have}) — новые не открываем."
+        )
+        return
+
+    need = max(0, want - ig_have)
+    if need <= 0:
+        if meta is not None:
+            ready = meta.get("tabs_ready")
+            if isinstance(ready, threading.Event):
+                ready.set()
+            meta["preopened"] = True
+        _log(
+            f"Instagram Reels: лимит IG-вкладок уже достигнут "
+            f"(ig={ig_have}/{want}, all={all_have}) — new_page пропущен."
+        )
+        return
+
+    alive = _ig_alive_context_pages(context)
+    seed = (_ig_instagram_pages(context) or alive or [None])[0]
+    from zaliver.instagram_upload.register import INSTAGRAM_URL
+
+    blanks = _ig_reusable_blank_pages(context)
+    # Primary IG не трогаем как blank (её нет в blanks).
+    opened = 0
+    _log(
+        f"Instagram Reels: preopen — нужно ещё {need} "
+        f"(сейчас ig={ig_have}/{want}, all={all_have}, blank={len(blanks)})."
+    )
+    for _ in range(need):
+        ig_now = len(_ig_instagram_pages(context))
+        if ig_now >= want:
+            break
+        page = None
+        reused_blank = False
+        if blanks:
+            page = blanks.pop(0)
+            reused_blank = True
+            try:
+                _ig_hub_navigate_home_quick(page)
+            except Exception as e:
+                _log(f"Instagram Reels: blank→IG не удалось: {e!r}")
+                page = None
+                reused_blank = False
+        if page is None:
+            try:
+                page = _ig_new_page_background(
+                    context, seed_page=seed, url=INSTAGRAM_URL
+                )
+            except Exception as e:
+                _log(f"Instagram Reels: не удалось заранее открыть вкладку: {e!r}")
+                break
+        # Если createTarget уже с url — только метка; иначе goto (без activate).
+        try:
+            cur = (page.url or "").strip().lower()
+        except Exception:
+            cur = ""
+        if "instagram.com" not in cur:
+            _ig_hub_navigate_home_quick(page)
+        else:
+            try:
+                _ig_page_target_id(page)
+            except Exception:
+                pass
+        opened += 1
+        how = "blank→IG" if reused_blank else "new"
+        _log(
+            f"Instagram Reels: заранее открыта вкладка +{opened} "
+            f"({how}, ig→{len(_ig_instagram_pages(context))}/{want}, фон)."
+        )
+
+    if meta is not None:
+        ready = meta.get("tabs_ready")
+        if isinstance(ready, threading.Event):
+            ready.set()
+        meta["preopened"] = True
+        total_ig = len(_ig_instagram_pages(context))
+        _log(
+            f"Instagram Reels: соседние вкладки готовы "
+            f"(ig={total_ig}/{want}, all={len(_ig_alive_context_pages(context))}) "
+            "— можно стартовать параллельный залив."
+        )
+
+
+def _ig_page_target_id(page) -> str:
+    """Стабильный уникальный id вкладки (не URL — у всех home он одинаковый)."""
+    # 1) Метка, которую ставим сами при open/preopen.
+    try:
+        marked = page.evaluate(
+            """() => {
+                try {
+                    const k = '__zaliver_tab_id';
+                    if (!window[k]) {
+                        window[k] = 'z' + Math.random().toString(36).slice(2)
+                            + Date.now().toString(36);
+                    }
+                    return String(window[k]);
+                } catch (e) {
+                    return '';
+                }
+            }"""
+        )
+        if isinstance(marked, str) and marked.strip():
+            return marked.strip()
+    except Exception:
+        pass
+    # 2) CDP targetId
+    try:
+        session = page.context.new_cdp_session(page)
+        try:
+            info = session.send("Target.getTargetInfo")
+            tid = ""
+            if isinstance(info, dict):
+                ti = info.get("targetInfo") or info
+                if isinstance(ti, dict):
+                    tid = str(ti.get("targetId") or "").strip()
+            if tid:
+                return tid
+        finally:
+            try:
+                session.detach()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return f"obj:{id(page)}"
+
+
+def _ig_claim_page_for_tab(meta: dict | None, page, tab_index: int) -> bool:
+    """
+    Занять вкладку за tab_index. False если её уже держит другой tab.
+    """
+    if meta is None or page is None:
+        return True
+    tid = _ig_page_target_id(page)
+    with _IG_KEEP_OPEN_META_GUARD:
+        busy: dict = meta.setdefault("busy_targets", {})
+        owner = busy.get(tid)
+        if owner is not None and int(owner) != int(tab_index):
+            return False
+        busy[tid] = int(tab_index)
+        meta.setdefault("tab_targets", {})[int(tab_index)] = tid
+    return True
+
+
+def _ig_release_page_for_tab(meta: dict | None, tab_index: int) -> None:
+    if meta is None:
+        return
+    with _IG_KEEP_OPEN_META_GUARD:
+        tab_targets: dict = meta.get("tab_targets") or {}
+        tid = tab_targets.pop(int(tab_index), None)
+        busy: dict = meta.get("busy_targets") or {}
+        if tid is not None and busy.get(tid) == int(tab_index):
+            busy.pop(tid, None)
+
+
+def _ig_pick_page_for_tab(
+    context,
+    *,
+    tab_index: int,
+    dedicated_tab: bool,
+    fallback_page=None,
+    tabs_per_profile: int = 1,
+    meta: dict | None = None,
+):
+    """Выбрать страницу для tab_index среди уже открытых context.pages."""
+    tab_i = max(0, int(tab_index))
+    want = max(1, int(tabs_per_profile or 1))
+    pages = _ig_alive_context_pages(context)
+
+    if tab_i == 0 and not dedicated_tab:
+        primary = _pick_primary_instagram_page(context, fallback_page)
+        chosen = primary if primary is not None else fallback_page
+        if chosen is not None and not _ig_claim_page_for_tab(meta, chosen, tab_i):
+            _log(
+                f"Instagram Reels: tab={tab_i} primary уже занята другим воркером."
+            )
+        return chosen
+
+    # tab>=1: только отдельные вкладки, primary никогда не трогаем.
+    ig_pages: list = []
+    primary = _pick_primary_instagram_page(context, None)
+    for pg in pages:
+        if primary is not None and pg is primary:
+            continue
+        try:
+            url = (pg.url or "").strip().lower()
+        except Exception:
+            url = ""
+        if "instagram.com" in url or url in ("about:blank", "about:srcdoc", ""):
+            ig_pages.append(pg)
+
+    def _try_claim(candidates: list):
+        for pg in candidates:
+            if pg is None:
+                continue
+            if primary is not None and pg is primary:
+                continue
+            if _ig_claim_page_for_tab(meta, pg, tab_i):
+                return pg
+        return None
+
+    extra_i = max(0, tab_i - 1)
+    if extra_i < len(ig_pages):
+        # Сначала «своя» по индексу, иначе любая свободная доп. вкладка.
+        ordered = [ig_pages[extra_i]] + [
+            p for j, p in enumerate(ig_pages) if j != extra_i
+        ]
+        chosen = _try_claim(ordered)
+        if chosen is not None:
+            _log(f"Instagram Reels: взяли заранее открытую вкладку tab={tab_i}.")
+            return chosen
+
+    have = len(_ig_instagram_pages(context))
+    if have < want:
+        page, _own = _open_dedicated_instagram_tab(
+            context, fallback_page=None
+        )
+        if page is not None and page is not fallback_page and page is not primary:
+            _ig_hub_navigate_home_quick(page)
+            if _ig_claim_page_for_tab(meta, page, tab_i):
+                _log(
+                    f"Instagram Reels: открыта новая вкладка tab={tab_i} "
+                    f"(ig={have + 1}/{want})."
+                )
+                return page
+
+    # Свободная доп. вкладка (не primary).
+    chosen = _try_claim(ig_pages)
+    if chosen is not None:
+        _log(
+            f"Instagram Reels: tab={tab_i} взял свободную доп. вкладку "
+            f"(лимит ig={want})."
+        )
+        return chosen
+
+    _log(
+        f"Instagram Reels: tab={tab_i} нет свободной вкладки "
+        f"(не используем primary, чтобы не сбить залив tab0)."
+    )
+    return None
+
+def _open_dedicated_instagram_tab(context, *, fallback_page=None):
+    """
+    Новая вкладка для параллельного залива Reels (отдельное UI-состояние).
+    Стараемся открыть в фоне, без переключения активной вкладки.
+    """
+    try:
+        from zaliver.instagram_upload.register import INSTAGRAM_URL
+
+        page = _ig_new_page_background(
+            context, seed_page=fallback_page, url=INSTAGRAM_URL
+        )
+        try:
+            cur = (page.url or "").strip().lower()
+        except Exception:
+            cur = ""
+        if "instagram.com" not in cur:
+            _ig_hub_navigate_home_quick(page)
+        else:
+            try:
+                _ig_page_target_id(page)
+            except Exception:
+                pass
+        _log("Instagram Reels: открыта отдельная вкладка для залива (фон).")
+        return page, True
+    except Exception as e:
+        _log(f"Instagram Reels: new_page не удался ({e!r}) — используем fallback.")
+        if fallback_page is not None:
+            return fallback_page, False
+        return None, False
+
+
+def _pick_primary_instagram_page(context, fallback_page=None):
+    """
+    Стартовая вкладка Instagram: первая незакрытая с instagram.com
+    (не about:blank и не поздние new_page() других воркеров).
+    """
+    first_any = None
+    first_ig = None
+    for pg in list(getattr(context, "pages", None) or []):
+        try:
+            if pg.is_closed():
+                continue
+        except Exception:
+            continue
+        if first_any is None:
+            first_any = pg
+        try:
+            url = (pg.url or "").strip().lower()
+        except Exception:
+            url = ""
+        if "instagram.com" in url and first_ig is None:
+            first_ig = pg
+            break
+    chosen = first_ig or first_any or fallback_page
+    if chosen is not None:
+        try:
+            _log(
+                "Instagram Reels: используем первичную вкладку "
+                f"url={(chosen.url or '')!r}"
+            )
+        except Exception:
+            _log("Instagram Reels: используем первичную вкладку профиля.")
+    return chosen
+
+
 def _is_scheduled_studio_upload(schedule_publish_at, scheduled_batch) -> bool:
     if scheduled_batch:
         return True
@@ -1222,54 +1750,167 @@ def upload_instagram_reel_in_profile(
     session_password: str = "",
     session_twofa: str = "",
     keep_browser_open: bool = False,
+    dedicated_tab: bool = False,
+    top_reels_scan: int = 1,
+    tab_index: int = 0,
+    tabs_per_profile: int = 1,
 ) -> dict:
     """Dolphin → Instagram → «Новая публикация» → файл → Share (Reels)."""
     from zaliver.instagram_upload.reels_upload import run_instagram_reels_upload
 
     keep_open = bool(keep_browser_open)
+    use_tab = bool(dedicated_tab)
+    scan_n = max(1, int(top_reels_scan or 1))
+    tab_i = max(0, int(tab_index or 0))
+    tabs_n = max(1, int(tabs_per_profile or 1))
     _log(
         "Dolphin: залив Instagram Reels. "
         f"profile_id={profile_id!r}, headless={headless}, "
-        f"keep_browser_open={keep_open}, video_path={video_path!r}"
+        f"keep_browser_open={keep_open}, dedicated_tab={use_tab}, "
+        f"tab={tab_i}/{tabs_n}, top_reels_scan={scan_n}, video_path={video_path!r}"
     )
     api = DolphinAntyLocalAPI()
+    pw_cm = None
     try:
         tok = (local_token or "").strip()
         if tok:
             _log("Dolphin: login_with_token…")
             api.login_with_token(tok)
-        _log("Dolphin: start_profile…")
-        conn = api.start_profile(profile_id, headless=headless)
-        _log(
-            "Dolphin: профиль запущен. "
-            f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
-        )
-        with sync_playwright() as p:
-            browser, _context, page = _playwright_page_from_cdp(
-                p, (conn.ws_url(), conn.http_url())
-            )
-            try:
-                return run_instagram_reels_upload(
-                    page,
-                    video_path=video_path,
-                    title=title,
-                    description=description,
-                    session_login=session_login,
-                    session_password=session_password,
-                    session_twofa=session_twofa,
-                    profile_id=profile_id,
+
+        if not keep_open:
+            with _profile_launch_lock(profile_id):
+                _log("Dolphin: start_profile…")
+                conn = api.start_profile(profile_id, headless=headless)
+                endpoints = (conn.ws_url(), conn.http_url())
+                _log(
+                    "Dolphin: профиль запущен. "
+                    f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
                 )
-            finally:
-                if keep_open:
-                    _log(
-                        "Dolphin: браузер оставлен открытым "
-                        f"(profile_id={profile_id!r}) — следующий залив без stop."
+            with sync_playwright() as p:
+                browser, context, page = _playwright_page_from_cdp(p, endpoints)
+                if use_tab:
+                    upload_page, own_page = _open_dedicated_instagram_tab(
+                        context, fallback_page=page
                     )
                 else:
+                    upload_page = _pick_primary_instagram_page(context, page)
+                    own_page = False
+                try:
+                    return run_instagram_reels_upload(
+                        upload_page,
+                        video_path=video_path,
+                        title=title,
+                        description=description,
+                        session_login=session_login,
+                        session_password=session_password,
+                        session_twofa=session_twofa,
+                        profile_id=profile_id,
+                        top_reels_scan=scan_n,
+                    )
+                finally:
+                    if own_page:
+                        try:
+                            upload_page.close()
+                        except Exception:
+                            pass
                     try:
                         browser.close()
                     except Exception:
                         pass
+
+        # keep_open / multi-tab: лок только на launch+CDP connect, залив — параллельно.
+        meta = _ig_meta_get(profile_id)
+        if meta is None:
+            meta = {"tabs_ready": threading.Event(), "preopened": False}
+            _ig_meta_set(profile_id, meta)
+        tabs_ready: threading.Event = meta["tabs_ready"]
+
+        if tab_i > 0 and tabs_n > 1 and not meta.get("preopened"):
+            _log(
+                f"Dolphin: tab={tab_i} ждём заранее открытых вкладок "
+                "(после «Новая публикация» на tab=0)…"
+            )
+            tabs_ready.wait(timeout=180.0)
+
+        context = None
+        with _profile_launch_lock(profile_id):
+            cached = _get_dolphin_keep_open_cdp(profile_id)
+            if cached:
+                endpoints = cached
+                _log(
+                    "Dolphin: переиспользуем CDP keep-open "
+                    f"profile_id={profile_id!r}, endpoints={endpoints!r}"
+                )
+            else:
+                _log("Dolphin: start_profile…")
+                conn = api.start_profile(profile_id, headless=headless)
+                endpoints = (conn.ws_url(), conn.http_url())
+                _log(
+                    "Dolphin: профиль запущен. "
+                    f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+                )
+                _cache_dolphin_keep_open_cdp(profile_id, endpoints)
+
+            pw_cm = sync_playwright()
+            p = pw_cm.__enter__()
+            try:
+                _browser, context, seed = _playwright_page_from_cdp(p, endpoints)
+            except Exception:
+                try:
+                    pw_cm.__exit__(None, None, None)
+                except Exception:
+                    pass
+                pw_cm = None
+                raise
+            upload_page = _ig_pick_page_for_tab(
+                context,
+                tab_index=tab_i,
+                dedicated_tab=use_tab,
+                fallback_page=seed,
+                tabs_per_profile=tabs_n,
+                meta=meta,
+            )
+            if upload_page is None:
+                raise DolphinAntyError(
+                    f"Нет свободной вкладки для tab={tab_i} "
+                    "(primary занята / лимит вкладок)."
+                )
+            _log(
+                f"Dolphin: CDP готов tab={tab_i} — отпускаем лок, "
+                "залив может идти параллельно с другими вкладками."
+            )
+
+        def _on_new_post() -> None:
+            # Добираем вкладки до лимита только с tab0 (один раз).
+            if tab_i == 0 and tabs_n > 1 and context is not None:
+                _ig_preopen_sibling_tabs(context, tabs_n, meta)
+
+        try:
+            result = run_instagram_reels_upload(
+                upload_page,
+                video_path=video_path,
+                title=title,
+                description=description,
+                session_login=session_login,
+                session_password=session_password,
+                session_twofa=session_twofa,
+                profile_id=profile_id,
+                top_reels_scan=scan_n,
+                on_new_post_clicked=_on_new_post if (tab_i == 0 and tabs_n > 1) else None,
+            )
+            _log(
+                "Dolphin: браузер оставлен открытым "
+                f"(profile_id={profile_id!r}) — следующий залив без stop."
+            )
+            return result
+        finally:
+            _ig_release_page_for_tab(meta, tab_i)
+            if pw_cm is not None:
+                try:
+                    pw_cm.__exit__(None, None, None)
+                except Exception:
+                    pass
+                pw_cm = None
     except Exception as e:
         _log(f"Ошибка залива Reels: {type(e).__name__}: {e!r}")
         raise _wrap_exc(e) from e
@@ -1281,6 +1922,7 @@ def upload_instagram_reel_in_profile(
             )
             api.close()
         else:
+            clear_dolphin_keep_open_cdp(profile_id)
             try:
                 api.stop_profile(profile_id)
             except Exception as e:
@@ -1302,6 +1944,10 @@ def upload_instagram_reel_in_local_antidetect_profile(
     session_password: str = "",
     session_twofa: str = "",
     keep_browser_open: bool = False,
+    dedicated_tab: bool = False,
+    top_reels_scan: int = 1,
+    tab_index: int = 0,
+    tabs_per_profile: int = 1,
 ) -> dict:
     """Локальный антидетект → Instagram → «Новая публикация» → файл → Share (Reels)."""
     from zaliver.instagram_upload.reels_upload import run_instagram_reels_upload
@@ -1315,14 +1961,20 @@ def upload_instagram_reel_in_local_antidetect_profile(
     )
 
     keep_open = bool(keep_browser_open)
+    use_tab = bool(dedicated_tab)
+    scan_n = max(1, int(top_reels_scan or 1))
+    tab_i = max(0, int(tab_index or 0))
+    tabs_n = max(1, int(tabs_per_profile or 1))
     _log(
         "Local antidetect: залив Instagram Reels. "
         f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}, "
-        f"keep_browser_open={keep_open}, video_path={video_path!r}"
+        f"keep_browser_open={keep_open}, dedicated_tab={use_tab}, "
+        f"tab={tab_i}/{tabs_n}, top_reels_scan={scan_n}, video_path={video_path!r}"
     )
     api = LocalAntidetectHttpAPI(base_url)
     session_id: str | None = None
     started_at = time.perf_counter()
+    pw_cm = None
     try:
         login = (session_login or "").strip()
         pwd = (session_password or "").strip()
@@ -1343,69 +1995,181 @@ def upload_instagram_reel_in_local_antidetect_profile(
                 _log(f"Local antidetect: не удалось прочитать custom_data: {e!r}")
 
         bu = (base_url or "").strip() or "http://127.0.0.1:18765"
-        ws_existing, sid_existing, _msg = api.resolve_running_cdp_ws_url_for_profile(
-            profile_id
-        )
-        if (
-            keep_open
-            and isinstance(ws_existing, str)
-            and ws_existing.strip()
-            and isinstance(sid_existing, str)
-            and sid_existing.strip()
-        ):
-            session_id = sid_existing.strip()
-            ws_url = ws_existing.strip()
-            register_local_session(
-                profile_id=profile_id, base_url=bu, session_id=session_id
-            )
-            _log(
-                "Local antidetect: переиспользуем уже запущенную сессию "
-                f"session_id={session_id!r}, cdp_ws_url={ws_url!r}"
-            )
-        else:
-            acc = api.launch_profile(
-                profile_id,
-                headless=headless,
-                expose_cdp=True,
-                remote_cdp=remote_cdp,
-                start_url="https://www.instagram.com/",
-            )
-            sid = acc.get("session_id")
-            if not isinstance(sid, str) or not sid.strip():
-                raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
-            session_id = sid.strip()
-            register_local_session(
-                profile_id=profile_id, base_url=bu, session_id=session_id
-            )
-            ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
-            _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
 
-        with sync_playwright() as p:
-            browser, _context, page = _playwright_page_from_local_session_cdp(
-                p, api, session_id, ws_url
-            )
-            try:
-                return run_instagram_reels_upload(
-                    page,
-                    video_path=video_path,
-                    title=title,
-                    description=description,
-                    session_login=login,
-                    session_password=pwd,
-                    session_twofa=twofa,
-                    profile_id=profile_id,
+        if not keep_open:
+            with _profile_launch_lock(profile_id):
+                acc = api.launch_profile(
+                    profile_id,
+                    headless=headless,
+                    expose_cdp=True,
+                    remote_cdp=remote_cdp,
+                    start_url="https://www.instagram.com/",
                 )
-            finally:
-                if keep_open:
-                    _log(
-                        "Local antidetect: браузер оставлен открытым "
-                        f"(profile_id={profile_id!r}) — следующий залив без stop."
+                sid = acc.get("session_id")
+                if not isinstance(sid, str) or not sid.strip():
+                    raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+                session_id = sid.strip()
+                register_local_session(
+                    profile_id=profile_id, base_url=bu, session_id=session_id
+                )
+                ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+                _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+            with sync_playwright() as p:
+                browser, context, page = _playwright_page_from_local_session_cdp(
+                    p, api, session_id, ws_url
+                )
+                if use_tab:
+                    upload_page, own_page = _open_dedicated_instagram_tab(
+                        context, fallback_page=page
                     )
                 else:
+                    upload_page = _pick_primary_instagram_page(context, page)
+                    own_page = False
+                try:
+                    return run_instagram_reels_upload(
+                        upload_page,
+                        video_path=video_path,
+                        title=title,
+                        description=description,
+                        session_login=login,
+                        session_password=pwd,
+                        session_twofa=twofa,
+                        profile_id=profile_id,
+                        top_reels_scan=scan_n,
+                    )
+                finally:
+                    if own_page:
+                        try:
+                            upload_page.close()
+                        except Exception:
+                            pass
                     try:
                         browser.close()
                     except Exception:
                         pass
+
+        meta = _ig_meta_get(profile_id)
+        if meta is None:
+            meta = {
+                "tabs_ready": threading.Event(),
+                "preopened": False,
+                "session_id": None,
+                "ws_url": None,
+            }
+            _ig_meta_set(profile_id, meta)
+        tabs_ready: threading.Event = meta["tabs_ready"]
+
+        if tab_i > 0 and tabs_n > 1 and not meta.get("preopened"):
+            _log(
+                f"Local antidetect: tab={tab_i} ждём заранее открытых вкладок "
+                "(после «Новая публикация» на tab=0)…"
+            )
+            tabs_ready.wait(timeout=180.0)
+
+        context = None
+        with _profile_launch_lock(profile_id):
+            ws_url = (meta.get("ws_url") or "").strip()
+            session_id = (meta.get("session_id") or "").strip() or None
+            if not ws_url or not session_id:
+                ws_existing, sid_existing, _msg = (
+                    api.resolve_running_cdp_ws_url_for_profile(profile_id)
+                )
+                if (
+                    isinstance(ws_existing, str)
+                    and ws_existing.strip()
+                    and isinstance(sid_existing, str)
+                    and sid_existing.strip()
+                ):
+                    session_id = sid_existing.strip()
+                    ws_url = ws_existing.strip()
+                    _log(
+                        "Local antidetect: переиспользуем уже запущенную сессию "
+                        f"session_id={session_id!r}, cdp_ws_url={ws_url!r}"
+                    )
+                else:
+                    acc = api.launch_profile(
+                        profile_id,
+                        headless=headless,
+                        expose_cdp=True,
+                        remote_cdp=remote_cdp,
+                        start_url="https://www.instagram.com/",
+                    )
+                    sid = acc.get("session_id")
+                    if not isinstance(sid, str) or not sid.strip():
+                        raise LocalAntidetectError(
+                            f"Нет session_id в ответе launch: {acc!r}"
+                        )
+                    session_id = sid.strip()
+                    ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+                    _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+                register_local_session(
+                    profile_id=profile_id, base_url=bu, session_id=session_id
+                )
+                meta["session_id"] = session_id
+                meta["ws_url"] = ws_url
+
+            pw_cm = sync_playwright()
+            p = pw_cm.__enter__()
+            try:
+                _browser, context, seed = _playwright_page_from_local_session_cdp(
+                    p, api, session_id, ws_url
+                )
+            except Exception:
+                try:
+                    pw_cm.__exit__(None, None, None)
+                except Exception:
+                    pass
+                pw_cm = None
+                raise
+            upload_page = _ig_pick_page_for_tab(
+                context,
+                tab_index=tab_i,
+                dedicated_tab=use_tab,
+                fallback_page=seed,
+                tabs_per_profile=tabs_n,
+                meta=meta,
+            )
+            if upload_page is None:
+                raise LocalAntidetectError(
+                    f"Нет свободной вкладки для tab={tab_i} "
+                    "(primary занята / лимит вкладок)."
+                )
+            _log(
+                f"Local antidetect: CDP готов tab={tab_i} — отпускаем лок, "
+                "залив может идти параллельно с другими вкладками."
+            )
+
+        def _on_new_post() -> None:
+            # Добираем вкладки до лимита только с tab0 (один раз).
+            if tab_i == 0 and tabs_n > 1 and context is not None:
+                _ig_preopen_sibling_tabs(context, tabs_n, meta)
+
+        try:
+            result = run_instagram_reels_upload(
+                upload_page,
+                video_path=video_path,
+                title=title,
+                description=description,
+                session_login=login,
+                session_password=pwd,
+                session_twofa=twofa,
+                profile_id=profile_id,
+                top_reels_scan=scan_n,
+                on_new_post_clicked=_on_new_post if (tab_i == 0 and tabs_n > 1) else None,
+            )
+            _log(
+                "Local antidetect: браузер оставлен открытым "
+                f"(profile_id={profile_id!r}) — следующий залив без stop."
+            )
+            return result
+        finally:
+            _ig_release_page_for_tab(meta, tab_i)
+            if pw_cm is not None:
+                try:
+                    pw_cm.__exit__(None, None, None)
+                except Exception:
+                    pass
+                pw_cm = None
     except Exception as e:
         _log(f"Ошибка залива Reels: {type(e).__name__}: {e!r}")
         raise LocalAntidetectError(f"Ошибка залива Instagram Reels: {e}") from e

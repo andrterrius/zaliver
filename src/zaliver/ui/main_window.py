@@ -2223,7 +2223,9 @@ class MainWindow(QWidget):
             self._start_channel_setup_from_tab
         )
 
-        self._ai_tab = AiTabPane(self, settings=self._settings)
+        self._ai_tab = AiTabPane(
+            self, settings=self._settings, platform=self._platform
+        )
 
         def _compact_settings_vbox(box: QGroupBox) -> QVBoxLayout:
             box.setObjectName("settingsSection")

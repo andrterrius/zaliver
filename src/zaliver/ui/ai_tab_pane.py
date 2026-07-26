@@ -23,6 +23,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from zaliver.ui.platform import PLATFORM_INSTAGRAM, normalize_platform
+
 _COLS = 3
 _PROMPT_H = 250
 _CUSTOM_ORDER_KEY = "ai/prompt_order"
@@ -38,6 +40,14 @@ BUILTIN_PROMPTS: tuple[tuple[str, str, str], ...] = (
     ("builtin_channel_description", "Описание канала", ""),
     ("builtin_link_title", "Название ссылки", ""),
     ("builtin_youtube_comments", "Комментарии YouTube", ""),
+)
+
+# На Instagram нет описания ролика и названия ссылки канала — скрываем в UI.
+_INSTAGRAM_HIDDEN_BUILTIN_IDS: frozenset[str] = frozenset(
+    {
+        "builtin_video_description",
+        "builtin_link_title",
+    }
 )
 
 # Старые id → текущий встроенный id (для импорта)
@@ -58,9 +68,16 @@ class _PromptData:
 class AiTabPane(QWidget):
     """Две сетки: встроенные (неудаляемые) и свои (создание / удаление)."""
 
-    def __init__(self, parent: QWidget | None = None, *, settings: QSettings) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        settings: QSettings,
+        platform: str = "youtube",
+    ) -> None:
         super().__init__(parent)
         self._settings = settings
+        self._platform = normalize_platform(platform)
         self._builtin_items: list[_PromptData] = []
         self._custom_items: list[_PromptData] = []
         self._cells: dict[str, QWidget] = {}
@@ -173,7 +190,7 @@ class AiTabPane(QWidget):
         out: list[tuple[str, str, str]] = []
         items: list[_PromptData] = []
         if include_builtin:
-            items.extend(self._builtin_items)
+            items.extend(self._visible_builtin_items())
         if include_custom:
             items.extend(self._custom_items)
         for item in items:
@@ -196,6 +213,18 @@ class AiTabPane(QWidget):
 
     def builtin_prompt_ids(self) -> frozenset[str]:
         return frozenset(pid for pid, _, _ in BUILTIN_PROMPTS)
+
+    def _is_instagram(self) -> bool:
+        return self._platform == PLATFORM_INSTAGRAM
+
+    def _visible_builtin_items(self) -> list[_PromptData]:
+        if not self._is_instagram():
+            return list(self._builtin_items)
+        return [
+            item
+            for item in self._builtin_items
+            if item.id not in _INSTAGRAM_HIDDEN_BUILTIN_IDS
+        ]
 
     def _load_builtin_items(self) -> list[_PromptData]:
         items: list[_PromptData] = []
@@ -258,7 +287,7 @@ class AiTabPane(QWidget):
         self._title_edits.clear()
         self._text_edits.clear()
 
-        for i, data in enumerate(self._builtin_items):
+        for i, data in enumerate(self._visible_builtin_items()):
             cell = self._make_cell(data)
             self._cells[data.id] = cell
             self._builtin_grid.addWidget(cell, i // _COLS, i % _COLS)

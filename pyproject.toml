@@ -22,12 +22,20 @@ bundle = ["pyinstaller>=6.3.0"]
 ffmpeg = ["imageio-ffmpeg>=0.4.9"]
 nuitka = ["nuitka>=2.3", "ordered-set>=4.0"]
 antydetect = ["requests>=2.32.0", "playwright>=1.45.0"]
+api = ["fastapi>=0.115.0", "uvicorn[standard]>=0.30.0", "pydantic>=2.7.0"]
 
 [project.scripts]
 zaliver = "zaliver.__main__:main"
+zaliver-api = "zaliver.api.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-zaliver = ["ui/theme.qss", "ui/icons/*", "assets/fonts/*"]
+zaliver = [
+  "ui/theme.qss",
+  "ui/icons/*",
+  "assets/fonts/*",
+  "api/web_dist/*",
+  "api/web_dist/assets/*",
+]

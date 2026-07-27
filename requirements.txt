@@ -8,3 +8,8 @@ tzdata>=2024.1
 patchright>=1.59.1
 playwright>=1.46.0
 instagrapi>=2.1.0
+
+# Optional API: pip install 'zaliver[api]'
+# fastapi>=0.115.0
+# uvicorn[standard]>=0.30.0
+# pydantic>=2.7.0

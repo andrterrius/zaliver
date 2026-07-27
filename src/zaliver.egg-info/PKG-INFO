@@ -6,7 +6,10 @@ Requires-Python: >=3.11
 Requires-Dist: PyQt6>=6.6.0
 Requires-Dist: numpy>=1.26.0
 Requires-Dist: scipy>=1.11.0
+Requires-Dist: Pillow>=10.0.0
 Requires-Dist: requests>=2.32.0
+Requires-Dist: tzdata>=2024.1
+Requires-Dist: instagrapi>=2.1.0
 Provides-Extra: bundle
 Requires-Dist: pyinstaller>=6.3.0; extra == "bundle"
 Provides-Extra: ffmpeg
@@ -17,3 +20,7 @@ Requires-Dist: ordered-set>=4.0; extra == "nuitka"
 Provides-Extra: antydetect
 Requires-Dist: requests>=2.32.0; extra == "antydetect"
 Requires-Dist: playwright>=1.45.0; extra == "antydetect"
+Provides-Extra: api
+Requires-Dist: fastapi>=0.115.0; extra == "api"
+Requires-Dist: uvicorn[standard]>=0.30.0; extra == "api"
+Requires-Dist: pydantic>=2.7.0; extra == "api"

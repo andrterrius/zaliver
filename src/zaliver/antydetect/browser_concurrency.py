@@ -30,14 +30,13 @@ def clamp_max_concurrent_browsers(value: int | float | str | None) -> int:
 def max_concurrent_browsers_from_settings(
     settings: object | None = None,
 ) -> int:
-    from PyQt6.QtCore import QSettings
+    from zaliver.config.store import ensure_settings_store
 
-    s = settings if settings is not None else QSettings("Zaliver", "Zaliver")
-    contains = getattr(s, "contains", None)
-    if callable(contains) and not contains(SETTINGS_KEY):
+    s = ensure_settings_store(settings)
+    if not s.contains(SETTINGS_KEY):
         return DEFAULT_MAX_CONCURRENT_BROWSERS
     return clamp_max_concurrent_browsers(
-        s.value(SETTINGS_KEY, DEFAULT_MAX_CONCURRENT_BROWSERS)  # type: ignore[attr-defined]
+        s.value(SETTINGS_KEY, DEFAULT_MAX_CONCURRENT_BROWSERS)
     )
 
 
@@ -55,14 +54,13 @@ def clamp_instagram_tabs_per_profile(value: int | float | str | None) -> int:
 def instagram_tabs_per_profile_from_settings(
     settings: object | None = None,
 ) -> int:
-    from PyQt6.QtCore import QSettings
+    from zaliver.config.store import ensure_settings_store
 
-    s = settings if settings is not None else QSettings("Zaliver", "Zaliver")
-    contains = getattr(s, "contains", None)
-    if callable(contains) and not contains(SETTINGS_KEY_INSTAGRAM_TABS_PER_PROFILE):
+    s = ensure_settings_store(settings)
+    if not s.contains(SETTINGS_KEY_INSTAGRAM_TABS_PER_PROFILE):
         return DEFAULT_INSTAGRAM_TABS_PER_PROFILE
     return clamp_instagram_tabs_per_profile(
-        s.value(  # type: ignore[attr-defined]
+        s.value(
             SETTINGS_KEY_INSTAGRAM_TABS_PER_PROFILE,
             DEFAULT_INSTAGRAM_TABS_PER_PROFILE,
         )

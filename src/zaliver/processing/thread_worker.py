@@ -1,4 +1,4 @@
-"""Qt-friendly orchestration: process pool, progress queue, cancel."""
+"""Headless orchestration: process pool, progress queue, cancel."""
 
 from __future__ import annotations
 
@@ -24,8 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import multiprocessing
 
-from PyQt6.QtCore import QObject, pyqtSignal
-
+from zaliver.core.sinks import JobProgressSink
 from zaliver.processing.batch_paths import list_video_files
 from zaliver.processing.chunking import VideoInfo, build_n_even_chunks, probe_video
 from zaliver.processing.ffmpeg_probe import estimate_target_video_bps
@@ -489,14 +488,11 @@ class _JobEncodeQueue:
     pending: deque[_PoolTaskMeta] = field(default_factory=deque)
 
 
-class ProcessingController(QObject):
-    progress = pyqtSignal(int, int, str)
-    finished = pyqtSignal(bool, str)
-    log_line = pyqtSignal(str)
-    output_saved = pyqtSignal(str, bool)
+class ProcessingService:
+    """Uniquify/encode pipeline. Bind a JobProgressSink (Qt or web)."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, sink: JobProgressSink | None = None) -> None:
+        self._sink = sink or JobProgressSink()
         self._mp_cancel: Optional[multiprocessing.synchronize.Event] = None
         self._upload_throttle = threading.Event()
         self._upload_throttle_logged = False
@@ -516,7 +512,7 @@ class ProcessingController(QObject):
     def run(self, options: Dict[str, Any]) -> None:
         def safe_log(msg: str) -> None:
             try:
-                self.log_line.emit(msg)
+                self._sink.on_log(msg)
             except RuntimeError:
                 pass
 
@@ -544,14 +540,14 @@ class ProcessingController(QObject):
                 inp_raw = str(options.get("input_dir") or "").strip()
                 inp_dir = Path(inp_raw) if inp_raw else Path()
                 if not inp_dir.is_dir():
-                    self.finished.emit(
+                    self._sink.on_finished(
                         False,
                         "Выберите видеофайлы для обработки (кнопка «Выбрать файлы…»).",
                     )
                     return
                 videos = list_video_files(inp_dir)
             if not videos:
-                self.finished.emit(
+                self._sink.on_finished(
                     False,
                     "Нет поддерживаемых видео (.mp4, .mkv, .mov, .avi, .webm…).",
                 )
@@ -560,11 +556,11 @@ class ProcessingController(QObject):
             try:
                 out_dir.mkdir(parents=True, exist_ok=True)
             except OSError as e:
-                self.finished.emit(False, f"Не удалось создать выходную папку: {e}")
+                self._sink.on_finished(False, f"Не удалось создать выходную папку: {e}")
                 return
 
             if not check_ffmpeg_tools():
-                self.finished.emit(
+                self._sink.on_finished(
                     False,
                     "Нужны ffmpeg и ffprobe в PATH (обработка только через ffmpeg, без OpenCV).",
                 )
@@ -584,7 +580,7 @@ class ProcessingController(QObject):
                         outp = out_dir / _unique_output_filename(p.stem)
                         plan.append((p, outp, inf, ci, copies_per_file, tvb))
             except Exception as e:
-                self.finished.emit(False, str(e))
+                self._sink.on_finished(False, str(e))
                 return
 
             total_all = max(1, sum(x[2].frame_count for x in plan))
@@ -647,7 +643,7 @@ class ProcessingController(QObject):
             sync_ffmpeg_env_for_children()
 
             if text_overlay_cfg and not ffmpeg_has_drawtext():
-                self.finished.emit(False, ffmpeg_drawtext_missing_user_message())
+                self._sink.on_finished(False, ffmpeg_drawtext_missing_user_message())
                 return
 
             ctx = multiprocessing.get_context("spawn")
@@ -675,7 +671,7 @@ class ProcessingController(QObject):
                 for p, outp, info, copy_index, _, tvb in plan:
                     file_idx += 1
                     if cancelled():
-                        self.finished.emit(False, "Отменено.")
+                        self._sink.on_finished(False, "Отменено.")
                         return
 
                     no_effects = bool(one_copy_no_effects and copy_index == 1)
@@ -763,7 +759,7 @@ class ProcessingController(QObject):
                         )
                     jobs.append(job)
             except Exception as e:
-                self.finished.emit(False, str(e))
+                self._sink.on_finished(False, str(e))
                 return
 
             jobs_by_id: Dict[str, OutputJob] = {j.job_id: j for j in jobs}
@@ -874,7 +870,7 @@ class ProcessingController(QObject):
                 fut_map.clear()
                 fin_map.clear()
                 _cleanup_partial_outputs()
-                self.finished.emit(False, msg)
+                self._sink.on_finished(False, msg)
 
             with ProcessPoolExecutor(
                 max_workers=num_workers,
@@ -992,7 +988,7 @@ class ProcessingController(QObject):
                         if now - last_emit < 0.05:
                             return
                         last_emit = now
-                        self.progress.emit(min(cur, total_all), total_all, "")
+                        self._sink.on_progress(min(cur, total_all), total_all, "")
 
                     def drain_progress_queue() -> None:
                         while True:
@@ -1111,7 +1107,7 @@ class ProcessingController(QObject):
                         else:
                             log(f"{j.tag(n_jobs)}: Сохранено: {j.outp.name}")
                         try:
-                            self.output_saved.emit(
+                            self._sink.on_output_saved(
                                 str(j.outp), not j.skip_youtube_upload
                             )
                         except RuntimeError:
@@ -1213,9 +1209,9 @@ class ProcessingController(QObject):
                 cur99 = (total_all * 99) // 100
                 if cur99 >= total_all:
                     cur99 = max(0, total_all - 1)
-                self.progress.emit(cur99, total_all, "YouTube: загрузка, прогресс 99%…")
+                self._sink.on_progress(cur99, total_all, "YouTube: загрузка, прогресс 99%…")
             else:
-                self.progress.emit(total_all, total_all, "Готово")
+                self._sink.on_progress(total_all, total_all, "Готово")
             saved_n = sum(
                 1 for j in jobs if j.finished and not j.finalize_error
             )
@@ -1231,8 +1227,12 @@ class ProcessingController(QObject):
                     f"\n\nНе удалось склеить/сохранить: {len(failed_finalize)} "
                     f"(подробности в логе, без остановки остальных)."
                 )
-            self.finished.emit(True, done_msg)
+            self._sink.on_finished(True, done_msg)
         except Exception as e:
-            self.finished.emit(False, str(e))
+            self._sink.on_finished(False, str(e))
         finally:
             self._mp_cancel = None
+
+
+# Deprecated alias — prefer ProcessingService + ui.adapters
+ProcessingController = ProcessingService

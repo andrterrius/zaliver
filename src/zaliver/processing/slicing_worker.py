@@ -1,4 +1,4 @@
-"""Qt-friendly slicing orchestration: parallel jobs, progress, cancel."""
+"""Headless slicing orchestration: parallel jobs, progress, cancel."""
 
 from __future__ import annotations
 
@@ -13,8 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from PyQt6.QtCore import QObject, pyqtSignal
-
+from zaliver.core.sinks import JobProgressSink
 from zaliver.processing.ffmpeg_merge import (
     check_ffmpeg_tools,
     ffmpeg_drawtext_missing_user_message,
@@ -280,14 +279,11 @@ def _run_slice_job(
     return job
 
 
-class SlicingController(QObject):
-    progress = pyqtSignal(int, int, str)
-    finished = pyqtSignal(bool, str)
-    log_line = pyqtSignal(str)
-    output_saved = pyqtSignal(str, bool)
+class SlicingService:
+    """Slicing pipeline. Bind a JobProgressSink (Qt or web)."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, sink: JobProgressSink | None = None) -> None:
+        self._sink = sink or JobProgressSink()
         self._cancelled = False
         self._upload_throttle = threading.Event()
         self._upload_throttle_logged = False
@@ -306,7 +302,7 @@ class SlicingController(QObject):
     def run(self, options: Dict[str, Any]) -> None:
         def safe_log(msg: str) -> None:
             try:
-                self.log_line.emit(msg)
+                self._sink.on_log(msg)
             except RuntimeError:
                 pass
 
@@ -329,13 +325,13 @@ class SlicingController(QObject):
                     music_pool.append(str(p.resolve()))
 
             if not clip_pool:
-                self.finished.emit(False, "Выберите хотя бы один видеофайл для сцен.")
+                self._sink.on_finished(False, "Выберите хотя бы один видеофайл для сцен.")
                 return
             if not music_pool:
-                self.finished.emit(False, "Добавьте хотя бы один аудиотрек для нарезки.")
+                self._sink.on_finished(False, "Добавьте хотя бы один аудиотрек для нарезки.")
                 return
             if not check_ffmpeg_tools():
-                self.finished.emit(
+                self._sink.on_finished(
                     False,
                     "Нужны ffmpeg и ffprobe в PATH.",
                 )
@@ -344,7 +340,7 @@ class SlicingController(QObject):
             try:
                 out_dir.mkdir(parents=True, exist_ok=True)
             except OSError as e:
-                self.finished.emit(False, f"Не удалось создать выходную папку: {e}")
+                self._sink.on_finished(False, f"Не удалось создать выходную папку: {e}")
                 return
 
             text_overlay_cfg: Optional[Dict[str, Any]] = None
@@ -354,7 +350,7 @@ class SlicingController(QObject):
                 if toc.enabled and (toc.text or "").strip():
                     text_overlay_cfg = toc.to_dict()
             if text_overlay_cfg and not ffmpeg_has_drawtext():
-                self.finished.emit(False, ffmpeg_drawtext_missing_user_message())
+                self._sink.on_finished(False, ffmpeg_drawtext_missing_user_message())
                 return
 
             output_count = max(1, int(options.get("copies_per_track", 1)))
@@ -394,13 +390,13 @@ class SlicingController(QObject):
                 log("GPU финал: выключена (CPU, libx264).")
 
             if min_scenes > max_scenes:
-                self.finished.emit(
+                self._sink.on_finished(
                     False,
                     "Мин. количество сцен не может быть больше максимального.",
                 )
                 return
             if not use_suggested and min_scene_duration > max_scene_duration:
-                self.finished.emit(
+                self._sink.on_finished(
                     False,
                     "Мин. длительность сцены не может быть больше максимальной.",
                 )
@@ -431,7 +427,7 @@ class SlicingController(QObject):
 
             n_jobs = len(jobs)
             if n_jobs == 0:
-                self.finished.emit(False, "Нет заданий для нарезки.")
+                self._sink.on_finished(False, "Нет заданий для нарезки.")
                 return
 
             repeat_videos = max(0, output_count - n_tracks)
@@ -482,10 +478,10 @@ class SlicingController(QObject):
             def on_job_done(j: SliceJob) -> None:
                 nonlocal done_count
                 done_count += 1
-                self.progress.emit(done_count, n_jobs, j.output_path.name)
+                self._sink.on_progress(done_count, n_jobs, j.output_path.name)
                 if j.finished and j.output_path.is_file():
                     try:
-                        self.output_saved.emit(
+                        self._sink.on_output_saved(
                             str(j.output_path.resolve()), not j.skip_youtube_upload
                         )
                     except RuntimeError:
@@ -496,7 +492,7 @@ class SlicingController(QObject):
             if max_concurrent <= 1 or n_jobs == 1:
                 for job in jobs:
                     if cancelled():
-                        self.finished.emit(False, "Отменено.")
+                        self._sink.on_finished(False, "Отменено.")
                         return
                     _run_slice_job(
                         job,
@@ -541,7 +537,7 @@ class SlicingController(QObject):
                         if cancelled():
                             for f in fut_map:
                                 f.cancel()
-                            self.finished.emit(False, "Отменено.")
+                            self._sink.on_finished(False, "Отменено.")
                             return
                         while pending and len(fut_map) < _slice_slot_limit():
                             job = pending.pop(0)
@@ -578,18 +574,22 @@ class SlicingController(QObject):
                             on_job_done(job)
 
             if cancelled():
-                self.finished.emit(False, "Отменено.")
+                self._sink.on_finished(False, "Отменено.")
                 return
             if done_count < n_jobs:
-                self.finished.emit(False, "Не все ролики обработаны.")
+                self._sink.on_finished(False, "Не все ролики обработаны.")
                 return
             if errors and done_count == len(errors):
-                self.finished.emit(False, errors[0])
+                self._sink.on_finished(False, errors[0])
                 return
             if errors:
                 log("Часть роликов завершилась с ошибками:")
                 for line in errors:
                     log(f"  • {line}")
-            self.finished.emit(True, "")
+            self._sink.on_finished(True, "")
         except Exception as e:
-            self.finished.emit(False, str(e).strip() or repr(e))
+            self._sink.on_finished(False, str(e).strip() or repr(e))
+
+
+# Deprecated alias — prefer SlicingService + ui.adapters
+SlicingController = SlicingService

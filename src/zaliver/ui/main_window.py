@@ -20,7 +20,6 @@ from PyQt6.QtCore import (
     QObject,
     QPointF,
     QDateTime,
-    QSettings,
     QSize,
     QThread,
     QTimeZone,
@@ -65,11 +64,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from zaliver.db.video_store import VideoStore
+from zaliver.core import ZaliverCore
 from zaliver.db.upload_store import (
     DEFAULT_UPLOAD_PAUSE_BETWEEN_UPLOADS,
     UploadedVideo,
-    UploadStore,
     uploaded_at_sort_ts,
 )
 from zaliver.antydetect.browser_concurrency import (
@@ -102,8 +100,7 @@ from zaliver.processing.text_overlay import (
     TextOverlaySettings,
     list_bundled_overlay_fonts,
 )
-from zaliver.processing.thread_worker import ProcessingController
-from zaliver.processing.slicing_worker import SlicingController
+from zaliver.ui.adapters import ProcessingController, SlicingController
 from zaliver.ui.antic_profile_row import (
     _profile_id,
     _profile_name,
@@ -159,6 +156,7 @@ from zaliver.ui.slicing_tab_pane import SlicingTabPane
 from zaliver.ui.channel_edit_tab_pane import ChannelEditTabPane
 from zaliver.ui.ai_tab_pane import AiTabPane
 from zaliver.ui.ai_generate_dialog import AiGenerateDialog
+from zaliver.core.profiles import ReelsWarmupSettings, ShortsWarmupSettings
 from zaliver.ui.channel_setup_helpers import (
     field_with_recent_picker,
     make_magic_wand_button,
@@ -167,7 +165,6 @@ from zaliver.ui.title_variables_ui import show_youtube_title_warnings, title_fie
 from zaliver.ui.platform import (
     PLATFORM_INSTAGRAM,
     PLATFORM_YOUTUBE,
-    PlatformSettings,
     apply_platform_branding,
     brand_text,
     normalize_platform,
@@ -832,31 +829,6 @@ def _max_concurrent_browsers_label_text(value: int) -> str:
     return f"{n} браузеров"
 
 
-class ShortsWarmupSettings(NamedTuple):
-    shorts_count: int
-    like_probability_pct: float
-    subscribe_probability_pct: float
-    shorts_watch_min_s: int
-    shorts_watch_max_s: int
-    watch_full_video: bool
-    shorts_recommendations: bool
-    shorts_search_query: str
-    watch_horizontal_videos: bool
-    horizontal_search_query: str
-    horizontal_videos_count: int
-
-
-class ReelsWarmupSettings(NamedTuple):
-    reels_count: int
-    like_probability_pct: float
-    follow_probability_pct: float
-    watch_min_s: int
-    watch_max_s: int
-    watch_full: bool
-    reels_recommendations: bool
-    reels_search_query: str
-
-
 class MainWindow(QWidget):
     _after_video_saved = pyqtSignal()
     _profiles_loaded = pyqtSignal(object)
@@ -912,17 +884,15 @@ class MainWindow(QWidget):
         self._stats_progress_dlg: QProgressDialog | None = None
         self._selected_input_files: list[str] = []
         self._background_music_files: list[str] = []
-        self._video_store = VideoStore()
-        self._upload_store = UploadStore(db_path=self._video_store.db_path)
+        self._core = ZaliverCore.create(self._platform)
+        self._video_store = self._core.videos
+        self._upload_store = self._core.uploads
         self._upload_session = None
         self._upload_session_processing_done = False
         self._upload_session_upload_done = False
         self._upload_session_upload_expected = False
 
-        self._settings = PlatformSettings(
-            QSettings("Zaliver", "Zaliver"),
-            self._platform,
-        )
+        self._settings = self._core.settings
         self._profiles_raw: list[dict[str, object]] | None = None
         self._profiles_tag_filter: frozenset[str] = frozenset()
         self._profiles_list_render_gen: int = 0
@@ -10678,8 +10648,38 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "Zaliver", str(e))
             return False
 
-        raw_ids = (pending.get("profile_ids", "") or "").strip()
-        profile_ids = [p.strip() for p in raw_ids.split(",") if p.strip()]
+        from zaliver.core import AntidetectLaunchConfig, build_upload_queue_request
+
+        headless = True
+        if hasattr(self, "_dolphin_headless"):
+            headless = bool(self._dolphin_headless.isChecked())
+        else:
+            headless = bool(
+                self._settings.value("antydetect/dolphin_headless", True, type=bool)
+            )
+        is_instagram_upload = self._platform == PLATFORM_INSTAGRAM
+        ig_keep_browser_open = (
+            is_instagram_upload
+            and self._upload_pause_between_uploads().total_seconds() <= 0
+        )
+        upload_req = build_upload_queue_request(
+            platform=self._platform,
+            pending=pending,
+            video_paths=video_paths,
+            antidetect=AntidetectLaunchConfig(
+                kind=kind,
+                token=token,
+                base_url=base_url or "",
+                headless=headless,
+                remote_cdp=remote_cdp,
+            ),
+            streaming=streaming,
+            max_concurrent_browsers=int(self._max_concurrent_browsers()),
+            instagram_tabs_per_profile=int(self._instagram_tabs_per_profile_value()),
+            keep_browser_open=ig_keep_browser_open,
+            delete_after_upload=self._delete_after_upload_enabled(),
+        )
+        profile_ids = list(upload_req.profile_ids)
         if not profile_ids:
             self._append_session_log(
                 self._brand("YouTube: профили не выбраны — заливка пропущена.")
@@ -10700,8 +10700,6 @@ class MainWindow(QWidget):
         )
         from zaliver.youtube_upload.studio import _studio_canonical_watch_url
 
-        is_instagram_upload = self._platform == PLATFORM_INSTAGRAM
-
         self._clear_previous_upload_result_tags(
             profile_ids=profile_ids,
             kind=kind,
@@ -10716,44 +10714,30 @@ class MainWindow(QWidget):
             f"{upload_platform_label}: многопоточная заливка стартует{stream_note}. "
             f"Видео={len(video_paths)}, профили={len(profile_ids)} [{ids_preview}]…"
         )
-        self._upload_delete_after_enabled = self._delete_after_upload_enabled()
+        self._upload_delete_after_enabled = upload_req.delete_after_upload
         with self._upload_success_lock:
             self._upload_success_video_paths.clear()
         self._sync_toolbar_for_upload_phase()
         self._upload_cancel_kind = (kind or "").strip()
         self._upload_cancel_dolphin_token = token
         self._upload_cancel_profile_ids = list(profile_ids)
-        publish_before_checks = bool(pending.get("publish_before_checks", True))
-        keep_studio_title = bool(pending.get("keep_studio_title", False))
-        from zaliver.youtube_upload.schedule_publish import parse_msk_datetime
-
-        schedule_times: list[datetime] = []
-        if pending.get("schedule_publish") and not is_instagram_upload:
-            for raw in pending.get("schedule_times_iso") or []:
-                dt = parse_msk_datetime(raw)
-                if dt is not None:
-                    schedule_times.append(dt)
-            schedule_times = sorted(schedule_times)
+        publish_before_checks = upload_req.publish_before_checks
+        keep_studio_title = upload_req.keep_studio_title
+        schedule_times = list(upload_req.schedule_times)
         schedule_batch_size = len(schedule_times)
-        schedule_warmup_shorts = bool(pending.get("schedule_warmup_shorts"))
-        schedule_warmup_shorts_recommendations = bool(
-            pending.get("schedule_warmup_shorts_recommendations", True)
+        schedule_warmup_shorts = upload_req.schedule_warmup_shorts
+        schedule_warmup_shorts_recommendations = (
+            upload_req.schedule_warmup_shorts_recommendations
         )
-        schedule_warmup_search_query = (
-            pending.get("schedule_warmup_search_query") or ""
-        ).strip()
+        schedule_warmup_search_query = upload_req.schedule_warmup_search_query
         if is_instagram_upload and pending.get("schedule_publish"):
             self._append_session_log(
                 "Instagram Reels: отложка Studio не поддерживается — публикуем сразу."
             )
 
         # Пауза 0 → режим keep_browser_open; решение «оставить/закрыть» — в менеджере.
-        ig_keep_browser_open = (
-            is_instagram_upload
-            and self._upload_pause_between_uploads().total_seconds() <= 0
-        )
-        max_browsers = int(self._max_concurrent_browsers())
-        ig_tabs_n = int(self._instagram_tabs_per_profile_value())
+        max_browsers = upload_req.max_concurrent_browsers
+        ig_tabs_n = upload_req.instagram_tabs_per_profile
         ig_tabs_per_profile: dict[str, int] | None = None
         if (
             is_instagram_upload

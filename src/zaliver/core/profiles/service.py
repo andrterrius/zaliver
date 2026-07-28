@@ -582,6 +582,8 @@ class ProfileJobsService:
             set_log_sink,
         )
         from zaliver.antydetect.profile_tags import (
+            IG_PROMOTE_ERROR_TAG,
+            IG_PROMOTE_SUCCESS_TAG,
             PROMOTE_ERROR_TAG,
             PROMOTE_SUCCESS_TAG,
         )
@@ -675,11 +677,15 @@ class ProfileJobsService:
                 )
 
         def _on_done(pid: str, ok: bool, _err: str) -> None:
+            if is_ig:
+                success_tag, error_tag = IG_PROMOTE_SUCCESS_TAG, IG_PROMOTE_ERROR_TAG
+            else:
+                success_tag, error_tag = PROMOTE_SUCCESS_TAG, PROMOTE_ERROR_TAG
             apply_result_tags(
                 kind=kind_s,
                 base_url=req.base_url,
                 profile_id=pid,
-                updates=[(ok, PROMOTE_SUCCESS_TAG, PROMOTE_ERROR_TAG)],
+                updates=[(ok, success_tag, error_tag)],
                 log=sink.on_log,
                 log_prefix="promote",
                 on_tags_applied=on_tags_applied,

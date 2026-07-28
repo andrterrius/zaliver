@@ -99,12 +99,20 @@ IG_WARMUP_RESULT_TAGS: tuple[str, ...] = (
     IG_WARMUP_SUCCESS_TAG,
 )
 
-# Продвижение (открытие чужих видео / подписка).
+# Продвижение YouTube (открытие чужих видео / подписка).
 PROMOTE_ERROR_TAG = "ОШИБКА ПРОДВИЖЕНИЯ YouTube"
 PROMOTE_SUCCESS_TAG = "УСПЕШНОЕ ПРОДВИЖЕНИЕ YouTube"
 PROMOTE_RESULT_TAGS: tuple[str, ...] = (
     PROMOTE_ERROR_TAG,
     PROMOTE_SUCCESS_TAG,
+)
+
+# Продвижение Instagram Reels.
+IG_PROMOTE_ERROR_TAG = "ОШИБКА ПРОДВИЖЕНИЯ Instagram"
+IG_PROMOTE_SUCCESS_TAG = "УСПЕШНОЕ ПРОДВИЖЕНИЕ Instagram"
+IG_PROMOTE_RESULT_TAGS: tuple[str, ...] = (
+    IG_PROMOTE_ERROR_TAG,
+    IG_PROMOTE_SUCCESS_TAG,
 )
 
 # Смена языка интерфейса YouTube.
@@ -202,6 +210,8 @@ _ZALIVER_PROFILE_TAGS_LEGACY: tuple[str, ...] = (
     "УСПЕШНЫЙ ПРОГРЕВ INSTAGRAM",
     "ОШИБКА ПРОДВИЖЕНИЯ",
     "УСПЕШНОЕ ПРОДВИЖЕНИЕ",
+    "ОШИБКА ПРОДВИЖЕНИЯ INSTAGRAM",
+    "УСПЕШНОЕ ПРОДВИЖЕНИЕ INSTAGRAM",
     "ОШИБКА СМЕНЫ ЯЗЫКА",
     "УСПЕШНАЯ СМЕНА ЯЗЫКА",
     "ОШИБКА ЗАПОЛНЕНИЯ ОПИСАНИЯ",
@@ -241,6 +251,8 @@ ZALIVER_PROFILE_TAGS: tuple[str, ...] = (
     IG_WARMUP_SUCCESS_TAG,
     PROMOTE_ERROR_TAG,
     PROMOTE_SUCCESS_TAG,
+    IG_PROMOTE_ERROR_TAG,
+    IG_PROMOTE_SUCCESS_TAG,
     LANGUAGE_CHANGE_ERROR_TAG,
     LANGUAGE_CHANGE_SUCCESS_TAG,
     IG_LANGUAGE_CHANGE_ERROR_TAG,
@@ -264,6 +276,44 @@ ZALIVER_PROFILE_TAGS: tuple[str, ...] = (
 )
 
 
+def cross_platform_tags_to_strip(success_tag: str, error_tag: str) -> tuple[str, ...]:
+    """Снять парные теги другой платформы (прогрев / продвижение)."""
+    pair = frozenset({success_tag, error_tag})
+    if pair == frozenset(WARMUP_RESULT_TAGS):
+        return (
+            *IG_WARMUP_RESULT_TAGS,
+            "ОШИБКА ПРОГРЕВА INSTAGRAM",
+            "УСПЕШНЫЙ ПРОГРЕВ INSTAGRAM",
+            "ОШИБКА ПРОГРЕВА",
+            "УСПЕШНЫЙ ПРОГРЕВ",
+        )
+    if pair == frozenset(IG_WARMUP_RESULT_TAGS):
+        return (
+            *WARMUP_RESULT_TAGS,
+            "ОШИБКА ПРОГРЕВА INSTAGRAM",
+            "УСПЕШНЫЙ ПРОГРЕВ INSTAGRAM",
+            "ОШИБКА ПРОГРЕВА",
+            "УСПЕШНЫЙ ПРОГРЕВ",
+        )
+    if pair == frozenset(PROMOTE_RESULT_TAGS):
+        return (
+            *IG_PROMOTE_RESULT_TAGS,
+            "ОШИБКА ПРОДВИЖЕНИЯ INSTAGRAM",
+            "УСПЕШНОЕ ПРОДВИЖЕНИЕ INSTAGRAM",
+            "ОШИБКА ПРОДВИЖЕНИЯ",
+            "УСПЕШНОЕ ПРОДВИЖЕНИЕ",
+        )
+    if pair == frozenset(IG_PROMOTE_RESULT_TAGS):
+        return (
+            *PROMOTE_RESULT_TAGS,
+            "ОШИБКА ПРОДВИЖЕНИЯ INSTAGRAM",
+            "УСПЕШНОЕ ПРОДВИЖЕНИЕ INSTAGRAM",
+            "ОШИБКА ПРОДВИЖЕНИЯ",
+            "УСПЕШНОЕ ПРОДВИЖЕНИЕ",
+        )
+    return ()
+
+
 def apply_mutually_exclusive_profile_tag(
     api: object,
     profile_id: str,
@@ -271,8 +321,9 @@ def apply_mutually_exclusive_profile_tag(
     success: bool,
     success_tag: str,
     error_tag: str,
+    also_remove: tuple[str, ...] = (),
 ) -> None:
-    """Ставит success_tag или error_tag, снимая противоположный."""
+    """Ставит success_tag или error_tag, снимая противоположный и also_remove."""
     from zaliver.antydetect.local_antidetect_api import LocalAntidetectHttpAPI
 
     if not isinstance(api, LocalAntidetectHttpAPI):
@@ -282,10 +333,17 @@ def apply_mutually_exclusive_profile_tag(
         return
     tag = success_tag if success else error_tag
     other = error_tag if success else success_tag
-    try:
-        api.remove_profile_tag(pid, other)
-    except Exception:
-        pass
+    to_remove = {
+        other,
+        *cross_platform_tags_to_strip(success_tag, error_tag),
+        *(t for t in also_remove if (t or "").strip() and t != tag),
+    }
+    to_remove.discard(tag)
+    for rem in to_remove:
+        try:
+            api.remove_profile_tag(pid, rem)
+        except Exception:
+            pass
     api.add_profile_tag(pid, tag)
 
 

@@ -39,7 +39,10 @@ def apply_result_tags(
     pid = (profile_id or "").strip()
     if not pid:
         return
-    from zaliver.antydetect.profile_tags import apply_mutually_exclusive_profile_tag
+    from zaliver.antydetect.profile_tags import (
+        apply_mutually_exclusive_profile_tag,
+        cross_platform_tags_to_strip,
+    )
 
     base_u = (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
     try:
@@ -63,6 +66,9 @@ def apply_result_tags(
                     "success": success,
                     "success_tag": success_tag,
                     "error_tag": error_tag,
+                    "strip_tags": list(
+                        cross_platform_tags_to_strip(success_tag, error_tag)
+                    ),
                 }
                 for success, success_tag, error_tag in updates
             ]

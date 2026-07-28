@@ -8264,15 +8264,21 @@ class MainWindow(QWidget):
             if not _is_own_antidetect_kind(kind_s):
                 return
             from zaliver.antydetect.profile_tags import (
+                IG_PROMOTE_ERROR_TAG,
+                IG_PROMOTE_SUCCESS_TAG,
                 PROMOTE_ERROR_TAG,
                 PROMOTE_SUCCESS_TAG,
             )
 
+            if is_ig:
+                success_tag, error_tag = IG_PROMOTE_SUCCESS_TAG, IG_PROMOTE_ERROR_TAG
+            else:
+                success_tag, error_tag = PROMOTE_SUCCESS_TAG, PROMOTE_ERROR_TAG
             self._apply_zaliver_profile_tags_from_worker(
                 profile_id=pid,
                 kind=kind_s,
                 base_url=base_url,
-                updates=[(ok, PROMOTE_SUCCESS_TAG, PROMOTE_ERROR_TAG)],
+                updates=[(ok, success_tag, error_tag)],
                 log_prefix="promote",
             )
 
@@ -11560,7 +11566,10 @@ class MainWindow(QWidget):
         log_prefix: str,
     ) -> None:
         """Записать теги в API и обновить список профилей в UI (из фонового потока)."""
-        from zaliver.antydetect.profile_tags import apply_mutually_exclusive_profile_tag
+        from zaliver.antydetect.profile_tags import (
+            apply_mutually_exclusive_profile_tag,
+            cross_platform_tags_to_strip,
+        )
 
         pid = (profile_id or "").strip()
         if not pid or not updates:
@@ -11588,6 +11597,9 @@ class MainWindow(QWidget):
                     "success": success,
                     "success_tag": success_tag,
                     "error_tag": error_tag,
+                    "strip_tags": list(
+                        cross_platform_tags_to_strip(success_tag, error_tag)
+                    ),
                 }
                 for success, success_tag, error_tag in updates
             ]

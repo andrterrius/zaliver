@@ -17,7 +17,6 @@ const JOBS: { path: string; label: string; igOnly?: boolean }[] = [
   { path: "warmup", label: "Прогрев" },
   { path: "promote", label: "Продвижение" },
   { path: "cookie-farm", label: "Фарм Cookie" },
-  { path: "channel-setup", label: "Редактирование канала" },
 ];
 
 type Props = { platform: Platform };

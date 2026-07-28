@@ -948,6 +948,7 @@ class MainWindow(QWidget):
         self._upload_streaming_active = False
         self._upload_streaming_title = ""
         self._upload_streaming_description = ""
+        self._upload_streaming_min_ready = 1
         self._progress_hold_youtube = False
         self._upload_cancel_kind = ""
         self._upload_cancel_dolphin_token = ""
@@ -2063,18 +2064,6 @@ class MainWindow(QWidget):
         self._btn_profiles_import_accounts.clicked.connect(
             self._open_profiles_accounts_import_dialog
         )
-        self._btn_profiles_channel_setup = QPushButton("Редактирование канала")
-        self._btn_profiles_channel_setup.setObjectName("secondary")
-        self._btn_profiles_channel_setup.setAutoDefault(False)
-        self._btn_profiles_channel_setup.setDefault(False)
-        self._btn_profiles_channel_setup.setToolTip(
-            "Переход в раздел «Редактирование каналов» для настройки YouTube Studio "
-            "(описание, ссылка, аватарки, названия) или профиля Instagram (bio / фото). "
-            "Профили выбираются кнопкой «Выбрать профили», как при заливе."
-        )
-        self._btn_profiles_channel_setup.clicked.connect(
-            self._open_channel_edit_tab
-        )
         self._btn_profiles_warmup = QPushButton("Прогрев")
         self._btn_profiles_warmup.setObjectName("secondary")
         self._btn_profiles_warmup.setAutoDefault(False)
@@ -2119,7 +2108,6 @@ class MainWindow(QWidget):
         self._btn_profiles_clear_zaliver_tags.clicked.connect(
             self._start_clear_zaliver_profile_tags
         )
-        profiles_actions_row.addWidget(self._btn_profiles_channel_setup)
         profiles_actions_row.addWidget(self._btn_profiles_warmup)
         profiles_actions_row.addWidget(self._btn_profiles_promote)
         profiles_actions_row.addWidget(self._btn_profiles_cookie_farm)
@@ -3590,8 +3578,28 @@ class MainWindow(QWidget):
             except Exception:
                 pass
 
+    def _streaming_upload_profile_count(self, pending: dict | None = None) -> int:
+        src = pending if pending is not None else getattr(self, "_pending_upload", None)
+        raw = ""
+        if isinstance(src, dict):
+            raw = str(src.get("profile_ids") or "")
+        return len([p for p in raw.split(",") if p.strip()])
+
+    def _compute_streaming_upload_min_ready(
+        self, *, profile_count: int, planned: int
+    ) -> int:
+        """Запас перед стартом залива: профили×2, но не больше запланированных видео."""
+        n = max(0, int(profile_count))
+        if n <= 0:
+            return 1
+        target = n * 2
+        planned_n = max(0, int(planned))
+        if planned_n > 0:
+            return max(1, min(target, planned_n))
+        return max(1, target)
+
     def _enqueue_or_start_streaming_upload(self, video_path: str) -> None:
-        """При «по мере готовности»: стартуем залив с первого видео, дальше — в очередь."""
+        """При «по мере готовности»: ждём запас профили×2, затем стартуем; дальше — в очередь."""
         if not getattr(self, "_upload_streaming_active", False):
             return
         path = (video_path or "").strip()
@@ -3622,13 +3630,35 @@ class MainWindow(QWidget):
         pending = self._pending_upload
         if pending is None:
             return
+        ready_paths = [
+            p.strip()
+            for p in (self._just_saved_outputs or [])
+            if isinstance(p, str) and p.strip()
+        ]
+        ready_n = len(ready_paths)
+        min_ready = max(1, int(getattr(self, "_upload_streaming_min_ready", 1) or 1))
+        if ready_n < min_ready:
+            try:
+                n_prof = self._streaming_upload_profile_count(pending)
+                self._append_session_log(
+                    f"[upload] Залив по мере готовности: ждём запас "
+                    f"{min_ready} видео (профили×2"
+                    + (f" = {n_prof}×2" if n_prof > 0 else "")
+                    + f"), готово {ready_n}/{min_ready}: {Path(path).name}"
+                )
+            except Exception:
+                pass
+            return
         self._upload_log_mode = self._active_work_mode
-        if self._start_upload_queue_from_pending(pending, [path], streaming=True):
+        if self._start_upload_queue_from_pending(
+            pending, ready_paths, streaming=True
+        ):
             self._pending_upload = None
             self._set_processing_upload_throttle(True)
             try:
                 self._append_session_log(
-                    f"[upload] Залив по мере готовности: первое видео {Path(path).name}"
+                    f"[upload] Залив по мере готовности: старт с запасом "
+                    f"{ready_n} видео (порог {min_ready})"
                 )
             except Exception:
                 pass
@@ -3822,8 +3852,10 @@ class MainWindow(QWidget):
             bool(self._settings.value("upload_as_ready", False, type=bool))
         )
         upload_as_ready_cb.setToolTip(
-            "Если включено: как только видео обработалось — сразу ставим его в очередь "
-            "залива (браузеры открываются параллельно с обработкой).\n"
+            "Если включено: залив стартует после запаса готовых видео "
+            "(число выбранных профилей × 2). Например, 5 профилей — после 10 роликов. "
+            "Если всего видео меньше этого запаса — ждём, пока обработаются все. "
+            "Дальше новые ролики сразу идут в очередь (браузеры параллельно с обработкой).\n"
             "Если выключено: сначала обрабатываются все видео, затем начинается залив."
         )
 
@@ -4832,8 +4864,6 @@ class MainWindow(QWidget):
             self._btn_profiles_register_accounts.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_connect_2fa"):
             self._btn_profiles_connect_2fa.setEnabled(not busy)
-        if hasattr(self, "_btn_profiles_channel_setup"):
-            self._btn_profiles_channel_setup.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_warmup"):
             self._btn_profiles_warmup.setEnabled(not busy)
         if hasattr(self, "_btn_profiles_promote"):
@@ -4852,11 +4882,9 @@ class MainWindow(QWidget):
             self._btn_profiles_register_accounts.setVisible(is_ig)
         if hasattr(self, "_btn_profiles_connect_2fa"):
             self._btn_profiles_connect_2fa.setVisible(is_ig)
-        # Продвижение: Shorts (YT) или Reels (IG). Редактирование — на обеих.
+        # Продвижение: Shorts (YT) или Reels (IG).
         if hasattr(self, "_btn_profiles_promote"):
             self._btn_profiles_promote.setVisible(True)
-        if hasattr(self, "_btn_profiles_channel_setup"):
-            self._btn_profiles_channel_setup.setVisible(True)
         # Прогрев: Shorts (YT) или Reels (IG).
         if hasattr(self, "_btn_profiles_warmup"):
             self._btn_profiles_warmup.setVisible(True)
@@ -6620,13 +6648,6 @@ class MainWindow(QWidget):
     def _profiles_channel_setup_dialog_title(self) -> str:
         return "Редактирование канала"
 
-    def _open_channel_edit_tab(self) -> None:
-        for i in range(self._nav.count()):
-            if self._nav.item(i).text() == "Редактирование каналов":
-                self._nav.setCurrentRow(i)
-                break
-        self._sync_channel_edit_tab()
-
     def _sync_channel_edit_tab(self) -> None:
         if not hasattr(self, "_channel_edit_tab"):
             return
@@ -6888,9 +6909,6 @@ class MainWindow(QWidget):
             },
             daemon=True,
         ).start()
-
-    def _open_profiles_channel_setup_dialog(self) -> None:
-        self._open_channel_edit_tab()
 
     def _profiles_channel_setup_worker(
         self,
@@ -10274,6 +10292,10 @@ class MainWindow(QWidget):
             )
         except Exception:
             planned = 0
+        n_prof = self._streaming_upload_profile_count(pending)
+        self._upload_streaming_min_ready = self._compute_streaming_upload_min_ready(
+            profile_count=n_prof, planned=planned
+        )
         try:
             self._upload_session = self._upload_store.start_session(
             planned_videos=planned, platform=self._platform
@@ -10292,9 +10314,17 @@ class MainWindow(QWidget):
         self.btn_cancel.setEnabled(True)
 
         if self._upload_streaming_active:
+            min_ready = int(self._upload_streaming_min_ready)
             self._append_log(
                 "Залив по мере готовности: обработка в 2 потока, "
-                "залив — после первого готового видео."
+                f"залив — после запаса {min_ready} готовых видео "
+                f"({n_prof} профилей×2"
+                + (
+                    f", всего запланировано {planned}"
+                    if planned > 0 and planned < n_prof * 2
+                    else ""
+                )
+                + ")."
             )
 
         self._work_thread = QThread()
@@ -10380,6 +10410,10 @@ class MainWindow(QWidget):
             )
         except Exception:
             planned = 0
+        n_prof = self._streaming_upload_profile_count(pending)
+        self._upload_streaming_min_ready = self._compute_streaming_upload_min_ready(
+            profile_count=n_prof, planned=planned
+        )
         try:
             self._upload_session = self._upload_store.start_session(
             planned_videos=planned, platform=self._platform
@@ -10397,9 +10431,17 @@ class MainWindow(QWidget):
         self._slice_tab.set_running(running=True)
 
         if self._upload_streaming_active:
+            min_ready = int(self._upload_streaming_min_ready)
             self._append_slice_log(
                 "Залив по мере готовности: нарезка в 2 потока, "
-                "залив — после первого готового видео."
+                f"залив — после запаса {min_ready} готовых видео "
+                f"({n_prof} профилей×2"
+                + (
+                    f", всего запланировано {planned}"
+                    if planned > 0 and planned < n_prof * 2
+                    else ""
+                )
+                + ")."
             )
 
         self._work_thread = QThread()
@@ -10561,6 +10603,7 @@ class MainWindow(QWidget):
         self._upload_streaming_active = False
         self._upload_streaming_title = ""
         self._upload_streaming_description = ""
+        self._upload_streaming_min_ready = 1
         self._set_processing_upload_throttle(False)
         self._upload_cancel_profile_ids = []
         self._upload_cancel_kind = ""

@@ -45,6 +45,13 @@ QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
     border: 1px solid #6366f1;
 }
 
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+    width: 0;
+    height: 0;
+    border: none;
+}
+
 /* Explicit dark combo styles: Windows light theme otherwise paints a light
    popup while * { color } keeps light text → unreadable. */
 QComboBox {
@@ -143,6 +150,63 @@ QPushButton#secondary {
 QPushButton#secondary:hover {
     background-color: #2e3245;
     border: 1px solid #6366f1;
+}
+
+QPushButton#workSectionNav {
+    background-color: transparent;
+    color: #9ca3af;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    min-height: 18px;
+    max-height: 28px;
+}
+
+QPushButton#workSectionNav:hover {
+    background-color: #1a1d26;
+    color: #f1f5f9;
+    border: 1px solid #3d4258;
+}
+
+QPushButton#workSectionNav:checked {
+    background-color: #1a1d26;
+    color: #ffffff;
+    border: 1px solid #7c3aed;
+}
+
+QPushButton#workSectionNav:checked:hover {
+    background-color: #1c1830;
+    color: #ffffff;
+    border: 1px solid #a78bfa;
+}
+
+QPushButton#textPreviewNav {
+    background-color: #252836;
+    color: #e4e6ef;
+    border: 1px solid #3d4258;
+    border-radius: 18px;
+    padding: 0;
+    font-size: 22px;
+    font-weight: 700;
+    min-width: 36px;
+    max-width: 36px;
+    min-height: 36px;
+    max-height: 36px;
+}
+
+QPushButton#textPreviewNav:hover {
+    background-color: #2e3245;
+    border: 1px solid #7c3aed;
+    color: #ffffff;
+}
+
+QPushButton#textPreviewNav:disabled {
+    background-color: #1a1d26;
+    color: #4b5563;
+    border: 1px solid #2d3142;
 }
 
 QPushButton#danger {

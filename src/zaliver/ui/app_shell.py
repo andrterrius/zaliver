@@ -18,6 +18,7 @@ from zaliver.ui.desktop_notify import DesktopNotifier
 from zaliver.ui.main_window import MainWindow
 from zaliver.ui.platform import normalize_platform, platform_display_name
 from zaliver.ui.platform_select import PlatformSelectPane
+from zaliver.ui.widgets import install_spinbox_input_policy
 
 
 def _dark_app_palette() -> QPalette:
@@ -73,6 +74,11 @@ class AppShell(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._stack)
+
+        self._spinbox_policy = None
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            self._spinbox_policy = install_spinbox_input_policy(app)
 
         self._apply_theme()
         self._fit_to_available_screen()

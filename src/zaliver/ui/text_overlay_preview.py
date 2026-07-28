@@ -2,8 +2,21 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QPointF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QMouseEvent, QPainter, QPen
+import subprocess
+import sys
+from pathlib import Path
+
+from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PyQt6.QtWidgets import QSizePolicy, QWidget
 
 from zaliver.processing.text_overlay import (
@@ -20,6 +33,93 @@ from zaliver.processing.text_overlay import (
     wrap_text_lines,
     _make_qfont,
 )
+
+_FRAME_CACHE: dict[tuple[str, float, int], QPixmap] = {}
+_FRAME_CACHE_MAX = 12
+
+
+def _popen_flags() -> int:
+    if sys.platform == "win32":
+        return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return 0
+
+
+def load_video_frame_pixmap(
+    video_path: str | Path,
+    *,
+    max_width: int = 720,
+    seek_sec: float = 0.5,
+) -> QPixmap | None:
+    """Кадр из видео через ffmpeg (кэш по пути + mtime)."""
+    try:
+        p = Path(video_path)
+        if not p.is_file():
+            return None
+        key_path = str(p.resolve())
+        mtime = float(p.stat().st_mtime)
+    except OSError:
+        return None
+
+    cache_key = (key_path, mtime, int(max_width))
+    cached = _FRAME_CACHE.get(cache_key)
+    if cached is not None and not cached.isNull():
+        return cached
+
+    from zaliver.processing.ffmpeg_merge import resolve_ffmpeg_executable
+
+    exe = resolve_ffmpeg_executable()
+    if not exe:
+        return None
+
+    def _grab(ss: float) -> QPixmap | None:
+        cmd = [
+            exe,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{max(0.0, float(ss)):.3f}",
+            "-i",
+            key_path,
+            "-frames:v",
+            "1",
+            "-vf",
+            f"scale={max(160, int(max_width))}:-2",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
+            "-",
+        ]
+        try:
+            r = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=45,
+                creationflags=_popen_flags(),
+            )
+        except Exception:
+            return None
+        if r.returncode != 0 or not r.stdout:
+            return None
+        pm = QPixmap()
+        if not pm.loadFromData(r.stdout, "JPG") or pm.isNull():
+            return None
+        return pm
+
+    pix = _grab(seek_sec)
+    if pix is None and seek_sec > 0.05:
+        pix = _grab(0.0)
+    if pix is None:
+        return None
+
+    if len(_FRAME_CACHE) >= _FRAME_CACHE_MAX:
+        try:
+            _FRAME_CACHE.pop(next(iter(_FRAME_CACHE)))
+        except StopIteration:
+            pass
+    _FRAME_CACHE[cache_key] = pix
+    return pix
 
 
 class TextOverlayPreviewWidget(QWidget):
@@ -58,18 +158,63 @@ class TextOverlayPreviewWidget(QWidget):
         self._wave_frame_speed = NEON_WAVE_FRAME_SPEED
         self._wave_amp = 4.0
         self._anim_frame = 0
+        self._bg_video_path: str | None = None
+        self._bg_pixmap: QPixmap | None = None
+        self._text_visible = True
         self._anim_timer = QTimer(self)
         self._anim_timer.setInterval(33)
         self._anim_timer.timeout.connect(self._on_anim_tick)
 
+    def set_text_visible(self, visible: bool) -> None:
+        """Показывать ли наложенный текст (выкл. — только кадр фона)."""
+        visible = bool(visible)
+        if visible == self._text_visible:
+            return
+        self._text_visible = visible
+        if visible:
+            self._start_animation()
+        else:
+            self._stop_animation()
+        self.update()
+
+    def set_background_video(
+        self, path: str | Path | None, *, force: bool = False
+    ) -> None:
+        """Фон превью — кадр из исходного ролика (или сброс)."""
+        raw = str(path or "").strip()
+        if not raw:
+            if self._bg_video_path is None and self._bg_pixmap is None and not force:
+                return
+            self._bg_video_path = None
+            self._bg_pixmap = None
+            self.update()
+            return
+        try:
+            resolved = str(Path(raw).resolve())
+        except OSError:
+            resolved = raw
+        if (
+            not force
+            and resolved == self._bg_video_path
+            and self._bg_pixmap is not None
+            and not self._bg_pixmap.isNull()
+        ):
+            return
+        self._bg_video_path = resolved
+        # Сразу сбросить старый кадр, чтобы смена файла была заметна.
+        self._bg_pixmap = None
+        self.update()
+        self._bg_pixmap = load_video_frame_pixmap(resolved)
+        self.update()
+
     def _on_anim_tick(self) -> None:
-        if not self._char_lines or not self.isVisible():
+        if not self._text_visible or not self._char_lines or not self.isVisible():
             return
         self._anim_frame += 1
         self.update()
 
     def _start_animation(self) -> None:
-        if self._char_lines and self.isVisible():
+        if self._text_visible and self._char_lines and self.isVisible():
             if not self._anim_timer.isActive():
                 self._anim_timer.start()
 
@@ -79,7 +224,8 @@ class TextOverlayPreviewWidget(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        self._start_animation()
+        if self._text_visible:
+            self._start_animation()
 
     def hideEvent(self, event) -> None:
         self._stop_animation()
@@ -212,7 +358,7 @@ class TextOverlayPreviewWidget(QWidget):
         self._wave_amp = max(0.0, painted_size * self._wave_amp_frac)
         self._block_h += int(self._wave_amp * 2)
 
-        if not self._char_lines or not any(self._char_lines):
+        if not self._text_visible or not self._char_lines or not any(self._char_lines):
             self._stop_animation()
         elif self.isVisible():
             self._start_animation()
@@ -263,23 +409,51 @@ class TextOverlayPreviewWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         painter.fillRect(self.rect(), QColor("#0f1117"))
 
         fx, fy, fw, fh = self._frame_geometry()
         ref_h = self._ref_size()[1]
         scale = fh / ref_h if ref_h > 0 else 1.0
+        frame_rect = QRectF(fx, fy, fw, fh)
+        radius = 8.0
 
+        clip = QPainterPath()
+        clip.addRoundedRect(frame_rect, radius, radius)
+        painter.setClipPath(clip)
+
+        bg = self._bg_pixmap
+        if bg is not None and not bg.isNull():
+            scaled = bg.scaled(
+                max(1, int(round(fw))),
+                max(1, int(round(fh))),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            px = fx + (fw - scaled.width()) / 2.0
+            py = fy + (fh - scaled.height()) / 2.0
+            painter.drawPixmap(int(round(px)), int(round(py)), scaled)
+            painter.fillRect(frame_rect, QColor(0, 0, 0, 40))
+        else:
+            painter.fillRect(frame_rect, QColor("#1a1f2e"))
+
+        painter.setClipping(False)
         painter.setPen(QPen(QColor("#334155"), 1))
-        painter.setBrush(QColor("#1a1f2e"))
-        painter.drawRoundedRect(int(fx), int(fy), int(fw), int(fh), 8, 8)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(frame_rect, radius, radius)
 
         orient_lbl = "9:16" if self._orientation == "vertical" else "16:9"
-        painter.setPen(QColor("#64748b"))
+        painter.setPen(QColor("#e2e8f0" if bg is not None else "#64748b"))
         painter.drawText(
             int(fx) + 8,
             int(fy) + 18,
-            f"Пример {orient_lbl} - перетащи текст",
+            f"Пример {orient_lbl} - перетащи текст"
+            if self._text_visible
+            else f"Пример {orient_lbl}",
         )
+
+        if not self._text_visible:
+            return
 
         if not self._char_lines or not any(self._char_lines):
             painter.setPen(QColor("#475569"))
@@ -328,6 +502,8 @@ class TextOverlayPreviewWidget(QWidget):
             y += line_h
 
     def _hit_test(self, pos: QPointF) -> bool:
+        if not self._text_visible:
+            return False
         if not self._char_lines or not any(self._char_lines):
             return False
         block_x, block_y = self._block_top_left()

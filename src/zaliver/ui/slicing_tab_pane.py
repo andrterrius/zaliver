@@ -4,16 +4,14 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QAbstractSpinBox,
     QCheckBox,
     QColorDialog,
     QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -27,6 +25,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -36,7 +35,6 @@ from zaliver.processing.slicing import (
     DEFAULT_MAX_SCENES,
     DEFAULT_MIN_SCENE_DURATION,
     DEFAULT_MIN_SCENES,
-    DEFAULT_SLICE_FPS_MODE,
 )
 from zaliver.processing.text_overlay import (
     NEON_WAVE_CHAR_PHASE,
@@ -46,11 +44,13 @@ from zaliver.processing.text_overlay import (
 from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
 from zaliver.ui.widgets import (
     AnimatedProgressBar,
-    CollapsibleSection,
     SmoothSlider,
     ToggleSwitch,
+    ValueSlider,
     configure_log_splitter,
     make_log_export_button,
+    make_work_section_nav,
+    wrap_work_section_page,
     FlowLayout,
 )
 
@@ -67,22 +67,15 @@ DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_Y = 0.5
 class SlicingTabPane(QWidget):
     start_requested = pyqtSignal()
     cancel_requested = pyqtSignal()
-    install_ffmpeg_requested = pyqtSignal()
 
     def __init__(
         self,
         parent: QWidget | None = None,
         *,
         settings: QSettings,
-        max_workers_fn: Callable[[], int],
-        default_workers_fn: Callable[[], int],
-        apply_thread_cap_fn: Callable[[SmoothSlider], None],
     ) -> None:
         super().__init__(parent)
         self._settings = settings
-        self._max_workers_fn = max_workers_fn
-        self._default_workers_fn = default_workers_fn
-        self._apply_thread_cap_fn = apply_thread_cap_fn
         self._clip_files: list[str] = []
         self._music_files: list[str] = []
         self._text_glow_color = "#00FFFF"
@@ -96,7 +89,6 @@ class SlicingTabPane(QWidget):
             "output_dir": self.output_dir_edit.text().strip(),
             "clip_files": list(self._clip_files),
             "music_files": list(self._music_files),
-            "num_workers": int(self.thread_slider.value()),
             "copies_per_track": int(self.copies_per_track.value()),
             "text_overlay": self.text_overlay_settings().to_dict(),
             "use_suggested_durations": bool(self.auto_scene_durations.isChecked()),
@@ -104,9 +96,6 @@ class SlicingTabPane(QWidget):
             "max_scene_duration": float(self.max_scene_duration.value()),
             "min_scenes": int(self.min_scenes.value()),
             "max_scenes": int(self.max_scenes.value()),
-            "use_gpu": bool(self.use_gpu.isChecked()),
-            "use_gpu_finalize": bool(self.use_gpu_finalize.isChecked()),
-            "slice_fps_mode": str(self.slice_fps_mode.currentData() or DEFAULT_SLICE_FPS_MODE),
         }
 
     def validate_scene_options(self) -> str | None:
@@ -245,21 +234,6 @@ class SlicingTabPane(QWidget):
         self.min_scenes.setValue(max(1, min_sc))
         self.max_scenes.setValue(max(1, max_sc))
         self._update_scene_duration_controls()
-        if hasattr(self, "use_gpu"):
-            self.use_gpu.setChecked(
-                bool(s.value("use_gpu_enabled", False, type=bool))
-            )
-            self.use_gpu_finalize.setChecked(
-                bool(s.value("use_gpu_finalize_enabled", False, type=bool))
-            )
-        fps_mode = str(s.value("slice/fps_mode", DEFAULT_SLICE_FPS_MODE, type=str) or DEFAULT_SLICE_FPS_MODE)
-        if fps_mode.strip().lower() in ("auto", "авто"):
-            fps_mode = DEFAULT_SLICE_FPS_MODE
-        idx = self.slice_fps_mode.findData(fps_mode)
-        if idx >= 0:
-            self.slice_fps_mode.setCurrentIndex(idx)
-        else:
-            self.slice_fps_mode.setCurrentIndex(0)
 
     def save_settings(self) -> None:
         s = self._settings
@@ -276,13 +250,6 @@ class SlicingTabPane(QWidget):
         s.setValue("slice/max_scene_duration", float(self.max_scene_duration.value()))
         s.setValue("slice/min_scenes", int(self.min_scenes.value()))
         s.setValue("slice/max_scenes", int(self.max_scenes.value()))
-        if hasattr(self, "use_gpu"):
-            s.setValue("use_gpu_enabled", bool(self.use_gpu.isChecked()))
-            s.setValue("use_gpu_finalize_enabled", bool(self.use_gpu_finalize.isChecked()))
-        s.setValue(
-            "slice/fps_mode",
-            str(self.slice_fps_mode.currentData() or DEFAULT_SLICE_FPS_MODE),
-        )
         s.setValue("slice/text_overlay_enabled", bool(self.text_overlay_enabled.isChecked()))
         s.setValue("slice/text_overlay_from_middle", bool(self.text_overlay_from_middle.isChecked()))
         orient = self.text_overlay_orientation.currentData()
@@ -315,13 +282,11 @@ class SlicingTabPane(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setSpacing(12)
+        root.setSpacing(4)
         root.setContentsMargins(12, 8, 12, 12)
 
         title = QLabel("Zaliver")
         title.setObjectName("title")
-        sub = QLabel("Клипы + трек → нарезка по пикам аудио · текст поверх видео")
-        sub.setObjectName("hint")
 
         self.btn_start = QPushButton("Старт")
         self.btn_cancel = QPushButton("Отмена")
@@ -339,15 +304,27 @@ class SlicingTabPane(QWidget):
         )
         self.progress_label = QLabel("")
         self.progress_label.setObjectName("hint")
+        self.progress_label.setMinimumHeight(0)
+        self.progress_label.setStyleSheet("min-height: 0; padding: 0; margin: 0;")
 
         header = QHBoxLayout()
         header.addWidget(title)
         header.addWidget(self.progress, 1)
         header.addWidget(self.btn_start)
         header.addWidget(self.btn_cancel)
-        root.addLayout(header)
-        root.addWidget(self.progress_label)
-        root.addWidget(sub)
+
+        header_block = QVBoxLayout()
+        header_block.setContentsMargins(0, 0, 0, 0)
+        header_block.setSpacing(0)
+        header_block.addLayout(header)
+        header_block.addWidget(self.progress_label)
+
+        section_nav, section_nav_group, _section_btns = make_work_section_nav(
+            ["Исходники", "Фильтры", "Текст", "Музыка"],
+            parent=self,
+        )
+        header_block.addWidget(section_nav)
+        root.addLayout(header_block)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -463,6 +440,7 @@ class SlicingTabPane(QWidget):
         duration_gb = QGroupBox("Длительность сцены")
         dg = QGridLayout(duration_gb)
         dg.setHorizontalSpacing(8)
+        dg.setVerticalSpacing(6)
         self.auto_scene_durations = QCheckBox(
             "Автоматически подобрать оптимальную длительность"
         )
@@ -473,24 +451,26 @@ class SlicingTabPane(QWidget):
         )
         self.auto_scene_durations.toggled.connect(self._update_scene_duration_controls)
         self.auto_scene_durations.toggled.connect(self.save_settings)
-        self.min_scene_duration = QDoubleSpinBox()
-        self.min_scene_duration.setRange(0.1, 60.0)
-        self.min_scene_duration.setSingleStep(0.05)
-        self.min_scene_duration.setDecimals(2)
-        self.min_scene_duration.setValue(DEFAULT_MIN_SCENE_DURATION)
-        self.min_scene_duration.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.min_scene_duration = ValueSlider(
+            minimum=0.1,
+            maximum=60.0,
+            value=DEFAULT_MIN_SCENE_DURATION,
+            step=0.05,
+            decimals=2,
+        )
         self.min_scene_duration.valueChanged.connect(lambda *_: self.save_settings())
-        self.max_scene_duration = QDoubleSpinBox()
-        self.max_scene_duration.setRange(0.1, 60.0)
-        self.max_scene_duration.setSingleStep(0.05)
-        self.max_scene_duration.setDecimals(2)
-        self.max_scene_duration.setValue(DEFAULT_MAX_SCENE_DURATION)
-        self.max_scene_duration.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.max_scene_duration = ValueSlider(
+            minimum=0.1,
+            maximum=60.0,
+            value=DEFAULT_MAX_SCENE_DURATION,
+            step=0.05,
+            decimals=2,
+        )
         self.max_scene_duration.valueChanged.connect(lambda *_: self.save_settings())
         dg.addWidget(self.auto_scene_durations, 0, 0, 1, 2)
-        dg.addWidget(QLabel("Мин. (с):"), 1, 0)
+        dg.addWidget(QLabel("Мин. (с):"), 1, 0, Qt.AlignmentFlag.AlignVCenter)
         dg.addWidget(self.min_scene_duration, 1, 1)
-        dg.addWidget(QLabel("Макс. (с):"), 2, 0)
+        dg.addWidget(QLabel("Макс. (с):"), 2, 0, Qt.AlignmentFlag.AlignVCenter)
         dg.addWidget(self.max_scene_duration, 2, 1)
         duration_hint = QLabel(
             "Интервал между сменами кадра на пиках аудио."
@@ -503,17 +483,26 @@ class SlicingTabPane(QWidget):
         scenes_gb = QGroupBox("Количество сцен")
         sg = QGridLayout(scenes_gb)
         sg.setHorizontalSpacing(8)
-        self.min_scenes = QSpinBox()
-        self.min_scenes.setRange(1, 999)
-        self.min_scenes.setValue(DEFAULT_MIN_SCENES)
+        sg.setVerticalSpacing(6)
+        self.min_scenes = ValueSlider(
+            minimum=1,
+            maximum=999,
+            value=DEFAULT_MIN_SCENES,
+            step=1,
+            decimals=0,
+        )
         self.min_scenes.valueChanged.connect(lambda *_: self.save_settings())
-        self.max_scenes = QSpinBox()
-        self.max_scenes.setRange(1, 999)
-        self.max_scenes.setValue(DEFAULT_MAX_SCENES)
+        self.max_scenes = ValueSlider(
+            minimum=1,
+            maximum=999,
+            value=DEFAULT_MAX_SCENES,
+            step=1,
+            decimals=0,
+        )
         self.max_scenes.valueChanged.connect(lambda *_: self.save_settings())
-        sg.addWidget(QLabel("Мин.:"), 0, 0)
+        sg.addWidget(QLabel("Мин.:"), 0, 0, Qt.AlignmentFlag.AlignVCenter)
         sg.addWidget(self.min_scenes, 0, 1)
-        sg.addWidget(QLabel("Макс.:"), 1, 0)
+        sg.addWidget(QLabel("Макс.:"), 1, 0, Qt.AlignmentFlag.AlignVCenter)
         sg.addWidget(self.max_scenes, 1, 1)
         scene_hint = QLabel(
             "Число сцен выбирается случайно в заданном диапазоне."
@@ -522,91 +511,27 @@ class SlicingTabPane(QWidget):
         scene_hint.setWordWrap(True)
         sg.addWidget(scene_hint, 2, 0, 1, 2)
 
-        proc = QGroupBox("Обработка")
-        pg = QGridLayout(proc)
-        self.thread_slider = SmoothSlider(Qt.Orientation.Horizontal)
-        self.thread_slider.setMinimum(1)
-        self.thread_slider.setMaximum(self._max_workers_fn())
-        self.thread_slider.setValue(self._default_workers_fn())
-        self.thread_label = QLabel()
-        self._update_thread_label(self.thread_slider.value())
-        self.thread_slider.valueChanged.connect(self._update_thread_label)
-        proc_hint = QLabel(
-            "Несколько треков обрабатываются параллельно. Нужны ffmpeg и ffprobe в PATH."
-        )
-        proc_hint.setObjectName("hint")
-        proc_hint.setWordWrap(True)
-        pg.addWidget(proc_hint, 0, 0, 1, 2)
-        ff_row_w = QWidget()
-        self._ffmpeg_row = ff_row_w
-        ff_row = QHBoxLayout(ff_row_w)
-        ff_row.setContentsMargins(0, 0, 0, 0)
-        self.ffmpeg_hint = QLabel()
-        self.ffmpeg_hint.setObjectName("hint")
-        self.ffmpeg_hint.setWordWrap(True)
-        self.btn_install_ffmpeg = QPushButton("Установить ffmpeg")
-        self.btn_install_ffmpeg.setObjectName("secondary")
-        self.btn_install_ffmpeg.clicked.connect(self.install_ffmpeg_requested.emit)
-        ff_row.addWidget(self.ffmpeg_hint, 1)
-        ff_row.addWidget(self.btn_install_ffmpeg, 0, Qt.AlignmentFlag.AlignRight)
-        pg.addWidget(ff_row_w, 1, 0, 1, 2)
-        self._ffmpeg_row.setVisible(False)
-
-        self.use_gpu = ToggleSwitch(
-            "GPU при обработке кадров (декод, фильтры, кодирование)"
-        )
-        self.use_gpu.setChecked(
-            bool(self._settings.value("use_gpu_enabled", False, type=bool))
-        )
-        self.use_gpu.toggled.connect(self.save_settings)
-        self.use_gpu_finalize = ToggleSwitch(
-            "GPU при склейке и mux звука (concat, ускорение, текст)"
-        )
-        self.use_gpu_finalize.setChecked(
-            bool(self._settings.value("use_gpu_finalize_enabled", False, type=bool))
-        )
-        self.use_gpu_finalize.toggled.connect(self.save_settings)
-        gpu_hint = QLabel(
-            "Независимо друг от друга. Можно сцены на CPU, а финальный проход на GPU (NVENC/QSV/AMF)."
-        )
-        gpu_hint.setObjectName("hint")
-        gpu_hint.setWordWrap(True)
-        pg.addWidget(self.use_gpu, 2, 0, 1, 2)
-        pg.addWidget(self.use_gpu_finalize, 3, 0, 1, 2)
-        pg.addWidget(gpu_hint, 4, 0, 1, 2)
-
-        self.slice_fps_mode = QComboBox()
-        self.slice_fps_mode.addItem("30 fps", "30")
-        self.slice_fps_mode.addItem("60 fps", "60")
-        self.slice_fps_mode.setToolTip("Частота кадров итогового ролика.")
-        self.slice_fps_mode.currentIndexChanged.connect(lambda *_: self.save_settings())
-        fps_hint = QLabel(
-            "60 fps вдвое медленнее рендера; для Shorts/Reels обычно достаточно 30."
-        )
-        fps_hint.setObjectName("hint")
-        fps_hint.setWordWrap(True)
-        pg.addWidget(QLabel("FPS:"), 5, 0)
-        pg.addWidget(self.slice_fps_mode, 5, 1)
-        pg.addWidget(fps_hint, 6, 0, 1, 2)
-
-        pg.addWidget(QLabel("Потоков:"), 7, 0)
-        thr = QHBoxLayout()
-        thr.addWidget(self.thread_slider, 1)
-        thr.addWidget(self.thread_label)
-        tw = QWidget()
-        tw.setLayout(thr)
-        pg.addWidget(tw, 7, 1)
-
         text_gb = QGroupBox("Текст на видео")
         text_outer = QVBoxLayout(text_gb)
-        self._text_section = CollapsibleSection("Текст на видео (неон)")
-        text_inner = QWidget()
-        text_l = QVBoxLayout(text_inner)
+        text_outer.setSpacing(8)
         self.text_overlay_enabled = ToggleSwitch("Накладывать текст на каждый ролик")
         self.text_overlay_enabled.setChecked(True)
         self.text_overlay_enabled.toggled.connect(self._update_text_overlay_controls)
         self.text_overlay_enabled.toggled.connect(self.save_settings)
-        text_l.addWidget(self.text_overlay_enabled)
+        self.text_overlay_from_middle = QCheckBox("Текст с середины видео до конца")
+        self.text_overlay_from_middle.setChecked(True)
+        self.text_overlay_from_middle.toggled.connect(self.save_settings)
+        text_top_row = QHBoxLayout()
+        text_top_row.setContentsMargins(0, 0, 0, 0)
+        text_top_row.setSpacing(16)
+        text_top_row.addWidget(self.text_overlay_enabled, 0, Qt.AlignmentFlag.AlignVCenter)
+        text_top_row.addWidget(
+            self.text_overlay_from_middle, 0, Qt.AlignmentFlag.AlignVCenter
+        )
+        text_top_row.addStretch(1)
+        text_top_w = QWidget()
+        text_top_w.setLayout(text_top_row)
+        text_outer.addWidget(text_top_w)
         self._text_panel = QWidget()
         tp = QVBoxLayout(self._text_panel)
         tp.setContentsMargins(0, 0, 0, 0)
@@ -616,10 +541,6 @@ class SlicingTabPane(QWidget):
         self.text_overlay_edit.setMaximumHeight(72)
         self.text_overlay_edit.textChanged.connect(self._schedule_preview)
         tp.addWidget(self.text_overlay_edit)
-        self.text_overlay_from_middle = QCheckBox("Текст с середины видео до конца")
-        self.text_overlay_from_middle.setChecked(True)
-        self.text_overlay_from_middle.toggled.connect(self.save_settings)
-        tp.addWidget(self.text_overlay_from_middle)
         opts = QGridLayout()
         self.text_overlay_font_size = QSpinBox()
         self.text_overlay_font_size.setRange(12, 240)
@@ -722,13 +643,19 @@ class SlicingTabPane(QWidget):
         self.text_overlay_preview.setMaximumHeight(340)
         self.text_overlay_preview.positionChanged.connect(lambda *_: self.save_settings())
         tp.addWidget(self.text_overlay_preview)
-        text_l.addWidget(self._text_panel)
-        self._text_section.content_layout().addWidget(text_inner)
-        self._text_section.set_expanded(True)
-        text_outer.addWidget(self._text_section)
+        text_outer.addWidget(self._text_panel)
         self._update_text_overlay_controls()
         self._sync_color_btn(self.text_overlay_glow_btn, self._text_glow_color)
         self._sync_color_btn(self.text_overlay_text_btn, self._text_text_color)
+
+        self._slice_section_stack = QStackedWidget()
+        self._slice_section_stack.addWidget(wrap_work_section_page(io))
+        self._slice_section_stack.addWidget(
+            wrap_work_section_page(duration_gb, scenes_gb)
+        )
+        self._slice_section_stack.addWidget(wrap_work_section_page(text_gb))
+        self._slice_section_stack.addWidget(wrap_work_section_page(music_gb))
+        section_nav_group.idClicked.connect(self._slice_section_stack.setCurrentIndex)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -741,12 +668,8 @@ class SlicingTabPane(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
         )
         il = QVBoxLayout(inner)
-        il.addWidget(io)
-        il.addWidget(music_gb)
-        il.addWidget(duration_gb)
-        il.addWidget(scenes_gb)
-        il.addWidget(proc)
-        il.addWidget(text_gb)
+        il.setContentsMargins(0, 0, 0, 0)
+        il.addWidget(self._slice_section_stack)
         il.addStretch()
         scroll.setWidget(inner)
         scroll.setSizePolicy(
@@ -779,30 +702,11 @@ class SlicingTabPane(QWidget):
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.timeout.connect(self._sync_text_overlay_preview)
-        self._apply_thread_cap_fn(self.thread_slider)
 
     def _update_scene_duration_controls(self, _checked: bool = False) -> None:
         auto = bool(self.auto_scene_durations.isChecked())
         self.min_scene_duration.setEnabled(not auto)
         self.max_scene_duration.setEnabled(not auto)
-
-    def sync_ffmpeg_install_row(
-        self, *, visible: bool, hint: str = "", button_text: str = "Установить ffmpeg"
-    ) -> None:
-        self._ffmpeg_row.setVisible(bool(visible))
-        if visible:
-            self.ffmpeg_hint.setText(hint)
-            self.btn_install_ffmpeg.setText(button_text)
-        else:
-            self.ffmpeg_hint.clear()
-
-    def sync_ffmpeg_hint(self, text: str) -> None:
-        """Обратная совместимость: только текст, видимость не меняет."""
-        self.ffmpeg_hint.setText(text)
-
-    def _update_thread_label(self, v: int) -> None:
-        mx = self._max_workers_fn()
-        self.thread_label.setText(f"{int(v)} / {mx}")
 
     def _normalize_path_key(self, p: str) -> str:
         try:
@@ -922,12 +826,14 @@ class SlicingTabPane(QWidget):
         self._btn_clear_clips.setVisible(has_files)
         if n <= 0:
             self._clip_hint.setText("Не выбрано — нажмите «Выбрать клипы…»")
+            self._schedule_preview()
             return
         names = [Path(p).name for p in self._clip_files]
         preview = ", ".join(names[:4])
         if n > 4:
             preview = f"{preview} и ещё {n - 4}"
         self._clip_hint.setText(f"Выбрано: {n} ({preview})")
+        self._schedule_preview()
 
     def _sync_music_hint(self) -> None:
         n = len(self._music_files)
@@ -959,10 +865,10 @@ class SlicingTabPane(QWidget):
     def _update_text_overlay_controls(self, _checked: bool = False) -> None:
         on = bool(self.text_overlay_enabled.isChecked())
         self._text_panel.setEnabled(on)
+        self.text_overlay_from_middle.setEnabled(on)
         glow_on = bool(self.text_overlay_glow_enabled.isChecked())
         self.text_overlay_glow_btn.setEnabled(glow_on)
-        if on:
-            self._sync_text_overlay_preview()
+        self._sync_text_overlay_preview()
 
     def _populate_text_font_combo(self) -> None:
         if not hasattr(self, "text_overlay_font_combo"):
@@ -1069,10 +975,21 @@ class SlicingTabPane(QWidget):
     def _sync_text_overlay_preview(
         self, anchor_x: float | None = None, anchor_y: float | None = None
     ) -> None:
-        if not bool(self.text_overlay_enabled.isChecked()):
+        preview = self.text_overlay_preview
+        first_clip = next(
+            (
+                p
+                for p in self._clip_files
+                if str(p).strip() and Path(p).is_file()
+            ),
+            None,
+        )
+        preview.set_background_video(first_clip)
+        overlay_on = bool(self.text_overlay_enabled.isChecked())
+        preview.set_text_visible(overlay_on)
+        if not overlay_on:
             return
         orient = self.text_overlay_orientation.currentData()
-        preview = self.text_overlay_preview
         preview.blockSignals(True)
         preview.set_orientation(orient if isinstance(orient, str) else "vertical")
         preview.set_font_size(int(self.text_overlay_font_size.value()))

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import (
     QEasingCurve,
+    QEvent,
     QObject,
     QPoint,
     QPropertyAnimation,
@@ -15,10 +16,16 @@ from PyQt6.QtCore import (
     pyqtProperty,
     pyqtSignal,
 )
-from PyQt6.QtGui import QColor, QLinearGradient, QPainter, QPen
+from PyQt6.QtGui import QColor, QLinearGradient, QPainter, QPen, QWheelEvent
 from PyQt6.QtWidgets import (
+    QAbstractSpinBox,
+    QApplication,
+    QButtonGroup,
     QCheckBox,
+    QDoubleSpinBox,
     QFileDialog,
+    QHBoxLayout,
+    QLabel,
     QLayout,
     QLayoutItem,
     QMessageBox,
@@ -26,6 +33,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSlider,
+    QSpinBox,
     QSplitter,
     QStyle,
     QStyleOptionSlider,
@@ -72,6 +80,48 @@ def make_log_export_button(
     btn.setObjectName("secondary")
     btn.clicked.connect(_export)
     return btn
+
+
+def make_work_section_nav(
+    labels: list[str],
+    *,
+    parent: QWidget | None = None,
+    initial: int = 0,
+) -> tuple[QWidget, QButtonGroup, list[QPushButton]]:
+    """Ряд кнопок-разделов (Исходники / Фильтры / …) для Уникализации и Нарезки."""
+    row = QWidget(parent)
+    lay = QHBoxLayout(row)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(6)
+    group = QButtonGroup(row)
+    group.setExclusive(True)
+    buttons: list[QPushButton] = []
+    for i, label in enumerate(labels):
+        btn = QPushButton(label)
+        btn.setObjectName("workSectionNav")
+        btn.setCheckable(True)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        group.addButton(btn, i)
+        lay.addWidget(btn, 0)
+        buttons.append(btn)
+    lay.addStretch(1)
+    if buttons:
+        idx = max(0, min(initial, len(buttons) - 1))
+        buttons[idx].setChecked(True)
+    return row, group, buttons
+
+
+def wrap_work_section_page(*sections: QWidget) -> QWidget:
+    """Страница стека: один или несколько блоков + растяжка снизу."""
+    page = QWidget()
+    lay = QVBoxLayout(page)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(10)
+    for section in sections:
+        lay.addWidget(section)
+    lay.addStretch(1)
+    return page
 
 
 def configure_log_splitter(
@@ -254,6 +304,10 @@ class SmoothSlider(QSlider):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._accent = QColor("#6366f1")
 
+    def wheelEvent(self, event: QWheelEvent) -> None:  # type: ignore[override]
+        # Не менять значение колёсиком — только перетаскивание (скролл страницы проходит выше).
+        event.ignore()
+
     def set_accent(self, hex_color: str) -> None:
         self._accent = QColor(hex_color)
         self.update()
@@ -312,6 +366,94 @@ class SmoothSlider(QSlider):
         painter.drawEllipse(hx - r, hy - r, 2 * r, 2 * r)
 
 
+class ValueSlider(QWidget):
+    """Ползунок + подпись значения; колесо мыши игнорируется (только drag)."""
+
+    valueChanged = pyqtSignal(float)
+
+    def __init__(
+        self,
+        *,
+        minimum: float,
+        maximum: float,
+        value: float | None = None,
+        step: float = 1.0,
+        decimals: int = 0,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        if maximum < minimum:
+            minimum, maximum = maximum, minimum
+        step = float(step) if step else 1.0
+        if step <= 0:
+            step = 1.0
+        self._decimals = max(0, int(decimals))
+        self._scale = 10 ** self._decimals if self._decimals > 0 else max(
+            1, int(round(1.0 / step)) if step < 1.0 else 1
+        )
+        if self._decimals == 0 and step >= 1.0:
+            self._scale = 1
+        self._slider = SmoothSlider(Qt.Orientation.Horizontal)
+        self._slider.setMinimum(int(round(minimum * self._scale)))
+        self._slider.setMaximum(int(round(maximum * self._scale)))
+        tick = max(1, int(round(step * self._scale)))
+        self._slider.setSingleStep(tick)
+        self._slider.setPageStep(tick * 5)
+        initial = minimum if value is None else float(value)
+        self._slider.setValue(int(round(initial * self._scale)))
+        self._label = QLabel()
+        self._label.setObjectName("hint")
+        self._label.setMinimumWidth(52)
+        self._label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        lay.addWidget(self._slider, 1, Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(self._label, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._slider.valueChanged.connect(self._on_slider)
+        self._sync_label()
+
+    def _from_slider(self, raw: int) -> float:
+        return float(raw) / float(self._scale)
+
+    def _on_slider(self, raw: int) -> None:
+        self._sync_label()
+        self.valueChanged.emit(self._from_slider(raw))
+
+    def _sync_label(self) -> None:
+        v = self._from_slider(self._slider.value())
+        if self._decimals <= 0:
+            self._label.setText(str(int(round(v))))
+        else:
+            self._label.setText(f"{v:.{self._decimals}f}")
+
+    def value(self) -> float:
+        return self._from_slider(self._slider.value())
+
+    def setValue(self, value: float) -> None:  # noqa: N802
+        lo = self._slider.minimum()
+        hi = self._slider.maximum()
+        raw = int(round(float(value) * self._scale))
+        self._slider.setValue(max(lo, min(hi, raw)))
+
+    def setRange(self, minimum: float, maximum: float) -> None:  # noqa: N802
+        if maximum < minimum:
+            minimum, maximum = maximum, minimum
+        cur = self.value()
+        self._slider.blockSignals(True)
+        self._slider.setMinimum(int(round(minimum * self._scale)))
+        self._slider.setMaximum(int(round(maximum * self._scale)))
+        self._slider.blockSignals(False)
+        self.setValue(cur)
+
+    def setEnabled(self, enabled: bool) -> None:  # noqa: N802
+        super().setEnabled(enabled)
+        self._slider.setEnabled(enabled)
+        self._label.setEnabled(enabled)
+
+
 class ToggleSwitch(QCheckBox):
     """Wide pill switch with animated thumb position via stylesheet + check state."""
 
@@ -359,3 +501,51 @@ class AnimatedProgressBar(QProgressBar):
         self._animator._anim.stop()
         self._display = max(0, min(value, self.maximum()))
         super().setValue(self._display)
+
+
+class NoWheelSpinBox(QSpinBox):
+    """Числовое поле без стрелок и без изменения значения колёсиком."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # type: ignore[override]
+        event.ignore()
+
+
+class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    """Дробное поле без стрелок и без изменения значения колёсиком."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # type: ignore[override]
+        event.ignore()
+
+
+class _SpinBoxInputPolicy(QObject):
+    """Глобально: без колеса и без up/down на всех QAbstractSpinBox."""
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # type: ignore[override]
+        if isinstance(obj, QAbstractSpinBox):
+            et = event.type()
+            if et == QEvent.Type.Wheel:
+                event.ignore()
+                return True
+            if et in (
+                QEvent.Type.Show,
+                QEvent.Type.Polish,
+                QEvent.Type.StyleChange,
+            ):
+                if obj.buttonSymbols() != QAbstractSpinBox.ButtonSymbols.NoButtons:
+                    obj.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        return False
+
+
+def install_spinbox_input_policy(app: QApplication) -> _SpinBoxInputPolicy:
+    """Установить политику ввода для числовых полей (один раз на приложение)."""
+    policy = _SpinBoxInputPolicy(app)
+    app.installEventFilter(policy)
+    return policy

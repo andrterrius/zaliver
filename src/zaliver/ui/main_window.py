@@ -93,6 +93,7 @@ from zaliver.antydetect.local_antidetect_api import (
     normalize_local_profile_for_ui,
 )
 from zaliver.processing.pipeline import RandomUniquifyBounds, UniquifySettings
+from zaliver.processing.slicing import DEFAULT_SLICE_FPS_MODE
 from zaliver.processing.text_overlay import (
     NEON_WAVE_AMP_FRAC,
     NEON_WAVE_CHAR_PHASE,
@@ -152,8 +153,11 @@ from zaliver.ui.widgets import (
     FlowLayout,
     SmoothSlider,
     ToggleSwitch,
+    ValueSlider,
     configure_log_splitter,
     make_log_export_button,
+    make_work_section_nav,
+    wrap_work_section_page,
 )
 from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
 from zaliver.ui.slicing_tab_pane import SlicingTabPane
@@ -1023,13 +1027,11 @@ class MainWindow(QWidget):
     def _build_ui(self) -> None:
         home = QWidget()
         home_l = QVBoxLayout(home)
-        home_l.setSpacing(12)
+        home_l.setSpacing(4)
         home_l.setContentsMargins(12, 8, 12, 12)
 
         title = QLabel("Zaliver")
         title.setObjectName("title")
-        sub = QLabel("Выбор видео → папка результатов · случайная уникализация ")
-        sub.setObjectName("hint")
 
         self.btn_start = QPushButton("Старт")
         self.btn_cancel = QPushButton("Отмена")
@@ -1047,6 +1049,8 @@ class MainWindow(QWidget):
         )
         self.progress_label = QLabel("")
         self.progress_label.setObjectName("hint")
+        self.progress_label.setMinimumHeight(0)
+        self.progress_label.setStyleSheet("min-height: 0; padding: 0; margin: 0;")
 
         header_row = QHBoxLayout()
         header_row.setSpacing(12)
@@ -1054,9 +1058,19 @@ class MainWindow(QWidget):
         header_row.addWidget(self.progress, 1, Qt.AlignmentFlag.AlignVCenter)
         header_row.addWidget(self.btn_start, 0, Qt.AlignmentFlag.AlignVCenter)
         header_row.addWidget(self.btn_cancel, 0, Qt.AlignmentFlag.AlignVCenter)
-        home_l.addLayout(header_row)
-        home_l.addWidget(self.progress_label)
-        home_l.addWidget(sub)
+
+        header_block = QVBoxLayout()
+        header_block.setContentsMargins(0, 0, 0, 0)
+        header_block.setSpacing(0)
+        header_block.addLayout(header_row)
+        header_block.addWidget(self.progress_label)
+
+        section_nav, section_nav_group, _section_btns = make_work_section_nav(
+            ["Исходники", "Фильтры", "Текст", "Музыка"],
+            parent=home,
+        )
+        header_block.addWidget(section_nav)
+        home_l.addLayout(header_block)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -1238,83 +1252,33 @@ class MainWindow(QWidget):
         self._update_music_mix_controls()
         self._sync_music_list_widget()
 
-        proc = QGroupBox("Обработка")
-        pg = QGridLayout(proc)
-        self.thread_slider = SmoothSlider(Qt.Orientation.Horizontal)
-        self.thread_slider.setMinimum(1)
-        # Максимум слайдера — число доступных логических потоков CPU.
-        self.thread_slider.setMaximum(_max_worker_slider())
-        self.thread_slider.setValue(_default_workers())
-        self.thread_label = QLabel()
-        self._update_thread_label(self.thread_slider.value())
-        self.thread_slider.valueChanged.connect(self._update_thread_label)
-
-        proc_hint = QLabel(
-            "Обработка целиком через ffmpeg (фильтры + кодирование). Несколько роликов — "
-            "параллельно по файлам; длинный ролик режется на части для загрузки CPU. "
-            "Нужны ffmpeg и ffprobe в PATH. Результат — MP4 (H.264 + AAC из исходника, если есть звук)."
-        )
-        proc_hint.setObjectName("hint")
-        proc_hint.setWordWrap(True)
-        pg.addWidget(proc_hint, 0, 0, 1, 2)
-
-        self._ffmpeg_row = QWidget()
-        ff_row = QHBoxLayout(self._ffmpeg_row)
-        ff_row.setContentsMargins(0, 0, 0, 0)
-        self.ffmpeg_hint = QLabel()
-        self.ffmpeg_hint.setObjectName("hint")
-        self.ffmpeg_hint.setWordWrap(True)
-        self.btn_install_ffmpeg = QPushButton("Установить ffmpeg")
-        self.btn_install_ffmpeg.setObjectName("secondary")
-        self.btn_install_ffmpeg.clicked.connect(self._on_install_ffmpeg)
-        ff_row.addWidget(self.ffmpeg_hint, 1)
-        ff_row.addWidget(self.btn_install_ffmpeg, 0, Qt.AlignmentFlag.AlignRight)
-        pg.addWidget(self._ffmpeg_row, 1, 0, 1, 2)
-
-        self.use_gpu = ToggleSwitch("GPU при обработке кадров (декод, фильтры, кодирование)")
-        self.use_gpu.setChecked(
-            bool(self._settings.value("use_gpu_enabled", False, type=bool))
-        )
-        self.use_gpu.toggled.connect(self._save_folder_settings)
-        self.use_gpu_finalize = ToggleSwitch(
-            "GPU при склейке и mux звука (concat, ускорение, фон)"
-        )
-        self.use_gpu_finalize.setChecked(
-            bool(self._settings.value("use_gpu_finalize_enabled", False, type=bool))
-        )
-        self.use_gpu_finalize.toggled.connect(self._save_folder_settings)
-        gpu_hint = QLabel(
-            "Независимо друг от друга. Можно кадры на CPU, а склейку на GPU (NVENC/QSV/AMF)."
-        )
-        gpu_hint.setObjectName("hint")
-        gpu_hint.setWordWrap(True)
-        pg.addWidget(self.use_gpu, 2, 0, 1, 2)
-        pg.addWidget(self.use_gpu_finalize, 3, 0, 1, 2)
-        pg.addWidget(gpu_hint, 4, 0, 1, 2)
-
-        pg.addWidget(QLabel("Потоков процессов:"), 5, 0, Qt.AlignmentFlag.AlignVCenter)
-        thr_row = QHBoxLayout()
-        thr_row.setSpacing(8)
-        thr_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-        thr_row.addWidget(self.thread_slider, 1, Qt.AlignmentFlag.AlignVCenter)
-        thr_row.addWidget(self.thread_label, 0, Qt.AlignmentFlag.AlignVCenter)
-        w_thr = QWidget()
-        w_thr.setLayout(thr_row)
-        pg.addWidget(w_thr, 5, 1, Qt.AlignmentFlag.AlignVCenter)
-
         fx = QGroupBox("Уникализация (лёгкие эффекты)")
         fx_layout = QVBoxLayout(fx)
         fx_layout.setSpacing(8)
 
-        self._text_overlay_section = CollapsibleSection("Текст на видео (неон)")
-        text_inner = QWidget()
-        text_l = QVBoxLayout(text_inner)
+        text_gb = QGroupBox("Текст на видео")
+        text_l = QVBoxLayout(text_gb)
         text_l.setSpacing(8)
         self.text_overlay_enabled = ToggleSwitch("Накладывать свой текст на каждое видео")
         self.text_overlay_enabled.setChecked(True)
         self.text_overlay_enabled.toggled.connect(self._update_text_overlay_controls)
         self.text_overlay_enabled.toggled.connect(self._save_folder_settings)
-        text_l.addWidget(self.text_overlay_enabled)
+        self.text_overlay_from_middle = QCheckBox(
+            "Текст с середины видео до конца"
+        )
+        self.text_overlay_from_middle.setChecked(True)
+        self.text_overlay_from_middle.toggled.connect(self._save_folder_settings)
+        text_top_row = QHBoxLayout()
+        text_top_row.setContentsMargins(0, 0, 0, 0)
+        text_top_row.setSpacing(16)
+        text_top_row.addWidget(self.text_overlay_enabled, 0, Qt.AlignmentFlag.AlignVCenter)
+        text_top_row.addWidget(
+            self.text_overlay_from_middle, 0, Qt.AlignmentFlag.AlignVCenter
+        )
+        text_top_row.addStretch(1)
+        text_top_w = QWidget()
+        text_top_w.setLayout(text_top_row)
+        text_l.addWidget(text_top_w)
 
         self._text_overlay_panel = QWidget()
         text_controls_l = QVBoxLayout(self._text_overlay_panel)
@@ -1327,13 +1291,6 @@ class MainWindow(QWidget):
         self.text_overlay_edit.setMaximumHeight(72)
         self.text_overlay_edit.textChanged.connect(self._on_text_overlay_content_changed)
         text_controls_l.addWidget(self.text_overlay_edit)
-
-        self.text_overlay_from_middle = QCheckBox(
-            "Текст с середины видео до конца"
-        )
-        self.text_overlay_from_middle.setChecked(True)
-        self.text_overlay_from_middle.toggled.connect(self._save_folder_settings)
-        text_controls_l.addWidget(self.text_overlay_from_middle)
 
         text_opts = QGridLayout()
         text_opts.setHorizontalSpacing(8)
@@ -1463,17 +1420,47 @@ class MainWindow(QWidget):
         self.text_overlay_preview.positionChanged.connect(self._on_text_overlay_position_changed)
         text_controls_l.addWidget(self.text_overlay_preview)
 
+        self._text_overlay_preview_index = 0
+        self._btn_text_preview_prev = QPushButton("‹")
+        self._btn_text_preview_prev.setObjectName("textPreviewNav")
+        self._btn_text_preview_prev.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_text_preview_prev.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_text_preview_prev.setFixedSize(36, 36)
+        self._btn_text_preview_prev.setToolTip("Предыдущий исходник")
+        self._btn_text_preview_prev.setAutoDefault(False)
+        self._btn_text_preview_prev.setDefault(False)
+        self._btn_text_preview_prev.clicked.connect(self._text_overlay_preview_prev)
+        self._btn_text_preview_next = QPushButton("›")
+        self._btn_text_preview_next.setObjectName("textPreviewNav")
+        self._btn_text_preview_next.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_text_preview_next.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_text_preview_next.setFixedSize(36, 36)
+        self._btn_text_preview_next.setToolTip("Следующий исходник")
+        self._btn_text_preview_next.setAutoDefault(False)
+        self._btn_text_preview_next.setDefault(False)
+        self._btn_text_preview_next.clicked.connect(self._text_overlay_preview_next)
+        self._text_overlay_preview_meta = QLabel("")
+        self._text_overlay_preview_meta.setObjectName("hint")
+        self._text_overlay_preview_meta.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._text_overlay_preview_meta.setWordWrap(True)
+        preview_nav = QHBoxLayout()
+        preview_nav.setContentsMargins(0, 0, 0, 0)
+        preview_nav.setSpacing(8)
+        preview_nav.addWidget(self._btn_text_preview_prev, 0)
+        preview_nav.addWidget(self._text_overlay_preview_meta, 1)
+        preview_nav.addWidget(self._btn_text_preview_next, 0)
+        preview_nav_w = QWidget()
+        preview_nav_w.setLayout(preview_nav)
+        text_controls_l.addWidget(preview_nav_w)
+
         text_hint = QLabel(
-            "Перетащите текст"
+            "Перетащите текст · стрелки листают выбранные исходники"
         )
         text_hint.setObjectName("hint")
         text_hint.setWordWrap(True)
         text_controls_l.addWidget(text_hint)
 
         text_l.addWidget(self._text_overlay_panel)
-        self._text_overlay_section.content_layout().addWidget(text_inner)
-        self._text_overlay_section.set_expanded(True)
-        fx_layout.addWidget(self._text_overlay_section)
         self._update_text_overlay_controls()
 
         self.random_uniquify = ToggleSwitch(
@@ -1489,66 +1476,83 @@ class MainWindow(QWidget):
         bounds_inner = QWidget()
         rg = QGridLayout(bounds_inner)
         rg.setHorizontalSpacing(8)
+        rg.setVerticalSpacing(6)
 
-        def _dspin(lo: float, hi: float, step: float, dec: int) -> tuple[QDoubleSpinBox, QDoubleSpinBox]:
-            a, b = QDoubleSpinBox(), QDoubleSpinBox()
-            for w in (a, b):
-                w.setRange(-_BIG_FLOAT, _BIG_FLOAT)
-                w.setSingleStep(step)
-                w.setDecimals(dec)
-                w.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-            a.setValue(lo)
-            b.setValue(hi)
+        def _bound_sliders(
+            *,
+            range_min: float,
+            range_max: float,
+            lo: float,
+            hi: float,
+            step: float,
+            decimals: int,
+        ) -> tuple[ValueSlider, ValueSlider]:
+            a = ValueSlider(
+                minimum=range_min,
+                maximum=range_max,
+                value=lo,
+                step=step,
+                decimals=decimals,
+            )
+            b = ValueSlider(
+                minimum=range_min,
+                maximum=range_max,
+                value=hi,
+                step=step,
+                decimals=decimals,
+            )
             return a, b
 
-        def _ispin(lo: int, hi: int) -> tuple[QSpinBox, QSpinBox]:
-            a, b = QSpinBox(), QSpinBox()
-            for w in (a, b):
-                w.setRange(_INT_MIN, _INT_MAX)
-            a.setValue(lo)
-            b.setValue(hi)
-            return a, b
-
-        def _bounds_row(row: int, title: str, w_lo: QWidget, w_hi: QWidget) -> None:
-            rg.addWidget(QLabel(title), row, 0)
-            rg.addWidget(QLabel("от"), row, 1)
-            rg.addWidget(w_lo, row, 2)
-            rg.addWidget(QLabel("до"), row, 3)
-            rg.addWidget(w_hi, row, 4)
+        def _bounds_row(row: int, title: str, w_lo: QWidget, w_hi: QWidget) -> int:
+            rg.addWidget(QLabel(title), row, 0, 1, 3)
+            rg.addWidget(QLabel("от"), row + 1, 0, Qt.AlignmentFlag.AlignVCenter)
+            rg.addWidget(w_lo, row + 1, 1, 1, 2)
+            rg.addWidget(QLabel("до"), row + 2, 0, Qt.AlignmentFlag.AlignVCenter)
+            rg.addWidget(w_hi, row + 2, 1, 1, 2)
+            return row + 3
 
         br = 0
-        self.rb_brightness_min, self.rb_brightness_max = _dspin(-22.0, 22.0, 1.0, 1)
-        _bounds_row(br, "Яркость (±)", self.rb_brightness_min, self.rb_brightness_max)
-        br += 1
-        self.rb_contrast_min, self.rb_contrast_max = _dspin(0.88, 1.14, 0.01, 3)
-        _bounds_row(br, "Контраст", self.rb_contrast_min, self.rb_contrast_max)
-        br += 1
-        self.rb_saturation_min, self.rb_saturation_max = _dspin(0.88, 1.12, 0.01, 3)
-        _bounds_row(br, "Насыщенность", self.rb_saturation_min, self.rb_saturation_max)
-        br += 1
-        self.rb_crop_jitter_min, self.rb_crop_jitter_max = _ispin(0, 3)
-        _bounds_row(br, "Кроп-джиттер (px)", self.rb_crop_jitter_min, self.rb_crop_jitter_max)
-        br += 1
-        self.rb_scale_pct_min, self.rb_scale_pct_max = _dspin(95, 100.6, 0.1, 2)
-        _bounds_row(br, "Масштаб %", self.rb_scale_pct_min, self.rb_scale_pct_max)
-        br += 1
-        self.rb_noise_min, self.rb_noise_max = _dspin(0.5, 4.0, 0.05, 2)
-        _bounds_row(br, "Шум σ", self.rb_noise_min, self.rb_noise_max)
-        br += 1
-        self.rb_seed_min, self.rb_seed_max = _ispin(0, 99_999_999)
-        _bounds_row(br, "Seed", self.rb_seed_min, self.rb_seed_max)
-        br += 1
-        self.audio_speed_min, self.audio_speed_max = _dspin(1.0, 1.1, 0.01, 2)
-        _bounds_row(br, "Скорость видео+аудио (x)", self.audio_speed_min, self.audio_speed_max)
-        br += 1
-        self.audio_chorus_prob = QDoubleSpinBox()
-        self.audio_chorus_prob.setRange(-_BIG_FLOAT, _BIG_FLOAT)
-        self.audio_chorus_prob.setSingleStep(0.05)
-        self.audio_chorus_prob.setDecimals(2)
-        self.audio_chorus_prob.setValue(0.45)
-        self.audio_chorus_prob.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        rg.addWidget(QLabel("Вероятность хора (0…1):"), br, 0, 1, 2)
-        rg.addWidget(self.audio_chorus_prob, br, 2, 1, 3)
+        self.rb_brightness_min, self.rb_brightness_max = _bound_sliders(
+            range_min=-40.0, range_max=40.0, lo=-22.0, hi=22.0, step=0.5, decimals=1
+        )
+        br = _bounds_row(br, "Яркость (±)", self.rb_brightness_min, self.rb_brightness_max)
+        self.rb_contrast_min, self.rb_contrast_max = _bound_sliders(
+            range_min=0.70, range_max=1.40, lo=0.88, hi=1.14, step=0.01, decimals=2
+        )
+        br = _bounds_row(br, "Контраст", self.rb_contrast_min, self.rb_contrast_max)
+        self.rb_saturation_min, self.rb_saturation_max = _bound_sliders(
+            range_min=0.70, range_max=1.40, lo=0.88, hi=1.12, step=0.01, decimals=2
+        )
+        br = _bounds_row(br, "Насыщенность", self.rb_saturation_min, self.rb_saturation_max)
+        self.rb_crop_jitter_min, self.rb_crop_jitter_max = _bound_sliders(
+            range_min=0, range_max=12, lo=0, hi=3, step=1, decimals=0
+        )
+        br = _bounds_row(
+            br, "Кроп-джиттер (px)", self.rb_crop_jitter_min, self.rb_crop_jitter_max
+        )
+        self.rb_scale_pct_min, self.rb_scale_pct_max = _bound_sliders(
+            range_min=90.0, range_max=110.0, lo=95.0, hi=100.6, step=0.1, decimals=1
+        )
+        br = _bounds_row(br, "Масштаб %", self.rb_scale_pct_min, self.rb_scale_pct_max)
+        self.rb_noise_min, self.rb_noise_max = _bound_sliders(
+            range_min=0.0, range_max=10.0, lo=0.5, hi=4.0, step=0.05, decimals=2
+        )
+        br = _bounds_row(br, "Шум σ", self.rb_noise_min, self.rb_noise_max)
+        self.rb_seed_min, self.rb_seed_max = _bound_sliders(
+            range_min=0, range_max=99_999_999, lo=0, hi=99_999_999, step=1, decimals=0
+        )
+        br = _bounds_row(br, "Seed", self.rb_seed_min, self.rb_seed_max)
+        self.audio_speed_min, self.audio_speed_max = _bound_sliders(
+            range_min=0.85, range_max=1.25, lo=1.0, hi=1.1, step=0.01, decimals=2
+        )
+        br = _bounds_row(
+            br, "Скорость видео+аудио (x)", self.audio_speed_min, self.audio_speed_max
+        )
+        self.audio_chorus_prob = ValueSlider(
+            minimum=0.0, maximum=1.0, value=0.45, step=0.05, decimals=2
+        )
+        rg.addWidget(QLabel("Вероятность хора:"), br, 0, Qt.AlignmentFlag.AlignVCenter)
+        rg.addWidget(self.audio_chorus_prob, br, 1, 1, 2)
         self._random_bounds_section.content_layout().addWidget(bounds_inner)
         self._random_bounds_section.set_expanded(True)
         fx_layout.addWidget(self._random_bounds_section)
@@ -1557,36 +1561,30 @@ class MainWindow(QWidget):
         self._manual_section = CollapsibleSection("Ручные параметры и аудио")
         manual_inner = QWidget()
         mg = QGridLayout(manual_inner)
+        mg.setHorizontalSpacing(8)
+        mg.setVerticalSpacing(6)
 
-        self.brightness = QSpinBox()
-        self.brightness.setRange(_INT_MIN, _INT_MAX)
-        self.brightness.setValue(0)
-        self.contrast = QDoubleSpinBox()
-        self.contrast.setRange(-_BIG_FLOAT, _BIG_FLOAT)
-        self.contrast.setSingleStep(0.01)
-        self.contrast.setValue(1.0)
-        self.contrast.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.saturation = QDoubleSpinBox()
-        self.saturation.setRange(-_BIG_FLOAT, _BIG_FLOAT)
-        self.saturation.setSingleStep(0.01)
-        self.saturation.setValue(1.0)
-        self.saturation.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.crop_jitter = QSpinBox()
-        self.crop_jitter.setRange(_INT_MIN, _INT_MAX)
-        self.crop_jitter.setValue(1)
-        self.scale_pct = QDoubleSpinBox()
-        self.scale_pct.setRange(-_BIG_FLOAT, _BIG_FLOAT)
-        self.scale_pct.setDecimals(2)
-        self.scale_pct.setValue(100.0)
-        self.scale_pct.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.noise = QDoubleSpinBox()
-        self.noise.setRange(-_BIG_FLOAT, _BIG_FLOAT)
-        self.noise.setSingleStep(0.5)
-        self.noise.setValue(1.0)
-        self.noise.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.seed = QSpinBox()
-        self.seed.setRange(_INT_MIN, _INT_MAX)
-        self.seed.setValue(42)
+        self.brightness = ValueSlider(
+            minimum=-40.0, maximum=40.0, value=0.0, step=0.5, decimals=1
+        )
+        self.contrast = ValueSlider(
+            minimum=0.70, maximum=1.40, value=1.0, step=0.01, decimals=2
+        )
+        self.saturation = ValueSlider(
+            minimum=0.70, maximum=1.40, value=1.0, step=0.01, decimals=2
+        )
+        self.crop_jitter = ValueSlider(
+            minimum=0, maximum=12, value=1, step=1, decimals=0
+        )
+        self.scale_pct = ValueSlider(
+            minimum=90.0, maximum=110.0, value=100.0, step=0.1, decimals=1
+        )
+        self.noise = ValueSlider(
+            minimum=0.0, maximum=10.0, value=1.0, step=0.05, decimals=2
+        )
+        self.seed = ValueSlider(
+            minimum=0, maximum=99_999_999, value=42, step=1, decimals=0
+        )
 
         self._manual_video_widgets = [
             self.brightness,
@@ -1608,7 +1606,7 @@ class MainWindow(QWidget):
             ("Шум σ:", self.noise),
             ("Seed:", self.seed),
         ]:
-            mg.addWidget(QLabel(label), r, 0)
+            mg.addWidget(QLabel(label), r, 0, Qt.AlignmentFlag.AlignVCenter)
             mg.addWidget(w, r, 1)
             r += 1
 
@@ -1633,13 +1631,8 @@ class MainWindow(QWidget):
 
         mg.addWidget(QLabel("— Скорость и аудио (ручные) —"), r, 0, 1, 2)
         r += 1
-        self.playback_speed_manual = QDoubleSpinBox()
-        self.playback_speed_manual.setRange(-_BIG_FLOAT, _BIG_FLOAT)
-        self.playback_speed_manual.setSingleStep(0.01)
-        self.playback_speed_manual.setDecimals(2)
-        self.playback_speed_manual.setValue(1.05)
-        self.playback_speed_manual.setButtonSymbols(
-            QAbstractSpinBox.ButtonSymbols.NoButtons
+        self.playback_speed_manual = ValueSlider(
+            minimum=0.85, maximum=1.25, value=1.05, step=0.01, decimals=2
         )
         self.audio_chorus_manual = ToggleSwitch("Хорус (включить)")
         self.audio_chorus_manual.setChecked(False)
@@ -1647,7 +1640,9 @@ class MainWindow(QWidget):
             self.playback_speed_manual,
             self.audio_chorus_manual,
         ]
-        mg.addWidget(QLabel("Скорость видео+аудио (x):"), r, 0)
+        mg.addWidget(
+            QLabel("Скорость видео+аудио (x):"), r, 0, Qt.AlignmentFlag.AlignVCenter
+        )
         mg.addWidget(self.playback_speed_manual, r, 1)
         r += 1
         mg.addWidget(self.audio_chorus_manual, r, 0, 1, 2)
@@ -1658,6 +1653,13 @@ class MainWindow(QWidget):
         self._manual_panel = manual_inner
         self._manual_section.set_expanded(True)
         self._on_random_uniquify_toggled(self.random_uniquify.isChecked())
+
+        self._uniquify_section_stack = QStackedWidget()
+        self._uniquify_section_stack.addWidget(wrap_work_section_page(io))
+        self._uniquify_section_stack.addWidget(wrap_work_section_page(fx))
+        self._uniquify_section_stack.addWidget(wrap_work_section_page(text_gb))
+        self._uniquify_section_stack.addWidget(wrap_work_section_page(bg_tracks))
+        section_nav_group.idClicked.connect(self._uniquify_section_stack.setCurrentIndex)
 
         scroll_left = QScrollArea()
         scroll_left.setWidgetResizable(True)
@@ -1672,10 +1674,8 @@ class MainWindow(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
         )
         inner_left_l = QVBoxLayout(inner_left)
-        inner_left_l.addWidget(io)
-        inner_left_l.addWidget(bg_tracks)
-        inner_left_l.addWidget(proc)
-        inner_left_l.addWidget(fx)
+        inner_left_l.setContentsMargins(0, 0, 0, 0)
+        inner_left_l.addWidget(self._uniquify_section_stack)
         inner_left_l.addStretch()
         scroll_left.setWidget(inner_left)
         scroll_left.setSizePolicy(
@@ -1705,16 +1705,9 @@ class MainWindow(QWidget):
         configure_log_splitter(splitter, form_panel=scroll_left, log_panel=right)
         home_l.addWidget(splitter, 1)
 
-        self._slice_tab = SlicingTabPane(
-            self,
-            settings=self._settings,
-            max_workers_fn=_max_worker_slider,
-            default_workers_fn=_default_workers,
-            apply_thread_cap_fn=_apply_thread_slider_fd_cap,
-        )
+        self._slice_tab = SlicingTabPane(self, settings=self._settings)
         self._slice_tab.start_requested.connect(self._start_slicing)
         self._slice_tab.cancel_requested.connect(self._cancel)
-        self._slice_tab.install_ffmpeg_requested.connect(self._on_install_ffmpeg)
 
         ready = QWidget()
         ready_l = QVBoxLayout(ready)
@@ -2254,10 +2247,12 @@ class MainWindow(QWidget):
         settings_title.setObjectName("title")
         settings_hint = QLabel(
             "Выберите браузер по умолчанию для раздела «Профили». "
+            "Параметры обработки видео (GPU, потоки, ffmpeg) — ниже. "
             "Токен Dolphin — https://dolphin-anty.net/panel/#/api"
             if self._platform != PLATFORM_YT_INST
             else "Общие настройки антидетекта и ИИ, плюс разделы YouTube и Instagram "
-            "(параметры берутся из настроек соответствующих платформ)."
+            "(параметры берутся из настроек соответствующих платформ). "
+            "Параметры обработки видео (GPU, потоки, ffmpeg) — общие для уникализации и нарезки."
         )
         settings_hint.setObjectName("hint")
         settings_hint.setWordWrap(True)
@@ -2542,9 +2537,103 @@ class MainWindow(QWidget):
         gai.addWidget(_settings_save_row(self._btn_save_ai), 5, 0, 1, 2)
         gai.addWidget(self._ai_settings_status, 6, 0, 1, 2)
 
+        self._gb_processing = QGroupBox("Обработка")
+        gp = _compact_settings_grid(self._gb_processing)
+        proc_hint = QLabel(
+            "Общие параметры уникализации и нарезки. Обработка через ffmpeg "
+            "(фильтры + кодирование). Несколько роликов — параллельно по файлам; "
+            "длинный ролик режется на части. Нужны ffmpeg и ffprobe в PATH. "
+            "Результат — MP4 (H.264 + AAC)."
+        )
+        proc_hint.setObjectName("hint")
+        proc_hint.setWordWrap(True)
+        gp.addWidget(proc_hint, 0, 0, 1, 2)
+
+        self._ffmpeg_row = QWidget()
+        ff_row = QHBoxLayout(self._ffmpeg_row)
+        ff_row.setContentsMargins(0, 0, 0, 0)
+        self.ffmpeg_hint = QLabel()
+        self.ffmpeg_hint.setObjectName("hint")
+        self.ffmpeg_hint.setWordWrap(True)
+        self.btn_install_ffmpeg = QPushButton("Установить ffmpeg")
+        self.btn_install_ffmpeg.setObjectName("secondary")
+        self.btn_install_ffmpeg.clicked.connect(self._on_install_ffmpeg)
+        ff_row.addWidget(self.ffmpeg_hint, 1)
+        ff_row.addWidget(self.btn_install_ffmpeg, 0, Qt.AlignmentFlag.AlignRight)
+        gp.addWidget(self._ffmpeg_row, 1, 0, 1, 2)
+
+        self.use_gpu = ToggleSwitch(
+            "GPU при обработке кадров (декод, фильтры, кодирование)"
+        )
+        self.use_gpu.setChecked(
+            bool(self._settings.value("use_gpu_enabled", False, type=bool))
+        )
+        self.use_gpu.toggled.connect(self._save_folder_settings)
+        self.use_gpu_finalize = ToggleSwitch(
+            "GPU при склейке и mux звука (concat, ускорение, фон/текст)"
+        )
+        self.use_gpu_finalize.setChecked(
+            bool(self._settings.value("use_gpu_finalize_enabled", False, type=bool))
+        )
+        self.use_gpu_finalize.toggled.connect(self._save_folder_settings)
+        gpu_hint = QLabel(
+            "Независимо друг от друга. Можно кадры на CPU, а склейку на GPU (NVENC/QSV/AMF)."
+        )
+        gpu_hint.setObjectName("hint")
+        gpu_hint.setWordWrap(True)
+        gp.addWidget(self.use_gpu, 2, 0, 1, 2)
+        gp.addWidget(self.use_gpu_finalize, 3, 0, 1, 2)
+        gp.addWidget(gpu_hint, 4, 0, 1, 2)
+
+        self.slice_fps_mode = QComboBox()
+        self.slice_fps_mode.addItem("30 fps", "30")
+        self.slice_fps_mode.addItem("60 fps", "60")
+        self.slice_fps_mode.setToolTip(
+            "Частота кадров итогового ролика при нарезке."
+        )
+        fps_mode = str(
+            self._settings.value("slice/fps_mode", DEFAULT_SLICE_FPS_MODE, type=str)
+            or DEFAULT_SLICE_FPS_MODE
+        )
+        if fps_mode.strip().lower() in ("auto", "авто"):
+            fps_mode = DEFAULT_SLICE_FPS_MODE
+        fps_idx = self.slice_fps_mode.findData(fps_mode)
+        self.slice_fps_mode.setCurrentIndex(fps_idx if fps_idx >= 0 else 0)
+        self.slice_fps_mode.currentIndexChanged.connect(
+            lambda *_: self._save_folder_settings()
+        )
+        fps_hint = QLabel(
+            "Только для нарезки. 60 fps вдвое медленнее рендера; "
+            "для Shorts/Reels обычно достаточно 30."
+        )
+        fps_hint.setObjectName("hint")
+        fps_hint.setWordWrap(True)
+        gp.addWidget(QLabel("FPS нарезки:"), 5, 0)
+        gp.addWidget(self.slice_fps_mode, 5, 1)
+        gp.addWidget(fps_hint, 6, 0, 1, 2)
+
+        self.thread_slider = SmoothSlider(Qt.Orientation.Horizontal)
+        self.thread_slider.setMinimum(1)
+        # Максимум слайдера — число доступных логических потоков CPU.
+        self.thread_slider.setMaximum(_max_worker_slider())
+        self.thread_slider.setValue(_default_workers())
+        self.thread_label = QLabel()
+        self._update_thread_label(self.thread_slider.value())
+        self.thread_slider.valueChanged.connect(self._update_thread_label)
+        gp.addWidget(QLabel("Потоков процессов:"), 7, 0, Qt.AlignmentFlag.AlignVCenter)
+        thr_row = QHBoxLayout()
+        thr_row.setSpacing(8)
+        thr_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        thr_row.addWidget(self.thread_slider, 1, Qt.AlignmentFlag.AlignVCenter)
+        thr_row.addWidget(self.thread_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        w_thr = QWidget()
+        w_thr.setLayout(thr_row)
+        gp.addWidget(w_thr, 7, 1, Qt.AlignmentFlag.AlignVCenter)
+
         settings_l.addWidget(settings_title)
         settings_l.addWidget(settings_hint)
         settings_l.addWidget(self._gb_stats_username)
+        settings_l.addWidget(self._gb_processing)
         settings_l.addLayout(browser_pick)
         settings_l.addWidget(self._dolphin_headless)
         settings_l.addWidget(self._gb_max_concurrent_browsers)
@@ -4492,8 +4581,6 @@ class MainWindow(QWidget):
         needs = needs_ffmpeg_install_prompt()
         if not needs:
             self._ffmpeg_row.setVisible(False)
-            if hasattr(self, "_slice_tab"):
-                self._slice_tab.sync_ffmpeg_install_row(visible=False)
             return
         self._ffmpeg_row.setVisible(True)
         if sys.platform == "darwin":
@@ -4518,10 +4605,6 @@ class MainWindow(QWidget):
                 "Нажмите кнопку справа (winget или pip, нужен интернет)."
             )
         self.ffmpeg_hint.setText(hint)
-        if hasattr(self, "_slice_tab"):
-            self._slice_tab.sync_ffmpeg_install_row(
-                visible=True, hint=hint, button_text=self.btn_install_ffmpeg.text()
-            )
 
     def _on_ff_install_progress(self, value: int, text: str) -> None:
         dlg = self._ffmpeg_progress_dlg
@@ -4653,6 +4736,17 @@ class MainWindow(QWidget):
             self.use_gpu_finalize.setChecked(
                 bool(self._settings.value("use_gpu_finalize_enabled", False, type=bool))
             )
+        if hasattr(self, "slice_fps_mode"):
+            fps_mode = str(
+                self._settings.value("slice/fps_mode", DEFAULT_SLICE_FPS_MODE, type=str)
+                or DEFAULT_SLICE_FPS_MODE
+            )
+            if fps_mode.strip().lower() in ("auto", "авто"):
+                fps_mode = DEFAULT_SLICE_FPS_MODE
+            idx = self.slice_fps_mode.findData(fps_mode)
+            self.slice_fps_mode.blockSignals(True)
+            self.slice_fps_mode.setCurrentIndex(idx if idx >= 0 else 0)
+            self.slice_fps_mode.blockSignals(False)
         if hasattr(self, "background_music_mix"):
             self.background_music_mix.setChecked(
                 bool(self._settings.value("background_music_mix_with_source", False, type=bool))
@@ -4770,6 +4864,11 @@ class MainWindow(QWidget):
         if hasattr(self, "use_gpu_finalize"):
             self._settings.setValue(
                 "use_gpu_finalize_enabled", bool(self.use_gpu_finalize.isChecked())
+            )
+        if hasattr(self, "slice_fps_mode"):
+            self._settings.setValue(
+                "slice/fps_mode",
+                str(self.slice_fps_mode.currentData() or DEFAULT_SLICE_FPS_MODE),
             )
         if hasattr(self, "background_music_mix"):
             self._settings.setValue(
@@ -9865,6 +9964,8 @@ class MainWindow(QWidget):
         if n <= 0:
             self._input_files_hint.setText("Не выбрано — нажмите «Выбрать файлы…»")
             self._input_files_hint.setToolTip("")
+            if hasattr(self, "text_overlay_preview"):
+                self._schedule_text_overlay_preview_sync()
             return
         names = [Path(p).name for p in self._selected_input_files]
         preview = ", ".join(names[:4])
@@ -9872,6 +9973,8 @@ class MainWindow(QWidget):
             preview = f"{preview} и ещё {n - 4}"
         self._input_files_hint.setText(f"Выбрано: {n} ({preview})")
         self._input_files_hint.setToolTip("\n".join(names))
+        if hasattr(self, "text_overlay_preview"):
+            self._schedule_text_overlay_preview_sync()
 
     def _browse_output_dir(self) -> None:
         start = self.output_dir_edit.text().strip()
@@ -10046,6 +10149,99 @@ class MainWindow(QWidget):
             from_middle=bool(self.text_overlay_from_middle.isChecked()),
         )
 
+    def _text_overlay_preview_videos(self) -> list[str]:
+        """Выбранные исходники в том же порядке, что в списке файлов."""
+        out: list[str] = []
+        seen: set[str] = set()
+        for p in self._selected_input_files or []:
+            raw = str(p).strip()
+            if not raw:
+                continue
+            try:
+                path = Path(raw)
+                if not path.is_file():
+                    continue
+                resolved = str(path.resolve())
+                key = os.path.normcase(resolved)
+            except OSError:
+                if not Path(raw).is_file():
+                    continue
+                resolved = raw
+                key = os.path.normcase(os.path.normpath(raw))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(resolved)
+        return out
+
+    def _clamp_text_overlay_preview_index(self) -> None:
+        videos = self._text_overlay_preview_videos()
+        n = len(videos)
+        if n <= 0:
+            self._text_overlay_preview_index = 0
+            return
+        self._text_overlay_preview_index = int(self._text_overlay_preview_index) % n
+
+    def _update_text_overlay_preview_nav(self) -> None:
+        videos = self._text_overlay_preview_videos()
+        n = len(videos)
+        self._clamp_text_overlay_preview_index()
+        idx = int(self._text_overlay_preview_index)
+        can_cycle = n > 1
+        if hasattr(self, "_btn_text_preview_prev"):
+            self._btn_text_preview_prev.setEnabled(can_cycle)
+            self._btn_text_preview_next.setEnabled(can_cycle)
+            self._btn_text_preview_prev.setVisible(True)
+            self._btn_text_preview_next.setVisible(True)
+        if hasattr(self, "_text_overlay_preview_meta"):
+            if n <= 0:
+                self._text_overlay_preview_meta.setText(
+                    "Нет исходников — выберите видео во вкладке «Исходники»"
+                )
+            else:
+                name = Path(videos[idx]).name
+                self._text_overlay_preview_meta.setText(f"{idx + 1} / {n} · {name}")
+
+    def _text_overlay_preview_prev(self) -> None:
+        videos = self._text_overlay_preview_videos()
+        n = len(videos)
+        if n <= 0:
+            self._update_text_overlay_preview_nav()
+            return
+        if n == 1:
+            self._text_overlay_preview_index = 0
+            self._apply_text_overlay_preview_video(force=True)
+            return
+        self._text_overlay_preview_index = (int(self._text_overlay_preview_index) - 1) % n
+        self._apply_text_overlay_preview_video(force=True)
+
+    def _text_overlay_preview_next(self) -> None:
+        videos = self._text_overlay_preview_videos()
+        n = len(videos)
+        if n <= 0:
+            self._update_text_overlay_preview_nav()
+            return
+        if n == 1:
+            self._text_overlay_preview_index = 0
+            self._apply_text_overlay_preview_video(force=True)
+            return
+        self._text_overlay_preview_index = (int(self._text_overlay_preview_index) + 1) % n
+        self._apply_text_overlay_preview_video(force=True)
+
+    def _apply_text_overlay_preview_video(self, *, force: bool = False) -> None:
+        """Показать кадр текущего исходника по индексу (стрелки листают файлы по кругу)."""
+        if not hasattr(self, "text_overlay_preview"):
+            return
+        videos = self._text_overlay_preview_videos()
+        self._update_text_overlay_preview_nav()
+        current = None
+        if videos:
+            self._clamp_text_overlay_preview_index()
+            current = videos[int(self._text_overlay_preview_index)]
+        self.text_overlay_preview.set_background_video(current, force=force)
+        overlay_on = bool(self.text_overlay_enabled.isChecked())
+        self.text_overlay_preview.set_text_visible(overlay_on)
+
     def _sync_text_overlay_color_btn(self, btn: QPushButton, hex_color: str) -> None:
         c = QColor(hex_color)
         fg = "#0f1117" if c.lightness() > 140 else "#f8fafc"
@@ -10058,10 +10254,12 @@ class MainWindow(QWidget):
     ) -> None:
         if not hasattr(self, "text_overlay_preview"):
             return
-        if not bool(self.text_overlay_enabled.isChecked()):
+        self._apply_text_overlay_preview_video(force=False)
+        preview = self.text_overlay_preview
+        overlay_on = bool(self.text_overlay_enabled.isChecked())
+        if not overlay_on:
             return
         orient = self.text_overlay_orientation.currentData()
-        preview = self.text_overlay_preview
         preview.blockSignals(True)
         preview.set_orientation(orient if isinstance(orient, str) else "vertical")
         preview.set_font_size(int(self.text_overlay_font_size.value()))
@@ -10090,10 +10288,11 @@ class MainWindow(QWidget):
             return
         on = bool(self.text_overlay_enabled.isChecked())
         self._text_overlay_panel.setEnabled(on)
+        if hasattr(self, "text_overlay_from_middle"):
+            self.text_overlay_from_middle.setEnabled(on)
         glow_on = bool(self.text_overlay_glow_enabled.isChecked())
         self.text_overlay_glow_btn.setEnabled(glow_on)
-        if on:
-            self._sync_text_overlay_preview()
+        self._sync_text_overlay_preview()
 
     def _populate_text_overlay_font_combo(self) -> None:
         if not hasattr(self, "text_overlay_font_combo"):
@@ -10232,6 +10431,19 @@ class MainWindow(QWidget):
             self._random_bounds_panel.setEnabled(bool(random_on))
         self._manual_section.setEnabled(True)
 
+    def _processing_run_options(self, *, for_slicing: bool = False) -> dict:
+        """Общие параметры обработки из раздела «Настройки»."""
+        out: dict = {
+            "num_workers": int(self.thread_slider.value()),
+            "use_gpu": bool(self.use_gpu.isChecked()),
+            "use_gpu_finalize": bool(self.use_gpu_finalize.isChecked()),
+        }
+        if for_slicing:
+            out["slice_fps_mode"] = str(
+                self.slice_fps_mode.currentData() or DEFAULT_SLICE_FPS_MODE
+            )
+        return out
+
     def _build_options(self) -> dict:
         st = UniquifySettings(
             brightness_delta=float(self.brightness.value()),
@@ -10248,9 +10460,7 @@ class MainWindow(QWidget):
             "input_dir": "",
             "output_dir": self.output_dir_edit.text().strip(),
             "input_files": list(self._selected_input_files),
-            "num_workers": int(self.thread_slider.value()),
-            "use_gpu": bool(self.use_gpu.isChecked()),
-            "use_gpu_finalize": bool(self.use_gpu_finalize.isChecked()),
+            **self._processing_run_options(),
             "settings": st.to_dict(),
             "randomize_uniquify": self.random_uniquify.isChecked(),
             "copies_per_file": int(self.copies_per_file.value()),
@@ -10426,6 +10636,7 @@ class MainWindow(QWidget):
         self._upload_streaming_description = ""
 
         opts = self._slice_tab.build_options()
+        opts.update(self._processing_run_options(for_slicing=True))
         if not opts["output_dir"]:
             QMessageBox.warning(self, "Zaliver", "Укажите выходную папку.")
             return
@@ -11916,8 +12127,6 @@ class MainWindow(QWidget):
 
         msg = bootstrap_fd_limits()
         _apply_thread_slider_fd_cap(self.thread_slider)
-        if hasattr(self, "_slice_tab"):
-            _apply_thread_slider_fd_cap(self._slice_tab.thread_slider)
         if msg:
             self._append_log(msg)
 

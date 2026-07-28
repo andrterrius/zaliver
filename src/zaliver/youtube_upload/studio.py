@@ -654,19 +654,21 @@ def _studio_account_switcher_all_channels_removed(page) -> bool:
 
 
 def _studio_abort_all_channels_removed(page, *, browser=None) -> None:
+    # Не вызываем browser.close(): при Yt+Inst Instagram уже в другой вкладке /
+    # pipeline — закрытие CDP убивает весь профиль и «зависает» общий залив.
+    # Профиль гасит вызывающий код (stop_profile) после завершения Instagram.
     _log(
         "Studio: все каналы в списке помечены как «Канал удалён» — "
-        "закрываем профиль."
+        "прерываем YouTube (браузер не закрываем здесь)."
     )
     if browser is not None:
-        _log("Playwright: закрытие браузера — все каналы удалены.")
-        try:
-            browser.close()
-        except Exception:
-            pass
+        _log(
+            "Studio: browser.close() пропущен (все каналы удалены) — "
+            "оставим сессию вызывающему коду."
+        )
     _studio_dismiss_open_menus(page)
     raise YoutubeAllChannelsRemovedError(
-        "YouTube Studio: все каналы в аккаунте удалены — профиль закрыт."
+        "YouTube Studio: все каналы в аккаунте удалены — залив YouTube прерван."
     )
 
 
@@ -3578,6 +3580,7 @@ def _studio_wait_create_or_login(
     deadline = time.monotonic() + max_s
     last_dialog_check = 0.0
     while True:
+        _studio_raise_if_channel_appeal_stuck(page)
         if _studio_on_google_auth_page(page) or _studio_login_required(page):
             if _studio_try_google_login_if_needed(page, login_credentials):
                 continue
@@ -3604,6 +3607,7 @@ def _studio_wait_create_or_login(
             break
         page.wait_for_timeout(150)
 
+    _studio_raise_if_channel_appeal_stuck(page)
     raise YoutubeStudioError("YouTube Studio: не дождались кнопки «Создать» (таймаут).")
 
 
@@ -3752,11 +3756,27 @@ def _studio_prepare_studio_dashboard(page, *, login_credentials=None) -> None:
     _studio_handle_onboarding_dialogs_if_present(page, login_credentials=login_credentials)
 
 
+def _studio_raise_if_channel_appeal_stuck(page) -> None:
+    """После попытки смены аккаунта всё ещё channel-appeal — не ждать «Создать»."""
+    if not _studio_channel_removed_page_visible(page):
+        return
+    raise YoutubeStudioError(
+        "YouTube Studio: открыта страница апелляции (channel-appeal) — "
+        "канал удалён или заблокирован."
+    )
+
+
 def _studio_goto_studio_if_needed(
     page, *, login_credentials=None, quick: bool = False
 ) -> None:
     """Открыть studio.youtube.com без ожидания кнопки «Создать»."""
     auth_fast = quick
+    # Уже channel-appeal: один раз пробуем сменить канал, иначе сразу ошибка —
+    # иначе Yt+Inst минутами ждёт «Создать», а Instagram так и не двигается.
+    if _studio_channel_removed_page_visible(page):
+        _log("Studio: сразу channel-appeal — пробуем сменить аккаунт…")
+        _studio_handle_channel_removed_if_present(page)
+        _studio_raise_if_channel_appeal_stuck(page)
     on_studio = _studio_page_on_studio_home(page) and not _studio_on_google_auth_page(
         page, fast=auth_fast
     )
@@ -3793,6 +3813,7 @@ def _studio_goto_studio_if_needed(
     elif _studio_on_google_auth_page(page) or _studio_login_required(page, fast=True):
         _studio_try_google_login_if_needed(page, login_credentials)
     _studio_handle_channel_removed_if_present(page)
+    _studio_raise_if_channel_appeal_stuck(page)
     _studio_handle_onboarding_dialogs_if_present(page, login_credentials=login_credentials)
 
 
@@ -3809,6 +3830,7 @@ def _studio_resolve_create_button(page, *, login_credentials=None):
     Кнопка «Создать» на главной Studio. Один переход в Studio и короткий опрос.
     """
     _studio_goto_studio_if_needed(page, login_credentials=login_credentials)
+    _studio_raise_if_channel_appeal_stuck(page)
     create = _studio_create_button_locator(page)
     _studio_handle_onboarding_dialogs_if_present(page, login_credentials=login_credentials)
     if _studio_create_button_visible(page, timeout_ms=4_000):
@@ -3818,6 +3840,7 @@ def _studio_resolve_create_button(page, *, login_credentials=None):
     deadline = time.monotonic() + 18.0
     last_dialog_check = 0.0
     while time.monotonic() < deadline:
+        _studio_raise_if_channel_appeal_stuck(page)
         if _studio_on_google_auth_page(page) or _studio_login_required(page):
             _studio_raise_if_auth_without_credentials(page, login_credentials)
             if _studio_try_google_login_if_needed(page, login_credentials):
@@ -3839,6 +3862,7 @@ def _studio_resolve_create_button(page, *, login_credentials=None):
             return create
         page.wait_for_timeout(120)
 
+    _studio_raise_if_channel_appeal_stuck(page)
     _studio_wait_create_or_login(
         page, create, login_credentials=login_credentials, timeout_s=45.0
     )
@@ -3859,6 +3883,12 @@ def _studio_click_create_then_add_video(
     → пункт «Добавить видео» (test-id=upload).
     Сессия Google должна уже быть в профиле антидетекта (без логина из Zaliver).
     """
+    # Не начинать долгий обход каналов, если Studio уже на апелляции.
+    if _studio_channel_removed_page_visible(page):
+        _log("Studio: channel-appeal перед «Создать» — пробуем сменить аккаунт…")
+        _studio_handle_channel_removed_if_present(page)
+        _studio_raise_if_channel_appeal_stuck(page)
+
     oldest = _studio_ensure_correct_studio_channel(
         page,
         yt_oldest_name=yt_oldest_name,
@@ -3871,6 +3901,7 @@ def _studio_click_create_then_add_video(
         raise YoutubeStudioError(
             "YouTube Studio: перед кликом «Создать» страница не studio.youtube.com."
         )
+    _studio_raise_if_channel_appeal_stuck(page)
     create.first.scroll_into_view_if_needed(timeout=10_000)
     _log("Studio: клик по «Создать»…")
     create.first.click(timeout=30_000)

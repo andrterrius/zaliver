@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -1592,7 +1593,9 @@ def _click_post_failed_retry(page) -> bool:
         return False
 
 
-def _click_post_shared_done(page, dialog) -> None:
+def _click_post_shared_done(
+    page, dialog, *, keep_in_background: bool = False
+) -> None:
     done = (
         dialog.first.get_by_role("button", name=_DONE_RE)
         .or_(dialog.first.locator('[role="button"]').filter(has_text=_DONE_RE))
@@ -1601,7 +1604,11 @@ def _click_post_shared_done(page, dialog) -> None:
     )
     try:
         if done.count() and done.first.is_visible(timeout=10_000):
-            done.first.click(timeout=30_000)
+            if keep_in_background:
+                # JS-клик без активации вкладки (не срывает YouTube Studio).
+                done.first.evaluate("el => el.click()")
+            else:
+                done.first.click(timeout=30_000)
             _log("Reels upload: нажали Done.")
             # Дать Instagram время проставить Reel в сетку профиля.
             page.wait_for_timeout(2_500)
@@ -1617,12 +1624,22 @@ def _click_post_shared_done(page, dialog) -> None:
     page.wait_for_timeout(2_000)
 
 
-def _wait_post_shared_and_done(page, *, timeout_s: float = 1_200.0) -> None:
+def _wait_post_shared_and_done(
+    page,
+    *,
+    timeout_s: float = 1_200.0,
+    keep_in_background: bool = False,
+    wait_before_done: threading.Event | None = None,
+    wait_before_done_timeout_s: float = 3_600.0,
+) -> None:
     """
     Ждём диалог Post shared / Reel shared (до 10 мин) и жмём Done.
 
     Если после Share появляется «Не удалось разместить публикацию» —
     один раз жмём «Повторить»; при повторной ошибке — выход с исключением.
+
+    wait_before_done — для Yt+Inst: не жать Done / не уходить на /reels/,
+    пока YouTube этого же ролика не закончил (иначе фокус срывает Studio).
     """
     _log(
         "Reels upload: ждём экран «Reel shared» / Post shared "
@@ -1637,7 +1654,24 @@ def _wait_post_shared_and_done(page, *, timeout_s: float = 1_200.0) -> None:
         try:
             if dialog.count() and dialog.first.is_visible(timeout=400):
                 _log("Reels upload: диалог Post shared виден.")
-                _click_post_shared_done(page, dialog)
+                if wait_before_done is not None:
+                    _log(
+                        "Reels upload: ждём завершения YouTube перед Done /reels/…"
+                    )
+                    if not wait_before_done.wait(
+                        timeout=max(30.0, float(wait_before_done_timeout_s))
+                    ):
+                        _log(
+                            "Reels upload: таймаут ожидания YouTube — "
+                            "продолжаем Done /reels/."
+                        )
+                    else:
+                        _log(
+                            "Reels upload: YouTube готов — Done /reels/."
+                        )
+                _click_post_shared_done(
+                    page, dialog, keep_in_background=keep_in_background
+                )
                 return
         except Exception:
             pass
@@ -1789,7 +1823,9 @@ def _open_own_profile(page, *, session_login: str = "") -> str:
     return username
 
 
-def _open_profile_reels_tab(page, username: str) -> None:
+def _open_profile_reels_tab(
+    page, username: str, *, keep_in_background: bool = False
+) -> None:
     """Сразу https://www.instagram.com/{username}/reels/ (без захода на профиль)."""
     uname = (username or "").strip().lstrip("@")
     if not uname:
@@ -1800,7 +1836,12 @@ def _open_profile_reels_tab(page, username: str) -> None:
 
     reels_url = f"https://www.instagram.com/{uname}/reels/"
     _log(f"Reels upload: сразу открываем {reels_url} (href профиля + /reels/)…")
-    _navigate_page_to(page, reels_url, label="IG profile reels")
+    _navigate_page_to(
+        page,
+        reels_url,
+        label="IG profile reels",
+        keep_in_background=keep_in_background,
+    )
     page.wait_for_timeout(1_500)
 
     try:
@@ -1825,6 +1866,7 @@ def _collect_profile_reel_urls(
     limit: int = 5,
     retries: int = 8,
     wait_ms: int = 4000,
+    keep_in_background: bool = False,
 ) -> list[str]:
     """
     Собрать до ``limit`` уникальных Reel-URL из сетки /username/reels/
@@ -1873,8 +1915,13 @@ def _collect_profile_reel_urls(
             )
             page.wait_for_timeout(wait_ms)
             try:
-                page.reload(wait_until="domcontentloaded", timeout=120_000)
-                page.wait_for_timeout(1_500)
+                # reload тоже может вытащить вкладку на передний план — в Yt+Inst
+                # лучше подождать без reload.
+                if keep_in_background:
+                    page.wait_for_timeout(1_500)
+                else:
+                    page.reload(wait_until="domcontentloaded", timeout=120_000)
+                    page.wait_for_timeout(1_500)
             except Exception:
                 pass
     raise InstagramReelsUploadError(
@@ -1897,6 +1944,7 @@ def run_instagram_reels_upload(
     top_reels_scan: int = 1,
     on_new_post_clicked=None,
     keep_in_background: bool = False,
+    wait_youtube_before_done: threading.Event | None = None,
 ) -> dict[str, Any]:
     """
     Главная → «Новая публикация» → файл → Share → Post shared →
@@ -1908,6 +1956,8 @@ def run_instagram_reels_upload(
     ``on_new_post_clicked`` — сразу после клика Create (открыть соседние вкладки).
     ``keep_in_background`` — не переключать фокус браузера на эту вкладку
     (Yt+Inst: фокус остаётся на YouTube).
+    ``wait_youtube_before_done`` — не жать Done / не открывать /reels/,
+    пока YouTube этого ролика не завершится.
     """
     upload_file = _validate_video_file_path(video_path)
     caption = (title or "").strip() or (description or "").strip()
@@ -1938,11 +1988,19 @@ def run_instagram_reels_upload(
     _click_next_until_caption_or_share(page)
     _fill_caption(page, caption)
     _click_share(page)
-    _wait_post_shared_and_done(page)
+    _wait_post_shared_and_done(
+        page,
+        keep_in_background=keep_in_background,
+        wait_before_done=wait_youtube_before_done,
+    )
     username = _open_own_profile(page, session_login=session_login)
-    _open_profile_reels_tab(page, username)
+    _open_profile_reels_tab(
+        page, username, keep_in_background=keep_in_background
+    )
     scan_n = max(1, int(top_reels_scan or 1))
-    urls = _collect_profile_reel_urls(page, limit=scan_n)
+    urls = _collect_profile_reel_urls(
+        page, limit=scan_n, keep_in_background=keep_in_background
+    )
     candidates: list[dict[str, str]] = []
     for u in urls:
         vid_i = _video_id_from_reel_url(u)

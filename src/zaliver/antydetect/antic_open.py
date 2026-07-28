@@ -38,16 +38,21 @@ def _log(message: str) -> None:
     _studio._log(f"[antic_open] {message}")
 
 
-def _close_playwright_browser(browser, *, timeout_s: float = 8.0) -> None:
+def _close_playwright_browser(
+    browser, *, timeout_s: float = 8.0, shared_cdp: bool = False
+) -> None:
     """
     Отключить Playwright от CDP-браузера.
 
     Важно: вызывать только из потока, где создан sync_playwright.
-    close()/stop() из другого потока оставляют asyncio loop running →
-    следующий start() падает: «Sync API inside the asyncio loop».
+    shared_cdp=True: НЕ вызывать browser.close() — для connect_over_cdp это
+    часто шлёт Browser.close и гасит весь Chrome (вторую вкладку YouTube тоже).
+    Достаточно pw.stop() у владельца соединения.
     """
     del timeout_s  # совместимость вызовов; таймаут через чужой поток нельзя
     if browser is None:
+        return
+    if shared_cdp:
         return
     try:
         browser.close()
@@ -333,7 +338,9 @@ def _ig_new_page_background(context, *, seed_page=None, url: str = "about:blank"
             if isinstance(tid, str) and tid.strip():
                 target_id = tid.strip()
 
-        deadline = time.monotonic() + 5.0
+        # background createTarget часто появляется в context.pages с задержкой —
+        # НЕ закрываем targetId (это и была живая вкладка Instagram).
+        deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
             found = _find_new_page()
             if found is not None:
@@ -342,13 +349,14 @@ def _ig_new_page_background(context, *, seed_page=None, url: str = "about:blank"
             ig_now = _ig_instagram_pages(context)
             if ig_now:
                 return ig_now[0]
-            time.sleep(0.05)
+            time.sleep(0.1)
 
         _log(
-            "Instagram Reels: CDP createTarget не появился в context.pages — "
-            "закрываем orphan и проверяем IG перед new_page()."
+            "Instagram Reels: CDP createTarget ещё не в context.pages "
+            f"(targetId={target_id!r}) — fallback new_page() без closeTarget."
         )
-        _close_orphan_target(cdp, target_id)
+        # closeTarget здесь нельзя: гасит единственную IG-вкладку, потом
+        # pipeline видит только Studio и browser.close() убивал YouTube.
         found = _find_new_page()
         if found is not None:
             return found
@@ -851,7 +859,8 @@ class ParallelShortsWarmupRunner:
                         shorts_page.close()
                     except Exception:
                         pass
-                    _close_playwright_browser(browser)
+                    # Shared CDP с основным заливом — не browser.close().
+                    _close_playwright_browser(browser, shared_cdp=True)
         except Exception as e:
             self.error = e
             if not self._stop.is_set():
@@ -4682,7 +4691,12 @@ def _ensure_one_instagram_tab(
         if seed_page is not None and blank is seed_page:
             continue
         try:
-            _navigate_page_to(blank, INSTAGRAM_URL, label="Yt+Inst IG tab")
+            _navigate_page_to(
+                blank,
+                INSTAGRAM_URL,
+                label="Yt+Inst IG tab",
+                keep_in_background=True,
+            )
             _log("Yt+Inst: blank-вкладка превращена в Instagram (фон).")
             _close_orphan_blanks(keep=(seed_page, blank))
             _refocus_youtube()
@@ -4701,7 +4715,12 @@ def _ensure_one_instagram_tab(
         cur = ""
     if "instagram.com" not in cur:
         try:
-            _navigate_page_to(page, INSTAGRAM_URL, label="Yt+Inst IG tab")
+            _navigate_page_to(
+                page,
+                INSTAGRAM_URL,
+                label="Yt+Inst IG tab",
+                keep_in_background=True,
+            )
         except Exception as e:
             _log(f"Yt+Inst: goto Instagram на вкладке: {e!r}")
     else:
@@ -4894,6 +4913,8 @@ class _YtInstIgJob:
     error: BaseException | None = None
     on_success: Callable[[dict], None] | None = None
     on_error: Callable[[BaseException], None] | None = None
+    # Сигнал: YouTube этого же ролика завершён — можно Done /reels/.
+    youtube_done: threading.Event | None = None
 
 
 _YT_INST_IG_PIPELINES: dict[str, "_YtInstIgPipeline"] = {}
@@ -4996,7 +5017,30 @@ class _YtInstIgPipeline:
                             break
                         time.sleep(0.2)
                     if ig_page is None:
-                        ig_page = _pick_primary_instagram_page(context)
+                        n_pages = len(_ig_alive_context_pages(context))
+                        _log(
+                            "Yt+Inst: pipeline не видит вкладку Instagram "
+                            f"(context_pages={n_pages}) — открываем заново…"
+                        )
+                        try:
+                            ig_page = _ensure_one_instagram_tab(
+                                context,
+                                seed_page=_seed,
+                                refocus_youtube=False,
+                            )
+                        except Exception as open_e:
+                            _log(
+                                f"Yt+Inst: pipeline не смог открыть IG: {open_e!r}"
+                            )
+                            ig_page = None
+                    if ig_page is not None:
+                        # Нельзя брать Studio как «Instagram» (_pick_primary fallback).
+                        if "instagram.com" not in _ig_page_url_lower(ig_page):
+                            _log(
+                                "Yt+Inst: pipeline: страница не Instagram "
+                                f"({_ig_page_url_lower(ig_page)!r}) — игнор."
+                            )
+                            ig_page = None
                     if ig_page is None or not _page_still_open(ig_page):
                         raise RuntimeError(
                             "Нет вкладки Instagram для pipeline-залива"
@@ -5021,6 +5065,7 @@ class _YtInstIgPipeline:
                             profile_id=self.profile_id or None,
                             top_reels_scan=1,
                             keep_in_background=True,
+                            wait_youtube_before_done=job.youtube_done,
                         )
                         batch_results.append(one)
                     if not batch_results:
@@ -5045,8 +5090,8 @@ class _YtInstIgPipeline:
                                 f"Yt+Inst: on_instagram_success: {cb_e!r}"
                             )
                 finally:
-                    # Сначала будим waiters (YouTube / drain), потом CDP close —
-                    # иначе browser.close()/stop зависают и стопят всю очередь.
+                    # Сначала будим waiters (YouTube / drain), потом disconnect.
+                    # НИКОГДА browser.close() на shared CDP — гасит YouTube-вкладку.
                     job.done.set()
                     signaled = True
                     try:
@@ -5055,8 +5100,8 @@ class _YtInstIgPipeline:
                         pass
                     if self._q.empty():
                         self._idle.set()
-                    _close_playwright_browser(_browser, timeout_s=5.0)
-                    _stop_playwright_driver(pw, timeout_s=5.0)
+                    _close_playwright_browser(_browser, shared_cdp=True)
+                    _stop_playwright_driver(pw)
             except Exception as e:
                 job.error = e
                 _log(
@@ -5349,6 +5394,7 @@ def _run_youtube_and_instagram_parallel(
         )
 
     ig_job: _YtInstIgJob | None = None
+    yt_done_event = threading.Event()
     if ig_items:
         pipe = _get_yt_inst_ig_pipeline(
             profile_id,
@@ -5361,6 +5407,7 @@ def _run_youtube_and_instagram_parallel(
             items=ig_items,
             on_success=on_instagram_success,
             on_error=on_instagram_error,
+            youtube_done=yt_done_event,
         )
         pipe.enqueue(ig_job)
         _log(
@@ -5429,18 +5476,19 @@ def _run_youtube_and_instagram_parallel(
             "Yt+Inst: YouTube — ошибка (Instagram продолжает в pipeline). "
             f"{type(e).__name__}: {e!r}"
         )
-        # channel-appeal / удалённые каналы: покажем IG-вкладку, чтобы не казалось,
-        # что «всё зависло на YouTube».
+        # Не переключаем фокус на IG при ошибке YouTube, если залив YT ещё
+        # мог быть в мастере — bring_to_front срывает Studio.
         try:
-            ig_pages = _ig_instagram_pages(context)
-            if ig_pages and _page_still_open(ig_pages[0]):
-                try:
-                    ig_pages[0].bring_to_front()
-                except Exception:
-                    pass
-                _log("Yt+Inst: фокус на вкладке Instagram после ошибки YouTube.")
+            _log(
+                "Yt+Inst: YouTube ошибка — фокус оставляем как есть "
+                "(Instagram продолжает в фоне)."
+            )
         except Exception:
             pass
+    finally:
+        # Разрешаем IG Done /reels/ только после конца YouTube этого ролика.
+        yt_done_event.set()
+        _log("Yt+Inst: сигнал YouTube готов (для IG Done /reels/).")
     # Не возвращаем фокус на Studio, пока Instagram ещё в pipeline —
     # иначе зависает навигация на /reels/.
 
@@ -5741,10 +5789,10 @@ def upload_youtube_and_instagram_in_profile(
                 return result
             finally:
                 _stop_parallel_shorts_warmup(warmup_runner)
-                # keep-open + живой IG pipeline: browser.close() часто вешает dual-CDP.
-                # pw.stop() всегда в _with_sync_playwright (этот же поток) — loop не травит worker.
+                # keep-open + живой IG pipeline: browser.close() на shared CDP
+                # гасит весь Chrome (YouTube). Отключаемся через pw.stop() в wrapper.
                 if not keep_open:
-                    _close_playwright_browser(browser)
+                    _close_playwright_browser(browser, shared_cdp=True)
 
         return _with_sync_playwright(
             _dolphin_yt_inst_job,
@@ -6080,7 +6128,7 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
                 finally:
                     _stop_parallel_shorts_warmup(warmup_runner)
                     if not keep_open:
-                        _close_playwright_browser(browser)
+                        _close_playwright_browser(browser, shared_cdp=True)
 
             return _with_sync_playwright(
                 _local_yt_inst_job,

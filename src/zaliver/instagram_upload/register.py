@@ -3004,8 +3004,60 @@ def _is_instagram_url(url: str) -> bool:
     return "instagram.com" in u and not u.startswith("about:")
 
 
-def _navigate_page_to(page, url: str, *, label: str = "Instagram") -> None:
+def _navigate_page_via_cdp_background(page, url: str, *, label: str) -> bool:
+    """
+    Page.navigate по CDP без Target.activateTarget — вкладка не выходит на передний план.
+    Нужно для Yt+Inst, чтобы Studio не теряла мастер загрузки.
+    """
+    cdp = None
+    try:
+        cdp = page.context.new_cdp_session(page)
+        _log(f"{label}: навигация (CDP Page.navigate, фон) → {url}")
+        cdp.send("Page.navigate", {"url": url})
+        deadline = time.monotonic() + 90.0
+        while time.monotonic() < deadline:
+            try:
+                page.wait_for_timeout(200)
+            except Exception:
+                time.sleep(0.2)
+            cur = _page_url(page)
+            if not cur or cur.lower() == "about:blank":
+                continue
+            if _is_instagram_url(cur) or cur.lower() != "about:blank":
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=30_000)
+                except Exception as e:
+                    _log(f"{label}: wait domcontentloaded после CDP navigate: {e!r}")
+                _log(f"{label}: OK (фон), URL={cur!r}")
+                if _is_cookie_consent_url(cur):
+                    accept_instagram_cookie_consent_if_present(
+                        page, appear_seconds=8.0, max_seconds=30.0
+                    )
+                return True
+        return False
+    except Exception as e:
+        _log(f"{label}: CDP Page.navigate не удалось: {e!r}")
+        return False
+    finally:
+        if cdp is not None:
+            try:
+                cdp.detach()
+            except Exception:
+                pass
+
+
+def _navigate_page_to(
+    page, url: str, *, label: str = "Instagram", keep_in_background: bool = False
+) -> None:
     """Надёжный goto для CDP/антидетекта (часто new_page зависает на about:blank)."""
+    if keep_in_background:
+        if _navigate_page_via_cdp_background(page, url, label=label):
+            return
+        _log(
+            f"{label}: фоновый CDP navigate не сработал — "
+            "fallback без bring_to_front."
+        )
+
     last_err: Exception | None = None
     strategies = (
         ("commit", lambda: page.goto(url, wait_until="commit", timeout=90_000)),
@@ -3024,10 +3076,14 @@ def _navigate_page_to(page, url: str, *, label: str = "Instagram") -> None:
     )
     for name, action in strategies:
         try:
-            try:
-                page.bring_to_front()
-            except Exception:
-                pass
+            # Yt+Inst: не перехватывать фокус у Studio — иначе при /reels/
+            # вкладка Instagram выходит на передний план, а возврат на YouTube
+            # перезагружает мастер загрузки.
+            if not keep_in_background:
+                try:
+                    page.bring_to_front()
+                except Exception:
+                    pass
             _log(f"{label}: навигация ({name}) → {url}")
             action()
             try:

@@ -630,7 +630,9 @@ def _dismiss_info_dialogs(page) -> None:
         pass
 
 
-def _attach_video_file(page, dialog, video_path: Path) -> None:
+def _attach_video_file(
+    page, dialog, video_path: Path, *, keep_in_background: bool = False
+) -> None:
     try:
         resolved = str(video_path.resolve())
     except OSError:
@@ -644,10 +646,11 @@ def _attach_video_file(page, dialog, video_path: Path) -> None:
         "(CDP DOM.setFileInputFiles)…"
     )
 
-    try:
-        page.bring_to_front()
-    except Exception:
-        pass
+    if not keep_in_background:
+        try:
+            page.bring_to_front()
+        except Exception:
+            pass
 
     file_input = _create_file_input_locator(dialog)
     preferred_frame = page
@@ -1748,218 +1751,46 @@ def _username_hint_from_login(session_login: str) -> str:
     return login
 
 
-def _click_sidebar_own_profile(page) -> bool:
-    """Клик по пункту своего профиля в сайдбаре. True если кликнули / уже на профиле."""
+def _resolve_own_username(page, *, session_login: str = "") -> str:
+    """
+    Username своего профиля без клика по сайдбару:
+    href кнопки Profile → extract → подсказка из session_login → URL.
+    """
     from zaliver.instagram_upload.register import _extract_logged_in_username
-
-    def _already_on_profile() -> bool:
-        try:
-            return bool(_username_from_url((page.url or "").strip()))
-        except Exception:
-            return False
-
-    username = (_extract_logged_in_username(page) or "").strip().lstrip("@")
-
-    # 1) Прямой href /username/
-    if username:
-        try:
-            link = page.locator(
-                f'a[href="/{username}/"], a[href="/{username}"]'
-            ).first
-            if link.count() and link.is_visible(timeout=4_000):
-                try:
-                    link.click(timeout=30_000)
-                except Exception as e:
-                    # После клика страница часто уходит с сайдбара — Playwright
-                    # кидает navigation/detach, хотя переход уже случился.
-                    _log(f"Reels upload: клик a[href=/username/] exception: {e!r}")
-                page.wait_for_timeout(800)
-                _log(f"Reels upload: клик профиля a[href=/{username}/].")
-                return True
-        except Exception as e:
-            _log(f"Reels upload: клик a[href=/username/]: {e!r}")
-            if _already_on_profile():
-                return True
-
-    # 2) aria-label / аватар
-    for sel in (
-        'a[aria-label="Profile" i]',
-        'a[aria-label="Профиль" i]',
-        'a[role="link"][aria-label*="Profile" i]',
-        'a[role="link"][aria-label*="Профиль" i]',
-        'svg[aria-label="Profile"]',
-        'svg[aria-label="Профиль"]',
-        'img[alt*="profile picture" i]',
-        'img[alt*="фото профиля" i]',
-        'img[alt*="Add a profile photo" i]',
-        'img[alt*="Добавить фото профиля" i]',
-        'span:text-is("Profile")',
-        'span:text-is("Профиль")',
-    ):
-        try:
-            loc = page.locator(sel).first
-            if not loc.count() or not loc.is_visible(timeout=700):
-                continue
-            if sel.startswith(("img", "span", "svg")):
-                clickable = loc.locator("xpath=ancestor::a[@href][1]")
-                target = clickable if clickable.count() else loc
-            else:
-                target = loc
-            try:
-                target.click(timeout=20_000)
-            except Exception as e:
-                _log(f"Reels upload: клик профиля {sel!r} exception: {e!r}")
-            page.wait_for_timeout(800)
-            _log(f"Reels upload: клик профиля через {sel!r}.")
-            if _already_on_profile():
-                return True
-            # Клик ушёл — даже если URL ещё не сменился.
-            return True
-        except Exception:
-            if _already_on_profile():
-                return True
-            continue
-
-    # 3) JS: ссылка сайдбара на один path-сегмент (свой профиль).
-    try:
-        href = page.evaluate(
-            """() => {
-              const reserved = new Set([
-                'reels','explore','direct','accounts','stories','p','reel','tv',
-                'tags','locations','about','legal','web','api','graphql','popular',
-                'challenge','privacy','meta','ads','notifications','nametag',
-                'directory','your_activity','professional_dashboard','archive'
-              ]);
-              const pick = (h) => {
-                if (!h) return '';
-                try {
-                  const u = new URL(h, location.origin);
-                  const m = (u.pathname || '').match(/^\\/([A-Za-z0-9._]{2,30})\\/?$/);
-                  if (!m) return '';
-                  const name = m[1];
-                  if (reserved.has(name.toLowerCase())) return '';
-                  return name;
-                } catch (e) { return ''; }
-              };
-              const sels = [
-                'a[aria-label="Profile" i]',
-                'a[aria-label="Профиль" i]',
-                'nav a[href^="/"]',
-                'a[href^="/"]',
-              ];
-              for (const sel of sels) {
-                for (const a of document.querySelectorAll(sel)) {
-                  const name = pick(a.getAttribute('href') || a.href || '');
-                  if (name) return a.getAttribute('href') || ('/' + name + '/');
-                }
-              }
-              return '';
-            }"""
-        )
-        if isinstance(href, str) and href.strip():
-            a = page.locator(f'a[href="{href.strip()}"]').first
-            if a.count() and a.is_visible(timeout=4_000):
-                try:
-                    a.click(timeout=20_000)
-                except Exception as e:
-                    _log(f"Reels upload: клик JS-профиля exception: {e!r}")
-                page.wait_for_timeout(800)
-                _log(f"Reels upload: клик профиля через JS href={href!r}.")
-                return True
-    except Exception as e:
-        _log(f"Reels upload: JS поиск профиля: {e!r}")
-
-    if _already_on_profile():
-        _log("Reels upload: уже на URL профиля после попыток клика.")
-        return True
-    return False
-
-
-def _open_own_profile(page, *, session_login: str = "") -> str:
-    """
-    Сайдбар → свой профиль.
-    Возвращает username; URL вида https://www.instagram.com/{username}.
-    """
-    from zaliver.instagram_upload.register import (
-        _extract_logged_in_username,
-        _navigate_page_to,
-    )
 
     hint = _username_hint_from_login(session_login)
     extracted = (_extract_logged_in_username(page) or "").strip().lstrip("@")
-    username = extracted or hint
-    _log(
-        f"Reels upload: открываем свой профиль "
-        f"(extracted={extracted!r}, hint={hint!r})…"
-    )
-
-    clicked = _click_sidebar_own_profile(page)
-
-    # Клик мог «упасть» из‑за навигации, но URL уже профиль.
+    from_url = ""
     try:
-        cur0 = (page.url or "").strip()
+        from_url = _username_from_url((page.url or "").strip())
     except Exception:
-        cur0 = ""
-    from_url0 = _username_from_url(cur0)
-    if from_url0:
-        clicked = True
-        username = from_url0
-        _log(f"Reels upload: после клика уже на профиле @{username} URL={cur0!r}.")
-
-    if not clicked and username:
-        _navigate_page_to(
-            page, f"https://www.instagram.com/{username}/", label="IG profile"
-        )
-        clicked = True
-
-    if not clicked:
-        raise InstagramReelsUploadError(
-            "Не удалось открыть свой профиль Instagram после Share."
-        )
-
-    # Ждём URL профиля /{username}/
-    deadline = time.monotonic() + 60.0
-    cur = cur0 if from_url0 else ""
-    while time.monotonic() < deadline:
-        try:
-            cur = (page.url or "").strip()
-        except Exception:
-            cur = ""
-        from_url = _username_from_url(cur)
-        if from_url:
-            username = from_url
-            break
-        page.wait_for_timeout(400)
-    else:
-        from_url = _username_from_url(cur)
-        if from_url:
-            username = from_url
-
-    if not username:
-        username = (
-            (_extract_logged_in_username(page) or "").strip().lstrip("@") or hint
-        )
-    if not username:
-        raise InstagramReelsUploadError(
-            f"Профиль открыт, но username не определён (URL={cur!r})."
-        )
-
-    # Если оказались не на странице профиля — явный goto.
-    if _username_from_url(cur) != username:
-        _navigate_page_to(
-            page, f"https://www.instagram.com/{username}/", label="IG profile"
-        )
-        page.wait_for_timeout(1_000)
-
+        from_url = ""
+    username = (extracted or from_url or hint or "").strip().lstrip("@")
     _log(
-        f"Reels upload: профиль открыт @{username} "
-        f"URL={(getattr(page, 'url', None) or '')!r}."
+        "Reels upload: username без клика по профилю "
+        f"(extracted={extracted!r}, url={from_url!r}, hint={hint!r}) → "
+        f"{username!r}"
     )
     return username
 
 
+def _open_own_profile(page, *, session_login: str = "") -> str:
+    """
+    Резолвит username своего профиля БЕЗ клика по кнопке Profile.
+    Переход на страницу профиля не делаем — сразу идём на /reels/
+    через ``_open_profile_reels_tab``.
+    """
+    username = _resolve_own_username(page, session_login=session_login)
+    if not username:
+        raise InstagramReelsUploadError(
+            "Не удалось получить username из ссылки профиля в сайдбаре "
+            "(без клика). Проверьте, что сессия Instagram активна."
+        )
+    return username
+
+
 def _open_profile_reels_tab(page, username: str) -> None:
-    """К текущему URL профиля просто добавляем /reels/."""
+    """Сразу https://www.instagram.com/{username}/reels/ (без захода на профиль)."""
     uname = (username or "").strip().lstrip("@")
     if not uname:
         raise InstagramReelsUploadError(
@@ -1967,14 +1798,8 @@ def _open_profile_reels_tab(page, username: str) -> None:
         )
     from zaliver.instagram_upload.register import _navigate_page_to
 
-    # Берём текущий URL профиля и дописываем /reels/.
-    try:
-        cur = (page.url or "").strip()
-    except Exception:
-        cur = ""
-    cur_user = _username_from_url(cur) or uname
-    reels_url = f"https://www.instagram.com/{cur_user}/reels/"
-    _log(f"Reels upload: открываем {reels_url} (profile URL + /reels/)…")
+    reels_url = f"https://www.instagram.com/{uname}/reels/"
+    _log(f"Reels upload: сразу открываем {reels_url} (href профиля + /reels/)…")
     _navigate_page_to(page, reels_url, label="IG profile reels")
     page.wait_for_timeout(1_500)
 
@@ -1992,28 +1817,6 @@ def _first_profile_reel_url(page, *, retries: int = 8, wait_ms: int = 4000) -> s
         page, limit=1, retries=retries, wait_ms=wait_ms
     )
     return urls[0]
-
-
-def _dismiss_instagram_overlays(page) -> None:
-    """Закрыть viewer Reel / диалоги (Escape), чтобы сайдбар снова был доступен."""
-    for _ in range(3):
-        try:
-            page.keyboard.press("Escape")
-            page.wait_for_timeout(250)
-        except Exception:
-            break
-
-
-def _return_instagram_home_after_upload(page) -> None:
-    """Вернуть вкладку на главную после подтверждения Reel (для следующего залива)."""
-    from zaliver.instagram_upload.register import INSTAGRAM_URL, _navigate_page_to
-
-    try:
-        _dismiss_instagram_overlays(page)
-        _navigate_page_to(page, INSTAGRAM_URL, label="IG home after upload")
-        _log("Reels upload: вкладка возвращена на главную после залива.")
-    except Exception as e:
-        _log(f"Reels upload: не удалось вернуться на главную после залива: {e!r}")
 
 
 def _collect_profile_reel_urls(
@@ -2093,15 +1896,18 @@ def run_instagram_reels_upload(
     profile_id: str | None = None,
     top_reels_scan: int = 1,
     on_new_post_clicked=None,
+    keep_in_background: bool = False,
 ) -> dict[str, Any]:
     """
     Главная → «Новая публикация» → файл → Share → Post shared →
-    свой профиль → URL+/reels/ → кандидаты из сетки.
+    username из href Profile → сразу /{username}/reels/ → кандидаты из сетки.
 
     Возвращает dict: video_id, url, title, description, candidate_reels.
     При ``top_reels_scan`` > 1 собирает несколько первых роликов
     (для multi-tab: если первый уже в БД — взять следующий).
     ``on_new_post_clicked`` — сразу после клика Create (открыть соседние вкладки).
+    ``keep_in_background`` — не переключать фокус браузера на эту вкладку
+    (Yt+Inst: фокус остаётся на YouTube).
     """
     upload_file = _validate_video_file_path(video_path)
     caption = (title or "").strip() or (description or "").strip()
@@ -2125,7 +1931,9 @@ def run_instagram_reels_upload(
             _log(f"Reels upload: on_new_post_clicked: {e!r}")
     _click_create_submenu_post_if_present(page)
     dialog = _wait_create_dialog(page)
-    _attach_video_file(page, dialog, upload_file)
+    _attach_video_file(
+        page, dialog, upload_file, keep_in_background=keep_in_background
+    )
     _select_crop_9_16(page)
     _click_next_until_caption_or_share(page)
     _fill_caption(page, caption)
@@ -2150,8 +1958,7 @@ def run_instagram_reels_upload(
         f"Reels upload: готово video_id={vid!r} url={url!r} "
         f"candidates={len(candidates)}"
     )
-    # Важно для первой вкладки (keep-open / multi-tab): не оставлять /reels/.
-    _return_instagram_home_after_upload(page)
+    # video_id получен — алгоритм залива завершён (без возврата на главную).
     return {
         "video_id": vid,
         "url": url,

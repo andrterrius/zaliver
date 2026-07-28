@@ -77,6 +77,7 @@ class ProfilesListInteraction(QObject):
         self._gmail_data_armed_row: ProfileListRow | None = None
         self._copy_id_armed_row: ProfileListRow | None = None
         self._preview_armed_row: ProfileListRow | None = None
+        self._upload_pause_armed_row: ProfileListRow | None = None
 
         self.lw.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self.lw.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -839,6 +840,7 @@ class ProfilesListInteraction(QObject):
         self._gmail_data_armed_row = None
         self._copy_id_armed_row = None
         self._preview_armed_row = None
+        self._upload_pause_armed_row = None
         self._lmb_select_end()
         self._cancel_checkbox_click_pending()
 
@@ -848,6 +850,44 @@ class ProfilesListInteraction(QObject):
         except Exception:
             pass
         self._clear_checkbox_click_pending()
+
+    def _profile_row_for_upload_pause_hit(
+        self, watched: QWidget, vp_pos: QPoint, *, global_pos: QPoint | None = None
+    ) -> ProfileListRow | None:
+        """Hit-test плашки паузы (как у кнопок) — работает и после grabMouse на viewport."""
+        gp = global_pos if global_pos is not None else self.lw.viewport().mapToGlobal(vp_pos)
+        for row in self._profile_id_to_row.values():
+            lbl = row.upload_label
+            if not lbl.isVisible():
+                continue
+            if row._upload_cooldown_kind != "wait" or row._upload_pause_cb is None:
+                continue
+            if lbl.rect().contains(lbl.mapFromGlobal(gp)):
+                return row
+            if watched is lbl:
+                return row
+
+        widgets_to_check: list[QWidget] = [watched]
+        child = self.lw.viewport().childAt(vp_pos)
+        if child is not None and child is not watched:
+            widgets_to_check.append(child)
+        for w in widgets_to_check:
+            cur: QWidget | None = w
+            while cur is not None and cur is not self.lw.viewport():
+                for row in self._profile_id_to_row.values():
+                    if cur is row.upload_label:
+                        if (
+                            row._upload_cooldown_kind == "wait"
+                            and row._upload_pause_cb is not None
+                        ):
+                            return row
+                cur = cur.parentWidget()
+        return None
+
+    def _invoke_upload_pause_click(self, row: ProfileListRow) -> None:
+        if row._upload_pause_cb is None or row._upload_cooldown_kind != "wait":
+            return
+        row._upload_pause_cb()
 
     def _is_upload_pause_click_widget(self, watched: QWidget, row_index: int) -> bool:
         pid = self._pid_at_row(row_index)
@@ -892,9 +932,22 @@ class ProfilesListInteraction(QObject):
             ):
                 row = self._preview_armed_row
                 self._preview_armed_row = None
+                self._upload_pause_armed_row = None
                 self._cancel_checkbox_click_pending()
                 self._lmb_select_end()
                 self._invoke_preview_click(row)
+                return True
+
+            if (
+                et == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton
+                and self._upload_pause_armed_row is not None
+            ):
+                row = self._upload_pause_armed_row
+                self._upload_pause_armed_row = None
+                self._cancel_checkbox_click_pending()
+                self._lmb_select_end()
+                self._invoke_upload_pause_click(row)
                 return True
 
             if (
@@ -905,9 +958,19 @@ class ProfilesListInteraction(QObject):
                     watched, vp_pos, global_pos=global_pos
                 )
                 if preview_row is not None:
+                    self._upload_pause_armed_row = None
                     self._cancel_checkbox_click_pending()
                     self._lmb_select_end()
                     self._invoke_preview_click(preview_row)
+                    return True
+                pause_row = self._profile_row_for_upload_pause_hit(
+                    watched, vp_pos, global_pos=global_pos
+                )
+                if pause_row is not None:
+                    self._upload_pause_armed_row = None
+                    self._cancel_checkbox_click_pending()
+                    self._lmb_select_end()
+                    self._invoke_upload_pause_click(pause_row)
                     return True
 
             if (
@@ -917,6 +980,7 @@ class ProfilesListInteraction(QObject):
             ):
                 row = self._copy_id_armed_row
                 self._copy_id_armed_row = None
+                self._upload_pause_armed_row = None
                 self._cancel_checkbox_click_pending()
                 self._lmb_select_end()
                 self._invoke_copy_id_click(row)
@@ -929,6 +993,7 @@ class ProfilesListInteraction(QObject):
             ):
                 row = self._account_data_armed_row
                 self._account_data_armed_row = None
+                self._upload_pause_armed_row = None
                 self._cancel_checkbox_click_pending()
                 self._lmb_select_end()
                 self._invoke_account_data_click(row)
@@ -941,6 +1006,7 @@ class ProfilesListInteraction(QObject):
             ):
                 row = self._gmail_data_armed_row
                 self._gmail_data_armed_row = None
+                self._upload_pause_armed_row = None
                 self._cancel_checkbox_click_pending()
                 self._lmb_select_end()
                 self._invoke_gmail_data_click(row)
@@ -953,6 +1019,7 @@ class ProfilesListInteraction(QObject):
                     self._account_data_armed_row = None
                     self._gmail_data_armed_row = None
                     self._preview_armed_row = None
+                    self._upload_pause_armed_row = None
                     self._cancel_checkbox_click_pending()
                     return True
                 self._copy_id_armed_row = None
@@ -962,6 +1029,7 @@ class ProfilesListInteraction(QObject):
                     self._account_data_armed_row = account_row
                     self._gmail_data_armed_row = None
                     self._preview_armed_row = None
+                    self._upload_pause_armed_row = None
                     self._cancel_checkbox_click_pending()
                     return True
                 self._account_data_armed_row = None
@@ -970,6 +1038,7 @@ class ProfilesListInteraction(QObject):
                 if gmail_row is not None:
                     self._gmail_data_armed_row = gmail_row
                     self._preview_armed_row = None
+                    self._upload_pause_armed_row = None
                     self._cancel_checkbox_click_pending()
                     return True
                 self._gmail_data_armed_row = None
@@ -982,9 +1051,23 @@ class ProfilesListInteraction(QObject):
                     self._account_data_armed_row = None
                     self._gmail_data_armed_row = None
                     self._copy_id_armed_row = None
+                    self._upload_pause_armed_row = None
                     self._cancel_checkbox_click_pending()
                     return True
                 self._preview_armed_row = None
+
+                pause_row = self._profile_row_for_upload_pause_hit(
+                    watched, vp_pos, global_pos=global_pos
+                )
+                if pause_row is not None:
+                    self._upload_pause_armed_row = pause_row
+                    self._account_data_armed_row = None
+                    self._gmail_data_armed_row = None
+                    self._copy_id_armed_row = None
+                    self._preview_armed_row = None
+                    self._cancel_checkbox_click_pending()
+                    return True
+                self._upload_pause_armed_row = None
 
             paint_mode = self._lmb_select_active or self._checkbox_row_pending is not None
 
@@ -1008,6 +1091,8 @@ class ProfilesListInteraction(QObject):
             if et == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
                 for row_w in self._profile_id_to_row.values():
                     if row_w.try_handle_upload_pause_click(watched):
+                        self._cancel_checkbox_click_pending()
+                        self._lmb_select_end()
                         return True
                 if self._lmb_select_active:
                     self._lmb_select_end()
@@ -1036,6 +1121,10 @@ class ProfilesListInteraction(QObject):
                 ):
                     return False
                 if self._profile_row_for_preview_button_hit(
+                    watched, vp_pos, global_pos=global_pos
+                ):
+                    return False
+                if self._profile_row_for_upload_pause_hit(
                     watched, vp_pos, global_pos=global_pos
                 ):
                     return False

@@ -137,7 +137,11 @@ from zaliver.ui.ig_checker_profile_dialog import IgCheckerProfilePickDialog
 from zaliver.ui.profiles_list_interaction import ProfilesListInteraction
 from zaliver.ui.ffmpeg_install_worker import FfmpegInstallWorker
 from zaliver.stats_server_client import notify_uploaded_video
-from zaliver.youtube_upload.schedule_publish import MSK, validate_schedule_times
+from zaliver.youtube_upload.schedule_publish import (
+    MSK,
+    parse_msk_datetime,
+    validate_schedule_times,
+)
 from zaliver.ui.uploaded_instagram_stats_refresh_worker import (
     UploadedInstagramStatsRefreshWorker,
 )
@@ -162,9 +166,11 @@ from zaliver.ui.channel_setup_helpers import (
     make_magic_wand_button,
 )
 from zaliver.ui.title_variables_ui import show_youtube_title_warnings, title_field_with_variables_hint
+from zaliver.config.platform_settings import PlatformSettings
 from zaliver.ui.platform import (
     PLATFORM_INSTAGRAM,
     PLATFORM_YOUTUBE,
+    PLATFORM_YT_INST,
     apply_platform_branding,
     brand_text,
     normalize_platform,
@@ -2242,6 +2248,9 @@ class MainWindow(QWidget):
         settings_hint = QLabel(
             "Выберите браузер по умолчанию для раздела «Профили». "
             "Токен Dolphin — https://dolphin-anty.net/panel/#/api"
+            if self._platform != PLATFORM_YT_INST
+            else "Общие настройки антидетекта и ИИ, плюс разделы YouTube и Instagram "
+            "(параметры берутся из настроек соответствующих платформ)."
         )
         settings_hint.setObjectName("hint")
         settings_hint.setWordWrap(True)
@@ -2407,6 +2416,7 @@ class MainWindow(QWidget):
         gy.addWidget(_settings_save_row(self._btn_save_youtube), 3, 0, 1, 2)
         gy.addWidget(self._youtube_settings_status, 4, 0, 1, 2)
         # В Instagram API-ключ Data API не используется (статистика через сессию профиля).
+        # Yt+Inst — оба раздела: YouTube и Instagram.
         gb_yt.setVisible(self._platform != PLATFORM_INSTAGRAM)
 
         gb_ig = QGroupBox("Instagram")
@@ -2416,7 +2426,9 @@ class MainWindow(QWidget):
             "Минимальная пауза между успешными заливами с одного профиля Instagram.\n"
             "0 ч 0 мин — браузер не закрывается между роликами на том же профиле;\n"
             "появляется настройка «Вкладок на профиль» для параллельного залива.\n"
-            "У YouTube всегда 3 часа и в настройках не меняется."
+            "У YouTube всегда 3 часа и в настройках не меняется.\n"
+            "В режиме Yt+Inst используется эта же пауза Instagram "
+            "(0 — следующий залив на тот же профиль без закрытия браузера)."
         )
         self._instagram_upload_pause_hours = QSpinBox()
         self._instagram_upload_pause_hours.setRange(0, 168)
@@ -2476,7 +2488,9 @@ class MainWindow(QWidget):
         gi.addWidget(self._instagram_tabs_per_profile, 1, 1)
         gi.addWidget(_settings_save_row(self._btn_save_instagram), 2, 0, 1, 2)
         gi.addWidget(self._instagram_settings_status, 3, 0, 1, 2)
-        gb_ig.setVisible(self._platform == PLATFORM_INSTAGRAM)
+        gb_ig.setVisible(
+            self._platform in (PLATFORM_INSTAGRAM, PLATFORM_YT_INST)
+        )
 
         gb_ai = QGroupBox("ИИ")
         gai = _compact_settings_grid(gb_ai)
@@ -2571,6 +2585,14 @@ class MainWindow(QWidget):
                 "Настройки",
             ]
         )
+        # Yt+Inst: уникализация, нарезка и настройки (YT+IG разделы).
+        if self._platform == PLATFORM_YT_INST:
+            for i in range(2, self._nav.count()):
+                item = self._nav.item(i)
+                if item is None:
+                    continue
+                # 7 = Настройки
+                item.setHidden(i != 7)
         self._nav.setCurrentRow(0)
         self._nav.currentRowChanged.connect(self._on_nav_row_changed)
 
@@ -4332,6 +4354,12 @@ class MainWindow(QWidget):
                     "Подпись к Reels (необязательно). "
                     "Можно использовать переменные: {date}, {profile}, {video}, {index}…"
                 )
+        elif self._platform == PLATFORM_YT_INST:
+            if title_le is not None:
+                title_le.setPlaceholderText(
+                    "Название YouTube / подпись Instagram. "
+                    "Переменные: {date}, {profile}, {video}, {index}…"
+                )
         profiles_col = QWidget()
         profiles_col_l = QVBoxLayout(profiles_col)
         profiles_col_l.setContentsMargins(0, 0, 0, 0)
@@ -5002,15 +5030,21 @@ class MainWindow(QWidget):
             )
         return max_concurrent_browsers_from_settings(self._settings)
 
+    def _settings_for(self, platform: str) -> PlatformSettings:
+        """Настройки конкретной платформы (Yt+Inst читает youtube / instagram отдельно)."""
+        store = getattr(self._settings, "store", self._settings)
+        return PlatformSettings(store, platform)
+
     def _load_youtube_settings(self) -> None:
         if not hasattr(self, "_youtube_api_key"):
             return
-        key = (self._settings.value("youtube/api_key", "", type=str) or "").strip()
+        yt = self._settings_for(PLATFORM_YOUTUBE)
+        key = (yt.value("youtube/api_key", "", type=str) or "").strip()
         self._youtube_api_key.setText(key)
         if key:
             os.environ["YOUTUBE_API_KEY"] = key
         if hasattr(self, "_youtube_search_oldest"):
-            search_oldest = self._settings.value(
+            search_oldest = yt.value(
                 "youtube/search_oldest_channel", True, type=bool
             )
             self._youtube_search_oldest.blockSignals(True)
@@ -5018,26 +5052,35 @@ class MainWindow(QWidget):
             self._youtube_search_oldest.blockSignals(False)
         if hasattr(self, "_stats_server_username"):
             gu = (
-                self._settings.value("stats_server/username", "", type=str) or ""
+                yt.value("stats_server/username", "", type=str) or ""
             ).strip()
             self._stats_server_username.setText(gu)
 
-    def _upload_pause_between_uploads(self) -> timedelta:
-        """Пауза между заливами: YouTube всегда 3 ч, Instagram — из настроек."""
-        if self._platform != PLATFORM_INSTAGRAM:
+    def _upload_pause_between_uploads(
+        self, platform: str | None = None
+    ) -> timedelta:
+        """
+        Пауза между заливами.
+        YouTube — всегда 3 ч; Instagram и Yt+Inst — из настроек Instagram.
+        """
+        plat = normalize_platform(platform or self._platform)
+        if plat == PLATFORM_YT_INST:
+            return self._upload_pause_between_uploads(PLATFORM_INSTAGRAM)
+        if plat != PLATFORM_INSTAGRAM:
             return DEFAULT_UPLOAD_PAUSE_BETWEEN_UPLOADS
+        ig = self._settings_for(PLATFORM_INSTAGRAM)
         total_mins: int | None = None
-        if self._settings.contains("upload_pause_minutes"):
+        if ig.contains("upload_pause_minutes"):
             try:
                 total_mins = int(
-                    self._settings.value("upload_pause_minutes", 180, type=int)
+                    ig.value("upload_pause_minutes", 180, type=int)
                 )
             except (TypeError, ValueError):
                 total_mins = None
         if total_mins is None:
             # Миграция со старого ключа (только часы).
             try:
-                hours = int(self._settings.value("upload_pause_hours", 3, type=int))
+                hours = int(ig.value("upload_pause_hours", 3, type=int))
             except (TypeError, ValueError):
                 hours = 3
             total_mins = max(0, min(168, hours)) * 60
@@ -5049,7 +5092,7 @@ class MainWindow(QWidget):
             return
         if not hasattr(self, "_instagram_upload_pause_minutes"):
             return
-        pause = self._upload_pause_between_uploads()
+        pause = self._upload_pause_between_uploads(PLATFORM_INSTAGRAM)
         total_mins = max(0, int(round(pause.total_seconds() / 60.0)))
         hours, mins = divmod(total_mins, 60)
         hours = max(0, min(168, hours))
@@ -5061,7 +5104,9 @@ class MainWindow(QWidget):
         self._instagram_upload_pause_hours.blockSignals(False)
         self._instagram_upload_pause_minutes.blockSignals(False)
         if hasattr(self, "_instagram_tabs_per_profile"):
-            tabs_n = instagram_tabs_per_profile_from_settings(self._settings)
+            tabs_n = instagram_tabs_per_profile_from_settings(
+                self._settings_for(PLATFORM_INSTAGRAM)
+            )
             self._instagram_tabs_per_profile.blockSignals(True)
             self._instagram_tabs_per_profile.setValue(tabs_n)
             self._instagram_tabs_per_profile.blockSignals(False)
@@ -5083,11 +5128,16 @@ class MainWindow(QWidget):
             self._instagram_tabs_per_profile_label.setVisible(show)
 
     def _instagram_tabs_per_profile_value(self) -> int:
-        if hasattr(self, "_instagram_tabs_per_profile"):
+        # Instagram / Yt+Inst: из UI настроек; иначе — из namespace Instagram.
+        if self._platform in (PLATFORM_INSTAGRAM, PLATFORM_YT_INST) and hasattr(
+            self, "_instagram_tabs_per_profile"
+        ):
             return clamp_instagram_tabs_per_profile(
                 self._instagram_tabs_per_profile.value()
             )
-        return instagram_tabs_per_profile_from_settings(self._settings)
+        return instagram_tabs_per_profile_from_settings(
+            self._settings_for(PLATFORM_INSTAGRAM)
+        )
 
     def _save_instagram_settings(self) -> None:
         if not hasattr(self, "_instagram_upload_pause_hours"):
@@ -5097,13 +5147,14 @@ class MainWindow(QWidget):
         hours = max(0, min(168, int(self._instagram_upload_pause_hours.value())))
         mins = max(0, min(59, int(self._instagram_upload_pause_minutes.value())))
         total_mins = hours * 60 + mins
-        self._settings.setValue("upload_pause_minutes", total_mins)
+        ig = self._settings_for(PLATFORM_INSTAGRAM)
+        ig.setValue("upload_pause_minutes", total_mins)
         # Совместимость со старым ключом (целые часы).
-        self._settings.setValue("upload_pause_hours", hours)
+        ig.setValue("upload_pause_hours", hours)
         tabs_n = self._instagram_tabs_per_profile_value()
-        self._settings.setValue(SETTINGS_KEY_INSTAGRAM_TABS_PER_PROFILE, tabs_n)
+        ig.setValue(SETTINGS_KEY_INSTAGRAM_TABS_PER_PROFILE, tabs_n)
         try:
-            self._settings.sync()
+            ig.sync()
         except Exception:
             pass
         pause = timedelta(minutes=total_mins)
@@ -5211,12 +5262,13 @@ class MainWindow(QWidget):
     def _save_youtube_settings(self) -> None:
         if not hasattr(self, "_youtube_api_key"):
             return
+        yt = self._settings_for(PLATFORM_YOUTUBE)
         key = (self._youtube_api_key.text() or "").strip()
         if key:
-            self._settings.setValue("youtube/api_key", key)
+            yt.setValue("youtube/api_key", key)
             os.environ["YOUTUBE_API_KEY"] = key
             try:
-                self._settings.sync()
+                yt.sync()
             except Exception:
                 pass
             if hasattr(self, "_youtube_settings_status"):
@@ -5226,12 +5278,12 @@ class MainWindow(QWidget):
             return
 
         try:
-            self._settings.remove("youtube/api_key")
+            yt.remove("youtube/api_key")
         except Exception:
-            self._settings.setValue("youtube/api_key", "")
+            yt.setValue("youtube/api_key", "")
         os.environ.pop("YOUTUBE_API_KEY", None)
         try:
-            self._settings.sync()
+            yt.sync()
         except Exception:
             pass
         if hasattr(self, "_youtube_settings_status"):
@@ -5358,21 +5410,23 @@ class MainWindow(QWidget):
             pass
 
     def _youtube_search_oldest_channel(self) -> bool:
-        if hasattr(self, "_youtube_search_oldest"):
+        if hasattr(self, "_youtube_search_oldest") and self._platform != PLATFORM_INSTAGRAM:
             return bool(self._youtube_search_oldest.isChecked())
         return bool(
-            self._settings.value("youtube/search_oldest_channel", True, type=bool)
+            self._settings_for(PLATFORM_YOUTUBE).value(
+                "youtube/search_oldest_channel", True, type=bool
+            )
         )
 
     def _on_youtube_search_oldest_changed(self, _state: int) -> None:
         if not hasattr(self, "_youtube_search_oldest"):
             return
-        self._settings.setValue(
+        self._settings_for(PLATFORM_YOUTUBE).setValue(
             "youtube/search_oldest_channel",
             bool(self._youtube_search_oldest.isChecked()),
         )
         try:
-            self._settings.sync()
+            self._settings_for(PLATFORM_YOUTUBE).sync()
         except Exception:
             pass
 
@@ -10707,8 +10761,10 @@ class MainWindow(QWidget):
                 self._settings.value("antydetect/dolphin_headless", True, type=bool)
             )
         is_instagram_upload = self._platform == PLATFORM_INSTAGRAM
+        is_yt_inst_upload = self._platform == PLATFORM_YT_INST
+        # Пауза 0 (из настроек Instagram): keep-open для Instagram и Yt+Inst.
         ig_keep_browser_open = (
-            is_instagram_upload
+            (is_instagram_upload or is_yt_inst_upload)
             and self._upload_pause_between_uploads().total_seconds() <= 0
         )
         upload_req = build_upload_queue_request(
@@ -10754,15 +10810,26 @@ class MainWindow(QWidget):
             kind=kind,
             base_url=base_url,
             for_instagram=is_instagram_upload,
+            for_both=is_yt_inst_upload,
         )
 
-        upload_platform_label = "Instagram Reels" if is_instagram_upload else "YouTube"
+        if is_yt_inst_upload:
+            upload_platform_label = "Yt+Inst"
+        elif is_instagram_upload:
+            upload_platform_label = "Instagram Reels"
+        else:
+            upload_platform_label = "YouTube"
         stream_note = " (по мере готовности)" if streaming else ""
         ids_preview = ",".join(profile_ids)
         self._append_session_log(
             f"{upload_platform_label}: многопоточная заливка стартует{stream_note}. "
             f"Видео={len(video_paths)}, профили={len(profile_ids)} [{ids_preview}]…"
         )
+        if is_yt_inst_upload and ig_keep_browser_open:
+            self._append_session_log(
+                "Yt+Inst: пауза Instagram = 0 — браузер не закрывается, "
+                "если следующий залив на тот же профиль."
+            )
         self._upload_delete_after_enabled = upload_req.delete_after_upload
         with self._upload_success_lock:
             self._upload_success_video_paths.clear()
@@ -10837,6 +10904,8 @@ class MainWindow(QWidget):
                 set_log_sink,
                 upload_instagram_reel_in_local_antidetect_profile,
                 upload_instagram_reel_in_profile,
+                upload_youtube_and_instagram_in_local_antidetect_profile,
+                upload_youtube_and_instagram_in_profile,
             )
 
             set_log_sink(self._ui_log_line.emit)
@@ -10856,6 +10925,502 @@ class MainWindow(QWidget):
                 video_path=task.video_path,
                 index=_next_upload_var_index(),
             )
+
+            def _record_one(
+                *,
+                video_path: str,
+                title: str,
+                description: str,
+                one_res,
+                schedule_publish_at: datetime | None = None,
+                record_platform: str | None = None,
+            ) -> None:
+                plat = (record_platform or self._platform or "").strip() or PLATFORM_YOUTUBE
+                if plat == PLATFORM_YT_INST:
+                    plat = PLATFORM_YOUTUBE
+                is_ig_rec = plat == PLATFORM_INSTAGRAM
+                vid = ""
+                url = ""
+                if isinstance(one_res, dict):
+                    vid = str(one_res.get("video_id") or "").strip()
+                    url = str(one_res.get("url") or "").strip()
+                if not vid and url:
+                    if is_ig_rec:
+                        for marker in ("/reel/", "/p/"):
+                            if marker in url:
+                                part = url.split(marker, 1)[1]
+                                vid = part.split("/", 1)[0].split("?", 1)[0].strip()
+                                break
+                    else:
+                        try:
+                            from zaliver.youtube_parsing.video_stats import (
+                                extract_video_id,
+                            )
+
+                            vid = extract_video_id(url)
+                        except Exception:
+                            pass
+                if not vid:
+                    raise RuntimeError(f"Empty video_id (res={one_res!r})")
+                if not url:
+                    if is_ig_rec:
+                        url = f"https://www.instagram.com/reel/{vid}/"
+                    else:
+                        url = _studio_canonical_watch_url(vid)
+                if not url:
+                    raise RuntimeError(f"Empty url (res={one_res!r})")
+
+                sid = int(self._upload_session.id) if self._upload_session is not None else 0
+                if sid <= 0:
+                    raise RuntimeError("upload_session is not set (sid=0)")
+
+                stored_title = title or ""
+                if keep_studio_title and not stored_title and not is_ig_rec:
+                    stored_title = Path(video_path).stem
+
+                self._upload_store.add_uploaded_video(
+                    session_id=sid,
+                    title=stored_title,
+                    description=description or "",
+                    url=url,
+                    video_id=vid,
+                    profile_id=profile_id,
+                    platform=plat,
+                )
+                try:
+                    self._upload_store.inc_uploaded_ok(session_id=sid, delta=1)
+                except Exception:
+                    pass
+                try:
+                    stats_notified = bool(
+                        isinstance(one_res, dict) and one_res.get("stats_notified")
+                    )
+                    if guser and not stats_notified:
+                        scheduled_unix = None
+                        if not is_ig_rec:
+                            sched_dt = parse_msk_datetime(schedule_publish_at)
+                            if sched_dt is not None:
+                                scheduled_unix = int(sched_dt.timestamp())
+                        ok = notify_uploaded_video(
+                            video_id=vid,
+                            username=guser,
+                            profile_id=profile_id,
+                            scheduled=scheduled_unix,
+                            platform=plat,
+                        )
+                        try:
+                            if ok:
+                                self._ui_log_line.emit(
+                                    f"[stats_server] уведомление отправлено: videoId={vid}"
+                                )
+                            else:
+                                self._ui_log_line.emit(
+                                    f"[stats_server] сервер не принял уведомление: videoId={vid}"
+                                )
+                        except Exception:
+                            pass
+                    elif not guser:
+                        try:
+                            self._ui_log_line.emit(
+                                "[stats_server] username не задан — уведомление пропущено."
+                            )
+                        except Exception:
+                            pass
+                except Exception as e:
+                    try:
+                        self._ui_log_line.emit(
+                            f"[stats_server] ошибка уведомления: {e!r}"
+                        )
+                    except Exception:
+                        pass
+                try:
+                    QTimer.singleShot(0, self._refresh_uploaded_list)
+                except Exception:
+                    pass
+                with self._upload_success_lock:
+                    self._upload_success_video_paths.add(video_path)
+
+            def _confirm_instagram_result(res, *, multi_tab: bool = False) -> dict | None:
+                ig_vid = ""
+                ig_url = ""
+                candidates: list[dict] = []
+                if isinstance(res, dict):
+                    ig_vid = str(res.get("video_id") or "").strip()
+                    ig_url = str(res.get("url") or "").strip()
+                    raw_cands = res.get("candidate_reels")
+                    if isinstance(raw_cands, list):
+                        for item in raw_cands:
+                            if not isinstance(item, dict):
+                                continue
+                            c_vid = str(item.get("video_id") or "").strip()
+                            c_url = str(item.get("url") or "").strip()
+                            if c_vid or c_url:
+                                candidates.append(
+                                    {"video_id": c_vid, "url": c_url}
+                                )
+                if not candidates and (ig_vid or ig_url):
+                    candidates = [{"video_id": ig_vid, "url": ig_url}]
+
+                chosen = None
+                skipped: list[str] = []
+                for cand in candidates:
+                    c_vid = str(cand.get("video_id") or "").strip()
+                    c_url = str(cand.get("url") or "").strip()
+                    if self._upload_store.has_uploaded_video(
+                        video_id=c_vid,
+                        url=c_url,
+                        platform=PLATFORM_INSTAGRAM,
+                    ):
+                        skipped.append(c_vid or c_url)
+                        continue
+                    chosen = cand
+                    break
+                if chosen is None:
+                    detail = (
+                        f"проверено={len(candidates)}, already={skipped!r}"
+                        if multi_tab
+                        else f"video_id={ig_vid!r}, url={ig_url!r}"
+                    )
+                    raise RuntimeError(
+                        "Instagram Reels: "
+                        + (
+                            "все первые ролики в профиле уже есть в базе залитых"
+                            if multi_tab and len(candidates) > 1
+                            else "первое видео в профиле уже есть в базе залитых"
+                        )
+                        + f" ({detail}) — заливка не подтверждена."
+                    )
+                ig_vid = str(chosen.get("video_id") or "").strip()
+                ig_url = str(chosen.get("url") or "").strip()
+                if multi_tab and skipped:
+                    try:
+                        self._ui_log_line.emit(
+                            "[upload] Instagram multi-tab: пропущены уже "
+                            f"известные Reels {skipped!r}, берём "
+                            f"video_id={ig_vid!r}"
+                        )
+                    except Exception:
+                        pass
+                if isinstance(res, dict):
+                    out = dict(res)
+                    out["video_id"] = ig_vid
+                    out["url"] = ig_url
+                    return out
+                return {"video_id": ig_vid, "url": ig_url}
+
+            if is_yt_inst_upload:
+                creds = self._profile_login_credentials(profile_id)
+                yt_oldest = self._profile_yt_oldest_name(profile_id) or None
+                search_oldest = self._youtube_search_oldest_channel()
+                sess_login, sess_pwd, sess_2fa = self._instagram_session_credentials(
+                    profile_id
+                )
+                task_scheduled = (
+                    task.schedule_publish_at is not None or task.scheduled_batch
+                )
+                title_result = expand_and_limit_title(task.title, var_ctx)
+                resolved_title = title_result.title
+                if title_result.truncated:
+                    try:
+                        self._ui_log_line.emit(
+                            "[upload] Название обрезано до 100 символов "
+                            f"(было {title_result.original_length})."
+                        )
+                    except Exception:
+                        pass
+                resolved_description = expand_title_variables(
+                    task.description, var_ctx
+                )
+                resolved_scheduled_batch = None
+                if task.scheduled_batch:
+                    resolved_scheduled_batch = []
+                    for item in task.scheduled_batch:
+                        item_ctx = TitleVariableContext(
+                            profile_name=_profile_display_name(profile_id),
+                            video_path=item.video_path,
+                            index=_next_upload_var_index(),
+                        )
+                        item_title_result = expand_and_limit_title(
+                            item.title, item_ctx
+                        )
+                        if item_title_result.truncated:
+                            try:
+                                self._ui_log_line.emit(
+                                    "[upload] Название обрезано до 100 символов "
+                                    f"(было {item_title_result.original_length})."
+                                )
+                            except Exception:
+                                pass
+                        resolved_scheduled_batch.append(
+                            ScheduledUploadItem(
+                                video_path=item.video_path,
+                                title=item_title_result.title,
+                                description=expand_title_variables(
+                                    item.description, item_ctx
+                                ),
+                                schedule_publish_at=item.schedule_publish_at,
+                            )
+                        )
+                warmup_kw = {}
+                if schedule_warmup_shorts and task_scheduled:
+                    warmup_kw = dict(
+                        warmup_during_schedule=True,
+                        warmup_shorts_recommendations=schedule_warmup_shorts_recommendations,
+                        warmup_search_query=schedule_warmup_search_query or None,
+                        warmup_shorts_batch_count=5,
+                        warmup_like_probability_pct=10.0,
+                        warmup_subscribe_probability_pct=10.0,
+                        warmup_shorts_watch_min_s=5.0,
+                        warmup_shorts_watch_max_s=25.0,
+                    )
+                keep_open = bool(ig_keep_browser_open) and (
+                    (mgr_holder.get("mgr").should_keep_browser_open(profile_id))
+                    if mgr_holder.get("mgr") is not None
+                    else True
+                )
+
+                def _record_yt_inst_youtube(yt_part: dict) -> None:
+                    batch_results = []
+                    raw_batch = yt_part.get("batch_results")
+                    if isinstance(raw_batch, list):
+                        batch_results = raw_batch
+                    if batch_results and task.scheduled_batch:
+                        items_for_record = (
+                            resolved_scheduled_batch or task.scheduled_batch
+                        )
+                        if len(batch_results) != len(items_for_record):
+                            raise RuntimeError(
+                                "scheduled_batch size mismatch: "
+                                f"{len(batch_results)} results vs "
+                                f"{len(items_for_record)} tasks"
+                            )
+                        for item, item_res in zip(items_for_record, batch_results):
+                            _record_one(
+                                video_path=item.video_path,
+                                title=item.title,
+                                description=item.description,
+                                one_res=item_res,
+                                schedule_publish_at=item.schedule_publish_at,
+                                record_platform=PLATFORM_YOUTUBE,
+                            )
+                    else:
+                        _record_one(
+                            video_path=task.video_path,
+                            title=resolved_title,
+                            description=resolved_description,
+                            one_res=yt_part,
+                            schedule_publish_at=task.schedule_publish_at,
+                            record_platform=PLATFORM_YOUTUBE,
+                        )
+                    try:
+                        self._set_previous_upload_result_tag(
+                            profile_id=profile_id,
+                            success=True,
+                            kind=kind,
+                            base_url=base_url,
+                            for_instagram=False,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        self._ui_log_line.emit(
+                            "[upload] Yt+Inst: YouTube сохранён в залитые "
+                            "(уведомление отправлено)."
+                        )
+                    except Exception:
+                        pass
+
+                def _record_yt_inst_instagram(ig_part) -> None:
+                    try:
+                        ig_batch = []
+                        if isinstance(ig_part, dict):
+                            raw_ig_batch = ig_part.get("batch_results")
+                            if isinstance(raw_ig_batch, list):
+                                ig_batch = raw_ig_batch
+                        if ig_batch and task.scheduled_batch:
+                            items_for_record = (
+                                resolved_scheduled_batch or task.scheduled_batch
+                            )
+                            for item, item_res in zip(items_for_record, ig_batch):
+                                confirmed = _confirm_instagram_result(item_res)
+                                _record_one(
+                                    video_path=item.video_path,
+                                    title=item.title,
+                                    description=item.description,
+                                    one_res=confirmed,
+                                    record_platform=PLATFORM_INSTAGRAM,
+                                )
+                        else:
+                            confirmed = _confirm_instagram_result(ig_part)
+                            _record_one(
+                                video_path=task.video_path,
+                                title=resolved_title,
+                                description=resolved_description,
+                                one_res=confirmed,
+                                record_platform=PLATFORM_INSTAGRAM,
+                            )
+                        try:
+                            self._set_previous_upload_result_tag(
+                                profile_id=profile_id,
+                                success=True,
+                                kind=kind,
+                                base_url=base_url,
+                                for_instagram=True,
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            self._ui_log_line.emit(
+                                "[upload] Yt+Inst: Instagram сохранён в залитые."
+                            )
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        try:
+                            self._ui_log_line.emit(
+                                f"[upload] Yt+Inst: запись Instagram не удалась: {e!r}"
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            self._set_previous_upload_result_tag(
+                                profile_id=profile_id,
+                                success=False,
+                                kind=kind,
+                                base_url=base_url,
+                                for_instagram=True,
+                            )
+                        except Exception:
+                            pass
+
+                def _on_yt_inst_ig_error(err: BaseException) -> None:
+                    try:
+                        self._ui_log_line.emit(
+                            f"[upload] Yt+Inst: Instagram ошибка (pipeline) — "
+                            f"{type(err).__name__}: {err}"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        self._set_previous_upload_result_tag(
+                            profile_id=profile_id,
+                            success=False,
+                            kind=kind,
+                            base_url=base_url,
+                            for_instagram=True,
+                        )
+                    except Exception:
+                        pass
+
+                combined_kw = dict(
+                    headless=headless,
+                    video_path=task.video_path,
+                    title=resolved_title,
+                    description=resolved_description,
+                    login_credentials=creds,
+                    yt_oldest_name=yt_oldest,
+                    search_oldest_channel=search_oldest,
+                    publish_before_checks=publish_before_checks,
+                    keep_studio_title=keep_studio_title,
+                    schedule_publish_at=task.schedule_publish_at,
+                    scheduled_batch=resolved_scheduled_batch,
+                    stats_server_username=guser or None,
+                    session_login=sess_login,
+                    session_password=sess_pwd,
+                    session_twofa=sess_2fa,
+                    keep_browser_open=keep_open,
+                    on_youtube_success=_record_yt_inst_youtube,
+                    on_instagram_success=_record_yt_inst_instagram,
+                    on_instagram_error=_on_yt_inst_ig_error,
+                    **warmup_kw,
+                )
+                if _is_own_antidetect_kind(kind):
+                    res = upload_youtube_and_instagram_in_local_antidetect_profile(
+                        profile_id,
+                        base_url=(base_url or "").strip(),
+                        remote_cdp=remote_cdp,
+                        **combined_kw,
+                    )
+                else:
+                    res = upload_youtube_and_instagram_in_profile(
+                        profile_id,
+                        local_token=token or None,
+                        **combined_kw,
+                    )
+
+                yt_part = res.get("youtube") if isinstance(res, dict) else None
+                ig_part = res.get("instagram") if isinstance(res, dict) else None
+                ig_pending = bool(
+                    isinstance(res, dict) and res.get("instagram_pending")
+                )
+                yt_err_s = (
+                    str(res.get("youtube_error") or "").strip()
+                    if isinstance(res, dict)
+                    else ""
+                )
+                ig_err_s = (
+                    str(res.get("instagram_error") or "").strip()
+                    if isinstance(res, dict)
+                    else ""
+                )
+
+                yt_ok = isinstance(yt_part, dict)
+                ig_ok = isinstance(ig_part, dict) or (
+                    # Уже записан через on_instagram_success в pipeline
+                    # при wait_for_instagram — ig_part в res; при pending — ещё нет.
+                    False
+                )
+                # YouTube уже записан в on_youtube_success; IG — в callback или ниже.
+                if isinstance(ig_part, dict) and not ig_pending:
+                    # Двойная запись не нужна, если callback уже сработал при wait.
+                    # При wait_for_instagram callback уже вызван из pipeline —
+                    # ig_ok отмечаем по наличию результата без повторной записи.
+                    ig_ok = True
+
+                if not yt_ok:
+                    try:
+                        self._set_previous_upload_result_tag(
+                            profile_id=profile_id,
+                            success=False,
+                            kind=kind,
+                            base_url=base_url,
+                            for_instagram=False,
+                        )
+                    except Exception:
+                        pass
+
+                if not yt_ok and not ig_ok and not ig_pending:
+                    parts = []
+                    if yt_err_s:
+                        parts.append(f"YouTube: {yt_err_s}")
+                    if ig_err_s:
+                        parts.append(f"Instagram: {ig_err_s}")
+                    detail = "; ".join(parts) if parts else "нет результата"
+                    raise RuntimeError(f"Yt+Inst: обе площадки не залиты ({detail})")
+                if yt_ok and ig_pending:
+                    try:
+                        self._ui_log_line.emit(
+                            "[upload] Yt+Inst: YouTube OK — следующее видео "
+                            "можно брать из очереди; Instagram догоняет в pipeline."
+                        )
+                    except Exception:
+                        pass
+                if yt_ok and not ig_ok and ig_err_s and not ig_pending:
+                    try:
+                        self._ui_log_line.emit(
+                            f"[upload] Yt+Inst: YouTube OK, Instagram ошибка — {ig_err_s}"
+                        )
+                    except Exception:
+                        pass
+                if ig_ok and not yt_ok and yt_err_s:
+                    try:
+                        self._ui_log_line.emit(
+                            f"[upload] Yt+Inst: Instagram OK, YouTube ошибка — {yt_err_s}"
+                        )
+                    except Exception:
+                        pass
+                return
+
             if is_instagram_upload:
                 # Подпись Reels длиннее лимита названия Studio — только expand.
                 resolved_title = expand_title_variables(task.title, var_ctx)
@@ -10920,70 +11485,7 @@ class MainWindow(QWidget):
                 # После залива: первое Reel в сетке. В multi-tab параллельные
                 # вкладки могут уже записать соседние ролики — берём первый
                 # из топ-5, которого ещё нет в базе.
-                ig_vid = ""
-                ig_url = ""
-                candidates: list[dict] = []
-                if isinstance(res, dict):
-                    ig_vid = str(res.get("video_id") or "").strip()
-                    ig_url = str(res.get("url") or "").strip()
-                    raw_cands = res.get("candidate_reels")
-                    if isinstance(raw_cands, list):
-                        for item in raw_cands:
-                            if not isinstance(item, dict):
-                                continue
-                            c_vid = str(item.get("video_id") or "").strip()
-                            c_url = str(item.get("url") or "").strip()
-                            if c_vid or c_url:
-                                candidates.append(
-                                    {"video_id": c_vid, "url": c_url}
-                                )
-                if not candidates and (ig_vid or ig_url):
-                    candidates = [{"video_id": ig_vid, "url": ig_url}]
-
-                chosen = None
-                skipped: list[str] = []
-                for cand in candidates:
-                    c_vid = str(cand.get("video_id") or "").strip()
-                    c_url = str(cand.get("url") or "").strip()
-                    if self._upload_store.has_uploaded_video(
-                        video_id=c_vid,
-                        url=c_url,
-                        platform=self._platform,
-                    ):
-                        skipped.append(c_vid or c_url)
-                        continue
-                    chosen = cand
-                    break
-                if chosen is None:
-                    detail = (
-                        f"проверено={len(candidates)}, already={skipped!r}"
-                        if multi_tab
-                        else f"video_id={ig_vid!r}, url={ig_url!r}"
-                    )
-                    raise RuntimeError(
-                        "Instagram Reels: "
-                        + (
-                            "все первые ролики в профиле уже есть в базе залитых"
-                            if multi_tab and len(candidates) > 1
-                            else "первое видео в профиле уже есть в базе залитых"
-                        )
-                        + f" ({detail}) — заливка не подтверждена."
-                    )
-                ig_vid = str(chosen.get("video_id") or "").strip()
-                ig_url = str(chosen.get("url") or "").strip()
-                if multi_tab and skipped:
-                    try:
-                        self._ui_log_line.emit(
-                            "[upload] Instagram multi-tab: пропущены уже "
-                            f"известные Reels {skipped!r}, берём "
-                            f"video_id={ig_vid!r}"
-                        )
-                    except Exception:
-                        pass
-                if isinstance(res, dict):
-                    res = dict(res)
-                    res["video_id"] = ig_vid
-                    res["url"] = ig_url
+                res = _confirm_instagram_result(res, multi_tab=multi_tab)
                 resolved_scheduled_batch = None
             else:
                 creds = self._profile_login_credentials(profile_id)
@@ -11076,115 +11578,6 @@ class MainWindow(QWidget):
                         **open_kw,
                     )
 
-            def _record_one(
-                *,
-                video_path: str,
-                title: str,
-                description: str,
-                one_res,
-                schedule_publish_at: datetime | None = None,
-            ) -> None:
-                vid = ""
-                url = ""
-                if isinstance(one_res, dict):
-                    vid = str(one_res.get("video_id") or "").strip()
-                    url = str(one_res.get("url") or "").strip()
-                if not vid and url:
-                    if is_instagram_upload:
-                        for marker in ("/reel/", "/p/"):
-                            if marker in url:
-                                part = url.split(marker, 1)[1]
-                                vid = part.split("/", 1)[0].split("?", 1)[0].strip()
-                                break
-                    else:
-                        try:
-                            from zaliver.youtube_parsing.video_stats import (
-                                extract_video_id,
-                            )
-
-                            vid = extract_video_id(url)
-                        except Exception:
-                            pass
-                if not vid:
-                    raise RuntimeError(f"Empty video_id (res={one_res!r})")
-                if not url:
-                    if is_instagram_upload:
-                        url = f"https://www.instagram.com/reel/{vid}/"
-                    else:
-                        url = _studio_canonical_watch_url(vid)
-                if not url:
-                    raise RuntimeError(f"Empty url (res={one_res!r})")
-
-                sid = int(self._upload_session.id) if self._upload_session is not None else 0
-                if sid <= 0:
-                    raise RuntimeError("upload_session is not set (sid=0)")
-
-                stored_title = title or ""
-                if keep_studio_title and not stored_title:
-                    stored_title = Path(video_path).stem
-
-                self._upload_store.add_uploaded_video(
-                    session_id=sid,
-                    title=stored_title,
-                    description=description or "",
-                    url=url,
-                    video_id=vid,
-                    profile_id=profile_id,
-                    platform=self._platform,
-                )
-                try:
-                    self._upload_store.inc_uploaded_ok(session_id=sid, delta=1)
-                except Exception:
-                    pass
-                try:
-                    stats_notified = bool(
-                        isinstance(one_res, dict) and one_res.get("stats_notified")
-                    )
-                    if guser and not stats_notified:
-                        scheduled_unix = None
-                        if not is_instagram_upload:
-                            sched_dt = parse_msk_datetime(schedule_publish_at)
-                            if sched_dt is not None:
-                                scheduled_unix = int(sched_dt.timestamp())
-                        ok = notify_uploaded_video(
-                            video_id=vid,
-                            username=guser,
-                            profile_id=profile_id,
-                            scheduled=scheduled_unix,
-                            platform=self._platform,
-                        )
-                        try:
-                            if ok:
-                                self._ui_log_line.emit(
-                                    f"[stats_server] уведомление отправлено: videoId={vid}"
-                                )
-                            else:
-                                self._ui_log_line.emit(
-                                    f"[stats_server] сервер не принял уведомление: videoId={vid}"
-                                )
-                        except Exception:
-                            pass
-                    elif not guser:
-                        try:
-                            self._ui_log_line.emit(
-                                "[stats_server] username не задан — уведомление пропущено."
-                            )
-                        except Exception:
-                            pass
-                except Exception as e:
-                    try:
-                        self._ui_log_line.emit(
-                            f"[stats_server] ошибка уведомления: {e!r}"
-                        )
-                    except Exception:
-                        pass
-                try:
-                    QTimer.singleShot(0, self._refresh_uploaded_list)
-                except Exception:
-                    pass
-                with self._upload_success_lock:
-                    self._upload_success_video_paths.add(video_path)
-
             batch_results = []
             if isinstance(res, dict):
                 raw_batch = res.get("batch_results")
@@ -11217,16 +11610,17 @@ class MainWindow(QWidget):
                 )
 
         def _on_profile_upload_attempt(pid: str, ok: bool, err: str) -> None:
-            try:
-                self._set_previous_upload_result_tag(
-                    profile_id=pid,
-                    success=bool(ok),
-                    kind=kind,
-                    base_url=base_url,
-                    for_instagram=is_instagram_upload,
-                )
-            except Exception:
-                pass
+            if not is_yt_inst_upload:
+                try:
+                    self._set_previous_upload_result_tag(
+                        profile_id=pid,
+                        success=bool(ok),
+                        kind=kind,
+                        base_url=base_url,
+                        for_instagram=is_instagram_upload,
+                    )
+                except Exception:
+                    pass
             if ok:
                 self._upload_store.reset_profile_upload_errors(profile_id=pid)
                 return
@@ -11674,6 +12068,7 @@ class MainWindow(QWidget):
         kind: str,
         base_url: str,
         for_instagram: bool = False,
+        for_both: bool = False,
     ) -> None:
         from zaliver.antydetect.profile_tags import (
             IG_UPLOAD_PREVIOUS_ERROR_TAG,
@@ -11693,20 +12088,24 @@ class MainWindow(QWidget):
             )
             return
         # Снимаем и актуальные, и старые имена (без суффикса платформы).
-        if for_instagram:
-            tags_to_clear = [
-                IG_UPLOAD_PREVIOUS_SUCCESS_TAG,
-                IG_UPLOAD_PREVIOUS_ERROR_TAG,
-                "УСПЕШНЫЙ ПРОШЛЫЙ ЗАЛИВ",
-                "ОШИБКА ПРОШЛОГО ЗАЛИВА",
-            ]
-        else:
-            tags_to_clear = [
-                UPLOAD_PREVIOUS_SUCCESS_TAG,
-                UPLOAD_PREVIOUS_ERROR_TAG,
-                "УСПЕШНЫЙ ПРОШЛЫЙ ЗАЛИВ",
-                "ОШИБКА ПРОШЛОГО ЗАЛИВА",
-            ]
+        tags_to_clear = [
+            "УСПЕШНЫЙ ПРОШЛЫЙ ЗАЛИВ",
+            "ОШИБКА ПРОШЛОГО ЗАЛИВА",
+        ]
+        if for_both or for_instagram:
+            tags_to_clear.extend(
+                [
+                    IG_UPLOAD_PREVIOUS_SUCCESS_TAG,
+                    IG_UPLOAD_PREVIOUS_ERROR_TAG,
+                ]
+            )
+        if for_both or not for_instagram:
+            tags_to_clear.extend(
+                [
+                    UPLOAD_PREVIOUS_SUCCESS_TAG,
+                    UPLOAD_PREVIOUS_ERROR_TAG,
+                ]
+            )
         try:
             for pid in pids:
                 for tag in tags_to_clear:

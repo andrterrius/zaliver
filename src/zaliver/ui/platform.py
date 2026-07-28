@@ -17,9 +17,14 @@ from zaliver.config.platform_settings import (
     PLATFORM_CHOICES,
     PLATFORM_INSTAGRAM,
     PLATFORM_YOUTUBE,
+    PLATFORM_YT_INST,
     PlatformSettings,
+    is_instagram_platform,
+    is_yt_inst_platform,
     normalize_platform,
     platform_display_name,
+    platform_includes_instagram,
+    platform_includes_youtube,
 )
 
 # Длинные фразы первыми, чтобы не резать их короткими заменами.
@@ -144,9 +149,14 @@ __all__ = [
     "PLATFORM_CHOICES",
     "PLATFORM_INSTAGRAM",
     "PLATFORM_YOUTUBE",
+    "PLATFORM_YT_INST",
     "PlatformSettings",
     "apply_platform_branding",
     "brand_text",
+    "is_instagram_platform",
+    "is_yt_inst_platform",
     "normalize_platform",
     "platform_display_name",
+    "platform_includes_instagram",
+    "platform_includes_youtube",
 ]

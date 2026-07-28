@@ -10,14 +10,14 @@ import { AiPage } from "../pages/AiPage";
 import { SettingsPage } from "../pages/SettingsPage";
 
 const NAV = [
-  "Уникализация",
-  "Нарезка",
-  "Готовые видео",
-  "Залитые видео",
-  "Профили",
-  "Редактирование каналов",
-  "ИИ",
-  "Настройки",
+  { id: 0, label: "Уникализация" },
+  { id: 1, label: "Нарезка" },
+  { id: 2, label: "Готовые видео" },
+  { id: 3, label: "Залитые видео" },
+  { id: 4, label: "Профили" },
+  { id: 5, label: "Редактирование каналов" },
+  { id: 6, label: "ИИ" },
+  { id: 7, label: "Настройки" },
 ] as const;
 
 type Props = {
@@ -27,17 +27,21 @@ type Props = {
 
 export function AppShell({ platform, onBack }: Props) {
   const [tab, setTab] = useState(0);
+  const navItems =
+    platform === "yt_inst"
+      ? NAV.filter((n) => n.id === 0 || n.id === 1 || n.id === 7)
+      : NAV;
 
   return (
     <div className="shell">
       <aside className="side-nav">
         <ul className="side-nav-list">
-          {NAV.map((label, i) => (
+          {navItems.map(({ id, label }) => (
             <li key={label}>
               <button
                 type="button"
-                className={tab === i ? "active" : ""}
-                onClick={() => setTab(i)}
+                className={tab === id ? "active" : ""}
+                onClick={() => setTab(id)}
               >
                 {label}
               </button>

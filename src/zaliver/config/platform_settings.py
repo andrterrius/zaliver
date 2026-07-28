@@ -8,10 +8,16 @@ from zaliver.config.store import SettingsStore, ensure_settings_store
 
 PLATFORM_YOUTUBE = "youtube"
 PLATFORM_INSTAGRAM = "instagram"
+PLATFORM_YT_INST = "yt_inst"
 
 PLATFORM_CHOICES: tuple[tuple[str, str, str], ...] = (
     (PLATFORM_YOUTUBE, "YouTube", "Залив видео на YouTube"),
     (PLATFORM_INSTAGRAM, "Instagram", "Залив видео на Instagram"),
+    (
+        PLATFORM_YT_INST,
+        "Yt+Inst",
+        "Одно видео на YouTube и Instagram (2 вкладки)",
+    ),
 )
 
 # Shared across platforms (antidetect, LLM key).
@@ -28,14 +34,59 @@ _SHARED_KEYS: frozenset[str] = frozenset(
 
 
 def normalize_platform(value: str | None) -> str:
-    v = (value or "").strip().lower()
-    if v == PLATFORM_INSTAGRAM:
+    v = (value or "").strip().lower().replace("+", "_").replace("-", "_")
+    if v in (PLATFORM_INSTAGRAM, "ig", "inst"):
         return PLATFORM_INSTAGRAM
+    if v in (
+        PLATFORM_YT_INST,
+        "youtube_instagram",
+        "youtube_inst",
+        "ytinstagram",
+        "yt_ig",
+    ):
+        return PLATFORM_YT_INST
     return PLATFORM_YOUTUBE
 
 
 def platform_display_name(platform: str) -> str:
-    return "Instagram" if normalize_platform(platform) == PLATFORM_INSTAGRAM else "YouTube"
+    p = normalize_platform(platform)
+    if p == PLATFORM_INSTAGRAM:
+        return "Instagram"
+    if p == PLATFORM_YT_INST:
+        return "Yt+Inst"
+    return "YouTube"
+
+
+def is_instagram_platform(platform: str | None) -> bool:
+    return normalize_platform(platform) == PLATFORM_INSTAGRAM
+
+
+def is_yt_inst_platform(platform: str | None) -> bool:
+    return normalize_platform(platform) == PLATFORM_YT_INST
+
+
+def platform_includes_youtube(platform: str | None) -> bool:
+    p = normalize_platform(platform)
+    return p in (PLATFORM_YOUTUBE, PLATFORM_YT_INST)
+
+
+def platform_includes_instagram(platform: str | None) -> bool:
+    p = normalize_platform(platform)
+    return p in (PLATFORM_INSTAGRAM, PLATFORM_YT_INST)
+
+
+def platform_settings_storage_id(platform: str | None) -> str:
+    """
+    Namespace for PlatformSettings keys.
+
+    Yt+Inst shares the YouTube namespace for prep/shared UI keys (folders, uniquify).
+    Platform-specific upload params (IG pause/tabs, YT API) should be read via
+    PlatformSettings(store, youtube|instagram) explicitly when in yt_inst mode.
+    """
+    p = normalize_platform(platform)
+    if p == PLATFORM_YT_INST:
+        return PLATFORM_YOUTUBE
+    return p
 
 
 class PlatformSettings:
@@ -49,6 +100,7 @@ class PlatformSettings:
         else:
             self._store = ensure_settings_store(settings)
         self._platform = normalize_platform(platform)
+        self._storage_platform = platform_settings_storage_id(self._platform)
 
     @property
     def platform(self) -> str:
@@ -71,7 +123,7 @@ class PlatformSettings:
     def _full_key(self, key: str) -> str:
         if self._is_shared(key):
             return key
-        return f"platforms/{self._platform}/{key}"
+        return f"platforms/{self._storage_platform}/{key}"
 
     def contains(self, key: str) -> bool:
         full = self._full_key(key)
@@ -79,12 +131,12 @@ class PlatformSettings:
             return True
         if self._is_shared(key):
             return False
-        return self._platform == PLATFORM_YOUTUBE and self._store.contains(key)
+        return self._storage_platform == PLATFORM_YOUTUBE and self._store.contains(key)
 
     def value(self, key: str, default: Any = None, type: Any = None) -> Any:
         full = self._full_key(key)
         if not self._store.contains(full) and not self._is_shared(key):
-            if self._platform == PLATFORM_YOUTUBE and self._store.contains(key):
+            if self._storage_platform == PLATFORM_YOUTUBE and self._store.contains(key):
                 legacy = (
                     self._store.value(key, default, type=type)
                     if type is not None

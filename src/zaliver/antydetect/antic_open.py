@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import queue
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Callable
 
 from patchright.sync_api import sync_playwright
 
@@ -35,12 +38,68 @@ def _log(message: str) -> None:
     _studio._log(f"[antic_open] {message}")
 
 
-def _close_playwright_browser(browser) -> None:
-    try:
-        if browser is not None:
+def _close_playwright_browser(browser, *, timeout_s: float = 8.0) -> None:
+    """
+    Отключить Playwright от CDP-браузера без долгой блокировки.
+
+    При двух CDP-клиентах на один профиль (YouTube + IG pipeline)
+    browser.close() иногда зависает навсегда — из‑за этого после
+    «Instagram сохранён» очередь/закрытие больше не двигаются.
+    """
+    if browser is None:
+        return
+
+    def _do_close() -> None:
+        try:
             browser.close()
-    except Exception:
-        pass
+        except Exception:
+            pass
+
+    t = threading.Thread(
+        target=_do_close,
+        name="pw-cdp-close",
+        daemon=True,
+    )
+    t.start()
+    join_s = max(0.5, float(timeout_s))
+    t.join(timeout=join_s)
+    if t.is_alive():
+        try:
+            _log(
+                f"Playwright: browser.close() не завершился за {join_s:.0f} с "
+                "— продолжаем (CDP disconnect в фоне)."
+            )
+        except Exception:
+            pass
+
+
+def _stop_playwright_driver(playwright, *, timeout_s: float = 8.0) -> None:
+    """Остановить драйвер Playwright с таймаутом (иначе keep-open + IG зависает)."""
+    if playwright is None:
+        return
+
+    def _do_stop() -> None:
+        try:
+            playwright.stop()
+        except Exception:
+            pass
+
+    t = threading.Thread(
+        target=_do_stop,
+        name="pw-driver-stop",
+        daemon=True,
+    )
+    t.start()
+    join_s = max(0.5, float(timeout_s))
+    t.join(timeout=join_s)
+    if t.is_alive():
+        try:
+            _log(
+                f"Playwright: driver.stop() не завершился за {join_s:.0f} с "
+                "— продолжаем."
+            )
+        except Exception:
+            pass
 
 
 # Сериализация start_profile / launch при параллельных вкладках одного профиля.
@@ -117,6 +176,11 @@ def close_instagram_keep_open_hub(profile_id: str) -> None:
     pid = (profile_id or "").strip()
     if not pid:
         return
+    # Дождаться фоновой очереди Instagram Yt+Inst, иначе потеряем заливы.
+    try:
+        drain_yt_inst_ig_pipeline(pid, timeout_s=3600.0)
+    except Exception as e:
+        _log(f"Yt+Inst: drain IG pipeline перед close: {e!r}")
     with _IG_KEEP_OPEN_META_GUARD:
         meta = _IG_KEEP_OPEN_META.pop(pid, None)
     if not meta:
@@ -189,6 +253,8 @@ def _ig_new_page_background(context, *, seed_page=None, url: str = "about:blank"
     """
     Новая вкладка БЕЗ переключения на неё (CDP Target.createTarget background=true).
     Fallback: context.new_page() — в Chrome обычно активирует вкладку.
+    Если createTarget создал target, но Playwright его не увидел — закрываем orphan,
+    иначе остаётся лишняя about:blank рядом с вкладкой от new_page().
     """
     seed = seed_page
     if seed is None:
@@ -199,6 +265,7 @@ def _ig_new_page_background(context, *, seed_page=None, url: str = "about:blank"
 
     before_ids = {id(p) for p in _ig_alive_context_pages(context)}
     cdp = None
+    target_id: str | None = None
     try:
         cdp = context.new_cdp_session(seed)
         params: dict = {
@@ -215,7 +282,11 @@ def _ig_new_page_background(context, *, seed_page=None, url: str = "about:blank"
                     params["browserContextId"] = bcid
         except Exception:
             pass
-        cdp.send("Target.createTarget", params)
+        created = cdp.send("Target.createTarget", params)
+        if isinstance(created, dict):
+            tid = created.get("targetId")
+            if isinstance(tid, str) and tid.strip():
+                target_id = tid.strip()
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             for p in _ig_alive_context_pages(context):
@@ -227,6 +298,17 @@ def _ig_new_page_background(context, *, seed_page=None, url: str = "about:blank"
             "Instagram Reels: CDP createTarget не появился в context.pages — "
             "fallback new_page()."
         )
+        if target_id:
+            try:
+                cdp.send("Target.closeTarget", {"targetId": target_id})
+                _log(
+                    "Instagram Reels: закрыт orphan createTarget "
+                    f"(targetId={target_id!r}) перед new_page."
+                )
+            except Exception as e:
+                _log(
+                    f"Instagram Reels: не удалось закрыть orphan createTarget: {e!r}"
+                )
     except Exception as e:
         _log(
             f"Instagram Reels: фоновое createTarget не удалось ({e!r}) — "
@@ -4456,6 +4538,1485 @@ def set_youtube_interface_language_in_local_antidetect_profile(
             _log(
                 "Local antidetect: смена языка YouTube завершена за "
                 f"{time.perf_counter() - started_at:.1f} с."
+            )
+        except Exception:
+            pass
+        api.close()
+
+
+class CombinedPlatformUploadError(Exception):
+    """Оба залива (YouTube и Instagram) завершились ошибкой."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        youtube_error: BaseException | None = None,
+        instagram_error: BaseException | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.youtube_error = youtube_error
+        self.instagram_error = instagram_error
+
+
+def _browser_cdp_alive(browser) -> bool:
+    try:
+        if browser is None:
+            return False
+        _ = browser.contexts
+        return True
+    except Exception:
+        return False
+
+
+def _page_still_open(page) -> bool:
+    try:
+        return page is not None and not page.is_closed()
+    except Exception:
+        return False
+
+
+def _ensure_one_instagram_tab(
+    context, *, seed_page=None, refocus_youtube: bool = True
+):
+    """
+    Ровно одна вкладка Instagram в фоне: без перехвата фокуса у YouTube.
+    Переиспользуем существующую / blank, иначе фоновый createTarget(IG URL)
+    или один new_page с немедленным возвратом фокуса на seed.
+    Лишние about:blank после неудачного CDP-attach закрываются.
+    """
+    from zaliver.instagram_upload.register import INSTAGRAM_URL, _navigate_page_to
+
+    def _refocus_youtube() -> None:
+        if not refocus_youtube:
+            return
+        if seed_page is not None and _page_still_open(seed_page):
+            _bring_studio_tab_to_front(seed_page, log_label="Yt+Inst")
+
+    def _close_orphan_blanks(*, keep) -> None:
+        keep_ids = {id(p) for p in keep if p is not None}
+        for blank in list(_ig_reusable_blank_pages(context)):
+            if id(blank) in keep_ids:
+                continue
+            try:
+                blank.close()
+                _log("Yt+Inst: закрыта лишняя about:blank вкладка.")
+            except Exception:
+                pass
+
+    ig_pages = _ig_instagram_pages(context)
+    if ig_pages:
+        chosen = ig_pages[0]
+        for extra in ig_pages[1:]:
+            try:
+                extra.close()
+                _log("Yt+Inst: закрыта лишняя вкладка Instagram.")
+            except Exception:
+                pass
+        _log(
+            "Yt+Inst: используем уже открытую вкладку Instagram "
+            f"url={_ig_page_url_lower(chosen)!r}"
+        )
+        _close_orphan_blanks(keep=(seed_page, chosen))
+        _refocus_youtube()
+        return chosen
+
+    blank_pages = _ig_reusable_blank_pages(context)
+    for blank in blank_pages:
+        if seed_page is not None and blank is seed_page:
+            continue
+        try:
+            _navigate_page_to(blank, INSTAGRAM_URL, label="Yt+Inst IG tab")
+            _log("Yt+Inst: blank-вкладка превращена в Instagram (фон).")
+            _close_orphan_blanks(keep=(seed_page, blank))
+            _refocus_youtube()
+            return blank
+        except Exception as e:
+            _log(f"Yt+Inst: не удалось открыть IG на blank: {e!r}")
+
+    # Сразу Instagram URL — не about:blank (иначе при fallback new_page
+    # остаётся orphan blank + IG).
+    page = _ig_new_page_background(
+        context, seed_page=seed_page, url=INSTAGRAM_URL
+    )
+    try:
+        cur = (page.url or "").strip().lower()
+    except Exception:
+        cur = ""
+    if "instagram.com" not in cur:
+        try:
+            _navigate_page_to(page, INSTAGRAM_URL, label="Yt+Inst IG tab")
+        except Exception as e:
+            _log(f"Yt+Inst: goto Instagram на вкладке: {e!r}")
+    else:
+        _log("Yt+Inst: вкладка Instagram открыта в фоне.")
+
+    _close_orphan_blanks(keep=(seed_page, page))
+    _refocus_youtube()
+    return page
+
+
+def _pick_non_instagram_page(context, *, prefer=None):
+    """Вкладка для YouTube: не Instagram (Studio / blank / прочее)."""
+    if prefer is not None and _page_still_open(prefer):
+        if "instagram.com" not in _ig_page_url_lower(prefer):
+            return prefer
+    studio = None
+    other = None
+    for pg in _ig_alive_context_pages(context):
+        url = _ig_page_url_lower(pg)
+        if "instagram.com" in url:
+            continue
+        if "studio.youtube.com" in url:
+            studio = pg
+            break
+        if other is None:
+            other = pg
+    return studio or other or prefer
+
+
+class _YoutubeTabFocusKeeper:
+    """
+    Периодически возвращает фокус на вкладку YouTube, пока крутится Instagram.
+
+    Нельзя вызывать Playwright API исходной page из другого потока/greenlet —
+    поэтому keeper держит своё CDP-подключение и активирует Studio через него.
+    """
+
+    def __init__(
+        self,
+        page,
+        *,
+        cdp_endpoints: tuple[str, ...] = (),
+        interval_s: float = 1.5,
+    ) -> None:
+        self._interval_s = max(0.5, float(interval_s))
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._cdp_endpoints = tuple(
+            e.strip() for e in cdp_endpoints if (e or "").strip()
+        )
+        self._target_id = ""
+        self._url_hint = "studio.youtube.com"
+        # targetId снимаем на владеющем потоке (до старта keeper-thread).
+        if page is not None:
+            try:
+                self._url_hint = (page.url or "").strip() or self._url_hint
+            except Exception:
+                pass
+            try:
+                session = page.context.new_cdp_session(page)
+                try:
+                    info = session.send("Target.getTargetInfo")
+                    if isinstance(info, dict):
+                        ti = info.get("targetInfo") or info
+                        if isinstance(ti, dict):
+                            tid = str(ti.get("targetId") or "").strip()
+                            if tid:
+                                self._target_id = tid
+                finally:
+                    try:
+                        session.detach()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        self._err_logged = False
+
+    def start(self) -> None:
+        if not self._cdp_endpoints:
+            _log(
+                "Yt+Inst: focus keeper пропущен — нет CDP endpoint "
+                "(нельзя трогать Playwright page из другого потока)."
+            )
+            return
+        self._thread = threading.Thread(
+            target=self._loop,
+            name="yt-inst-focus-keeper",
+            daemon=True,
+        )
+        self._thread.start()
+        _log("Yt+Inst: фокус удерживается на вкладке YouTube (отдельный CDP).")
+
+    def stop(self, *, timeout_s: float = 5.0) -> None:
+        self._stop.set()
+        th = self._thread
+        if th is not None and th.is_alive():
+            th.join(timeout=max(0.5, float(timeout_s)))
+
+    def _activate_studio(self, context) -> None:
+        # 1) Вкладка Studio в этом CDP-контексте.
+        for pg in list(getattr(context, "pages", None) or []):
+            try:
+                if pg.is_closed():
+                    continue
+                url = (pg.url or "").strip().lower()
+            except Exception:
+                continue
+            if "studio.youtube.com" in url or (
+                "youtube.com" in url and "instagram.com" not in url
+            ):
+                try:
+                    pg.bring_to_front()
+                except Exception:
+                    pass
+                return
+        # 2) Fallback: Target.activateTarget по id, снятому с YT-вкладки.
+        if not self._target_id:
+            return
+        seed = None
+        for pg in list(getattr(context, "pages", None) or []):
+            try:
+                if not pg.is_closed():
+                    seed = pg
+                    break
+            except Exception:
+                continue
+        if seed is None:
+            return
+        cdp = None
+        try:
+            cdp = context.new_cdp_session(seed)
+            cdp.send("Target.activateTarget", {"targetId": self._target_id})
+        except Exception:
+            pass
+        finally:
+            if cdp is not None:
+                try:
+                    cdp.detach()
+                except Exception:
+                    pass
+
+    def _loop(self) -> None:
+        try:
+            with sync_playwright() as p:
+                browser, context, _seed = _playwright_page_from_cdp(
+                    p, self._cdp_endpoints
+                )
+                try:
+                    while not self._stop.wait(self._interval_s):
+                        try:
+                            self._activate_studio(context)
+                        except Exception as e:
+                            if not self._err_logged:
+                                self._err_logged = True
+                                _log(
+                                    "Yt+Inst: focus keeper — активация Studio "
+                                    f"не удалась (дальше без спама): {e!r}"
+                                )
+                finally:
+                    _close_playwright_browser(browser)
+        except Exception as e:
+            if not self._err_logged:
+                _log(f"Yt+Inst: focus keeper остановлен: {e!r}")
+
+
+@dataclass
+class _YtInstIgJob:
+    """Один (или batch) залив Instagram в очереди профиля Yt+Inst."""
+
+    items: list[tuple[str, str, str]]
+    done: threading.Event = field(default_factory=threading.Event)
+    result: dict | None = None
+    error: BaseException | None = None
+    on_success: Callable[[dict], None] | None = None
+    on_error: Callable[[BaseException], None] | None = None
+
+
+_YT_INST_IG_PIPELINES: dict[str, "_YtInstIgPipeline"] = {}
+_YT_INST_IG_PIPELINES_GUARD = threading.Lock()
+
+
+class _YtInstIgPipeline:
+    """
+    Серийная очередь Instagram на профиль.
+    YouTube может уйти вперёд на следующее видео (pause 0 / keep-open);
+    Instagram догоняет теми же роликами в том же порядке.
+    """
+
+    def __init__(
+        self,
+        profile_id: str,
+        *,
+        cdp_endpoints: tuple[str, ...],
+        session_login: str = "",
+        session_password: str = "",
+        session_twofa: str = "",
+    ) -> None:
+        self.profile_id = (profile_id or "").strip()
+        self._cdp_endpoints = tuple(
+            e.strip() for e in cdp_endpoints if (e or "").strip()
+        )
+        self._session_login = session_login
+        self._session_password = session_password
+        self._session_twofa = session_twofa
+        self._q: queue.Queue[_YtInstIgJob | None] = queue.Queue()
+        self._idle = threading.Event()
+        self._idle.set()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._worker,
+            name=f"yt-inst-ig-{self.profile_id[:12] or 'x'}",
+            daemon=True,
+        )
+        self._thread.start()
+        _log(
+            f"Yt+Inst: IG pipeline стартовал profile_id={self.profile_id!r}."
+        )
+
+    def update_endpoints(self, cdp_endpoints: tuple[str, ...]) -> None:
+        cleaned = tuple(e.strip() for e in cdp_endpoints if (e or "").strip())
+        if cleaned:
+            self._cdp_endpoints = cleaned
+
+    def enqueue(self, job: _YtInstIgJob) -> None:
+        self._idle.clear()
+        self._q.put(job)
+
+    def wait_idle(self, *, timeout_s: float = 3600.0) -> None:
+        if not self._idle.wait(timeout=max(1.0, float(timeout_s))):
+            raise TimeoutError(
+                f"Yt+Inst IG pipeline не освободился за {timeout_s:.0f} с "
+                f"(profile={self.profile_id!r})"
+            )
+
+    def shutdown(self, *, timeout_s: float = 120.0) -> None:
+        self._stop.set()
+        try:
+            self._q.put_nowait(None)
+        except Exception:
+            pass
+        self._thread.join(timeout=max(1.0, float(timeout_s)))
+
+    def _worker(self) -> None:
+        from zaliver.instagram_upload.reels_upload import run_instagram_reels_upload
+
+        while not self._stop.is_set():
+            try:
+                job = self._q.get(timeout=0.5)
+            except queue.Empty:
+                if self._q.empty():
+                    self._idle.set()
+                continue
+            if job is None:
+                self._idle.set()
+                break
+            self._idle.clear()
+            signaled = False
+            try:
+                if not self._cdp_endpoints:
+                    raise DolphinAntyError(
+                        "Yt+Inst Instagram: пустой CDP endpoint."
+                    )
+                pw = sync_playwright().start()
+                _browser = None
+                try:
+                    _browser, context, _seed = _playwright_page_from_cdp(
+                        pw, self._cdp_endpoints
+                    )
+                    ig_page = None
+                    deadline = time.monotonic() + 60.0
+                    while time.monotonic() < deadline:
+                        pages = _ig_instagram_pages(context)
+                        if pages:
+                            ig_page = pages[0]
+                            break
+                        time.sleep(0.2)
+                    if ig_page is None:
+                        ig_page = _pick_primary_instagram_page(context)
+                    if ig_page is None or not _page_still_open(ig_page):
+                        raise RuntimeError(
+                            "Нет вкладки Instagram для pipeline-залива"
+                        )
+                    batch_results: list = []
+                    for idx, (vp, tt, dd) in enumerate(job.items, start=1):
+                        if not (vp or "").strip():
+                            continue
+                        _log(
+                            f"Yt+Inst: Instagram queue "
+                            f"{idx}/{len(job.items)} "
+                            f"profile={self.profile_id!r}…"
+                        )
+                        one = run_instagram_reels_upload(
+                            ig_page,
+                            video_path=vp,
+                            title=tt,
+                            description=dd,
+                            session_login=self._session_login,
+                            session_password=self._session_password,
+                            session_twofa=self._session_twofa,
+                            profile_id=self.profile_id or None,
+                            top_reels_scan=1,
+                            keep_in_background=True,
+                        )
+                        batch_results.append(one)
+                    if not batch_results:
+                        raise RuntimeError(
+                            "Instagram: нет результата pipeline-залива"
+                        )
+                    if len(batch_results) == 1:
+                        job.result = batch_results[0]
+                    else:
+                        out = dict(batch_results[-1])
+                        out["batch_results"] = list(batch_results)
+                        job.result = out
+                    _log(
+                        f"Yt+Inst: Instagram — успех (pipeline) "
+                        f"profile={self.profile_id!r}."
+                    )
+                    if job.on_success is not None and job.result is not None:
+                        try:
+                            job.on_success(job.result)
+                        except Exception as cb_e:
+                            _log(
+                                f"Yt+Inst: on_instagram_success: {cb_e!r}"
+                            )
+                finally:
+                    # Сначала будим waiters (YouTube / drain), потом CDP close —
+                    # иначе browser.close()/stop зависают и стопят всю очередь.
+                    job.done.set()
+                    signaled = True
+                    try:
+                        self._q.task_done()
+                    except Exception:
+                        pass
+                    if self._q.empty():
+                        self._idle.set()
+                    _close_playwright_browser(_browser, timeout_s=5.0)
+                    _stop_playwright_driver(pw, timeout_s=5.0)
+            except Exception as e:
+                job.error = e
+                _log(
+                    f"Yt+Inst: Instagram — ошибка (pipeline) "
+                    f"profile={self.profile_id!r}. {type(e).__name__}: {e!r}"
+                )
+                if job.on_error is not None:
+                    try:
+                        job.on_error(e)
+                    except Exception:
+                        pass
+            finally:
+                if not signaled:
+                    job.done.set()
+                    try:
+                        self._q.task_done()
+                    except Exception:
+                        pass
+                    if self._q.empty():
+                        self._idle.set()
+
+
+def _get_yt_inst_ig_pipeline(
+    profile_id: str,
+    *,
+    cdp_endpoints: tuple[str, ...],
+    session_login: str = "",
+    session_password: str = "",
+    session_twofa: str = "",
+) -> _YtInstIgPipeline:
+    pid = (profile_id or "").strip() or "_unknown"
+    with _YT_INST_IG_PIPELINES_GUARD:
+        pipe = _YT_INST_IG_PIPELINES.get(pid)
+        if pipe is None or not pipe._thread.is_alive():
+            pipe = _YtInstIgPipeline(
+                pid,
+                cdp_endpoints=cdp_endpoints,
+                session_login=session_login,
+                session_password=session_password,
+                session_twofa=session_twofa,
+            )
+            _YT_INST_IG_PIPELINES[pid] = pipe
+        else:
+            pipe.update_endpoints(cdp_endpoints)
+            if session_login:
+                pipe._session_login = session_login
+            if session_password:
+                pipe._session_password = session_password
+            if session_twofa:
+                pipe._session_twofa = session_twofa
+        return pipe
+
+
+def drain_yt_inst_ig_pipeline(
+    profile_id: str, *, timeout_s: float = 3600.0
+) -> None:
+    """Дождаться очереди Instagram и остановить pipeline профиля."""
+    pid = (profile_id or "").strip()
+    if not pid:
+        return
+    with _YT_INST_IG_PIPELINES_GUARD:
+        pipe = _YT_INST_IG_PIPELINES.pop(pid, None)
+    if pipe is None:
+        return
+    try:
+        pipe.wait_idle(timeout_s=timeout_s)
+    finally:
+        pipe.shutdown(timeout_s=min(120.0, max(5.0, float(timeout_s))))
+
+
+def _yt_inst_ig_pipeline_busy(profile_id: str) -> bool:
+    """True, если Instagram ещё заливает / в очереди на этом профиле."""
+    pid = (profile_id or "").strip()
+    if not pid:
+        return False
+    with _YT_INST_IG_PIPELINES_GUARD:
+        pipe = _YT_INST_IG_PIPELINES.get(pid)
+    if pipe is None:
+        return False
+    try:
+        return not pipe._idle.is_set()
+    except Exception:
+        return False
+
+
+class _ParallelInstagramUploadRunner:
+    """Залив Instagram Reels на отдельном CDP-подключении (параллельно с YouTube)."""
+
+    def __init__(
+        self,
+        *,
+        cdp_endpoints: tuple[str, ...],
+        video_items: list[tuple[str, str, str]],
+        session_login: str = "",
+        session_password: str = "",
+        session_twofa: str = "",
+        profile_id: str = "",
+    ) -> None:
+        self._cdp_endpoints = tuple(
+            e.strip() for e in cdp_endpoints if (e or "").strip()
+        )
+        self._video_items = list(video_items)
+        self._session_login = session_login
+        self._session_password = session_password
+        self._session_twofa = session_twofa
+        self._profile_id = profile_id
+        self._thread: threading.Thread | None = None
+        self.result: dict | None = None
+        self.error: BaseException | None = None
+        self.batch_results: list = []
+
+    def start(self) -> None:
+        if not self._cdp_endpoints:
+            raise DolphinAntyError("Yt+Inst Instagram: пустой CDP endpoint.")
+        if not self._video_items:
+            return
+        self._thread = threading.Thread(
+            target=self._worker,
+            name="yt-inst-instagram-upload",
+            daemon=True,
+        )
+        self._thread.start()
+        _log("Yt+Inst: фоновый залив Instagram запущен (параллельно с YouTube).")
+
+    def join(self, *, timeout_s: float = 3600.0) -> None:
+        th = self._thread
+        if th is not None and th.is_alive():
+            th.join(timeout=max(1.0, float(timeout_s)))
+            if th.is_alive():
+                self.error = TimeoutError(
+                    f"Instagram upload не завершился за {timeout_s:.0f} с"
+                )
+
+    def _wait_for_instagram_page(self, context, *, timeout_s: float = 60.0):
+        deadline = time.monotonic() + max(5.0, float(timeout_s))
+        while time.monotonic() < deadline:
+            pages = _ig_instagram_pages(context)
+            if pages:
+                return pages[0]
+            time.sleep(0.2)
+        return _pick_primary_instagram_page(context)
+
+    def _worker(self) -> None:
+        from zaliver.instagram_upload.reels_upload import run_instagram_reels_upload
+
+        try:
+            with sync_playwright() as p:
+                _browser, context, _seed = _playwright_page_from_cdp(
+                    p, self._cdp_endpoints
+                )
+                ig_page = self._wait_for_instagram_page(context)
+                if ig_page is None or not _page_still_open(ig_page):
+                    raise RuntimeError(
+                        "Нет вкладки Instagram для параллельного залива"
+                    )
+                for idx, (vp, tt, dd) in enumerate(self._video_items, start=1):
+                    if not (vp or "").strip():
+                        continue
+                    _log(
+                        f"Yt+Inst: Instagram параллельно "
+                        f"{idx}/{len(self._video_items)}…"
+                    )
+                    one = run_instagram_reels_upload(
+                        ig_page,
+                        video_path=vp,
+                        title=tt,
+                        description=dd,
+                        session_login=self._session_login,
+                        session_password=self._session_password,
+                        session_twofa=self._session_twofa,
+                        profile_id=self._profile_id or None,
+                        top_reels_scan=1,
+                        keep_in_background=True,
+                    )
+                    self.batch_results.append(one)
+                if len(self.batch_results) == 1:
+                    self.result = self.batch_results[0]
+                elif self.batch_results:
+                    out = dict(self.batch_results[-1])
+                    out["batch_results"] = list(self.batch_results)
+                    self.result = out
+                _log("Yt+Inst: Instagram — успех (параллельный поток).")
+        except Exception as e:
+            self.error = e
+            _log(
+                f"Yt+Inst: Instagram — ошибка (параллельный поток). "
+                f"{type(e).__name__}: {e!r}"
+            )
+
+
+def _run_youtube_and_instagram_parallel(
+    *,
+    browser,
+    context,
+    page,
+    cdp_endpoints: tuple[str, ...],
+    zaliver_db_path: Path | None,
+    video_path: str | None,
+    title: str | None,
+    description: str | None,
+    publish_before_checks: bool,
+    keep_studio_title: bool,
+    schedule_publish_at,
+    scheduled_batch,
+    stats_server_username: str | None,
+    studio_kw: dict,
+    session_login: str = "",
+    session_password: str = "",
+    session_twofa: str = "",
+    profile_id: str = "",
+    wait_for_instagram: bool = True,
+    on_youtube_success: Callable[[dict], None] | None = None,
+    on_instagram_success: Callable[[dict], None] | None = None,
+    on_instagram_error: Callable[[BaseException], None] | None = None,
+) -> dict:
+    """
+    Вкладка 1 — YouTube, вкладка 2 — Instagram (отдельный CDP / pipeline).
+
+    wait_for_instagram=False (pause 0 / keep-open на тот же профиль):
+      после успеха YouTube сразу возвращаемся — можно брать следующее видео
+      из очереди; Instagram догоняет тем же роликом через pipeline.
+    wait_for_instagram=True: ждём Instagram перед возвратом.
+    """
+    yt_page = _pick_non_instagram_page(context, prefer=page)
+    if yt_page is None:
+        yt_page = page
+
+    try:
+        ig_busy = _yt_inst_ig_pipeline_busy(profile_id)
+        _ensure_one_instagram_tab(
+            context,
+            seed_page=yt_page,
+            refocus_youtube=not ig_busy,
+        )
+        _log(
+            "Yt+Inst: вкладки готовы — 1=YouTube, 2=Instagram "
+            "(pipeline / параллельный залив)."
+        )
+    except Exception as e:
+        _log(f"Yt+Inst: заранее открыть Instagram не удалось: {e!r}")
+
+    ig_items: list[tuple[str, str, str]] = []
+    if scheduled_batch:
+        for item in scheduled_batch:
+            ig_items.append(
+                (
+                    str(getattr(item, "video_path", "") or ""),
+                    str(getattr(item, "title", "") or ""),
+                    str(getattr(item, "description", "") or ""),
+                )
+            )
+    elif video_path:
+        ig_items.append(
+            (
+                str(video_path),
+                str(title or ""),
+                str(description or ""),
+            )
+        )
+
+    ig_job: _YtInstIgJob | None = None
+    if ig_items:
+        pipe = _get_yt_inst_ig_pipeline(
+            profile_id,
+            cdp_endpoints=cdp_endpoints,
+            session_login=session_login,
+            session_password=session_password,
+            session_twofa=session_twofa,
+        )
+        ig_job = _YtInstIgJob(
+            items=ig_items,
+            on_success=on_instagram_success,
+            on_error=on_instagram_error,
+        )
+        pipe.enqueue(ig_job)
+        _log(
+            "Yt+Inst: Instagram поставлен в pipeline "
+            f"({len(ig_items)} шт., wait={wait_for_instagram})."
+        )
+
+    yt_res = None
+    yt_err: BaseException | None = None
+    try:
+        _log("Yt+Inst: залив YouTube (вкладка 1)…")
+        # Не перехватываем фокус, пока Instagram ещё на /reels/ и т.п. —
+        # Studio через CDP работает и в фоне.
+        if _yt_inst_ig_pipeline_busy(profile_id):
+            _log(
+                "Yt+Inst: Instagram ещё в pipeline — "
+                "фокус на Studio не переключаем."
+            )
+        else:
+            _bring_studio_tab_to_front(yt_page, log_label="Yt+Inst")
+        yt_res = _run_profile_studio_upload(
+            page=yt_page,
+            browser=browser,
+            zaliver_db_path=zaliver_db_path,
+            video_path=video_path,
+            title=title,
+            description=description,
+            publish_before_checks=publish_before_checks,
+            keep_studio_title=keep_studio_title,
+            schedule_publish_at=schedule_publish_at,
+            scheduled_batch=scheduled_batch,
+            stats_server_username=stats_server_username,
+            studio_kw=studio_kw,
+        )
+        _log("Yt+Inst: YouTube — успех.")
+        if on_youtube_success is not None and isinstance(yt_res, dict):
+            try:
+                on_youtube_success(yt_res)
+            except Exception as cb_e:
+                _log(f"Yt+Inst: on_youtube_success: {cb_e!r}")
+                # Запись/уведомление обязательны — считаем залив YT сорванным.
+                yt_err = cb_e
+                yt_res = None
+    except Exception as e:
+        yt_err = e
+        _log(
+            "Yt+Inst: YouTube — ошибка (Instagram продолжает в pipeline). "
+            f"{type(e).__name__}: {e!r}"
+        )
+    # Не возвращаем фокус на Studio, пока Instagram ещё в pipeline —
+    # иначе зависает навигация на /reels/.
+
+    ig_res = None
+    ig_err: BaseException | None = None
+    instagram_pending = False
+    if ig_job is not None:
+        # Pause 0 + успех YT: не ждём IG — следующее видео можно брать сразу.
+        # Иначе (закрываем браузер / YT ошибка) — дожидаемся текущего IG.
+        should_wait = bool(wait_for_instagram) or yt_res is None
+        if should_wait:
+            if not ig_job.done.wait(timeout=3600.0):
+                ig_err = TimeoutError(
+                    "Instagram upload не завершился за 3600 с"
+                )
+            else:
+                ig_res = ig_job.result
+                ig_err = ig_job.error
+                if ig_res is None and ig_err is None:
+                    ig_err = RuntimeError(
+                        "Instagram: нет результата pipeline-залива"
+                    )
+        else:
+            instagram_pending = True
+            _log(
+                "Yt+Inst: YouTube готов — не ждём Instagram "
+                "(pause 0 / keep-open, IG догонит в pipeline)."
+            )
+
+    if yt_res is None and ig_res is None and not instagram_pending:
+        parts = []
+        if yt_err is not None:
+            parts.append(f"YouTube: {yt_err}")
+        if ig_err is not None:
+            parts.append(f"Instagram: {ig_err}")
+        detail = "; ".join(parts) if parts else "нет результата"
+        raise CombinedPlatformUploadError(
+            f"Yt+Inst: обе площадки не залиты ({detail})",
+            youtube_error=yt_err,
+            instagram_error=ig_err,
+        )
+
+    out: dict = {
+        "youtube": yt_res,
+        "instagram": ig_res,
+        "instagram_pending": instagram_pending,
+        "youtube_error": (
+            f"{type(yt_err).__name__}: {yt_err}" if yt_err is not None else None
+        ),
+        "instagram_error": (
+            f"{type(ig_err).__name__}: {ig_err}" if ig_err is not None else None
+        ),
+    }
+    if isinstance(yt_res, dict):
+        out["video_id"] = yt_res.get("video_id")
+        out["url"] = yt_res.get("url")
+        if yt_res.get("batch_results") is not None:
+            out["batch_results"] = yt_res.get("batch_results")
+    elif isinstance(ig_res, dict):
+        out["video_id"] = ig_res.get("video_id")
+        out["url"] = ig_res.get("url")
+    return out
+
+
+def _run_youtube_then_instagram_session(
+    *,
+    browser,
+    context,
+    page,
+    cdp_endpoints: tuple[str, ...] = (),
+    zaliver_db_path: Path | None,
+    video_path: str | None,
+    title: str | None,
+    description: str | None,
+    publish_before_checks: bool,
+    keep_studio_title: bool,
+    schedule_publish_at,
+    scheduled_batch,
+    stats_server_username: str | None,
+    studio_kw: dict,
+    session_login: str = "",
+    session_password: str = "",
+    session_twofa: str = "",
+    profile_id: str = "",
+    wait_for_instagram: bool = True,
+    on_youtube_success: Callable[[dict], None] | None = None,
+    on_instagram_success: Callable[[dict], None] | None = None,
+    on_instagram_error: Callable[[BaseException], None] | None = None,
+) -> dict:
+    """Совместимая обёртка → параллельный / pipeline залив YT+Inst."""
+    return _run_youtube_and_instagram_parallel(
+        browser=browser,
+        context=context,
+        page=page,
+        cdp_endpoints=cdp_endpoints,
+        zaliver_db_path=zaliver_db_path,
+        video_path=video_path,
+        title=title,
+        description=description,
+        publish_before_checks=publish_before_checks,
+        keep_studio_title=keep_studio_title,
+        schedule_publish_at=schedule_publish_at,
+        scheduled_batch=scheduled_batch,
+        stats_server_username=stats_server_username,
+        studio_kw=studio_kw,
+        session_login=session_login,
+        session_password=session_password,
+        session_twofa=session_twofa,
+        profile_id=profile_id,
+        wait_for_instagram=wait_for_instagram,
+        on_youtube_success=on_youtube_success,
+        on_instagram_success=on_instagram_success,
+        on_instagram_error=on_instagram_error,
+    )
+
+
+def _fallback_instagram_only_upload(
+    *,
+    profile_id: str,
+    video_path: str,
+    title: str,
+    description: str,
+    headless: bool,
+    session_login: str,
+    session_password: str,
+    session_twofa: str,
+    local_token: str | None = None,
+    base_url: str = "",
+    remote_cdp=None,
+    own_antidetect: bool = False,
+) -> dict:
+    """Отдельный запуск профиля только для Instagram (если общая сессия умерла)."""
+    if own_antidetect:
+        return upload_instagram_reel_in_local_antidetect_profile(
+            profile_id,
+            video_path=video_path,
+            base_url=base_url,
+            title=title,
+            description=description,
+            headless=headless,
+            remote_cdp=remote_cdp,
+            session_login=session_login,
+            session_password=session_password,
+            session_twofa=session_twofa,
+            keep_browser_open=False,
+        )
+    return upload_instagram_reel_in_profile(
+        profile_id,
+        video_path=video_path,
+        title=title,
+        description=description,
+        local_token=local_token,
+        headless=headless,
+        session_login=session_login,
+        session_password=session_password,
+        session_twofa=session_twofa,
+        keep_browser_open=False,
+    )
+
+
+@with_log_profile
+def upload_youtube_and_instagram_in_profile(
+    profile_id: str,
+    *,
+    local_token: str | None = None,
+    headless: bool = True,
+    zaliver_db_path: Path | None = None,
+    video_path: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    search_oldest_channel: bool = True,
+    publish_before_checks: bool = False,
+    keep_studio_title: bool = False,
+    schedule_publish_at=None,
+    scheduled_batch=None,
+    stats_server_username: str | None = None,
+    warmup_during_schedule: bool = False,
+    warmup_shorts_recommendations: bool = True,
+    warmup_search_query: str | None = None,
+    warmup_shorts_batch_count: int = 5,
+    warmup_like_probability_pct: float = 10.0,
+    warmup_subscribe_probability_pct: float = 10.0,
+    warmup_shorts_watch_min_s: float = 5.0,
+    warmup_shorts_watch_max_s: float = 25.0,
+    session_login: str = "",
+    session_password: str = "",
+    session_twofa: str = "",
+    keep_browser_open: bool = False,
+    on_youtube_success=None,
+    on_instagram_success=None,
+    on_instagram_error=None,
+) -> dict:
+    """
+    Dolphin: один профиль, 2 вкладки — YouTube Studio затем Instagram Reels.
+    При ошибке одной площадки вторая всё равно заливается.
+    keep_browser_open: как у Instagram — не stop_profile, повторный залив
+    на тот же профиль переиспользует CDP; YouTube может уйти вперёд,
+    Instagram догоняет через pipeline.
+    """
+    keep_open = bool(keep_browser_open)
+    _log(
+        "Dolphin: Yt+Inst залив. "
+        f"profile_id={profile_id!r}, headless={headless}, "
+        f"keep_browser_open={keep_open}, video_path={video_path!r}"
+    )
+    api = DolphinAntyLocalAPI()
+    endpoints: tuple[str, ...] = ()
+    try:
+        tok = (local_token or "").strip()
+        if tok:
+            _log("Dolphin: login_with_token…")
+            api.login_with_token(tok)
+
+        with _profile_launch_lock(profile_id):
+            if keep_open:
+                cached = _get_dolphin_keep_open_cdp(profile_id)
+                if cached:
+                    endpoints = cached
+                    _log(
+                        "Dolphin: Yt+Inst переиспользуем CDP keep-open "
+                        f"profile_id={profile_id!r}, endpoints={endpoints!r}"
+                    )
+                else:
+                    _log("Dolphin: start_profile…")
+                    conn = api.start_profile(profile_id, headless=headless)
+                    endpoints = (conn.ws_url(), conn.http_url())
+                    _cache_dolphin_keep_open_cdp(profile_id, endpoints)
+                    _log(
+                        "Dolphin: профиль запущен (keep-open). "
+                        f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+                    )
+            else:
+                _log("Dolphin: start_profile…")
+                conn = api.start_profile(profile_id, headless=headless)
+                endpoints = (conn.ws_url(), conn.http_url())
+                _log(
+                    "Dolphin: профиль запущен. "
+                    f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+                )
+
+        pw = sync_playwright().start()
+        browser = None
+        warmup_runner = None
+        try:
+            browser, context, page = _playwright_page_from_cdp(pw, endpoints)
+            warmup_runner = _maybe_start_parallel_shorts_warmup(
+                enabled=warmup_during_schedule,
+                schedule_publish_at=schedule_publish_at,
+                scheduled_batch=scheduled_batch,
+                cdp_endpoints=endpoints,
+                login_credentials=login_credentials,
+                shorts_recommendations=warmup_shorts_recommendations,
+                search_query=warmup_search_query,
+                shorts_batch_count=warmup_shorts_batch_count,
+                like_probability_pct=warmup_like_probability_pct,
+                subscribe_probability_pct=warmup_subscribe_probability_pct,
+                shorts_watch_min_s=warmup_shorts_watch_min_s,
+                shorts_watch_max_s=warmup_shorts_watch_max_s,
+            )
+            if warmup_runner is not None:
+                _refocus_studio_tab_after_warmup_start(page)
+            result = _run_youtube_then_instagram_session(
+                browser=browser,
+                context=context,
+                page=page,
+                cdp_endpoints=endpoints,
+                zaliver_db_path=zaliver_db_path,
+                video_path=video_path,
+                title=title,
+                description=description,
+                publish_before_checks=publish_before_checks,
+                keep_studio_title=keep_studio_title,
+                schedule_publish_at=schedule_publish_at,
+                scheduled_batch=scheduled_batch,
+                stats_server_username=stats_server_username,
+                studio_kw={
+                    "profile_id": profile_id,
+                    "login_credentials": login_credentials,
+                    "yt_oldest_name": yt_oldest_name,
+                    "search_oldest_channel": search_oldest_channel,
+                },
+                session_login=session_login,
+                session_password=session_password,
+                session_twofa=session_twofa,
+                profile_id=profile_id,
+                wait_for_instagram=not keep_open,
+                on_youtube_success=on_youtube_success,
+                on_instagram_success=on_instagram_success,
+                on_instagram_error=on_instagram_error,
+            )
+            if keep_open:
+                _log(
+                    "Dolphin: Yt+Inst браузер оставлен открытым "
+                    f"(profile_id={profile_id!r}) — следующий залив без stop."
+                )
+            return result
+        except CombinedPlatformUploadError:
+            # Сессия закрыта/сломана — Instagram отдельно после stop_profile.
+            raise
+        except YoutubeAllChannelsRemovedError:
+            raise
+        finally:
+            _stop_parallel_shorts_warmup(warmup_runner)
+            # keep-open: IG pipeline ещё на том же CDP — close/stop не должны
+            # блокировать возврат в очередь (иначе «Instagram OK и тишина»).
+            close_s = 3.0 if keep_open else 8.0
+            _close_playwright_browser(browser, timeout_s=close_s)
+            _stop_playwright_driver(pw, timeout_s=close_s)
+    except CombinedPlatformUploadError as e:
+        if (video_path or "").strip():
+            _log("Yt+Inst: fallback — отдельный залив Instagram…")
+            try:
+                try:
+                    api.stop_profile(profile_id)
+                except Exception:
+                    pass
+                clear_dolphin_keep_open_cdp(profile_id)
+                ig_only = _fallback_instagram_only_upload(
+                    profile_id=profile_id,
+                    video_path=str(video_path),
+                    title=str(title or ""),
+                    description=str(description or ""),
+                    headless=headless,
+                    session_login=session_login,
+                    session_password=session_password,
+                    session_twofa=session_twofa,
+                    local_token=local_token,
+                    own_antidetect=False,
+                )
+                return {
+                    "youtube": None,
+                    "instagram": ig_only,
+                    "youtube_error": (
+                        f"{type(e.youtube_error).__name__}: {e.youtube_error}"
+                        if e.youtube_error is not None
+                        else str(e)
+                    ),
+                    "instagram_error": None,
+                }
+            except Exception as ie:
+                raise CombinedPlatformUploadError(
+                    f"Yt+Inst: обе площадки не залиты "
+                    f"(YouTube: {e.youtube_error}; Instagram: {ie})",
+                    youtube_error=e.youtube_error,
+                    instagram_error=ie,
+                ) from ie
+        raise
+    except YoutubeAllChannelsRemovedError:
+        raise
+    except Exception as e:
+        _log(f"Yt+Inst ошибка: {type(e).__name__}: {e!r}")
+        if (video_path or "").strip():
+            _log("Yt+Inst: после сбоя сессии — fallback Instagram…")
+            try:
+                try:
+                    api.stop_profile(profile_id)
+                except Exception:
+                    pass
+                clear_dolphin_keep_open_cdp(profile_id)
+                ig_res = _fallback_instagram_only_upload(
+                    profile_id=profile_id,
+                    video_path=str(video_path),
+                    title=str(title or ""),
+                    description=str(description or ""),
+                    headless=headless,
+                    session_login=session_login,
+                    session_password=session_password,
+                    session_twofa=session_twofa,
+                    local_token=local_token,
+                    own_antidetect=False,
+                )
+                return {
+                    "youtube": None,
+                    "instagram": ig_res,
+                    "youtube_error": f"{type(e).__name__}: {e}",
+                    "instagram_error": None,
+                }
+            except Exception as ie:
+                raise CombinedPlatformUploadError(
+                    f"Yt+Inst: обе площадки не залиты "
+                    f"(YouTube: {e}; Instagram: {ie})",
+                    youtube_error=e,
+                    instagram_error=ie,
+                ) from ie
+        raise _wrap_exc(e) from e
+    finally:
+        if keep_open:
+            _log(
+                "Dolphin: stop_profile пропущен (keep_browser_open) "
+                f"profile_id={profile_id!r}."
+            )
+        else:
+            try:
+                drain_yt_inst_ig_pipeline(profile_id)
+            except Exception as de:
+                _log(f"Dolphin: Yt+Inst drain IG: {de!r}")
+            clear_dolphin_keep_open_cdp(profile_id)
+            try:
+                api.stop_profile(profile_id)
+            except Exception as se:
+                _log(f"Dolphin: stop_profile: {se!r}")
+        api.close()
+
+
+@with_log_profile
+def upload_youtube_and_instagram_in_local_antidetect_profile(
+    profile_id: str,
+    *,
+    base_url: str,
+    headless: bool = True,
+    zaliver_db_path: Path | None = None,
+    video_path: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    login_credentials=None,
+    yt_oldest_name: str | None = None,
+    search_oldest_channel: bool = True,
+    remote_cdp=None,
+    publish_before_checks: bool = False,
+    keep_studio_title: bool = False,
+    schedule_publish_at=None,
+    scheduled_batch=None,
+    stats_server_username: str | None = None,
+    warmup_during_schedule: bool = False,
+    warmup_shorts_recommendations: bool = True,
+    warmup_search_query: str | None = None,
+    warmup_shorts_batch_count: int = 5,
+    warmup_like_probability_pct: float = 10.0,
+    warmup_subscribe_probability_pct: float = 10.0,
+    warmup_shorts_watch_min_s: float = 5.0,
+    warmup_shorts_watch_max_s: float = 25.0,
+    session_login: str = "",
+    session_password: str = "",
+    session_twofa: str = "",
+    keep_browser_open: bool = False,
+    on_youtube_success=None,
+    on_instagram_success=None,
+    on_instagram_error=None,
+) -> dict:
+    """
+    Локальный антидетект: один профиль, 2 вкладки — YouTube затем Instagram.
+    keep_browser_open: как у Instagram — сессия не stop'ится между заливами
+    на тот же профиль; YouTube может уйти вперёд, Instagram догоняет.
+    """
+    from zaliver.antydetect.local_antidetect_api import (
+        LocalAntidetectError,
+        LocalAntidetectHttpAPI,
+    )
+    from zaliver.antydetect.local_active_sessions import (
+        register_local_session,
+        unregister_local_session,
+    )
+
+    keep_open = bool(keep_browser_open)
+    _log(
+        "Local antidetect: Yt+Inst залив. "
+        f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}, "
+        f"keep_browser_open={keep_open}, video_path={video_path!r}"
+    )
+    api = LocalAntidetectHttpAPI(base_url)
+    session_id: str | None = None
+    started_at = time.perf_counter()
+    login = (session_login or "").strip()
+    pwd = (session_password or "").strip()
+    twofa = (session_twofa or "").strip()
+    bu = (base_url or "").strip() or "http://127.0.0.1:18765"
+    try:
+        if not pwd or not login:
+            try:
+                prof = api.get_profile(profile_id)
+                loaded_login, loaded_pwd, loaded_twofa = (
+                    _instagram_session_creds_from_profile_dict(prof)
+                )
+                if not login:
+                    login = loaded_login
+                if not pwd:
+                    pwd = loaded_pwd
+                if not twofa:
+                    twofa = loaded_twofa
+            except Exception as e:
+                _log(f"Local antidetect: custom_data Instagram: {e!r}")
+
+        ws_url = ""
+        with _profile_launch_lock(profile_id):
+            if keep_open:
+                meta = _ig_meta_get(profile_id)
+                if meta is None:
+                    meta = {
+                        "tabs_ready": threading.Event(),
+                        "preopened": False,
+                        "session_id": None,
+                        "ws_url": None,
+                    }
+                    _ig_meta_set(profile_id, meta)
+                ws_url = (meta.get("ws_url") or "").strip()
+                session_id = (meta.get("session_id") or "").strip() or None
+                if not ws_url or not session_id:
+                    ws_existing, sid_existing, _msg = (
+                        api.resolve_running_cdp_ws_url_for_profile(profile_id)
+                    )
+                    if (
+                        isinstance(ws_existing, str)
+                        and ws_existing.strip()
+                        and isinstance(sid_existing, str)
+                        and sid_existing.strip()
+                    ):
+                        session_id = sid_existing.strip()
+                        ws_url = ws_existing.strip()
+                        _log(
+                            "Local antidetect: Yt+Inst переиспользуем сессию "
+                            f"session_id={session_id!r}, cdp_ws_url={ws_url!r}"
+                        )
+                    else:
+                        acc = api.launch_profile(
+                            profile_id,
+                            headless=headless,
+                            expose_cdp=True,
+                            remote_cdp=remote_cdp,
+                        )
+                        sid = acc.get("session_id")
+                        if not isinstance(sid, str) or not sid.strip():
+                            raise LocalAntidetectError(
+                                f"Нет session_id в ответе launch: {acc!r}"
+                            )
+                        session_id = sid.strip()
+                        ws_url = api.wait_for_cdp_ws_url(
+                            session_id, timeout_s=120.0
+                        )
+                        _log(
+                            "Local antidetect: профиль запущен (keep-open). "
+                            f"cdp_ws_url={ws_url!r}"
+                        )
+                    meta["session_id"] = session_id
+                    meta["ws_url"] = ws_url
+                    register_local_session(
+                        profile_id=profile_id, base_url=bu, session_id=session_id
+                    )
+                else:
+                    _log(
+                        "Local antidetect: Yt+Inst CDP keep-open из meta "
+                        f"session_id={session_id!r}, cdp_ws_url={ws_url!r}"
+                    )
+            else:
+                acc = api.launch_profile(
+                    profile_id,
+                    headless=headless,
+                    expose_cdp=True,
+                    remote_cdp=remote_cdp,
+                )
+                sid = acc.get("session_id")
+                if not isinstance(sid, str) or not sid.strip():
+                    raise LocalAntidetectError(
+                        f"Нет session_id в ответе launch: {acc!r}"
+                    )
+                session_id = sid.strip()
+                register_local_session(
+                    profile_id=profile_id, base_url=bu, session_id=session_id
+                )
+                ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+                _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+
+        try:
+            pw = sync_playwright().start()
+            browser = None
+            warmup_runner = None
+            try:
+                browser, context, page = _playwright_page_from_local_session_cdp(
+                    pw, api, session_id, ws_url
+                )
+                warmup_runner = _maybe_start_parallel_shorts_warmup(
+                    enabled=warmup_during_schedule,
+                    schedule_publish_at=schedule_publish_at,
+                    scheduled_batch=scheduled_batch,
+                    cdp_endpoints=(ws_url,),
+                    login_credentials=login_credentials,
+                    shorts_recommendations=warmup_shorts_recommendations,
+                    search_query=warmup_search_query,
+                    shorts_batch_count=warmup_shorts_batch_count,
+                    like_probability_pct=warmup_like_probability_pct,
+                    subscribe_probability_pct=warmup_subscribe_probability_pct,
+                    shorts_watch_min_s=warmup_shorts_watch_min_s,
+                    shorts_watch_max_s=warmup_shorts_watch_max_s,
+                )
+                if warmup_runner is not None:
+                    _refocus_studio_tab_after_warmup_start(page)
+                studio_kw = _local_studio_workflow_kwargs(
+                    api,
+                    profile_id,
+                    login_credentials=login_credentials,
+                    yt_oldest_name=yt_oldest_name,
+                    search_oldest_channel=search_oldest_channel,
+                )
+                result = _run_youtube_then_instagram_session(
+                    browser=browser,
+                    context=context,
+                    page=page,
+                    cdp_endpoints=(ws_url,),
+                    zaliver_db_path=zaliver_db_path,
+                    video_path=video_path,
+                    title=title,
+                    description=description,
+                    publish_before_checks=publish_before_checks,
+                    keep_studio_title=keep_studio_title,
+                    schedule_publish_at=schedule_publish_at,
+                    scheduled_batch=scheduled_batch,
+                    stats_server_username=stats_server_username,
+                    studio_kw=studio_kw,
+                    session_login=login,
+                    session_password=pwd,
+                    session_twofa=twofa,
+                    profile_id=profile_id,
+                    wait_for_instagram=not keep_open,
+                    on_youtube_success=on_youtube_success,
+                    on_instagram_success=on_instagram_success,
+                    on_instagram_error=on_instagram_error,
+                )
+                if keep_open:
+                    _log(
+                        "Local antidetect: Yt+Inst браузер оставлен открытым "
+                        f"(profile_id={profile_id!r}) — следующий залив без stop."
+                    )
+                return result
+            except CombinedPlatformUploadError:
+                raise
+            except YoutubeAllChannelsRemovedError as e:
+                _log(
+                    "Local antidetect: все каналы удалены — "
+                    "Instagram попробуем после остановки сессии."
+                )
+                raise CombinedPlatformUploadError(
+                    str(e),
+                    youtube_error=e,
+                    instagram_error=RuntimeError(
+                        "браузер закрыт после YouTube"
+                    ),
+                ) from e
+            finally:
+                _stop_parallel_shorts_warmup(warmup_runner)
+                close_s = 3.0 if keep_open else 8.0
+                _close_playwright_browser(browser, timeout_s=close_s)
+                _stop_playwright_driver(pw, timeout_s=close_s)
+        finally:
+            if not keep_open:
+                unregister_local_session(profile_id=profile_id)
+    except CombinedPlatformUploadError as e:
+        if (video_path or "").strip():
+            _log("Yt+Inst: fallback — отдельный залив Instagram…")
+            if session_id:
+                try:
+                    api.stop_session(session_id)
+                except Exception:
+                    pass
+                session_id = None
+            close_instagram_keep_open_hub(profile_id)
+            try:
+                ig_only = _fallback_instagram_only_upload(
+                    profile_id=profile_id,
+                    video_path=str(video_path),
+                    title=str(title or ""),
+                    description=str(description or ""),
+                    headless=headless,
+                    session_login=login,
+                    session_password=pwd,
+                    session_twofa=twofa,
+                    base_url=bu,
+                    remote_cdp=remote_cdp,
+                    own_antidetect=True,
+                )
+                return {
+                    "youtube": None,
+                    "instagram": ig_only,
+                    "youtube_error": (
+                        f"{type(e.youtube_error).__name__}: {e.youtube_error}"
+                        if e.youtube_error is not None
+                        else str(e)
+                    ),
+                    "instagram_error": None,
+                }
+            except Exception as ie:
+                raise CombinedPlatformUploadError(
+                    f"Yt+Inst: обе площадки не залиты "
+                    f"(YouTube: {e.youtube_error}; Instagram: {ie})",
+                    youtube_error=e.youtube_error,
+                    instagram_error=ie,
+                ) from ie
+        raise
+    except Exception as e:
+        _log(f"Yt+Inst ошибка: {type(e).__name__}: {e!r}")
+        raise LocalAntidetectError(f"Yt+Inst: ошибка профиля: {e}") from e
+    finally:
+        if keep_open:
+            _log(
+                "Local antidetect: stop_session пропущен (keep_browser_open) "
+                f"profile_id={profile_id!r}."
+            )
+        else:
+            try:
+                drain_yt_inst_ig_pipeline(profile_id)
+            except Exception as de:
+                _log(f"Local antidetect: Yt+Inst drain IG: {de!r}")
+            if session_id:
+                try:
+                    api.stop_session(session_id)
+                except Exception:
+                    pass
+        try:
+            _log(
+                f"Local antidetect: Yt+Inst завершение. "
+                f"elapsed_s={time.perf_counter() - started_at:.3f}"
             )
         except Exception:
             pass

@@ -10,8 +10,39 @@ from typing import Iterable, Optional
 
 
 def _normalize_platform(value: str | None) -> str:
-    v = (value or "").strip().lower()
-    return "instagram" if v == "instagram" else "youtube"
+    v = (value or "").strip().lower().replace("+", "_").replace("-", "_")
+    if v in ("instagram", "ig", "inst"):
+        return "instagram"
+    if v in ("yt_inst", "youtube_instagram", "youtube_inst", "ytinstagram", "yt_ig"):
+        return "yt_inst"
+    return "youtube"
+
+
+def _storage_platform(value: str | None) -> str:
+    """Platform id for uploaded_videos rows (never yt_inst)."""
+    plat = _normalize_platform(value)
+    return "youtube" if plat == "yt_inst" else plat
+
+
+def _video_platform_sql_filter(platform: str | None) -> tuple[str, tuple[str, ...]]:
+    """
+    SQL fragment + bind values for uploaded_videos.platform.
+    Yt+Inst sessions store rows as youtube and/or instagram.
+    """
+    plat = _normalize_platform(platform)
+    if plat == "yt_inst":
+        return "platform IN (?, ?)", ("youtube", "instagram")
+    return "platform = ?", (plat,)
+
+
+def _video_platform_sql_filter_aliased(
+    platform: str | None, *, alias: str = "v"
+) -> tuple[str, tuple[str, ...]]:
+    plat = _normalize_platform(platform)
+    col = f"{alias}.platform"
+    if plat == "yt_inst":
+        return f"{col} IN (?, ?)", ("youtube", "instagram")
+    return f"{col} = ?", (plat,)
 
 
 def _app_data_dir() -> Path:
@@ -514,7 +545,7 @@ class UploadStore:
         platform: str = "youtube",
     ) -> list[str]:
         lim = max(1, int(limit))
-        plat = _normalize_platform(platform)
+        plat = _storage_platform(platform)
         with self._connect() as con:
             rows = con.execute(
                 f"""
@@ -543,7 +574,7 @@ class UploadStore:
         if not raw.strip():
             return
         v = raw if preserve_whitespace else raw.strip()
-        plat = _normalize_platform(platform)
+        plat = _storage_platform(platform)
         now = _utc_now_iso()
         with self._connect() as con:
             con.execute(
@@ -647,7 +678,7 @@ class UploadStore:
         platform: str = "youtube",
     ) -> int:
         ua = (uploaded_at or _utc_now_iso()).strip() or _utc_now_iso()
-        plat = _normalize_platform(platform)
+        plat = _storage_platform(platform)
         with self._connect() as con:
             cur = con.execute(
                 """
@@ -686,7 +717,7 @@ class UploadStore:
         """Есть ли уже запись с таким video_id или url для платформы."""
         import re
 
-        plat = _normalize_platform(platform)
+        plat = _storage_platform(platform)
         vid = (video_id or "").strip()
         raw_url = (url or "").strip()
         if not vid and raw_url:
@@ -749,43 +780,53 @@ class UploadStore:
         """Последние уникальные названия для выпадающего списка перед заливом."""
         lim = max(1, int(limit))
         plat = _normalize_platform(platform)
+        # Yt+Inst: названия с обеих площадок (YouTube + Instagram).
+        plats: tuple[str, ...] = (
+            ("youtube", "instagram") if plat == "yt_inst" else (_storage_platform(plat),)
+        )
+        ph = ",".join("?" for _ in plats)
         with self._connect() as con:
             rows = con.execute(
-                """
-                SELECT title FROM recent_upload_titles
-                WHERE platform = ? AND trim(title) <> ''
-                ORDER BY used_at DESC, title ASC
+                f"""
+                SELECT title, MAX(used_at) AS last_used
+                FROM recent_upload_titles
+                WHERE platform IN ({ph}) AND trim(title) <> ''
+                GROUP BY title
+                ORDER BY last_used DESC, title ASC
                 LIMIT ?;
                 """,
-                (plat, lim),
+                (*plats, lim),
             ).fetchall()
         out = [str(r["title"]).strip() for r in rows if str(r["title"]).strip()]
         if out:
             return out[:lim]
-        if plat != "youtube":
-            return []
         with self._connect() as con:
             rows = con.execute(
-                """
+                f"""
                 SELECT title FROM uploaded_videos
-                WHERE platform = ? AND trim(title) <> ''
+                WHERE platform IN ({ph}) AND trim(title) <> ''
                 GROUP BY title
                 ORDER BY MAX(uploaded_at) DESC, title ASC
                 LIMIT ?;
                 """,
-                (plat, lim),
+                (*plats, lim),
             ).fetchall()
         return [str(r["title"]).strip() for r in rows if str(r["title"]).strip()][:lim]
 
     def remember_upload_title(self, title: str, *, platform: str = "youtube") -> None:
         """Запомнить название после подтверждения диалога залива."""
-        self._remember_recent_text_value(
-            table="recent_upload_titles",
-            column="title",
-            value=title,
-            keep=_RECENT_UPLOAD_TITLES_KEEP,
-            platform=platform,
+        plat = _normalize_platform(platform)
+        targets: tuple[str, ...] = (
+            ("youtube", "instagram") if plat == "yt_inst" else (_storage_platform(plat),)
         )
+        for one in targets:
+            self._remember_recent_text_value(
+                table="recent_upload_titles",
+                column="title",
+                value=title,
+                keep=_RECENT_UPLOAD_TITLES_KEEP,
+                platform=one,
+            )
 
     def list_recent_channel_names(
         self,
@@ -1078,19 +1119,53 @@ class UploadStore:
     def list_sessions(
         self, limit: int = 200, *, platform: str = "youtube"
     ) -> list[UploadSession]:
+        """
+        Сессии выбранного режима.
+
+        Для youtube / instagram также включаются сессии yt_inst, в которых есть
+        залитые видео этой площадки (ссылки из dual-upload попадают в «Залитые»
+        соответствующей платформы). uploaded_ok для таких режимов — число видео
+        именно этой площадки в сессии.
+        """
         lim = max(1, int(limit))
         plat = _normalize_platform(platform)
         with self._connect() as con:
-            rows = con.execute(
-                """
-                SELECT id, started_at, planned_videos, processed_videos, uploaded_ok, ended_at, status
-                FROM upload_sessions
-                WHERE platform = ?
-                ORDER BY started_at DESC, id DESC
-                LIMIT ?;
-                """,
-                (plat, lim),
-            ).fetchall()
+            if plat in ("youtube", "instagram"):
+                rows = con.execute(
+                    """
+                    SELECT
+                        s.id, s.started_at, s.planned_videos, s.processed_videos,
+                        COALESCE((
+                            SELECT COUNT(*) FROM uploaded_videos v
+                            WHERE v.session_id = s.id AND v.platform = ?
+                        ), 0) AS uploaded_ok,
+                        s.ended_at, s.status
+                    FROM upload_sessions s
+                    WHERE s.platform = ?
+                       OR (
+                            s.platform = 'yt_inst'
+                            AND EXISTS (
+                                SELECT 1 FROM uploaded_videos v
+                                WHERE v.session_id = s.id AND v.platform = ?
+                            )
+                       )
+                    ORDER BY s.started_at DESC, s.id DESC
+                    LIMIT ?;
+                    """,
+                    (plat, plat, plat, lim),
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    """
+                    SELECT id, started_at, planned_videos, processed_videos,
+                           uploaded_ok, ended_at, status
+                    FROM upload_sessions
+                    WHERE platform = ?
+                    ORDER BY started_at DESC, id DESC
+                    LIMIT ?;
+                    """,
+                    (plat, lim),
+                ).fetchall()
         out: list[UploadSession] = []
         for r in rows:
             out.append(
@@ -1116,7 +1191,7 @@ class UploadStore:
         if not ids:
             return {}
         ph = ",".join("?" for _ in ids)
-        plat = _normalize_platform(platform)
+        plat_sql, plat_binds = _video_platform_sql_filter_aliased(platform)
         with self._connect() as con:
             rows = con.execute(
                 f"""
@@ -1130,10 +1205,10 @@ class UploadStore:
                     v.age_restricted AS age_restricted
                 FROM uploaded_videos v
                 LEFT JOIN upload_sessions s ON s.id = v.session_id
-                WHERE v.platform = ? AND v.session_id IN ({ph})
+                WHERE {plat_sql} AND v.session_id IN ({ph})
                 ORDER BY v.uploaded_at DESC, v.id DESC;
                 """,
-                (plat, *ids),
+                (*plat_binds, *ids),
             ).fetchall()
         out: dict[int, list[UploadedVideo]] = {sid: [] for sid in ids}
         for r in rows:
@@ -1171,9 +1246,15 @@ class UploadStore:
     ) -> list[UploadedVideo]:
         lim = max(1, int(limit))
         plat = _normalize_platform(platform)
+        plat_sql, plat_binds = _video_platform_sql_filter_aliased(platform)
+        session_filter = ""
+        session_binds: tuple[str, ...] = ()
+        if plat == "yt_inst":
+            session_filter = " AND s.platform = ?"
+            session_binds = (plat,)
         with self._connect() as con:
             rows = con.execute(
-                """
+                f"""
                 SELECT
                     v.id, v.session_id, s.started_at AS session_started_at,
                     v.uploaded_at, v.title, v.description, v.url, v.video_id,
@@ -1184,11 +1265,11 @@ class UploadStore:
                     v.age_restricted AS age_restricted
                 FROM uploaded_videos v
                 LEFT JOIN upload_sessions s ON s.id = v.session_id
-                WHERE v.platform = ?
+                WHERE {plat_sql}{session_filter}
                 ORDER BY v.uploaded_at DESC, v.id DESC
                 LIMIT ?;
                 """,
-                (plat, lim),
+                (*plat_binds, *session_binds, lim),
             ).fetchall()
         out: list[UploadedVideo] = []
         for r in rows:
@@ -1299,15 +1380,27 @@ class UploadStore:
         ph = ",".join("?" for _ in ids)
         plat = _normalize_platform(platform)
         with self._connect() as con:
-            rows = con.execute(
-                f"""
-                SELECT profile_id, MAX(uploaded_at) AS last_at
-                FROM uploaded_videos
-                WHERE platform = ? AND profile_id IN ({ph})
-                GROUP BY profile_id;
-                """,
-                (plat, *ids),
-            ).fetchall()
+            if plat == "yt_inst":
+                rows = con.execute(
+                    f"""
+                    SELECT profile_id, MAX(uploaded_at) AS last_at
+                    FROM uploaded_videos
+                    WHERE platform IN ('youtube', 'instagram')
+                      AND profile_id IN ({ph})
+                    GROUP BY profile_id;
+                    """,
+                    (*ids,),
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    f"""
+                    SELECT profile_id, MAX(uploaded_at) AS last_at
+                    FROM uploaded_videos
+                    WHERE platform = ? AND profile_id IN ({ph})
+                    GROUP BY profile_id;
+                    """,
+                    (plat, *ids),
+                ).fetchall()
         out: dict[str, str] = {}
         for r in rows:
             pid = str(r["profile_id"] or "").strip()
@@ -1523,26 +1616,32 @@ class UploadStore:
         shift = pause_td + timedelta(hours=1) if pause_td.total_seconds() > 0 else timedelta(hours=1)
         old = (datetime.now(tz=timezone.utc) - shift).isoformat()
         with self._connect() as con:
-            con.execute(
-                """
-                UPDATE uploaded_videos
-                SET uploaded_at = ?
-                WHERE platform = ?
-                  AND profile_id = ?
-                  AND id = (
-                    SELECT id FROM uploaded_videos
-                    WHERE platform = ? AND profile_id = ?
-                    ORDER BY uploaded_at DESC, id DESC
-                    LIMIT 1
-                  );
-                """,
-                (old, plat, pid, plat, pid),
-            )
-            row = con.execute("SELECT changes() AS n;").fetchone()
-            try:
-                return int(row["n"]) if row is not None else 0
-            except (TypeError, ValueError, KeyError):
-                return 0
+            changed = 0
+            # Yt+Inst: сдвигаем последние заливки обеих площадок, иначе пауза может
+            # остаться из-за второй платформы после сброса только одного ряда.
+            plats = ("youtube", "instagram") if plat == "yt_inst" else (plat,)
+            for one in plats:
+                con.execute(
+                    """
+                    UPDATE uploaded_videos
+                    SET uploaded_at = ?
+                    WHERE platform = ?
+                      AND profile_id = ?
+                      AND id = (
+                        SELECT id FROM uploaded_videos
+                        WHERE platform = ? AND profile_id = ?
+                        ORDER BY uploaded_at DESC, id DESC
+                        LIMIT 1
+                      );
+                    """,
+                    (old, one, pid, one, pid),
+                )
+                row = con.execute("SELECT changes() AS n;").fetchone()
+                try:
+                    changed += int(row["n"]) if row is not None else 0
+                except (TypeError, ValueError, KeyError):
+                    pass
+            return changed
 
     def flag_profile_after_upload_errors(self, *, profile_id: str, flagged: bool, error_text: str = "") -> None:
         pid = (profile_id or "").strip()

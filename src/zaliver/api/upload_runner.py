@@ -26,7 +26,9 @@ def run_upload_job(
 ) -> None:
     from zaliver.youtube_upload.multi_uploader import MultiProfileUploader
 
-    is_instagram = platform == "instagram"
+    plat = (platform or "").strip().lower()
+    is_instagram = plat == "instagram"
+    is_yt_inst = plat in {"yt_inst", "youtube_instagram", "yt+inst"}
     paths = [p for p in video_paths if (p or "").strip()]
     total = len(paths)
     if total <= 0:
@@ -40,14 +42,37 @@ def run_upload_job(
             set_log_sink,
             upload_instagram_reel_in_local_antidetect_profile,
             upload_instagram_reel_in_profile,
+            upload_youtube_and_instagram_in_local_antidetect_profile,
+            upload_youtube_and_instagram_in_profile,
         )
 
         set_log_sink(sink.on_log)
         kind_l = (kind or "dolphin").strip().lower()
         own = kind_l in {"own", "local", "own_antidetect", "local_antidetect"}
 
-        if is_instagram:
+        if is_yt_inst:
             kw: dict[str, Any] = dict(
+                video_path=task.video_path,
+                title=task.title or title,
+                description=task.description or description,
+                headless=headless,
+            )
+            if own:
+                upload_youtube_and_instagram_in_local_antidetect_profile(
+                    profile_id,
+                    base_url=(base_url or "").strip(),
+                    **kw,
+                )
+            else:
+                upload_youtube_and_instagram_in_profile(
+                    profile_id,
+                    local_token=token or None,
+                    **kw,
+                )
+            return
+
+        if is_instagram:
+            kw = dict(
                 video_path=task.video_path,
                 title=task.title or title,
                 description=task.description or description,

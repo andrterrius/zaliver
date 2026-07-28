@@ -3,6 +3,11 @@ import type { Platform } from "../api/client";
 const CHOICES: { id: Platform; name: string; hint: string }[] = [
   { id: "youtube", name: "YouTube", hint: "Залив видео на YouTube" },
   { id: "instagram", name: "Instagram", hint: "Залив видео на Instagram" },
+  {
+    id: "yt_inst",
+    name: "Yt+Inst",
+    hint: "Одно видео на YouTube и Instagram (2 вкладки)",
+  },
 ];
 
 type Props = {

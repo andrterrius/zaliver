@@ -4,12 +4,50 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtWidgets import QApplication, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
+from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtWidgets import (
+    QApplication,
+    QSizePolicy,
+    QStackedWidget,
+    QStyleFactory,
+    QVBoxLayout,
+    QWidget,
+)
 
 from zaliver.ui.desktop_notify import DesktopNotifier
 from zaliver.ui.main_window import MainWindow
 from zaliver.ui.platform import normalize_platform, platform_display_name
 from zaliver.ui.platform_select import PlatformSelectPane
+
+
+def _dark_app_palette() -> QPalette:
+    """Dark palette so native Windows light theme doesn't leak into popups."""
+    p = QPalette()
+    window = QColor("#12141c")
+    base = QColor("#0f1118")
+    alt = QColor("#1a1d26")
+    text = QColor("#e4e6ef")
+    button = QColor("#252836")
+    highlight = QColor("#6366f1")
+    highlighted = QColor("#f8fafc")
+    disabled = QColor("#6b7280")
+    p.setColor(QPalette.ColorRole.Window, window)
+    p.setColor(QPalette.ColorRole.WindowText, text)
+    p.setColor(QPalette.ColorRole.Base, base)
+    p.setColor(QPalette.ColorRole.AlternateBase, alt)
+    p.setColor(QPalette.ColorRole.Text, text)
+    p.setColor(QPalette.ColorRole.Button, button)
+    p.setColor(QPalette.ColorRole.ButtonText, text)
+    p.setColor(QPalette.ColorRole.ToolTipBase, alt)
+    p.setColor(QPalette.ColorRole.ToolTipText, text)
+    p.setColor(QPalette.ColorRole.Highlight, highlight)
+    p.setColor(QPalette.ColorRole.HighlightedText, highlighted)
+    p.setColor(QPalette.ColorRole.PlaceholderText, disabled)
+    p.setColor(QPalette.ColorRole.Link, QColor("#a5b4fc"))
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, disabled)
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, disabled)
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, disabled)
+    return p
 
 
 class AppShell(QWidget):
@@ -76,9 +114,21 @@ class AppShell(QWidget):
         return Path(__file__).with_name("theme.qss")
 
     def _apply_theme(self) -> None:
-        p = self._theme_path()
-        if p.is_file():
-            self.setStyleSheet(p.read_text(encoding="utf-8"))
+        app = QApplication.instance()
+        if app is not None:
+            # Fusion + dark palette: Windows native style ignores combo popup QSS
+            # under light OS theme and paints white bg with light text from "*".
+            fusion = QStyleFactory.create("Fusion")
+            if fusion is not None:
+                app.setStyle(fusion)
+            app.setPalette(_dark_app_palette())
+        theme = self._theme_path()
+        if theme.is_file():
+            qss = theme.read_text(encoding="utf-8")
+            self.setStyleSheet(qss)
+            if app is not None:
+                # App-level QSS so QComboBox popups (top-level) inherit styles.
+                app.setStyleSheet(qss)
 
     def _dispose_main(self) -> None:
         if self._main is None:

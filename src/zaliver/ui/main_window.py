@@ -995,9 +995,16 @@ class MainWindow(QWidget):
         return Path(__file__).with_name("theme.qss")
 
     def _apply_theme(self) -> None:
+        # Prefer shell theme when embedded; standalone still needs local QSS.
         p = self._theme_path()
-        if p.is_file():
-            self.setStyleSheet(p.read_text(encoding="utf-8"))
+        if not p.is_file():
+            return
+        qss = p.read_text(encoding="utf-8")
+        self.setStyleSheet(qss)
+        if not getattr(self, "_embedded", False):
+            app = QApplication.instance()
+            if app is not None:
+                app.setStyleSheet(qss)
 
     def _brand(self, text: str) -> str:
         """Подмена YouTube → Instagram в UI-тексте."""

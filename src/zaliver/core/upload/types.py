@@ -9,7 +9,7 @@ from typing import Any
 
 @dataclass(slots=True)
 class AntidetectLaunchConfig:
-    kind: str = "dolphin"
+    kind: str = "local"
     token: str = ""
     base_url: str = ""
     headless: bool = True

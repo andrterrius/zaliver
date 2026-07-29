@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 
-type BrowserKind = "local" | "remote" | "dolphin";
+type BrowserKind = "local" | "remote";
 
 export function SettingsPage() {
   const [browserKind, setBrowserKind] = useState<BrowserKind>("local");
   const [localBase, setLocalBase] = useState("http://127.0.0.1:18765");
-  const [token, setTok] = useState("");
+  const [remoteBase, setRemoteBase] = useState("");
+  const [remoteCdpHost, setRemoteCdpHost] = useState("");
   const [headless, setHeadless] = useState(true);
   const [maxBrowsers, setMaxBrowsers] = useState(5);
   const [aiBase, setAiBase] = useState("");
@@ -21,11 +22,7 @@ export function SettingsPage() {
         const s = await api.getSettings();
         const v = s.values;
         const kind = String(v["antydetect/default_browser"] ?? "local").toLowerCase();
-        setBrowserKind(
-          kind === "dolphin" || kind === "remote" || kind === "local"
-            ? kind
-            : "local",
-        );
+        setBrowserKind(kind === "remote" ? "remote" : "local");
         setLocalBase(
           String(
             v["antydetect/local_api_base_url"] ||
@@ -33,7 +30,8 @@ export function SettingsPage() {
               "http://127.0.0.1:18765",
           ),
         );
-        setTok(String(v["antydetect/dolphin_token"] ?? ""));
+        setRemoteBase(String(v["antydetect/remote_api_base_url"] ?? ""));
+        setRemoteCdpHost(String(v["antydetect/remote_cdp_public_host"] ?? ""));
         setHeadless(Boolean(v["antydetect/dolphin_headless"] ?? true));
         setMaxBrowsers(Number(v["antydetect/max_concurrent_browsers"] ?? 5));
         setAiBase(String(v["ai/base_url"] ?? ""));
@@ -50,11 +48,13 @@ export function SettingsPage() {
     setStatus("");
     try {
       const base = localBase.trim().replace(/\/$/, "");
+      const remote = remoteBase.trim().replace(/\/$/, "");
       await api.patchSettings({
         "antydetect/default_browser": browserKind,
         "antydetect/local_api_base_url": base,
         "antydetect/own_base_url": base,
-        "antydetect/dolphin_token": token,
+        "antydetect/remote_api_base_url": remote,
+        "antydetect/remote_cdp_public_host": remoteCdpHost.trim(),
         "antydetect/dolphin_headless": headless,
         "antydetect/max_concurrent_browsers": maxBrowsers,
         "ai/base_url": aiBase,
@@ -67,8 +67,6 @@ export function SettingsPage() {
     }
   };
 
-  const ownMode = browserKind === "local" || browserKind === "remote";
-
   return (
     <div className="stack">
       <h1 className="title">Настройки</h1>
@@ -77,18 +75,17 @@ export function SettingsPage() {
 
       <section className="group stack">
         <h3 className="group-title">Антидетект</h3>
-        <label className="hint">Браузер по умолчанию</label>
+        <label className="hint">API антидетекта</label>
         <select
           className="field"
           value={browserKind}
           onChange={(e) => setBrowserKind(e.target.value as BrowserKind)}
         >
-          <option value="local">Свой (локальный API на сервере)</option>
-          <option value="remote">Свой (удалённый API)</option>
-          <option value="dolphin">Dolphin Anty</option>
+          <option value="local">Локальный</option>
+          <option value="remote">Удалённый</option>
         </select>
 
-        {ownMode ? (
+        {browserKind === "local" ? (
           <>
             <label className="hint">URL локального антидетекта</label>
             <input
@@ -103,12 +100,19 @@ export function SettingsPage() {
           </>
         ) : (
           <>
-            <label className="hint">Dolphin token</label>
+            <label className="hint">URL удалённого антидетекта</label>
             <input
               className="field"
-              value={token}
-              onChange={(e) => setTok(e.target.value)}
-              placeholder="Токен Dolphin Anty"
+              value={remoteBase}
+              onChange={(e) => setRemoteBase(e.target.value)}
+              placeholder="https://example.com:18765"
+            />
+            <label className="hint">CDP public host</label>
+            <input
+              className="field"
+              value={remoteCdpHost}
+              onChange={(e) => setRemoteCdpHost(e.target.value)}
+              placeholder="Публичный IP или хост для CDP"
             />
           </>
         )}

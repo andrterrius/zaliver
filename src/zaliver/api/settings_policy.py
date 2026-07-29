@@ -32,13 +32,13 @@ SETTINGS_ALLOWLIST: frozenset[str] = frozenset(
         "text_overlay_anchor_y",
         "text_overlay_wave_amp_frac",
         "text_overlay_wave_frame_speed",
-        "antydetect/dolphin_token",
         "antydetect/dolphin_headless",
         "antydetect/max_concurrent_browsers",
         "antydetect/default_browser",
         "antydetect/local_api_base_url",
         "antydetect/own_base_url",
         "antydetect/remote_api_base_url",
+        "antydetect/remote_cdp_public_host",
         "antydetect/own_remote_cdp_host",
         "antydetect/own_remote_cdp_port",
         "instagram/tabs_per_profile",
@@ -52,7 +52,6 @@ SETTINGS_ALLOWLIST: frozenset[str] = frozenset(
 
 SECRET_KEYS: frozenset[str] = frozenset(
     {
-        "antydetect/dolphin_token",
         "ai/api_key",
     }
 )

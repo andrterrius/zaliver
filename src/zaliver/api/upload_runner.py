@@ -47,8 +47,16 @@ def run_upload_job(
         )
 
         set_log_sink(sink.on_log)
-        kind_l = (kind or "dolphin").strip().lower()
-        own = kind_l in {"own", "local", "own_antidetect", "local_antidetect"}
+        kind_l = (kind or "local").strip().lower()
+        if kind_l == "dolphin":
+            kind_l = "local"
+        own = kind_l in {
+            "own",
+            "local",
+            "remote",
+            "own_antidetect",
+            "local_antidetect",
+        }
 
         if is_yt_inst:
             kw: dict[str, Any] = dict(

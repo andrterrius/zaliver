@@ -139,7 +139,7 @@ class UploadJobRequest(BaseModel):
     video_paths: list[str] = Field(min_length=1)
     title: str = ""
     description: str = ""
-    kind: str = "dolphin"
+    kind: str = "local"
     token: str = ""
     base_url: str = ""
     headless: bool = True

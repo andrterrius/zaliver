@@ -434,7 +434,9 @@ def build_router() -> APIRouter:
             raise HTTPException(status_code=400, detail="profile_ids required")
 
         platform = st.platform
-        kind = (body.kind or "dolphin").strip()
+        kind = (body.kind or "local").strip()
+        if kind == "dolphin":
+            kind = "local"
         base_url = (body.base_url or "").strip()
         headless = bool(body.headless)
         max_b = int(body.max_concurrent_browsers)
@@ -543,10 +545,10 @@ def build_router() -> APIRouter:
         request: Request,
         kind: str | None = Query(
             default=None,
-            description="dolphin | local | remote (default from settings, usually local)",
+            description="local | remote (default from settings, usually local)",
         ),
     ) -> dict[str, Any]:
-        """List antidetect profiles. Local API is default (no Dolphin token)."""
+        """List antidetect profiles (own local/remote HTTP API)."""
         st = _state(request)
         if not st.config.allow_browser_jobs:
             raise HTTPException(

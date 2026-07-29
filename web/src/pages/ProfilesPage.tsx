@@ -86,9 +86,7 @@ export function ProfilesPage({ platform }: Props) {
   const title =
     platform === "instagram"
       ? "Профили Instagram"
-      : kind === "dolphin"
-        ? "Профили Dolphin Anty"
-        : "Профили антидетекта";
+      : "Профили антидетекта";
 
   return (
     <div className="stack">
@@ -103,8 +101,6 @@ export function ProfilesPage({ platform }: Props) {
           Режим: {kind}
           {baseUrl ? ` · ${baseUrl}` : ""}
         </p>
-      ) : kind === "dolphin" ? (
-        <p className="hint">Режим: dolphin</p>
       ) : null}
       {error ? <div className="error-banner">{error}</div> : null}
       {job ? (

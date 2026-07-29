@@ -84,7 +84,7 @@ from zaliver.antydetect.browser_concurrency import (
     instagram_tabs_per_profile_from_settings,
     max_concurrent_browsers_from_settings,
 )
-from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI, DolphinAntyPublicAPI
+from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI
 from zaliver.antydetect.local_antidetect_api import (
     DEFAULT_LOCAL_API_BASE_URL,
     LocalAntidetectError,
@@ -213,6 +213,14 @@ _ANTYDETECT_OWN_KINDS = frozenset({"local", "remote"})
 
 def _is_own_antidetect_kind(kind: str) -> bool:
     return (kind or "").strip() in _ANTYDETECT_OWN_KINDS
+
+
+def _normalize_antidetect_kind(kind: str | None) -> str:
+    """Всегда свой антидетект: local | remote (dolphin → local)."""
+    k = (kind or "").strip().lower()
+    if k == "remote":
+        return "remote"
+    return "local"
 
 
 def _own_antidetect_api_label(kind: str) -> str:
@@ -1981,10 +1989,10 @@ class MainWindow(QWidget):
         profiles_l = QVBoxLayout(profiles)
         profiles_l.setSpacing(10)
         profiles_l.setContentsMargins(12, 12, 12, 12)
-        self._profiles_title = QLabel("Профили Dolphin Anty")
+        self._profiles_title = QLabel("Профили антидетекта")
         self._profiles_title.setObjectName("title")
         self._profiles_hint = QLabel(
-            "Подгрузка профилей через глобальный Public API Dolphin{anty} "
+            "Отметьте квадратиками профили для залива."
         )
         self._profiles_hint.setObjectName("hint")
         self._profiles_hint.setWordWrap(True)
@@ -2251,9 +2259,8 @@ class MainWindow(QWidget):
         settings_title = QLabel("Настройки")
         settings_title.setObjectName("title")
         settings_hint = QLabel(
-            "Выберите браузер по умолчанию для раздела «Профили». "
-            "Параметры обработки видео (GPU, потоки, ffmpeg) — ниже. "
-            "Токен Dolphin — https://dolphin-anty.net/panel/#/api"
+            "Настройки своего антидетекта (локальный или удалённый HTTP API) "
+            "и параметры обработки видео (GPU, потоки, ffmpeg)."
             if self._platform != PLATFORM_YT_INST
             else "Общие настройки антидетекта и ИИ, плюс разделы YouTube и Instagram "
             "(параметры берутся из настроек соответствующих платформ). "
@@ -2275,25 +2282,23 @@ class MainWindow(QWidget):
         gsu.addWidget(self._stats_server_username)
         gsu.addWidget(_settings_save_row(self._btn_save_stats_username))
 
-        browser_pick = QHBoxLayout()
-        browser_pick.setContentsMargins(0, 0, 0, 0)
-        browser_pick.setSpacing(8)
-        browser_pick.addWidget(QLabel("Браузер по умолчанию:"))
+        api_pick = QHBoxLayout()
+        api_pick.setContentsMargins(0, 0, 0, 0)
+        api_pick.setSpacing(8)
+        api_pick.addWidget(QLabel("API антидетекта:"))
         self._default_browser_combo = QComboBox()
         self._default_browser_combo.setObjectName("defaultBrowserCombo")
-        self._default_browser_combo.addItem("Dolphin Anty", "dolphin")
-        self._default_browser_combo.addItem("Свой (локальный API)", "local")
-        self._default_browser_combo.addItem("Свой (удалённый API)", "remote")
+        self._default_browser_combo.addItem("Локальный", "local")
+        self._default_browser_combo.addItem("Удалённый", "remote")
         self._default_browser_combo.currentIndexChanged.connect(
             self._on_default_browser_combo_changed
         )
-        browser_pick.addWidget(self._default_browser_combo, 1)
+        api_pick.addWidget(self._default_browser_combo, 1)
 
         self._dolphin_headless = QCheckBox("Headless (без окна браузера)")
         self._dolphin_headless.setChecked(True)
         self._dolphin_headless.setToolTip(
-            "Если включено — профиль запускается без окна браузера (headless): "
-            "Dolphin и свой антидетект (локальный или удалённый API)."
+            "Если включено — профиль запускается без окна браузера (headless)."
         )
 
         self._gb_max_concurrent_browsers = QGroupBox("Параллельные браузеры")
@@ -2331,20 +2336,7 @@ class MainWindow(QWidget):
         w_browsers_row.setLayout(browsers_row)
         gmc.addWidget(w_browsers_row)
 
-        self._gb_antydetect_dolphin = QGroupBox("Dolphin Anty")
-        gg = _compact_settings_grid(self._gb_antydetect_dolphin)
-        public_host = QLabel("Public API: https://dolphin-anty-api.com")
-        public_host.setObjectName("hint")
-        public_host.setWordWrap(True)
-        self._dolphin_token = QLineEdit()
-        self._dolphin_token.setPlaceholderText("JWT токен (Public API)…")
-        self._dolphin_token.setEchoMode(QLineEdit.EchoMode.Password)
-        self._dolphin_token.setToolTip(
-            "Токен из личного кабинета Dolphin. "
-            "Используется для Public API как заголовок Authorization: Bearer <token>."
-        )
-
-        self._gb_antydetect_local = QGroupBox("Свой антидетект (локальный HTTP API)")
+        self._gb_antydetect_local = QGroupBox("Локальный HTTP API")
         gl = _compact_settings_grid(self._gb_antydetect_local)
         self._local_api_base_url = QLineEdit()
         self._local_api_base_url.setPlaceholderText(DEFAULT_LOCAL_API_BASE_URL)
@@ -2354,7 +2346,7 @@ class MainWindow(QWidget):
         gl.addWidget(QLabel("Базовый URL:"), 0, 0)
         gl.addWidget(self._local_api_base_url, 0, 1)
 
-        self._gb_antydetect_remote = QGroupBox("Свой антидетект (удалённый HTTP API)")
+        self._gb_antydetect_remote = QGroupBox("Удалённый HTTP API")
         gr = _compact_settings_grid(self._gb_antydetect_remote)
         self._remote_api_base_url = QLineEdit()
         self._remote_api_base_url.setPlaceholderText("https://example.com:18765")
@@ -2381,11 +2373,12 @@ class MainWindow(QWidget):
         self._settings_status.setObjectName("hint")
         self._settings_status.setWordWrap(True)
 
-        gg.addWidget(public_host, 0, 0, 1, 2)
-        gg.addWidget(QLabel("JWT:"), 1, 0)
-        gg.addWidget(self._dolphin_token, 1, 1)
-        gg.addWidget(_settings_save_row(self._btn_save_antydetect), 2, 0, 1, 2)
-        gg.addWidget(self._settings_status, 3, 0, 1, 2)
+        self._antydetect_save_row = QWidget()
+        antydetect_save_l = QVBoxLayout(self._antydetect_save_row)
+        antydetect_save_l.setContentsMargins(0, 0, 0, 0)
+        antydetect_save_l.setSpacing(4)
+        antydetect_save_l.addWidget(_settings_save_row(self._btn_save_antydetect))
+        antydetect_save_l.addWidget(self._settings_status)
 
         gb_yt = QGroupBox("YouTube")
         self._gb_youtube_settings = gb_yt
@@ -2639,12 +2632,12 @@ class MainWindow(QWidget):
         settings_l.addWidget(settings_hint)
         settings_l.addWidget(self._gb_stats_username)
         settings_l.addWidget(self._gb_processing)
-        settings_l.addLayout(browser_pick)
+        settings_l.addLayout(api_pick)
         settings_l.addWidget(self._dolphin_headless)
         settings_l.addWidget(self._gb_max_concurrent_browsers)
-        settings_l.addWidget(self._gb_antydetect_dolphin)
         settings_l.addWidget(self._gb_antydetect_local)
         settings_l.addWidget(self._gb_antydetect_remote)
+        settings_l.addWidget(self._antydetect_save_row)
         settings_l.addWidget(gb_yt)
         settings_l.addWidget(gb_ig)
         settings_l.addWidget(gb_ai)
@@ -3342,18 +3335,8 @@ class MainWindow(QWidget):
     def _make_instagram_sessionid_provider(self, profile_id: str):
         """Callable для воркера: достать sessionid из браузера выбранного профиля."""
         pid = (profile_id or "").strip()
-        token = ""
-        if hasattr(self, "_dolphin_token"):
-            token = (self._dolphin_token.text() or "").strip()
-        if not token:
-            token = (
-                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
-            ).strip()
-        kind = "dolphin"
-        if hasattr(self, "_default_browser_combo"):
-            k = self._default_browser_combo.currentData()
-            if isinstance(k, str) and k.strip():
-                kind = k.strip()
+        token = self._legacy_dolphin_token()
+        kind = self._antidetect_kind()
         base_url = self._own_antidetect_base_url_from_settings(kind)
         headless = True
         if hasattr(self, "_dolphin_headless"):
@@ -4947,21 +4930,34 @@ class MainWindow(QWidget):
             self._settings.setValue("text_overlay_wave_amp_frac", float(waf))
             self._settings.setValue("text_overlay_wave_frame_speed", float(wfs))
 
+    def _antidetect_kind(self) -> str:
+        """Текущий режим антидетекта: только local | remote."""
+        if hasattr(self, "_default_browser_combo"):
+            k = self._default_browser_combo.currentData()
+            if isinstance(k, str) and k.strip():
+                return _normalize_antidetect_kind(k)
+        stored = (
+            self._settings.value("antydetect/default_browser", "local", type=str) or "local"
+        )
+        return _normalize_antidetect_kind(str(stored))
+
+    def _legacy_dolphin_token(self) -> str:
+        """Токен Dolphin больше не настраивается в UI (legacy из QSettings)."""
+        return (
+            self._settings.value("antydetect/dolphin_token", "", type=str) or ""
+        ).strip()
+
     def _on_default_browser_combo_changed(self, _index: int) -> None:
         self._update_profiles_section_header()
         self._sync_antydetect_settings_groups_visibility()
         self._sync_profiles_tab_action_buttons()
 
     def _sync_antydetect_settings_groups_visibility(self) -> None:
-        if not hasattr(self, "_gb_antydetect_dolphin") or not hasattr(
+        if not hasattr(self, "_gb_antydetect_local") or not hasattr(
             self, "_default_browser_combo"
         ):
             return
-        kind = self._default_browser_combo.currentData()
-        if not isinstance(kind, str) or not kind:
-            kind = "dolphin"
-        show_dolphin = kind == "dolphin"
-        self._gb_antydetect_dolphin.setVisible(show_dolphin)
+        kind = self._antidetect_kind()
         self._gb_antydetect_local.setVisible(kind == "local")
         if hasattr(self, "_gb_antydetect_remote"):
             self._gb_antydetect_remote.setVisible(kind == "remote")
@@ -4969,45 +4965,24 @@ class MainWindow(QWidget):
     def _update_profiles_section_header(self) -> None:
         if not hasattr(self, "_profiles_title"):
             return
-        kind = self._default_browser_combo.currentData()
-        if not isinstance(kind, str) or not kind:
-            kind = "dolphin"
-        if kind == "local":
-            self._profiles_title.setText("Профили (локальный антидетект)")
-            pause_short = format_upload_pause_short(self._upload_pause_between_uploads())
-            self._profiles_hint.setText(
-                f"Отметьте квадратиками профили для залива; «Пауза {pause_short}» — можно ли снова загружать "
-                "(клик по оранжевой подписи сбрасывает паузу)."
-            )
-            if hasattr(self, "_dolphin_query"):
-                self._dolphin_query.setPlaceholderText(
-                    "Поиск по загруженным профилям (имя, ID, движок)…"
-                )
-        elif kind == "remote":
+        kind = self._antidetect_kind()
+        if kind == "remote":
             self._profiles_title.setText("Профили (удалённый антидетект)")
-            pause_short = format_upload_pause_short(self._upload_pause_between_uploads())
-            self._profiles_hint.setText(
-                f"Отметьте квадратиками профили для залива; «Пауза {pause_short}» — можно ли снова загружать "
-                "(клик по оранжевой подписи сбрасывает паузу)."
-            )
-            if hasattr(self, "_dolphin_query"):
-                self._dolphin_query.setPlaceholderText(
-                    "Поиск по загруженным профилям (имя, ID, движок)…"
-                )
         else:
-            self._profiles_title.setText("Профили Dolphin Anty")
-            self._profiles_hint.setText(
-                "Подгрузка через Public API Dolphin{anty}. Квадратик — участие в заливе; "
-                "удерживайте ЛКМ по квадратикам для групповой отметки (Ctrl — добавить)."
+            self._profiles_title.setText("Профили (локальный антидетект)")
+        pause_short = format_upload_pause_short(self._upload_pause_between_uploads())
+        self._profiles_hint.setText(
+            f"Отметьте квадратиками профили для залива; «Пауза {pause_short}» — можно ли снова загружать "
+            "(клик по оранжевой подписи сбрасывает паузу)."
+        )
+        if hasattr(self, "_dolphin_query"):
+            self._dolphin_query.setPlaceholderText(
+                "Поиск по загруженным профилям (имя, ID, движок)…"
             )
-            if hasattr(self, "_dolphin_query"):
-                self._dolphin_query.setPlaceholderText("Поиск по загруженным профилям…")
         self._sync_profiles_tab_action_buttons()
 
     def _sync_profiles_tab_action_buttons(self) -> None:
-        kind = self._default_browser_combo.currentData()
-        if not isinstance(kind, str) or not kind:
-            kind = "dolphin"
+        kind = self._antidetect_kind()
         own = _is_own_antidetect_kind(kind)
         busy = (
             self._profiles_availability_running
@@ -5058,26 +5033,28 @@ class MainWindow(QWidget):
                 self._populate_uploaded_ig_checker_profiles()
 
     def _load_antydetect_settings(self) -> None:
-        if not hasattr(self, "_dolphin_token"):
+        if not hasattr(self, "_default_browser_combo"):
             return
-        token = self._settings.value("antydetect/dolphin_token", "", type=str) or ""
-        self._dolphin_token.setText((token or "").strip())
         if hasattr(self, "_dolphin_headless"):
             headless = self._settings.value(
                 "antydetect/dolphin_headless", True, type=bool
             )
             self._dolphin_headless.setChecked(bool(headless))
-        if hasattr(self, "_default_browser_combo"):
-            br = (
-                self._settings.value("antydetect/default_browser", "dolphin", type=str)
-                or "dolphin"
-            ).strip()
-            idx = self._default_browser_combo.findData(br)
-            if idx < 0:
-                idx = 0
-            self._default_browser_combo.blockSignals(True)
-            self._default_browser_combo.setCurrentIndex(idx)
-            self._default_browser_combo.blockSignals(False)
+        br = _normalize_antidetect_kind(
+            self._settings.value("antydetect/default_browser", "local", type=str)
+            or "local"
+        )
+        # Старый режим dolphin больше не поддерживается в UI.
+        if (
+            self._settings.value("antydetect/default_browser", "", type=str) or ""
+        ).strip().lower() == "dolphin":
+            self._settings.setValue("antydetect/default_browser", "local")
+        idx = self._default_browser_combo.findData(br)
+        if idx < 0:
+            idx = 0
+        self._default_browser_combo.blockSignals(True)
+        self._default_browser_combo.setCurrentIndex(idx)
+        self._default_browser_combo.blockSignals(False)
         if hasattr(self, "_local_api_base_url"):
             if self._settings.contains("antydetect/local_api_base_url"):
                 url = (self._settings.value("antydetect/local_api_base_url", "", type=str) or "").strip()
@@ -5106,18 +5083,15 @@ class MainWindow(QWidget):
         self._sync_antydetect_settings_groups_visibility()
 
     def _save_antydetect_settings(self) -> None:
-        token = (self._dolphin_token.text() or "").strip()
-        if token:
-            self._settings.setValue("antydetect/dolphin_token", token)
         if hasattr(self, "_dolphin_headless"):
             self._settings.setValue(
                 "antydetect/dolphin_headless",
                 bool(self._dolphin_headless.isChecked()),
             )
         if hasattr(self, "_default_browser_combo"):
-            k = self._default_browser_combo.currentData()
-            if isinstance(k, str) and k:
-                self._settings.setValue("antydetect/default_browser", k)
+            self._settings.setValue(
+                "antydetect/default_browser", self._antidetect_kind()
+            )
         if hasattr(self, "_local_api_base_url"):
             self._settings.setValue(
                 "antydetect/local_api_base_url",
@@ -5140,7 +5114,7 @@ class MainWindow(QWidget):
             pass
         if hasattr(self, "_settings_status"):
             self._settings_status.setText("Сохранено.")
-
+        self._update_profiles_section_header()
     def _update_max_concurrent_browsers_label(self, value: int) -> None:
         if hasattr(self, "_max_concurrent_browsers_label"):
             self._max_concurrent_browsers_label.setText(
@@ -5992,9 +5966,7 @@ class MainWindow(QWidget):
             pids, platform=self._platform
         )
         kind = (
-            self._default_browser_combo.currentData()
-            if hasattr(self, "_default_browser_combo")
-            else "dolphin"
+            self._antidetect_kind()
         )
         show_account = _is_own_antidetect_kind(kind if isinstance(kind, str) else "")
         show_preview = isinstance(kind, str) and kind.strip() == "remote"
@@ -6100,13 +6072,9 @@ class MainWindow(QWidget):
         self._profiles_filter_timer.stop()
         self._save_antydetect_settings()
 
-        token = (self._dolphin_token.text() or "").strip()
-        if not token:
-            token = (self._settings.value("antydetect/dolphin_token", "", type=str) or "").strip()
+        token = self._legacy_dolphin_token()
 
-        kind = self._default_browser_combo.currentData()
-        if not isinstance(kind, str) or not kind.strip():
-            kind = "dolphin"
+        kind = self._antidetect_kind()
         base_url = self._own_antidetect_base_url_from_settings(kind)
 
         self._profiles_refresh_running = True
@@ -6121,35 +6089,23 @@ class MainWindow(QWidget):
         t.start()
 
     def _profiles_worker(self, *, kind: str, token: str, base_url: str) -> None:
+        del token  # Dolphin JWT больше не используется
         try:
-            if _is_own_antidetect_kind(kind):
-                u = (base_url or "").strip()
-                if not u:
-                    self._profiles_load_failed.emit(
-                        f"Укажите базовый URL {_own_antidetect_api_label(kind)} API в настройках "
-                        "(раздел «Свой антидетект») и сохраните."
-                    )
-                    return
-                api = LocalAntidetectHttpAPI(u)
-                try:
-                    raw = api.list_profiles()
-                finally:
-                    api.close()
-                profiles = [normalize_local_profile_for_ui(p) for p in raw]
-                self._profiles_loaded.emit(profiles)
+            k = _normalize_antidetect_kind(kind)
+            u = (base_url or "").strip()
+            if not u:
+                self._profiles_load_failed.emit(
+                    f"Укажите базовый URL {_own_antidetect_api_label(k)} API в настройках "
+                    "и сохраните."
+                )
                 return
-
-            api = DolphinAntyPublicAPI(token=token)
+            api = LocalAntidetectHttpAPI(u)
             try:
-                # Public API: limit max 100 (OpenAPI). Поиск в UI — локально по загруженному списку.
-                profiles = api.list_profiles(limit=100, query=None)
+                raw = api.list_profiles()
             finally:
                 api.close()
+            profiles = [normalize_local_profile_for_ui(p) for p in raw]
             self._profiles_loaded.emit(profiles)
-        except DolphinAntyError as e:
-            self._profiles_load_failed.emit(
-                "Проверьте JWT токен (Public API: https://dolphin-anty-api.com).\n" + str(e)
-            )
         except LocalAntidetectError as e:
             self._profiles_load_failed.emit(
                 f"Проверьте, что сервис {_own_antidetect_api_label(kind)} антидетекта доступен "
@@ -6200,14 +6156,8 @@ class MainWindow(QWidget):
             )
             return
 
-        token = (self._dolphin_token.text() or "").strip()
-        if not token:
-            token = (
-                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
-            ).strip()
-        kind = self._default_browser_combo.currentData()
-        if not isinstance(kind, str) or not kind.strip():
-            kind = "dolphin"
+        token = self._legacy_dolphin_token()
+        kind = self._antidetect_kind()
         base_url = self._own_antidetect_base_url_from_settings(kind)
 
         headless = True
@@ -6435,14 +6385,8 @@ class MainWindow(QWidget):
             )
             return
 
-        token = (self._dolphin_token.text() or "").strip()
-        if not token:
-            token = (
-                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
-            ).strip()
-        kind = self._default_browser_combo.currentData()
-        if not isinstance(kind, str) or not kind.strip():
-            kind = "dolphin"
+        token = self._legacy_dolphin_token()
+        kind = self._antidetect_kind()
         base_url = self._own_antidetect_base_url_from_settings(kind)
 
         headless = True
@@ -6653,14 +6597,8 @@ class MainWindow(QWidget):
             )
             return
 
-        token = (self._dolphin_token.text() or "").strip()
-        if not token:
-            token = (
-                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
-            ).strip()
-        kind = self._default_browser_combo.currentData()
-        if not isinstance(kind, str) or not kind.strip():
-            kind = "dolphin"
+        token = self._legacy_dolphin_token()
+        kind = self._antidetect_kind()
         base_url = self._own_antidetect_base_url_from_settings(kind)
 
         headless = True
@@ -7008,8 +6946,8 @@ class MainWindow(QWidget):
         if answer != QMessageBox.StandardButton.Yes:
             return
 
-        kind = self._default_browser_combo.currentData()
-        kind_s = kind if isinstance(kind, str) else "dolphin"
+        kind = self._antidetect_kind()
+        kind_s = _normalize_antidetect_kind(kind if isinstance(kind, str) else "")
         if (
             has_customization
             and not is_ig
@@ -7023,11 +6961,7 @@ class MainWindow(QWidget):
             )
             return
 
-        token = (self._dolphin_token.text() or "").strip()
-        if not token:
-            token = (
-                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
-            ).strip()
+        token = self._legacy_dolphin_token()
         base_url = self._own_antidetect_base_url_from_settings(kind_s)
         need_base = _is_own_antidetect_kind(kind_s) and (
             has_customization or is_ig
@@ -7855,14 +7789,8 @@ class MainWindow(QWidget):
         if warmup_settings is None:
             return
 
-        token = (self._dolphin_token.text() or "").strip()
-        if not token:
-            token = (
-                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
-            ).strip()
-        kind = self._default_browser_combo.currentData()
-        if not isinstance(kind, str) or not kind.strip():
-            kind = "dolphin"
+        token = self._legacy_dolphin_token()
+        kind = self._antidetect_kind()
         base_url = self._own_antidetect_base_url_from_settings(kind)
 
         headless = True
@@ -8264,14 +8192,8 @@ class MainWindow(QWidget):
                 for v in videos
             ]
 
-        token = (self._dolphin_token.text() or "").strip()
-        if not token:
-            token = (
-                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
-            ).strip()
-        kind = self._default_browser_combo.currentData()
-        if not isinstance(kind, str) or not kind.strip():
-            kind = "dolphin"
+        token = self._legacy_dolphin_token()
+        kind = self._antidetect_kind()
         base_url = self._own_antidetect_base_url_from_settings(kind)
 
         headless = True
@@ -8513,14 +8435,8 @@ class MainWindow(QWidget):
             return
         farm_settings = dlg.settings()
 
-        token = (self._dolphin_token.text() or "").strip()
-        if not token:
-            token = (
-                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
-            ).strip()
-        kind = self._default_browser_combo.currentData()
-        if not isinstance(kind, str) or not kind.strip():
-            kind = "dolphin"
+        token = self._legacy_dolphin_token()
+        kind = self._antidetect_kind()
         base_url = self._own_antidetect_base_url_from_settings(kind)
 
         headless = True
@@ -8669,10 +8585,8 @@ class MainWindow(QWidget):
 
     def _own_antidetect_base_url_from_settings(self, kind: str | None = None) -> str:
         if kind is None:
-            kind = self._default_browser_combo.currentData()
-        k = (kind or "").strip() if isinstance(kind, str) else "dolphin"
-        if not k:
-            k = "dolphin"
+            kind = self._antidetect_kind()
+        k = _normalize_antidetect_kind(kind if isinstance(kind, str) else None)
         if k == "local":
             base_url = (self._local_api_base_url.text() or "").strip()
             if not base_url:
@@ -8760,11 +8674,7 @@ class MainWindow(QWidget):
         if not pid:
             return ""
 
-        kind = "dolphin"
-        if hasattr(self, "_default_browser_combo"):
-            k = self._default_browser_combo.currentData()
-            if isinstance(k, str) and k.strip():
-                kind = k.strip()
+        kind = self._antidetect_kind()
 
         if _is_own_antidetect_kind(kind):
             base_url = self._own_antidetect_base_url_from_settings(kind)
@@ -8803,7 +8713,7 @@ class MainWindow(QWidget):
         return ""
 
     def _open_profiles_accounts_import_dialog(self) -> None:
-        kind = self._default_browser_combo.currentData()
+        kind = self._antidetect_kind()
         if not _is_own_antidetect_kind(kind if isinstance(kind, str) else ""):
             QMessageBox.information(
                 self,
@@ -8923,7 +8833,7 @@ class MainWindow(QWidget):
         pid = (profile_id or "").strip()
         if not pid:
             return
-        kind = self._default_browser_combo.currentData()
+        kind = self._antidetect_kind()
         if not isinstance(kind, str) or kind.strip() != "remote":
             QMessageBox.information(
                 self,
@@ -9138,7 +9048,7 @@ class MainWindow(QWidget):
                 "Очистка уже выполняется. Дождитесь завершения.",
             )
             return
-        kind = self._default_browser_combo.currentData()
+        kind = self._antidetect_kind()
         if not _is_own_antidetect_kind(kind if isinstance(kind, str) else ""):
             QMessageBox.warning(
                 self,
@@ -9301,7 +9211,7 @@ class MainWindow(QWidget):
                 self._append_log(
                     "[availability] Недоступные профили (ID): " + ", ".join(failed)
                 )
-        kind = self._default_browser_combo.currentData()
+        kind = self._antidetect_kind()
         if _is_own_antidetect_kind((kind or "").strip()) and total > 0:
             self._refresh_profiles_list_after_zaliver_tags()
         QMessageBox.information(
@@ -9479,7 +9389,7 @@ class MainWindow(QWidget):
                 self._append_log(
                     "[ig-register] Профили с ошибкой (ID): " + ", ".join(failed)
                 )
-        kind = self._default_browser_combo.currentData()
+        kind = self._antidetect_kind()
         if _is_own_antidetect_kind((kind or "").strip()) and total > 0:
             self._refresh_profiles_list_after_zaliver_tags()
         QMessageBox.information(
@@ -9515,7 +9425,7 @@ class MainWindow(QWidget):
                 self._append_log(
                     "[ig-2fa] Профили с ошибкой (ID): " + ", ".join(failed)
                 )
-        kind = self._default_browser_combo.currentData()
+        kind = self._antidetect_kind()
         if _is_own_antidetect_kind((kind or "").strip()) and total > 0:
             self._refresh_profiles_list_after_zaliver_tags()
         QMessageBox.information(
@@ -9669,7 +9579,7 @@ class MainWindow(QWidget):
                 self._append_log(
                     "[cookie_farm] Ошибки (ID): " + ", ".join(failed)
                 )
-        kind = self._default_browser_combo.currentData()
+        kind = self._antidetect_kind()
         if _is_own_antidetect_kind((kind or "").strip()) and total > 0:
             self._refresh_profiles_list_after_zaliver_tags()
         QMessageBox.information(
@@ -9900,7 +9810,7 @@ class MainWindow(QWidget):
             self._apply_profiles_filter()
         self._upload_session_upload_done = True
         self._maybe_finish_upload_session(status="upload_failed")
-        kind = self._default_browser_combo.currentData()
+        kind = self._antidetect_kind()
         if _is_own_antidetect_kind(kind if isinstance(kind, str) else ""):
             hint = (
                 f"Нужны доступный API {_own_antidetect_api_label(kind if isinstance(kind, str) else '')} "
@@ -11118,15 +11028,8 @@ class MainWindow(QWidget):
         streaming: bool = False,
     ) -> bool:
         """Start MultiProfileUploader. Returns False if upload was skipped."""
-        token = (self._dolphin_token.text() or "").strip()
-        if not token:
-            token = (
-                self._settings.value("antydetect/dolphin_token", "", type=str) or ""
-            ).strip()
-
-        kind = self._default_browser_combo.currentData()
-        if not isinstance(kind, str) or not kind.strip():
-            kind = "dolphin"
+        token = self._legacy_dolphin_token()
+        kind = self._antidetect_kind()
         base_url = self._own_antidetect_base_url_from_settings(kind)
 
         try:
@@ -12357,7 +12260,7 @@ class MainWindow(QWidget):
 
     def _refresh_profiles_list_after_zaliver_tags(self) -> None:
         """Перезагрузить профили с API после смены служебных тегов (свой антидетект)."""
-        kind = self._default_browser_combo.currentData()
+        kind = self._antidetect_kind()
         if _is_own_antidetect_kind((kind or "").strip() if isinstance(kind, str) else ""):
             self._refresh_antydetect_profiles()
 

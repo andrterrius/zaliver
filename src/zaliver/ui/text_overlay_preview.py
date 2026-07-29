@@ -6,18 +6,20 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QPointF, QRectF, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
+    QImage,
     QMouseEvent,
     QPainter,
     QPainterPath,
     QPen,
     QPixmap,
+    QResizeEvent,
 )
-from PyQt6.QtWidgets import QSizePolicy, QWidget
+from PyQt6.QtWidgets import QPushButton, QSizePolicy, QWidget
 
 from zaliver.processing.text_overlay import (
     NEON_WAVE_AMP_FRAC,
@@ -33,6 +35,8 @@ from zaliver.processing.text_overlay import (
     wrap_text_lines,
     _make_qfont,
 )
+
+_PLAY_MAX_WIDTH = 480
 
 _FRAME_CACHE: dict[tuple[str, float, int], QPixmap] = {}
 _FRAME_CACHE_MAX = 12
@@ -122,10 +126,120 @@ def load_video_frame_pixmap(
     return pix
 
 
+class _PreviewVideoWorker(QThread):
+    """Декодирует ролик в raw RGB кадры примерно в реальном времени."""
+
+    frame_ready = pyqtSignal(bytes, int, int)
+    failed = pyqtSignal(str)
+    finished_ok = pyqtSignal()
+
+    def __init__(self, video_path: str, *, max_width: int = _PLAY_MAX_WIDTH) -> None:
+        super().__init__()
+        self._video_path = video_path
+        self._max_width = max(160, int(max_width))
+        self._proc: subprocess.Popen[bytes] | None = None
+        self._stop = False
+
+    def request_stop(self) -> None:
+        self._stop = True
+        proc = self._proc
+        if proc is None:
+            return
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    def run(self) -> None:
+        from zaliver.processing.ffmpeg_merge import resolve_ffmpeg_executable
+        from zaliver.processing.ffmpeg_probe import probe_video_stream
+
+        exe = resolve_ffmpeg_executable()
+        if not exe:
+            self.failed.emit("ffmpeg не найден")
+            return
+        try:
+            # Display-размер (после rotate/SAR) — как у статичного кадра превью.
+            src_w, src_h, _fps, _fc, _fcc = probe_video_stream(self._video_path)
+        except Exception as exc:
+            self.failed.emit(str(exc) or "не удалось прочитать видео")
+            return
+        if src_w <= 0 or src_h <= 0:
+            self.failed.emit("некорректный размер кадра")
+            return
+
+        # Ограничиваем по ширине превью, сохраняя пропорции display-кадра.
+        out_w = min(self._max_width, int(src_w))
+        out_h = max(2, int(round(src_h * (out_w / float(src_w)))))
+        out_w -= out_w % 2
+        out_h -= out_h % 2
+        if out_w < 2 or out_h < 2:
+            self.failed.emit("слишком маленький кадр")
+            return
+
+        frame_bytes = out_w * out_h * 3
+        # force_original_aspect_ratio+pad: без растягивания, если autorotate
+        # и probe чуть расходятся; setsar=1 — квадратные пиксели как у still JPG.
+        vf = (
+            f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
+            f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,"
+            f"setsar=1"
+        )
+        cmd = [
+            exe,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-re",
+            "-i",
+            self._video_path,
+            "-an",
+            "-vf",
+            vf,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ]
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=_popen_flags(),
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc) or "не удалось запустить ffmpeg")
+            return
+
+        proc = self._proc
+        assert proc is not None and proc.stdout is not None
+        try:
+            while not self._stop:
+                data = proc.stdout.read(frame_bytes)
+                if not data or len(data) < frame_bytes:
+                    break
+                if self._stop:
+                    break
+                self.frame_ready.emit(bytes(data), out_w, out_h)
+        finally:
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait(timeout=2)
+            except Exception:
+                pass
+            self._proc = None
+        if not self._stop:
+            self.finished_ok.emit()
+
+
 class TextOverlayPreviewWidget(QWidget):
     """Drag text on a vertical/horizontal frame; position stored as normalized anchor."""
 
     positionChanged = pyqtSignal(float, float)
+    playbackChanged = pyqtSignal(bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -161,9 +275,140 @@ class TextOverlayPreviewWidget(QWidget):
         self._bg_video_path: str | None = None
         self._bg_pixmap: QPixmap | None = None
         self._text_visible = True
+        self._playing = False
+        self._play_worker: _PreviewVideoWorker | None = None
         self._anim_timer = QTimer(self)
         self._anim_timer.setInterval(33)
         self._anim_timer.timeout.connect(self._on_anim_tick)
+
+        self._btn_play = QPushButton("▶", self)
+        self._btn_play.setObjectName("textPreviewNav")
+        self._btn_play.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_play.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_play.setFixedSize(36, 36)
+        self._btn_play.setToolTip("Смотреть видео с текстом")
+        self._btn_play.setAutoDefault(False)
+        self._btn_play.setDefault(False)
+        self._btn_play.clicked.connect(self.toggle_playback)
+        self._btn_play.setEnabled(False)
+        self._position_play_button()
+
+    def is_playing(self) -> bool:
+        return bool(self._playing)
+
+    def toggle_playback(self) -> None:
+        if self._playing:
+            self.stop_playback()
+        else:
+            self.start_playback()
+
+    def start_playback(self) -> None:
+        path = (self._bg_video_path or "").strip()
+        if not path or not Path(path).is_file():
+            return
+        if self._playing:
+            return
+        self.stop_playback(restore_still=False)
+        worker = _PreviewVideoWorker(path, max_width=_PLAY_MAX_WIDTH)
+        worker.frame_ready.connect(self._on_play_frame)
+        worker.failed.connect(self._on_play_failed)
+        worker.finished_ok.connect(self._on_play_finished)
+        worker.finished.connect(self._on_play_thread_finished)
+        self._play_worker = worker
+        self._playing = True
+        self._anim_frame = 0
+        self._stop_animation()
+        self._sync_play_button()
+        self.playbackChanged.emit(True)
+        worker.start()
+
+    def stop_playback(self, *, restore_still: bool = True) -> None:
+        was_playing = self._playing or self._play_worker is not None
+        worker = self._play_worker
+        self._play_worker = None
+        self._playing = False
+        if worker is not None:
+            try:
+                worker.frame_ready.disconnect(self._on_play_frame)
+            except TypeError:
+                pass
+            try:
+                worker.failed.disconnect(self._on_play_failed)
+            except TypeError:
+                pass
+            try:
+                worker.finished_ok.disconnect(self._on_play_finished)
+            except TypeError:
+                pass
+            try:
+                worker.finished.disconnect(self._on_play_thread_finished)
+            except TypeError:
+                pass
+            worker.request_stop()
+            if worker.isRunning() and not worker.wait(1500):
+                worker.terminate()
+                worker.wait(500)
+        self._sync_play_button()
+        if was_playing:
+            self.playbackChanged.emit(False)
+        if restore_still and self._bg_video_path:
+            self._bg_pixmap = load_video_frame_pixmap(self._bg_video_path)
+            self.update()
+        if self._text_visible:
+            self._start_animation()
+
+    def _on_play_frame(self, data: bytes, width: int, height: int) -> None:
+        if not self._playing:
+            return
+        img = QImage(
+            data,
+            int(width),
+            int(height),
+            int(width) * 3,
+            QImage.Format.Format_RGB888,
+        )
+        if img.isNull():
+            return
+        self._bg_pixmap = QPixmap.fromImage(img.copy())
+        self._anim_frame += 1
+        self.update()
+
+    def _on_play_failed(self, _message: str) -> None:
+        self.stop_playback(restore_still=True)
+
+    def _on_play_finished(self) -> None:
+        self.stop_playback(restore_still=True)
+
+    def _on_play_thread_finished(self) -> None:
+        # Поток уже завершился; stop_playback обычно уже вызван из finished_ok/failed.
+        if self._play_worker is not None and not self._play_worker.isRunning():
+            self._play_worker = None
+        if self._playing:
+            self.stop_playback(restore_still=True)
+    def _sync_play_button(self) -> None:
+        has_video = bool(self._bg_video_path)
+        self._btn_play.setEnabled(has_video)
+        if self._playing:
+            self._btn_play.setText("⏹")
+            self._btn_play.setToolTip("Остановить просмотр")
+        else:
+            self._btn_play.setText("▶")
+            self._btn_play.setToolTip(
+                "Смотреть видео с текстом"
+                if has_video
+                else "Нет видео для предпросмотра"
+            )
+
+    def _position_play_button(self) -> None:
+        margin = 10
+        x = max(margin, self.width() - self._btn_play.width() - margin)
+        y = max(margin, self.height() - self._btn_play.height() - margin)
+        self._btn_play.move(x, y)
+        self._btn_play.raise_()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._position_play_button()
 
     def set_text_visible(self, visible: bool) -> None:
         """Показывать ли наложенный текст (выкл. — только кадр фона)."""
@@ -171,7 +416,7 @@ class TextOverlayPreviewWidget(QWidget):
         if visible == self._text_visible:
             return
         self._text_visible = visible
-        if visible:
+        if visible and not self._playing:
             self._start_animation()
         else:
             self._stop_animation()
@@ -183,10 +428,14 @@ class TextOverlayPreviewWidget(QWidget):
         """Фон превью — кадр из исходного ролика (или сброс)."""
         raw = str(path or "").strip()
         if not raw:
+            if self._playing:
+                self.stop_playback(restore_still=False)
             if self._bg_video_path is None and self._bg_pixmap is None and not force:
+                self._sync_play_button()
                 return
             self._bg_video_path = None
             self._bg_pixmap = None
+            self._sync_play_button()
             self.update()
             return
         try:
@@ -198,22 +447,31 @@ class TextOverlayPreviewWidget(QWidget):
             and resolved == self._bg_video_path
             and self._bg_pixmap is not None
             and not self._bg_pixmap.isNull()
+            and not self._playing
         ):
+            self._sync_play_button()
             return
+        if self._playing:
+            self.stop_playback(restore_still=False)
         self._bg_video_path = resolved
         # Сразу сбросить старый кадр, чтобы смена файла была заметна.
         self._bg_pixmap = None
+        self._sync_play_button()
         self.update()
         self._bg_pixmap = load_video_frame_pixmap(resolved)
         self.update()
 
     def _on_anim_tick(self) -> None:
+        if self._playing:
+            return
         if not self._text_visible or not self._char_lines or not self.isVisible():
             return
         self._anim_frame += 1
         self.update()
 
     def _start_animation(self) -> None:
+        if self._playing:
+            return
         if self._text_visible and self._char_lines and self.isVisible():
             if not self._anim_timer.isActive():
                 self._anim_timer.start()
@@ -224,10 +482,13 @@ class TextOverlayPreviewWidget(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        if self._text_visible:
+        self._position_play_button()
+        if self._text_visible and not self._playing:
             self._start_animation()
 
     def hideEvent(self, event) -> None:
+        if self._playing:
+            self.stop_playback(restore_still=True)
         self._stop_animation()
         super().hideEvent(event)
 
@@ -444,13 +705,13 @@ class TextOverlayPreviewWidget(QWidget):
 
         orient_lbl = "9:16" if self._orientation == "vertical" else "16:9"
         painter.setPen(QColor("#e2e8f0" if bg is not None else "#64748b"))
-        painter.drawText(
-            int(fx) + 8,
-            int(fy) + 18,
-            f"Пример {orient_lbl} - перетащи текст"
-            if self._text_visible
-            else f"Пример {orient_lbl}",
-        )
+        if self._playing:
+            hint = f"▶ {orient_lbl}"
+        elif self._text_visible:
+            hint = f"Пример {orient_lbl} · ▶ видео · перетащи текст"
+        else:
+            hint = f"Пример {orient_lbl}"
+        painter.drawText(int(fx) + 8, int(fy) + 18, hint)
 
         if not self._text_visible:
             return

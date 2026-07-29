@@ -134,6 +134,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  startStitching: (body: Record<string, unknown>) =>
+    request<{ id: string; kind: string; status: string }>("/v1/jobs/stitching", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   listProfiles: () =>
     request<{
       kind?: string;

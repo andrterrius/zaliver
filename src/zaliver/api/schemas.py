@@ -67,6 +67,7 @@ class TextOverlayModel(BaseModel):
     font_bold: bool = True
     orientation: str = "vertical"
     from_middle: bool = True
+    after_frame_change: bool = False
     anchor_x: float = 0.5
     anchor_y: float = 0.15
     wave_amp_frac: float = 0.0
@@ -107,6 +108,22 @@ class SlicingJobRequest(BaseModel):
     max_scene_duration: float = Field(default=4.0, ge=0.1, le=120.0)
     min_scenes: int = Field(default=3, ge=1, le=100)
     max_scenes: int = Field(default=8, ge=1, le=100)
+    slice_fps_mode: str = "auto"
+    text_overlay: TextOverlayModel = Field(default_factory=TextOverlayModel)
+    youtube_upload_after_processing: bool = False
+
+
+class StitchingJobRequest(BaseModel):
+    output_dir: str
+    part1_files: list[str] = Field(min_length=1)
+    part2_files: list[str] = Field(min_length=1)
+    music_files: list[str] = Field(min_length=1)
+    num_workers: int = Field(default=2, ge=1, le=32)
+    copies_per_track: int = Field(default=1, ge=1, le=100)
+    use_gpu: bool = False
+    use_gpu_finalize: bool = False
+    min_part_duration: float = Field(default=2.0, ge=0.3, le=120.0)
+    max_part_duration: float = Field(default=6.0, ge=0.3, le=120.0)
     slice_fps_mode: str = "auto"
     text_overlay: TextOverlayModel = Field(default_factory=TextOverlayModel)
     youtube_upload_after_processing: bool = False

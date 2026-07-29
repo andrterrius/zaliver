@@ -31,6 +31,7 @@ from zaliver.api.schemas import (
     SettingsGetResponse,
     SettingsPatchRequest,
     SlicingJobRequest,
+    StitchingJobRequest,
     UniquifyJobRequest,
     UploadJobRequest,
     UploadedVideoItem,
@@ -44,6 +45,7 @@ from zaliver.api.settings_policy import (
 from zaliver.api.state import AppState
 from zaliver.api.upload_runner import run_upload_job
 from zaliver.processing.slicing_worker import SlicingService
+from zaliver.processing.stitching_worker import StitchingService
 from zaliver.processing.thread_worker import ProcessingService
 
 
@@ -328,6 +330,69 @@ def build_router() -> APIRouter:
 
         try:
             job = st.jobs.start(kind=JobKind.SLICING, runner=runner)
+        except RuntimeError as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        return JobCreatedResponse(
+            id=job.id, kind=job.kind.value, status=job.status.value
+        )
+
+    @router.post(
+        "/v1/jobs/stitching",
+        response_model=JobCreatedResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def start_stitching(
+        body: StitchingJobRequest, request: Request
+    ) -> JobCreatedResponse:
+        st = _state(request)
+        if body.min_part_duration > body.max_part_duration:
+            raise HTTPException(
+                status_code=400,
+                detail="min_part_duration cannot exceed max_part_duration",
+            )
+        try:
+            out_dir = str(
+                resolve_dir(body.output_dir, st.config.allowed_roots, create=True)
+            )
+            part1 = resolve_path_list(body.part1_files, st.config.allowed_roots)
+            part2 = resolve_path_list(body.part2_files, st.config.allowed_roots)
+            music = resolve_path_list(body.music_files, st.config.allowed_roots)
+            overlay = body.text_overlay.model_dump()
+            if "orientation" in overlay:
+                overlay["preview_orientation"] = overlay.pop("orientation")
+            if overlay.get("custom_font_path"):
+                overlay["custom_font_path"] = resolve_path_list(
+                    [overlay["custom_font_path"]], st.config.allowed_roots
+                )[0]
+        except PathNotAllowedError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+        workers = min(int(body.num_workers), st.config.max_workers_per_job)
+        options: dict[str, Any] = {
+            "output_dir": out_dir,
+            "part1_files": part1,
+            "part2_files": part2,
+            "music_files": music,
+            "num_workers": workers,
+            "copies_per_track": int(body.copies_per_track),
+            "text_overlay": overlay,
+            "min_part_duration": float(body.min_part_duration),
+            "max_part_duration": float(body.max_part_duration),
+            "use_gpu": bool(body.use_gpu),
+            "use_gpu_finalize": bool(body.use_gpu_finalize),
+            "slice_fps_mode": str(body.slice_fps_mode or "auto"),
+            "youtube_upload_after_processing": bool(
+                body.youtube_upload_after_processing
+            ),
+        }
+
+        def runner(sink, register_cancel) -> None:
+            svc = StitchingService(sink)
+            register_cancel(svc.cancel)
+            svc.run(options)
+
+        try:
+            job = st.jobs.start(kind=JobKind.STITCHING, runner=runner)
         except RuntimeError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
         return JobCreatedResponse(

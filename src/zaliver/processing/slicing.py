@@ -1121,34 +1121,38 @@ def _scene_filter_chain(
     *,
     gpu_pipeline: GpuPipeline | None = None,
 ) -> str:
-    last_frame = max(0, frame_count - 1)
-    select_pts = (
+    fc = max(1, int(frame_count))
+    last_frame = max(0, fc - 1)
+    # Если probe-длительность чуть длиннее реальных кадров, fps/энкодер
+    # иначе добивают чёрным → вспышка на стыке сцен. Клонируем последний кадр.
+    tail = (
+        f"tpad=stop_mode=clone:stop={fc},"
         f"select='lte(n\\,{last_frame})',setpts=N/FRAME_RATE/TB[{out_label}]"
     )
     if gpu_pipeline is None or gpu_pipeline.name in ("videotoolbox", "d3d11va"):
         return (
             f"[{input_index}:v]fps={fps},"
             f"{_cpu_scale_pad_chain(width, height)},"
-            f"{select_pts}"
+            f"{tail}"
         )
     if gpu_pipeline.name == "cuda":
         return (
             f"[{input_index}:v]scale_cuda={width}:{height}:force_original_aspect_ratio=decrease,"
             f"hwdownload,format=nv12,fps={fps},"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,"
-            f"{select_pts}"
+            f"{tail}"
         )
     if gpu_pipeline.name == "qsv":
         return (
             f"[{input_index}:v]scale_qsv={width}:{height},"
             f"hwdownload,format=nv12,fps={fps},"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,"
-            f"{select_pts}"
+            f"{tail}"
         )
     return (
         f"[{input_index}:v]fps={fps},"
         f"{_cpu_scale_pad_chain(width, height)},"
-        f"{select_pts}"
+        f"{tail}"
     )
 
 
@@ -1568,32 +1572,428 @@ def get_audio_duration(audio_file):
         return None
 
 
+def _pcm_audio_argv_tail() -> list[str]:
+    return ["-acodec", "pcm_s16le", "-ac", "2", "-ar", "44100"]
+
+
+def _trim_trailing_fade_wav(src_wav: str, out_wav: str) -> bool:
+    """Срезает затухание/тишину в конце, чтобы стык с началом песни не проваливался."""
+    try:
+        run_ffmpeg(
+            [
+                "-i",
+                src_wav,
+                "-af",
+                # reverse → убрать тихий старт (= бывший хвост) → reverse обратно
+                "areverse,"
+                "silenceremove=start_periods=1:start_duration=0.08:"
+                "start_threshold=-40dB:detection=peak,"
+                "areverse",
+                *_pcm_audio_argv_tail(),
+                out_wav,
+            ],
+        )
+        got = probe_media_duration_seconds(out_wav) or 0.0
+        src_len = probe_media_duration_seconds(src_wav) or 0.0
+        # Оставляем результат, если после среза fade ещё осталась полезная длина.
+        if got < 0.35:
+            return False
+        if src_len <= 0:
+            return True
+        return got >= min(src_len - 0.05, max(src_len * 0.35, src_len - 3.5))
+    except Exception:
+        return False
+
+
+def _trim_leading_silence_wav(src_wav: str, out_wav: str) -> bool:
+    """Срезает тишину/тихий вступ в начале перед стыком."""
+    try:
+        run_ffmpeg(
+            [
+                "-i",
+                src_wav,
+                "-af",
+                "silenceremove=start_periods=1:start_duration=0.05:"
+                "start_threshold=-42dB:detection=peak",
+                *_pcm_audio_argv_tail(),
+                out_wav,
+            ],
+        )
+        got = probe_media_duration_seconds(out_wav) or 0.0
+        return got >= 0.2
+    except Exception:
+        return False
+
+
+def _concat_audio_with_crossfade(
+    part_a: str,
+    part_b: str,
+    out_wav: str,
+    *,
+    duration_sec: float,
+    crossfade_sec: float = 0.12,
+    log: Optional[LogCallback] = None,
+) -> bool:
+    """Склеивает A+B с коротким crossfade, без щелчка и провала громкости."""
+    dur_a = probe_media_duration_seconds(part_a) or 0.0
+    dur_b = probe_media_duration_seconds(part_b) or 0.0
+    if dur_a < 0.1 or dur_b < 0.1:
+        return False
+    cf = min(float(crossfade_sec), dur_a * 0.35, dur_b * 0.35, 0.35)
+    cf = max(0.04, cf)
+    try:
+        # acrossfade: выход короче на cf, чем сумма длин — это как раз убирает хвост fade.
+        run_ffmpeg(
+            [
+                "-i",
+                part_a,
+                "-i",
+                part_b,
+                "-filter_complex",
+                f"[0:a][1:a]acrossfade=d={cf:.4f}:c1=tri:c2=tri[aout]",
+                "-map",
+                "[aout]",
+                "-t",
+                f"{duration_sec:.6f}",
+                *_pcm_audio_argv_tail(),
+                out_wav,
+            ],
+        )
+        got = probe_media_duration_seconds(out_wav) or 0.0
+        if got >= duration_sec - 0.15:
+            _log(f"    Стык музыки: crossfade {cf:.3f}с без затухания", log)
+            return True
+        # Если короче — добьём pad (редко).
+        if got > 0.2:
+            padded = out_wav + ".pad.wav"
+            run_ffmpeg(
+                [
+                    "-i",
+                    out_wav,
+                    "-af",
+                    f"apad=whole_dur={duration_sec:.6f}",
+                    "-t",
+                    f"{duration_sec:.6f}",
+                    *_pcm_audio_argv_tail(),
+                    padded,
+                ],
+            )
+            if os.path.exists(padded) and os.path.getsize(padded) > 1000:
+                shutil.copy2(padded, out_wav)
+                try:
+                    os.remove(padded)
+                except OSError:
+                    pass
+                return True
+    except Exception as e:
+        _log(f"    Crossfade не удался ({e}), пробуем простую склейку…", log)
+    return False
+
+
+def _prepare_loopable_song_body(
+    audio_file: str,
+    body_wav: str,
+    temp_dir: str,
+    log: Optional[LogCallback] = None,
+) -> Optional[str]:
+    """Полный трек без хвостового fade и без тишины в начале — для бесшовного повтора."""
+    raw = os.path.join(temp_dir, "song_body_raw.wav")
+    no_tail = os.path.join(temp_dir, "song_body_notail.wav")
+    try:
+        run_ffmpeg(
+            [
+                "-i",
+                audio_file,
+                *_pcm_audio_argv_tail(),
+                raw,
+            ],
+        )
+    except Exception:
+        return None
+    src = raw
+    if _trim_trailing_fade_wav(raw, no_tail):
+        src = no_tail
+        _log("    Убрано затухание в конце трека для бесшовного продления", log)
+    if _trim_leading_silence_wav(src, body_wav):
+        _log("    Убрана тишина в начале трека для стыка", log)
+        return body_wav
+    try:
+        shutil.copy2(src, body_wav)
+        return body_wav
+    except Exception:
+        return src if os.path.exists(src) else None
+
+
+def build_audio_wav_exact_duration(
+    audio_file: str,
+    *,
+    start_sec: float,
+    duration_sec: float,
+    out_wav: str,
+    temp_dir: str,
+    log: Optional[LogCallback] = None,
+    prefer_loop: bool = False,
+) -> bool:
+    """
+    Непрерывный кусок музыки с ``start_sec`` длиной ``duration_sec``.
+
+    Если до EOF не хватает — дописываем с начала песни без хвостового затухания
+    (trim fade + короткий crossfade).
+    """
+    del prefer_loop
+    start_sec = max(0.0, float(start_sec))
+    duration_sec = max(0.05, float(duration_sec))
+    src_dur = get_audio_duration(audio_file)
+    remaining = None if src_dur is None else max(0.0, float(src_dur) - start_sec)
+
+    def _direct_cut(target: str, *, ss: float, dur: float) -> bool:
+        try:
+            run_ffmpeg(
+                [
+                    "-ss",
+                    f"{ss:.6f}",
+                    "-i",
+                    audio_file,
+                    "-t",
+                    f"{dur:.6f}",
+                    *_pcm_audio_argv_tail(),
+                    target,
+                ],
+            )
+        except Exception:
+            return False
+        got = probe_media_duration_seconds(target) or 0.0
+        return got >= dur - 0.12
+
+    if remaining is not None and remaining + 0.05 >= duration_sec:
+        if _direct_cut(out_wav, ss=start_sec, dur=duration_sec):
+            return True
+        _log("    Не хватило аудио до EOF — допишем с начала песни…", log)
+
+    part_a = os.path.join(temp_dir, "audio_part_a.wav")
+    part_a_trim = os.path.join(temp_dir, "audio_part_a_trim.wav")
+    part_b = os.path.join(temp_dir, "audio_part_b.wav")
+    part_b_trim = os.path.join(temp_dir, "audio_part_b_trim.wav")
+    list_path = os.path.join(temp_dir, "audio_concat.txt")
+    loop_body = os.path.join(temp_dir, "song_loop_body.wav")
+
+    if remaining is None or remaining < 0.05:
+        _log(
+            f"    Музыка с начала трека на {duration_sec:.3f}с "
+            f"(без затухания на стыках повтора)",
+            log,
+        )
+        body = _prepare_loopable_song_body(audio_file, loop_body, temp_dir, log=log)
+        src_loop = body or audio_file
+        try:
+            run_ffmpeg(
+                [
+                    "-stream_loop",
+                    "-1",
+                    "-i",
+                    src_loop,
+                    "-t",
+                    f"{duration_sec:.6f}",
+                    *_pcm_audio_argv_tail(),
+                    out_wav,
+                ],
+            )
+            got = probe_media_duration_seconds(out_wav) or 0.0
+            return got >= duration_sec - 0.12
+        except Exception as e:
+            _log(f"    Ошибка аудио с начала: {e}", log)
+            return False
+
+    # Берём с запасом на обрезку fade в конце (~1.2с), чтобы после trim длина была близка к need.
+    fade_budget = 1.25
+    take_a = min(remaining, duration_sec + fade_budget)
+    need_b = max(0.0, duration_sec - (take_a - fade_budget * 0.5))
+    _log(
+        f"    Музыка: кусок с {start_sec:.3f}с + начало песни без затухания на стыке",
+        log,
+    )
+    if not _direct_cut(part_a, ss=start_sec, dur=take_a):
+        body = _prepare_loopable_song_body(audio_file, loop_body, temp_dir, log=log)
+        src_loop = body or audio_file
+        try:
+            run_ffmpeg(
+                [
+                    "-stream_loop",
+                    "-1",
+                    "-i",
+                    src_loop,
+                    "-t",
+                    f"{duration_sec:.6f}",
+                    *_pcm_audio_argv_tail(),
+                    out_wav,
+                ],
+            )
+            return (probe_media_duration_seconds(out_wav) or 0.0) >= duration_sec - 0.12
+        except Exception:
+            return False
+
+    a_src = part_a
+    if _trim_trailing_fade_wav(part_a, part_a_trim):
+        a_src = part_a_trim
+        _log("    Срезано затухание в конце перед продлением", log)
+
+    dur_a = probe_media_duration_seconds(a_src) or 0.0
+    need_b = max(0.05, duration_sec - dur_a + 0.15)  # чуть с запасом под crossfade
+
+    if dur_a >= duration_sec - 0.05:
+        try:
+            run_ffmpeg(
+                [
+                    "-i",
+                    a_src,
+                    "-t",
+                    f"{duration_sec:.6f}",
+                    *_pcm_audio_argv_tail(),
+                    out_wav,
+                ],
+            )
+            return (probe_media_duration_seconds(out_wav) or 0.0) >= duration_sec - 0.12
+        except Exception:
+            try:
+                shutil.copy2(a_src, out_wav)
+                return True
+            except Exception:
+                return False
+
+    body = _prepare_loopable_song_body(audio_file, loop_body, temp_dir, log=log)
+    try:
+        run_ffmpeg(
+            [
+                "-stream_loop",
+                "-1",
+                "-i",
+                body or audio_file,
+                "-t",
+                f"{need_b:.6f}",
+                *_pcm_audio_argv_tail(),
+                part_b,
+            ],
+        )
+    except Exception as e:
+        _log(f"    Ошибка дописки с начала песни: {e}", log)
+        return False
+
+    b_src = part_b
+    if _trim_leading_silence_wav(part_b, part_b_trim):
+        b_src = part_b_trim
+
+    if _concat_audio_with_crossfade(
+        a_src, b_src, out_wav, duration_sec=duration_sec, log=log
+    ):
+        return True
+
+    # Fallback: concat без crossfade
+    try:
+        def _esc(p: str) -> str:
+            return p.replace("\\", "/").replace("'", "'\\''")
+
+        with open(list_path, "w", encoding="utf-8") as f:
+            f.write(f"file '{_esc(a_src)}'\n")
+            f.write(f"file '{_esc(b_src)}'\n")
+        run_ffmpeg(
+            [
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                list_path,
+                "-t",
+                f"{duration_sec:.6f}",
+                *_pcm_audio_argv_tail(),
+                out_wav,
+            ],
+        )
+        got = probe_media_duration_seconds(out_wav) or 0.0
+        return got >= duration_sec - 0.12
+    except Exception as e:
+        _log(f"    Ошибка склейки аудиочастей: {e}", log)
+        return False
+
+
 def generate_video_from_segment(
         audio_file,
         segment,
         output_video,
         *,
         clip_pool: list[str] | None = None,
+        scene_clip_pools: list[list[str]] | None = None,
+        fixed_scene_clips: list[dict] | None = None,
         clip_dir: str = "clips",
         fps=DEFAULT_SLICE_FPS_MODE,
         log: Optional[LogCallback] = None,
         use_gpu: bool = False,
         use_gpu_finalize: bool = False,
         text_overlay_cfg: dict | None = None,
+        loop_audio: bool = False,
 ):
-    """Генерирует видео: смена фрагмента на каждом пике аудио"""
+    """Генерирует видео: смена фрагмента на каждом пике аудио.
+
+    ``scene_clip_pools`` — опционально отдельный пул клипов на каждую сцену
+    (для склейки: часть 1 / часть 2).
+    ``fixed_scene_clips`` — готовые фрагменты (path/start/duration[/loop]),
+    если заданы — пулы не используются.
+    ``loop_audio`` — зациклить аудио с ``start_time``, если ролику не хватает хвоста трека.
+    """
     _log(f"\n  Генерация видео: {output_video}", log)
 
-    if clip_pool:
-        pool = [p for p in clip_pool if os.path.isfile(p)]
-    else:
-        pool = collect_video_clips(clip_dir)
-    if not pool:
-        src = "списка клипов" if clip_pool else f"папки '{clip_dir}'"
-        _log(f"    Ошибка: в {src} нет видеофайлов", log)
-        return None
+    loop_audio = bool(loop_audio or segment.get("loop_audio"))
 
-    _log(f"    Источник клипов: {len(pool)} файлов", log)
+    if fixed_scene_clips:
+        pool = []
+        for frag in fixed_scene_clips:
+            p = str((frag or {}).get("path") or "")
+            if p and os.path.isfile(p):
+                pool.append(p)
+        if not pool:
+            _log("    Ошибка: в fixed_scene_clips нет видеофайлов", log)
+            return None
+        per_scene_pools = None
+        _log(f"    Фиксированные клипы сцен: {len(fixed_scene_clips)}", log)
+    else:
+        if clip_pool:
+            pool = [p for p in clip_pool if os.path.isfile(p)]
+        else:
+            pool = collect_video_clips(clip_dir)
+
+        per_scene_pools: list[list[str]] | None = None
+        if scene_clip_pools:
+            per_scene_pools = [
+                [p for p in (scene_pool or []) if os.path.isfile(p)]
+                for scene_pool in scene_clip_pools
+            ]
+            if not any(per_scene_pools):
+                _log("    Ошибка: в пулах сцен нет видеофайлов", log)
+                return None
+            if not pool:
+                merged: list[str] = []
+                seen: set[str] = set()
+                for sp in per_scene_pools:
+                    for p in sp:
+                        key = os.path.normcase(p)
+                        if key not in seen:
+                            seen.add(key)
+                            merged.append(p)
+                pool = merged
+
+        if not pool:
+            src = "списка клипов" if clip_pool or scene_clip_pools else f"папки '{clip_dir}'"
+            _log(f"    Ошибка: в {src} нет видеофайлов", log)
+            return None
+
+        if per_scene_pools:
+            _log(
+                "    Источник клипов по сценам: "
+                + ", ".join(f"сцена {i + 1}={len(sp)}" for i, sp in enumerate(per_scene_pools)),
+                log,
+            )
+        else:
+            _log(f"    Источник клипов: {len(pool)} файлов", log)
 
     dimension_cache: dict = {}
     fps = resolve_slice_fps(fps)
@@ -1613,38 +2013,59 @@ def generate_video_from_segment(
         scene_durations.append(video_end - transition_times[-1])
 
     audio_duration = get_audio_duration(audio_file)
-    clamped = clamp_segment_to_audio(
-        {**segment, 'start_time': video_start, 'scene_durations': scene_durations},
-        audio_duration,
-    )
-    if clamped is None:
-        min_scene = segment.get('min_interval')
-        if min_scene:
-            print(f"    Ошибка: сегмент не влезает в аудио без нарушения MIN_SCENE_DURATION ({min_scene}с)")
-        else:
-            print("    Ошибка: сегмент начинается после конца аудио")
-        return None
-
-    video_start = clamped['start_time']
-    scene_durations = clamped['scene_durations']
-    min_scene = segment.get('min_interval')
-    available_audio = clamped['max_video_duration']
-    scene_durations, frame_counts = snap_scene_durations_to_frames(
-        scene_durations, fps, min_scene_duration=min_scene,
-    )
-
-    frame_counts = clamp_frame_counts_to_audio(
-        frame_counts, fps, available_audio, min_scene_duration=min_scene,
-    )
-    if frame_counts is None:
-        print(
-            f"    Ошибка: {len(scene_durations)} сцен не влезают в аудио "
-            f"({available_audio:.3f}с) без нарушения MIN_SCENE_DURATION "
-            f"({min_scene}с)"
+    preserve_full = bool(segment.get("stitch_preserve_full_clips"))
+    if preserve_full or loop_audio:
+        # Видео фиксированной длины (склейка полных клипов) — не ужимаем под аудио.
+        video_start = float(segment.get("start_time", video_start) or 0.0)
+        min_scene = segment.get("min_interval")
+        available_audio = float(sum(scene_durations)) + 1.0
+        clamped = {
+            "start_time": video_start,
+            "scene_durations": list(scene_durations),
+            "max_video_duration": available_audio,
+        }
+    else:
+        clamped = clamp_segment_to_audio(
+            {**segment, 'start_time': video_start, 'scene_durations': scene_durations},
+            audio_duration,
         )
-        return None
+        if clamped is None:
+            min_scene = segment.get('min_interval')
+            if min_scene:
+                print(f"    Ошибка: сегмент не влезает в аудио без нарушения MIN_SCENE_DURATION ({min_scene}с)")
+            else:
+                print("    Ошибка: сегмент начинается после конца аудио")
+            return None
+        video_start = clamped['start_time']
+        scene_durations = clamped['scene_durations']
+        min_scene = segment.get('min_interval')
+        available_audio = clamped['max_video_duration']
 
-    scene_durations = [frames / fps for frames in frame_counts]
+    if preserve_full:
+        # Полные исходники: floor, чтобы не запрашивать кадр за EOF (чёрный стык).
+        frame_counts = [
+            max(1, int(math.floor(float(d) * float(fps) + 1e-9)))
+            for d in scene_durations
+        ]
+        scene_durations = [fc / float(fps) for fc in frame_counts]
+    else:
+        scene_durations, frame_counts = snap_scene_durations_to_frames(
+            scene_durations, fps, min_scene_duration=min_scene,
+        )
+
+        if not loop_audio:
+            frame_counts = clamp_frame_counts_to_audio(
+                frame_counts, fps, available_audio, min_scene_duration=min_scene,
+            )
+            if frame_counts is None:
+                print(
+                    f"    Ошибка: {len(scene_durations)} сцен не влезают в аудио "
+                    f"({available_audio:.3f}с) без нарушения MIN_SCENE_DURATION "
+                    f"({min_scene}с)"
+                )
+                return None
+
+        scene_durations = [frames / fps for frames in frame_counts]
 
     if min_scene and not validate_scene_durations(scene_durations, min_scene):
         short = [
@@ -1670,42 +2091,111 @@ def generate_video_from_segment(
     num_scenes = len(scene_durations)
     duration_cache = {}
     scene_clips = []
-    used_paths = set()
-    force_unique_clips = len(pool) >= num_scenes
+    used_paths: set[str] = set()
+    used_paths_by_pool: list[set[str]] = (
+        [set() for _ in per_scene_pools] if per_scene_pools else []
+    )
 
-    if force_unique_clips:
-        _log(f"    Каждая сцена — из отдельного видео ({num_scenes} сцен, {len(pool)} файлов)", log)
-    else:
-        _log(
-            f"    Видео меньше сцен ({len(pool)} < {num_scenes}), "
-            f"повторное использование неизбежно",
-            log,
-        )
-
-    for i, duration in enumerate(scene_durations):
-        unused_clips = [c for c in pool if c not in used_paths]
-        if force_unique_clips or unused_clips:
-            exclude_paths = used_paths
-        else:
-            exclude_paths = set()
-
-        fragment = pick_random_clip_fragment(
-            pool, duration, duration_cache, exclude_paths=exclude_paths
-        )
-        if fragment is None:
-            print(f"    Ошибка: не удалось выбрать фрагмент для сцены {i + 1}")
+    if fixed_scene_clips:
+        if len(fixed_scene_clips) < num_scenes:
+            print(
+                f"    Ошибка: fixed_scene_clips ({len(fixed_scene_clips)}) "
+                f"< числа сцен ({num_scenes})"
+            )
             return None
+        rebuilt_durs: list[float] = []
+        rebuilt_frames: list[int] = []
+        for i, duration in enumerate(scene_durations):
+            raw = fixed_scene_clips[i] or {}
+            path = str(raw.get("path") or "")
+            if not path or not os.path.isfile(path):
+                print(f"    Ошибка: нет файла для сцены {i + 1}")
+                return None
+            start = float(raw.get("start", 0.0) or 0.0)
+            src_dur = duration_cache.get(path)
+            if src_dur is None:
+                src_dur = get_media_duration(path)
+                duration_cache[path] = src_dur
+            available = max(0.0, float(src_dur or 0.0) - start)
+            # Склейка: всегда целый клип с 0, без video-loop «кусками».
+            fc = int(frame_counts[i])
+            if preserve_full:
+                max_fc = max(1, int(math.floor(available * float(fps) + 1e-6)))
+                fc = min(fc, max_fc)
+                duration = fc / float(fps)
+            fragment = {
+                "path": path,
+                "start": start,
+                "duration": float(duration),
+                "loop": False,
+                "frame_count": fc,
+            }
+            scene_clips.append(fragment)
+            used_paths.add(path)
+            rebuilt_durs.append(float(duration))
+            rebuilt_frames.append(fc)
+            clip_name = os.path.basename(path)
+            print(
+                f"    Часть {i + 1}: {duration:.2f}с — {clip_name} целиком с {start:.2f}с"
+            )
+        if preserve_full:
+            scene_durations = rebuilt_durs
+            frame_counts = rebuilt_frames
+            total_video_duration = sum(scene_durations)
+            video_end = video_start + total_video_duration
+    else:
+        if not per_scene_pools:
+            force_unique_clips = len(pool) >= num_scenes
+            if force_unique_clips:
+                _log(
+                    f"    Каждая сцена — из отдельного видео ({num_scenes} сцен, {len(pool)} файлов)",
+                    log,
+                )
+            else:
+                _log(
+                    f"    Видео меньше сцен ({len(pool)} < {num_scenes}), "
+                    f"повторное использование неизбежно",
+                    log,
+                )
 
-        scene_clips.append(fragment)
-        used_paths.add(fragment['path'])
-        fragment['frame_count'] = frame_counts[i]
-        fragment['duration'] = scene_durations[i]
-        clip_name = os.path.basename(fragment['path'])
-        loop_note = " (зациклено)" if fragment['loop'] else ""
-        print(
-            f"    Сцена {i + 1}: {duration:.2f}с — {clip_name} "
-            f"с {fragment['start']:.2f}с{loop_note}"
-        )
+        for i, duration in enumerate(scene_durations):
+            if per_scene_pools:
+                pool_i = per_scene_pools[i] if i < len(per_scene_pools) else []
+                if not pool_i and per_scene_pools:
+                    pool_i = per_scene_pools[-1]
+                if not pool_i:
+                    print(f"    Ошибка: пустой пул клипов для сцены {i + 1}")
+                    return None
+                used_i = used_paths_by_pool[i] if i < len(used_paths_by_pool) else set()
+                unused_clips = [c for c in pool_i if c not in used_i]
+                exclude_paths = used_i if unused_clips else set()
+            else:
+                pool_i = pool
+                unused_clips = [c for c in pool_i if c not in used_paths]
+                if force_unique_clips or unused_clips:
+                    exclude_paths = used_paths
+                else:
+                    exclude_paths = set()
+
+            fragment = pick_random_clip_fragment(
+                pool_i, duration, duration_cache, exclude_paths=exclude_paths
+            )
+            if fragment is None:
+                print(f"    Ошибка: не удалось выбрать фрагмент для сцены {i + 1}")
+                return None
+
+            scene_clips.append(fragment)
+            used_paths.add(fragment['path'])
+            if per_scene_pools and i < len(used_paths_by_pool):
+                used_paths_by_pool[i].add(fragment['path'])
+            fragment['frame_count'] = frame_counts[i]
+            fragment['duration'] = scene_durations[i]
+            clip_name = os.path.basename(fragment['path'])
+            loop_note = " (зациклено)" if fragment['loop'] else ""
+            print(
+                f"    Сцена {i + 1}: {duration:.2f}с — {clip_name} "
+                f"с {fragment['start']:.2f}с{loop_note}"
+            )
 
     output_parent = os.path.dirname(os.path.abspath(output_video)) or "."
     temp_dir = os.path.join(
@@ -1736,10 +2226,19 @@ def generate_video_from_segment(
         toc = TextOverlaySettings.from_dict(text_overlay_cfg)
         scaled_overlay = compute_scaled_overlay(toc, video_w=width, video_h=height)
         if scaled_overlay is not None and scaled_overlay.lines:
-            _log(
-                f"    Текст в одном проходе ({len(scaled_overlay.lines)} строк)…",
-                log,
-            )
+            if bool(getattr(toc, "after_frame_change", False)) and len(scene_durations) >= 2:
+                # Текст с момента перехода (конец части 1 / смена кадра).
+                scaled_overlay.enable_after_sec = float(scene_durations[0])
+                scaled_overlay.from_middle = False
+                _log(
+                    f"    Текст после смены кадра (с {scaled_overlay.enable_after_sec:.3f}с)…",
+                    log,
+                )
+            else:
+                _log(
+                    f"    Текст в одном проходе ({len(scaled_overlay.lines)} строк)…",
+                    log,
+                )
         else:
             scaled_overlay = None
 
@@ -1821,31 +2320,24 @@ def generate_video_from_segment(
         except Exception as e:
             _log(f"    Предупреждение: не удалось обрезать видео: {e}", log)
 
-    final_duration = total_video_duration
+    # Аудио должно покрывать фактическую длину ролика (иначе тишина во второй половине).
+    final_duration = max(float(total_video_duration), float(video_duration or 0.0))
 
     # ====== ДОБАВЛЯЕМ АУДИО ======
     temp_audio = os.path.join(temp_dir, "temp_audio.wav")
 
     try:
-        run_ffmpeg(
-            [
-                "-ss",
-                f"{video_start:.6f}",
-                "-i",
-                audio_file,
-                "-t",
-                f"{final_duration:.6f}",
-                "-acodec",
-                "pcm_s16le",
-                "-ac",
-                "2",
-                "-ar",
-                "44100",
-                temp_audio,
-            ],
+        ok_audio = build_audio_wav_exact_duration(
+            audio_file,
+            start_sec=float(video_start),
+            duration_sec=float(final_duration),
+            out_wav=temp_audio,
+            temp_dir=temp_dir,
+            log=log,
+            prefer_loop=bool(loop_audio),
         )
 
-        if os.path.exists(temp_audio) and os.path.getsize(temp_audio) > 1000:
+        if ok_audio and os.path.exists(temp_audio) and os.path.getsize(temp_audio) > 1000:
             run_ffmpeg(
                 [
                     "-i",

@@ -101,7 +101,7 @@ from zaliver.processing.text_overlay import (
     TextOverlaySettings,
     list_bundled_overlay_fonts,
 )
-from zaliver.ui.adapters import ProcessingController, SlicingController
+from zaliver.ui.adapters import ProcessingController, SlicingController, StitchingController
 from zaliver.ui.antic_profile_row import (
     _profile_id,
     _profile_name,
@@ -161,6 +161,7 @@ from zaliver.ui.widgets import (
 )
 from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
 from zaliver.ui.slicing_tab_pane import SlicingTabPane
+from zaliver.ui.stitching_tab_pane import StitchingTabPane
 from zaliver.ui.channel_edit_tab_pane import ChannelEditTabPane
 from zaliver.ui.ai_tab_pane import AiTabPane
 from zaliver.ui.ai_generate_dialog import AiGenerateDialog
@@ -883,6 +884,7 @@ class MainWindow(QWidget):
         self._work_thread: QThread | None = None
         self._processor: ProcessingController | None = None
         self._slice_processor: SlicingController | None = None
+        self._stitch_processor: StitchingController | None = None
         self._active_work_mode = "uniquify"
         self._ff_thread: QThread | None = None
         self._ff_worker: FfmpegInstallWorker | None = None
@@ -1454,7 +1456,7 @@ class MainWindow(QWidget):
         text_controls_l.addWidget(preview_nav_w)
 
         text_hint = QLabel(
-            "Перетащите текст · стрелки листают выбранные исходники"
+            "Перетащите текст · ▶ смотреть ролик · стрелки листают исходники"
         )
         text_hint.setObjectName("hint")
         text_hint.setWordWrap(True)
@@ -1708,6 +1710,9 @@ class MainWindow(QWidget):
         self._slice_tab = SlicingTabPane(self, settings=self._settings)
         self._slice_tab.start_requested.connect(self._start_slicing)
         self._slice_tab.cancel_requested.connect(self._cancel)
+        self._stitch_tab = StitchingTabPane(self, settings=self._settings)
+        self._stitch_tab.start_requested.connect(self._start_stitching)
+        self._stitch_tab.cancel_requested.connect(self._cancel)
 
         ready = QWidget()
         ready_l = QVBoxLayout(ready)
@@ -2651,6 +2656,7 @@ class MainWindow(QWidget):
         self._stack = QStackedWidget()
         self._stack.addWidget(home)
         self._stack.addWidget(self._slice_tab)
+        self._stack.addWidget(self._stitch_tab)
         self._stack.addWidget(ready)
         self._stack.addWidget(uploaded)
         self._stack.addWidget(profiles)
@@ -2673,6 +2679,7 @@ class MainWindow(QWidget):
             [
                 "Уникализация",
                 "Нарезка",
+                "Склейка",
                 "Готовые видео",
                 "Залитые видео",
                 "Профили",
@@ -2681,14 +2688,14 @@ class MainWindow(QWidget):
                 "Настройки",
             ]
         )
-        # Yt+Inst: уникализация, нарезка и настройки (YT+IG разделы).
+        # Yt+Inst: уникализация, нарезка, склейка и настройки (YT+IG разделы).
         if self._platform == PLATFORM_YT_INST:
-            for i in range(2, self._nav.count()):
+            for i in range(3, self._nav.count()):
                 item = self._nav.item(i)
                 if item is None:
                     continue
-                # 7 = Настройки
-                item.setHidden(i != 7)
+                # 8 = Настройки
+                item.setHidden(i != 8)
         self._nav.setCurrentRow(0)
         self._nav.currentRowChanged.connect(self._on_nav_row_changed)
 
@@ -2717,13 +2724,13 @@ class MainWindow(QWidget):
 
     def _on_nav_row_changed(self, row: int) -> None:
         self._stack.setCurrentIndex(max(0, min(row, self._stack.count() - 1)))
-        if row == 2:
-            self._refresh_ready_list()
         if row == 3:
-            self._refresh_uploaded_list()
+            self._refresh_ready_list()
         if row == 4:
-            self._refresh_antydetect_profiles()
+            self._refresh_uploaded_list()
         if row == 5:
+            self._refresh_antydetect_profiles()
+        if row == 6:
             self._sync_channel_edit_tab()
 
     def _sorted_uploaded_videos(
@@ -3657,12 +3664,32 @@ class MainWindow(QWidget):
             row_w.remove_requested.connect(self._on_ready_remove_requested)
             self._ready_list.setItemWidget(it, row_w)
 
+    def _is_montage_mode(self, mode: str | None = None) -> bool:
+        m = (mode or getattr(self, "_active_work_mode", "") or "").strip()
+        return m in ("slicing", "stitching")
+
+    def _montage_tab(self, mode: str | None = None):
+        m = (mode or getattr(self, "_active_work_mode", "") or "").strip()
+        if m == "slicing":
+            return getattr(self, "_slice_tab", None)
+        if m == "stitching":
+            return getattr(self, "_stitch_tab", None)
+        return None
+
+    def _montage_work_label(self, mode: str | None = None) -> str:
+        m = (mode or getattr(self, "_active_work_mode", "") or "").strip()
+        if m == "stitching":
+            return "Склейка"
+        if m == "slicing":
+            return "Нарезка"
+        return "Уникализация"
+
     def _delete_after_upload_enabled(self) -> bool:
         mode = (getattr(self, "_upload_log_mode", "") or "").strip()
         if not mode:
             mode = (getattr(self, "_active_work_mode", "") or "").strip()
-        if mode == "slicing":
-            tab = getattr(self, "_slice_tab", None)
+        if self._is_montage_mode(mode):
+            tab = self._montage_tab(mode)
             return bool(
                 tab is not None
                 and hasattr(tab, "delete_after_upload")
@@ -3677,6 +3704,7 @@ class MainWindow(QWidget):
         for ctrl in (
             getattr(self, "_processor", None),
             getattr(self, "_slice_processor", None),
+            getattr(self, "_stitch_processor", None),
         ):
             if ctrl is None:
                 continue
@@ -3872,7 +3900,7 @@ class MainWindow(QWidget):
             # Профили ещё не подтянулись — не блокируем уникализацию (раньше return None
             # давал «Старт» без реакции, если пользователь не на вкладке с профилями).
             try:
-                work_label = "Нарезка" if mode == "slicing" else "Уникализация"
+                work_label = self._montage_work_label(mode)
                 self._profiles_status.setText(
                     f"Профили ещё не загружены — запускаю загрузку… "
                     f"{work_label} без залива в YouTube (профили не выбраны)."
@@ -3883,11 +3911,12 @@ class MainWindow(QWidget):
             return {"title": "", "description": "", "profile_ids": "", "publish_before_checks": True, "keep_studio_title": False, "upload_as_ready": False, "schedule_publish": False, "schedule_times_iso": [], "schedule_warmup_shorts": False, "schedule_warmup_shorts_recommendations": True, "schedule_warmup_search_query": ""}
 
         dlg = QDialog(self)
-        dlg_title = (
-            "Загрузка в YouTube после нарезки"
-            if mode == "slicing"
-            else "Загрузка в YouTube после уникализации"
-        )
+        if mode == "slicing":
+            dlg_title = "Загрузка в YouTube после нарезки"
+        elif mode == "stitching":
+            dlg_title = "Загрузка в YouTube после склейки"
+        else:
+            dlg_title = "Загрузка в YouTube после уникализации"
         dlg.setWindowTitle(dlg_title)
         dlg.setModal(True)
         screen = QApplication.primaryScreen()
@@ -4289,9 +4318,10 @@ class MainWindow(QWidget):
             copies_n = 1
 
         def _planned_videos_count() -> int:
-            if mode == "slicing" and hasattr(self, "_slice_tab"):
+            tab = self._montage_tab(mode) if self._is_montage_mode(mode) else None
+            if tab is not None and hasattr(tab, "copies_per_track"):
                 try:
-                    return max(1, int(self._slice_tab.copies_per_track.value()))
+                    return max(1, int(tab.copies_per_track.value()))
                 except Exception:
                     return 1
             try:
@@ -4316,9 +4346,10 @@ class MainWindow(QWidget):
             target = max(0, int(profile_count))
             if target <= 0:
                 return
-            if mode == "slicing" and hasattr(self, "_slice_tab"):
-                self._slice_tab.copies_per_track.setValue(target)
-                self._slice_tab.save_settings()
+            tab = self._montage_tab(mode) if self._is_montage_mode(mode) else None
+            if tab is not None and hasattr(tab, "copies_per_track"):
+                tab.copies_per_track.setValue(target)
+                tab.save_settings()
             elif n_inputs > 0:
                 need_copies = (target + n_inputs - 1) // n_inputs
                 self.copies_per_file.setValue(max(1, need_copies))
@@ -4336,16 +4367,15 @@ class MainWindow(QWidget):
         dlg_raise_videos_btn.clicked.connect(_on_raise_videos_clicked)
         dlg_raise_videos_schedule_btn.clicked.connect(_on_raise_videos_schedule_clicked)
 
-        planned_label = (
-            "Будет нарезано видео"
-            if mode == "slicing"
-            else "Будет уникализировано видео"
-        )
-        only_label = (
-            "(только нарезка)."
-            if mode == "slicing"
-            else "(только уникализация)."
-        )
+        if mode == "slicing":
+            planned_label = "Будет нарезано видео"
+            only_label = "(только нарезка)."
+        elif mode == "stitching":
+            planned_label = "Будет склеено видео"
+            only_label = "(только склейка)."
+        else:
+            planned_label = "Будет уникализировано видео"
+            only_label = "(только уникализация)."
 
         def _update_dlg_upload_profile_count() -> None:
             n = dlg_interaction.checked_count()
@@ -4363,7 +4393,7 @@ class MainWindow(QWidget):
                 lines.append(f"Выбрано профилей для залива: {n}")
             dlg_profile_count_lbl.setText("\n".join(lines))
             can_raise_base = n > 0 and (
-                mode == "slicing" or n_inputs > 0
+                self._is_montage_mode(mode) or n_inputs > 0
             )
             can_raise_profiles = can_raise_base and n > pv
             schedule_multi = (
@@ -9323,8 +9353,8 @@ class MainWindow(QWidget):
         """Открыть вкладку «Профили» и выделить нужный профиль."""
         pid = (profile_id or "").strip()
         try:
-            # 0 Уникализация … 4 Профили
-            self._nav.setCurrentRow(4)
+            # 0 Уникализация, 1 Нарезка, 2 Склейка, 3 Готовые, 4 Залитые, 5 Профили
+            self._nav.setCurrentRow(5)
         except Exception:
             pass
         inter = getattr(self, "_profiles_interaction", None)
@@ -10735,16 +10765,143 @@ class MainWindow(QWidget):
         self._work_thread.finished.connect(self._thread_cleanup)
         self._work_thread.start()
 
+    def _pending_upload_for_stitching(self) -> dict[str, str] | None:
+        return self._prompt_title_desc_and_profile(mode="stitching")
+
+    def _start_stitching(self) -> None:
+        self._active_work_mode = "stitching"
+        self._stitch_tab.save_settings()
+        if not self._prompt_stats_server_username_if_empty():
+            return
+        pending = self._pending_upload_for_stitching()
+        if pending is None:
+            return
+        self._pending_upload = pending
+        self._just_saved_outputs = []
+        self._upload_streaming_active = False
+        self._upload_streaming_title = ""
+        self._upload_streaming_description = ""
+
+        opts = self._stitch_tab.build_options()
+        opts.update(self._processing_run_options(for_slicing=True))
+        if not opts["output_dir"]:
+            QMessageBox.warning(self, "Zaliver", "Укажите выходную папку.")
+            return
+        if not opts.get("part1_files"):
+            QMessageBox.warning(
+                self,
+                "Zaliver",
+                "Выберите хотя бы одно видео для первой части.",
+            )
+            return
+        if not opts.get("part2_files"):
+            QMessageBox.warning(
+                self,
+                "Zaliver",
+                "Выберите хотя бы одно видео для второй части.",
+            )
+            return
+        if not opts.get("music_files"):
+            QMessageBox.warning(
+                self,
+                "Zaliver",
+                "Добавьте хотя бы один аудиотрек для склейки.",
+            )
+            return
+        toc = opts.get("text_overlay") or {}
+        if bool(toc.get("enabled")) and not str(toc.get("text") or "").strip():
+            QMessageBox.warning(
+                self,
+                "Zaliver",
+                "Включён текст на видео, но поле текста пустое.\n"
+                "Введите текст или выключите опцию.",
+            )
+            return
+        part_err = self._stitch_tab.validate_part_options()
+        if part_err:
+            QMessageBox.warning(self, "Zaliver", part_err)
+            return
+        if self._work_thread and self._work_thread.isRunning():
+            return
+
+        raw_prof = (pending.get("profile_ids") or "").strip()
+        opts["youtube_upload_after_processing"] = bool(raw_prof)
+        self._progress_hold_youtube = bool(raw_prof)
+        self._upload_cancel_profile_ids = []
+        self._upload_cancel_kind = ""
+        self._upload_cancel_dolphin_token = ""
+        self._upload_streaming_active = bool(
+            raw_prof and pending.get("upload_as_ready")
+        )
+        if self._upload_streaming_active:
+            opts["num_workers"] = 2
+
+        try:
+            planned = len(list(opts.get("music_files") or [])) * max(
+                1, int(opts.get("copies_per_track") or 1)
+            )
+        except Exception:
+            planned = 0
+        n_prof = self._streaming_upload_profile_count(pending)
+        self._upload_streaming_min_ready = self._compute_streaming_upload_min_ready(
+            profile_count=n_prof, planned=planned
+        )
+        try:
+            self._upload_session = self._upload_store.start_session(
+                planned_videos=planned, platform=self._platform
+            )
+        except Exception:
+            self._upload_session = None
+        self._upload_session_processing_done = False
+        self._upload_session_upload_done = False
+        self._upload_session_upload_expected = bool(raw_prof)
+
+        self._stitch_tab.log.clear()
+        self._stitch_tab.progress.setRange(0, 1)
+        self._stitch_tab.progress.setValueImmediate(0)
+        self._stitch_tab.progress_label.setText("Подготовка…")
+        self._stitch_tab.set_running(running=True)
+
+        if self._upload_streaming_active:
+            min_ready = int(self._upload_streaming_min_ready)
+            self._append_stitch_log(
+                "Залив по мере готовности: склейка в 2 потока, "
+                f"залив — после запаса {min_ready} готовых видео "
+                f"({n_prof} профилей×2"
+                + (
+                    f", всего запланировано {planned}"
+                    if planned > 0 and planned < n_prof * 2
+                    else ""
+                )
+                + ")."
+            )
+
+        self._work_thread = QThread()
+        self._stitch_processor = StitchingController()
+        self._stitch_processor.moveToThread(self._work_thread)
+        self._work_thread.started.connect(partial(self._stitch_processor.run, opts))
+        self._stitch_processor.progress.connect(self._on_stitch_progress)
+        self._stitch_processor.finished.connect(self._on_finished)
+        self._stitch_processor.output_saved.connect(self._on_output_saved)
+        self._stitch_processor.log_line.connect(self._append_stitch_log)
+        self._stitch_processor.finished.connect(self._work_thread.quit)
+        self._stitch_processor.finished.connect(self._stitch_processor.deleteLater)
+        self._work_thread.finished.connect(self._thread_cleanup)
+        self._work_thread.start()
+
     def _thread_cleanup(self) -> None:
         self._work_thread = None
         self._processor = None
         self._slice_processor = None
+        self._stitch_processor = None
 
     def _cancel(self) -> None:
         if self._processor is not None:
             self._processor.cancel()
         if self._slice_processor is not None:
             self._slice_processor.cancel()
+        if self._stitch_processor is not None:
+            self._stitch_processor.cancel()
         mgr = getattr(self, "_upload_manager", None)
         try:
             if mgr is not None:
@@ -10834,35 +10991,41 @@ class MainWindow(QWidget):
         self.btn_cancel.setEnabled(False)
         if hasattr(self, "_slice_tab"):
             self._slice_tab.set_idle()
+        if hasattr(self, "_stitch_tab"):
+            self._stitch_tab.set_idle()
 
     def _sync_toolbar_for_upload_phase(self) -> None:
         """Во время залива на YouTube: отмена доступна, старт выключен."""
         self.btn_cancel.setEnabled(True)
         self.btn_start.setEnabled(False)
-        if self._active_work_mode == "slicing" and hasattr(self, "_slice_tab"):
-            self._slice_tab.set_busy()
-            self._slice_tab.progress_label.setText(self._brand("YouTube: загрузка…"))
+        tab = self._montage_tab()
+        if tab is not None:
+            tab.set_busy()
+            tab.progress_label.setText(self._brand("YouTube: загрузка…"))
 
-    def _finish_slice_tab_after_upload(self, status: str) -> None:
-        if self._active_work_mode != "slicing" or not hasattr(self, "_slice_tab"):
+    def _finish_montage_tab_after_upload(self, status: str) -> None:
+        tab = self._montage_tab()
+        if tab is None:
             return
-        st = self._slice_tab
-        st.set_idle()
-        mx = max(1, int(st.progress.maximum()))
-        st.progress.setRange(0, mx)
-        st.progress.setValueImmediate(mx)
+        tab.set_idle()
+        mx = max(1, int(tab.progress.maximum()))
+        tab.progress.setRange(0, mx)
+        tab.progress.setValueImmediate(mx)
         if status == "cancelled":
-            st.progress_label.setText(self._brand("Загрузка на YouTube отменена."))
+            tab.progress_label.setText(self._brand("Загрузка на YouTube отменена."))
         elif status == "timeout":
-            st.progress_label.setText(
+            tab.progress_label.setText(
                 self._brand("Загрузка на YouTube остановлена по таймауту.")
             )
         elif status == "upload_failed":
-            st.progress_label.setText(
+            tab.progress_label.setText(
                 self._brand("Готово (ошибки загрузки на YouTube).")
             )
         else:
-            st.progress_label.setText("Готово")
+            tab.progress_label.setText("Готово")
+
+    def _finish_slice_tab_after_upload(self, status: str) -> None:
+        self._finish_montage_tab_after_upload(status)
 
     def _on_slice_progress(self, cur: int, total: int, msg: str) -> None:
         if not hasattr(self, "_slice_tab"):
@@ -10871,6 +11034,14 @@ class MainWindow(QWidget):
         self._slice_tab.progress.setValue(cur)
         if msg:
             self._slice_tab.progress_label.setText(msg)
+
+    def _on_stitch_progress(self, cur: int, total: int, msg: str) -> None:
+        if not hasattr(self, "_stitch_tab"):
+            return
+        self._stitch_tab.progress.setRange(0, max(1, total))
+        self._stitch_tab.progress.setValue(cur)
+        if msg:
+            self._stitch_tab.progress_label.setText(msg)
 
     def _on_youtube_upload_phase_finished(self, status: str) -> None:
         upload_mode = (
@@ -10893,8 +11064,10 @@ class MainWindow(QWidget):
         self._finalize_idle_toolbar()
         self._finish_slice_tab_after_upload(status)
         if status == "cancelled":
-            if upload_mode == "slicing":
-                self._append_slice_log("YouTube: загрузка отменена пользователем.")
+            if self._is_montage_mode(upload_mode):
+                self._append_montage_log(
+                    "YouTube: загрузка отменена пользователем.", mode=upload_mode
+                )
             else:
                 self.progress_label.setText("Загрузка на YouTube отменена.")
                 self._append_log("YouTube: загрузка отменена пользователем.")
@@ -10905,16 +11078,17 @@ class MainWindow(QWidget):
                 "(долгие паузы между профилями или большая очередь). "
                 "Часть видео могла не залиться — см. лог."
             )
-            if upload_mode == "slicing":
-                self._append_slice_log(f"YouTube: {timeout_msg}")
+            if self._is_montage_mode(upload_mode):
+                self._append_montage_log(f"YouTube: {timeout_msg}", mode=upload_mode)
             else:
                 self.progress_label.setText("Загрузка на YouTube остановлена по таймауту.")
                 self._append_log(f"YouTube: {timeout_msg}")
             QMessageBox.warning(self, "Zaliver", timeout_msg)
         elif status == "upload_failed":
-            if upload_mode == "slicing":
-                self._append_slice_log(
-                    "YouTube: очередь завершена, залив не удался (см. лог выше)."
+            if self._is_montage_mode(upload_mode):
+                self._append_montage_log(
+                    "YouTube: очередь завершена, залив не удался (см. лог выше).",
+                    mode=upload_mode,
                 )
             else:
                 self.progress_label.setText("Готово (есть ошибки загрузки на YouTube).")
@@ -10922,8 +11096,10 @@ class MainWindow(QWidget):
                     "YouTube: очередь завершена, часть загрузок завершилась с ошибками."
                 )
         else:
-            if upload_mode == "slicing":
-                self._append_slice_log("YouTube: очередь загрузок завершена.")
+            if self._is_montage_mode(upload_mode):
+                self._append_montage_log(
+                    "YouTube: очередь загрузок завершена.", mode=upload_mode
+                )
             else:
                 self.progress_label.setText("Готово")
                 self._append_log("YouTube: очередь загрузок завершена.")
@@ -12024,8 +12200,8 @@ class MainWindow(QWidget):
                 except Exception:
                     pass
                 err_line = f"Ошибка: {msg}"
-                if self._active_work_mode == "slicing":
-                    self._append_slice_log(err_line)
+                if self._is_montage_mode():
+                    self._append_montage_log(err_line)
                 else:
                     self._append_log(err_line)
                 if msg and msg != "Отменено.":
@@ -12038,8 +12214,8 @@ class MainWindow(QWidget):
             self._finalize_idle_toolbar()
             self._release_youtube_progress_hold_if_any()
             err_line = f"Ошибка: {msg}"
-            if self._active_work_mode == "slicing":
-                self._append_slice_log(err_line)
+            if self._is_montage_mode():
+                self._append_montage_log(err_line)
             else:
                 self._append_log(err_line)
             if msg and msg != "Отменено.":
@@ -12056,6 +12232,8 @@ class MainWindow(QWidget):
 
         if self._active_work_mode == "slicing":
             self._append_slice_log("Нарезка завершена.")
+        elif self._active_work_mode == "stitching":
+            self._append_stitch_log("Склейка завершена.")
         else:
             self._append_log("Уникализация завершена.")
 
@@ -12145,18 +12323,35 @@ class MainWindow(QWidget):
         bar = self._slice_tab.log.verticalScrollBar()
         bar.setValue(bar.maximum())
 
-    def _append_session_log(self, line: str) -> None:
-        """Лог текущей сессии залива (нарезка или уникализация — откуда стартовали)."""
-        if (getattr(self, "_upload_log_mode", "") or "").strip() == "slicing":
+    def _append_stitch_log(self, line: str) -> None:
+        from zaliver.log_format import format_log_line
+
+        if not hasattr(self, "_stitch_tab"):
+            return
+        self._stitch_tab.log.appendPlainText(format_log_line(self._brand(line)))
+        bar = self._stitch_tab.log.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _append_montage_log(self, line: str, *, mode: str | None = None) -> None:
+        m = (mode or getattr(self, "_active_work_mode", "") or "").strip()
+        if m == "stitching":
+            self._append_stitch_log(line)
+        else:
             self._append_slice_log(line)
+
+    def _append_session_log(self, line: str) -> None:
+        """Лог текущей сессии залива (нарезка/склейка или уникализация)."""
+        mode = (getattr(self, "_upload_log_mode", "") or "").strip()
+        if self._is_montage_mode(mode):
+            self._append_montage_log(line, mode=mode)
         else:
             self._append_log(line)
 
     def _route_ui_log_line(self, line: str) -> None:
         """Служебные логи (upload, studio, теги) — в лог той вкладки, откуда запущен залив."""
         mode = (getattr(self, "_upload_log_mode", "") or "").strip()
-        if mode == "slicing":
-            self._append_slice_log(line)
+        if self._is_montage_mode(mode):
+            self._append_montage_log(line, mode=mode)
         else:
             self._append_log(line)
 

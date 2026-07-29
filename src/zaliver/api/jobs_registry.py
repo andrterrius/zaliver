@@ -16,6 +16,7 @@ from zaliver.core.sinks import JobProgressSink
 class JobKind(str, Enum):
     UNIQUIFY = "uniquify"
     SLICING = "slicing"
+    STITCHING = "stitching"
     UPLOAD = "upload"
     AVAILABILITY = "availability"
     INSTAGRAM_REGISTER = "instagram_register"

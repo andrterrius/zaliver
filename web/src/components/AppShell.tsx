@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { Platform } from "../api/client";
 import { UniquifyPage } from "../pages/UniquifyPage";
 import { SlicingPage } from "../pages/SlicingPage";
+import { StitchingPage } from "../pages/StitchingPage";
 import { ReadyPage } from "../pages/ReadyPage";
 import { UploadedPage } from "../pages/UploadedPage";
 import { ProfilesPage } from "../pages/ProfilesPage";
@@ -12,12 +13,13 @@ import { SettingsPage } from "../pages/SettingsPage";
 const NAV = [
   { id: 0, label: "Уникализация" },
   { id: 1, label: "Нарезка" },
-  { id: 2, label: "Готовые видео" },
-  { id: 3, label: "Залитые видео" },
-  { id: 4, label: "Профили" },
-  { id: 5, label: "Редактирование каналов" },
-  { id: 6, label: "ИИ" },
-  { id: 7, label: "Настройки" },
+  { id: 2, label: "Склейка" },
+  { id: 3, label: "Готовые видео" },
+  { id: 4, label: "Залитые видео" },
+  { id: 5, label: "Профили" },
+  { id: 6, label: "Редактирование каналов" },
+  { id: 7, label: "ИИ" },
+  { id: 8, label: "Настройки" },
 ] as const;
 
 type Props = {
@@ -29,7 +31,7 @@ export function AppShell({ platform, onBack }: Props) {
   const [tab, setTab] = useState(0);
   const navItems =
     platform === "yt_inst"
-      ? NAV.filter((n) => n.id === 0 || n.id === 1 || n.id === 7)
+      ? NAV.filter((n) => n.id === 0 || n.id === 1 || n.id === 2 || n.id === 8)
       : NAV;
 
   return (
@@ -55,12 +57,13 @@ export function AppShell({ platform, onBack }: Props) {
       <main className="main-pane">
         {tab === 0 ? <UniquifyPage /> : null}
         {tab === 1 ? <SlicingPage /> : null}
-        {tab === 2 ? <ReadyPage /> : null}
-        {tab === 3 ? <UploadedPage /> : null}
-        {tab === 4 ? <ProfilesPage platform={platform} /> : null}
-        {tab === 5 ? <ChannelEditPage /> : null}
-        {tab === 6 ? <AiPage /> : null}
-        {tab === 7 ? <SettingsPage /> : null}
+        {tab === 2 ? <StitchingPage /> : null}
+        {tab === 3 ? <ReadyPage /> : null}
+        {tab === 4 ? <UploadedPage /> : null}
+        {tab === 5 ? <ProfilesPage platform={platform} /> : null}
+        {tab === 6 ? <ChannelEditPage /> : null}
+        {tab === 7 ? <AiPage /> : null}
+        {tab === 8 ? <SettingsPage /> : null}
       </main>
     </div>
   );

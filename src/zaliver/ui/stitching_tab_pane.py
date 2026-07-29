@@ -1,4 +1,4 @@
-"""UI for the «Нарезки» tab (audio-peak slicing)."""
+"""UI for the «Склейка» tab (two-part beat-synced stitch)."""
 
 from __future__ import annotations
 
@@ -30,12 +30,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from zaliver.processing.slicing import (
-    DEFAULT_MAX_SCENE_DURATION,
-    DEFAULT_MAX_SCENES,
-    DEFAULT_MIN_SCENE_DURATION,
-    DEFAULT_MIN_SCENES,
-)
 from zaliver.processing.text_overlay import (
     NEON_WAVE_CHAR_PHASE,
     TextOverlaySettings,
@@ -46,7 +40,6 @@ from zaliver.ui.widgets import (
     AnimatedProgressBar,
     SmoothSlider,
     ToggleSwitch,
-    ValueSlider,
     configure_log_splitter,
     make_log_export_button,
     make_work_section_nav,
@@ -56,15 +49,15 @@ from zaliver.ui.widgets import (
 
 _INT_MAX = 2_147_483_647
 
-DEFAULT_SLICE_TEXT_OVERLAY_TEXT = "5.000.000$ GIVEAWAY IN BIO"
-DEFAULT_SLICE_TEXT_OVERLAY_FONT_SIZE = 58
-DEFAULT_SLICE_WAVE_AMP_FRAC = 0.15
-DEFAULT_SLICE_WAVE_FRAME_SPEED = 0.05
-DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_X = 0.5
-DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_Y = 0.5
+DEFAULT_STITCH_TEXT_OVERLAY_TEXT = "5.000.000$ GIVEAWAY IN BIO"
+DEFAULT_STITCH_TEXT_OVERLAY_FONT_SIZE = 58
+DEFAULT_STITCH_WAVE_AMP_FRAC = 0.15
+DEFAULT_STITCH_WAVE_FRAME_SPEED = 0.05
+DEFAULT_STITCH_TEXT_OVERLAY_ANCHOR_X = 0.5
+DEFAULT_STITCH_TEXT_OVERLAY_ANCHOR_Y = 0.5
 
 
-class SlicingTabPane(QWidget):
+class StitchingTabPane(QWidget):
     start_requested = pyqtSignal()
     cancel_requested = pyqtSignal()
 
@@ -76,39 +69,33 @@ class SlicingTabPane(QWidget):
     ) -> None:
         super().__init__(parent)
         self._settings = settings
-        self._clip_files: list[str] = []
+        self._part1_files: list[str] = []
+        self._part2_files: list[str] = []
         self._music_files: list[str] = []
         self._text_glow_color = "#00FFFF"
         self._text_text_color = "#FFFFFF"
         self._text_font_path = ""
+        self._text_overlay_preview_index_part1 = 0
+        self._text_overlay_preview_index_part2 = 0
         self._build_ui()
         self.load_settings()
 
     def build_options(self) -> dict[str, Any]:
         return {
             "output_dir": self.output_dir_edit.text().strip(),
-            "clip_files": list(self._clip_files),
+            "part1_files": list(self._part1_files),
+            "part2_files": list(self._part2_files),
             "music_files": list(self._music_files),
             "copies_per_track": int(self.copies_per_track.value()),
             "text_overlay": self.text_overlay_settings().to_dict(),
-            "use_suggested_durations": bool(self.auto_scene_durations.isChecked()),
-            "min_scene_duration": float(self.min_scene_duration.value()),
-            "max_scene_duration": float(self.max_scene_duration.value()),
-            "min_scenes": int(self.min_scenes.value()),
-            "max_scenes": int(self.max_scenes.value()),
         }
 
-    def validate_scene_options(self) -> str | None:
-        if int(self.min_scenes.value()) > int(self.max_scenes.value()):
-            return "Мин. количество сцен не может быть больше максимального."
-        if not self.auto_scene_durations.isChecked():
-            if float(self.min_scene_duration.value()) > float(self.max_scene_duration.value()):
-                return "Мин. длительность сцены не может быть больше максимальной."
+    def validate_part_options(self) -> str | None:
         return None
 
     def text_overlay_settings(self) -> TextOverlaySettings:
         orient = self.text_overlay_orientation.currentData()
-        ax, ay = self.text_overlay_preview.anchor()
+        ax, ay = self.text_overlay_preview_part1.anchor()
         waf = self.text_overlay_wave_amp.value() / 100.0
         wfs = self.text_overlay_wave_speed.value() / 100.0
         return TextOverlaySettings(
@@ -128,140 +115,130 @@ class SlicingTabPane(QWidget):
             wave_char_phase=float(NEON_WAVE_CHAR_PHASE),
             wave_frame_speed=float(wfs),
             from_middle=bool(self.text_overlay_from_middle.isChecked()),
+            after_frame_change=bool(self.text_overlay_after_frame_change.isChecked()),
         )
 
     def _apply_fixed_text_overlay_defaults(self) -> None:
-        self.text_overlay_edit.setPlainText(DEFAULT_SLICE_TEXT_OVERLAY_TEXT)
-        self.text_overlay_font_size.setValue(DEFAULT_SLICE_TEXT_OVERLAY_FONT_SIZE)
+        self.text_overlay_edit.setPlainText(DEFAULT_STITCH_TEXT_OVERLAY_TEXT)
+        self.text_overlay_font_size.setValue(DEFAULT_STITCH_TEXT_OVERLAY_FONT_SIZE)
         self.text_overlay_glow_enabled.setChecked(True)
         self.text_overlay_letter_spacing.setValue(0)
-        self.text_overlay_wave_amp.setValue(int(round(DEFAULT_SLICE_WAVE_AMP_FRAC * 100)))
-        self.text_overlay_wave_speed.setValue(int(round(DEFAULT_SLICE_WAVE_FRAME_SPEED * 100)))
-        self.text_overlay_preview.set_anchor(
-            DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_X,
-            DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_Y,
+        self.text_overlay_wave_amp.setValue(int(round(DEFAULT_STITCH_WAVE_AMP_FRAC * 100)))
+        self.text_overlay_wave_speed.setValue(
+            int(round(DEFAULT_STITCH_WAVE_FRAME_SPEED * 100))
         )
+        self._set_both_preview_anchors(
+            DEFAULT_STITCH_TEXT_OVERLAY_ANCHOR_X,
+            DEFAULT_STITCH_TEXT_OVERLAY_ANCHOR_Y,
+        )
+
+    def _load_file_list(self, key: str) -> list[str]:
+        try:
+            files = self._settings.value(key, [], type=list) or []
+        except Exception:
+            files = []
+        out: list[str] = []
+        for p in files:
+            try:
+                path = Path(str(p))
+                if path.is_file():
+                    out.append(str(path.resolve()))
+            except OSError:
+                continue
+        return out
 
     def load_settings(self) -> None:
         s = self._settings
-        self.output_dir_edit.setText(s.value("slice/output_folder", "", type=str) or "")
-        try:
-            files = s.value("slice/clip_files", [], type=list) or []
-        except Exception:
-            files = []
-        self._clip_files = [str(x) for x in files if str(x).strip()]
-        try:
-            mf = s.value("slice/music_files", [], type=list) or []
-        except Exception:
-            mf = []
-        self._music_files = []
-        for p in mf:
-            try:
-                if Path(str(p)).is_file():
-                    self._music_files.append(str(Path(p).resolve()))
-            except OSError:
-                continue
-        self._sync_clip_hint()
+        self.output_dir_edit.setText(s.value("stitch/output_folder", "", type=str) or "")
+        self._part1_files = self._load_file_list("stitch/part1_files")
+        self._part2_files = self._load_file_list("stitch/part2_files")
+        self._music_files = self._load_file_list("stitch/music_files")
+        self._sync_part1_hint()
+        self._sync_part2_hint()
         self._sync_music_hint()
         self.text_overlay_enabled.setChecked(
-            bool(s.value("slice/text_overlay_enabled", True, type=bool))
+            bool(s.value("stitch/text_overlay_enabled", True, type=bool))
         )
         self._apply_fixed_text_overlay_defaults()
         self.text_overlay_from_middle.setChecked(
-            bool(s.value("slice/text_overlay_from_middle", True, type=bool))
+            bool(s.value("stitch/text_overlay_from_middle", True, type=bool))
         )
-        orient = s.value("slice/text_overlay_orientation", "vertical", type=str) or "vertical"
+        self.text_overlay_after_frame_change.setChecked(
+            bool(s.value("stitch/text_overlay_after_frame_change", False, type=bool))
+        )
+        # Взаимоисключающие режимы появления текста.
+        if (
+            self.text_overlay_after_frame_change.isChecked()
+            and self.text_overlay_from_middle.isChecked()
+        ):
+            self.text_overlay_from_middle.setChecked(False)
+        orient = s.value("stitch/text_overlay_orientation", "vertical", type=str) or "vertical"
         idx = self.text_overlay_orientation.findData(
             "horizontal" if orient == "horizontal" else "vertical"
         )
         if idx >= 0:
             self.text_overlay_orientation.setCurrentIndex(idx)
         self._text_glow_color = (
-            s.value("slice/text_overlay_glow_color", "#00FFFF", type=str) or "#00FFFF"
+            s.value("stitch/text_overlay_glow_color", "#00FFFF", type=str) or "#00FFFF"
         )
         self._text_text_color = (
-            s.value("slice/text_overlay_text_color", "#FFFFFF", type=str) or "#FFFFFF"
+            s.value("stitch/text_overlay_text_color", "#FFFFFF", type=str) or "#FFFFFF"
         )
         self._text_font_path = (
-            s.value("slice/text_overlay_font_path", "", type=str) or ""
+            s.value("stitch/text_overlay_font_path", "", type=str) or ""
         ).strip()
         self._populate_text_font_combo()
         self.text_overlay_font_bold.setChecked(
-            bool(s.value("slice/text_overlay_font_bold", True, type=bool))
+            bool(s.value("stitch/text_overlay_font_bold", True, type=bool))
         )
         self._sync_color_btn(self.text_overlay_glow_btn, self._text_glow_color)
         self._sync_color_btn(self.text_overlay_text_btn, self._text_text_color)
         self._sync_wave_labels()
         self._update_text_overlay_controls()
         self._sync_text_overlay_preview(
-            DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_X,
-            DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_Y,
+            DEFAULT_STITCH_TEXT_OVERLAY_ANCHOR_X,
+            DEFAULT_STITCH_TEXT_OVERLAY_ANCHOR_Y,
         )
         try:
-            cp = int(s.value("slice/copies_per_track", 1, type=int))
+            cp = int(s.value("stitch/copies_per_track", 1, type=int))
         except Exception:
             cp = 1
         self.copies_per_track.setValue(max(1, cp))
         if hasattr(self, "delete_after_upload"):
             self.delete_after_upload.setChecked(
-                bool(s.value("slice/delete_after_upload", False, type=bool))
+                bool(s.value("stitch/delete_after_upload", False, type=bool))
             )
-        self.auto_scene_durations.setChecked(
-            bool(s.value("slice/auto_scene_durations", False, type=bool))
-        )
-        try:
-            min_dur = float(
-                s.value("slice/min_scene_duration", DEFAULT_MIN_SCENE_DURATION, type=float)
-            )
-        except Exception:
-            min_dur = DEFAULT_MIN_SCENE_DURATION
-        try:
-            max_dur = float(
-                s.value("slice/max_scene_duration", DEFAULT_MAX_SCENE_DURATION, type=float)
-            )
-        except Exception:
-            max_dur = DEFAULT_MAX_SCENE_DURATION
-        self.min_scene_duration.setValue(max(0.1, min(60.0, min_dur)))
-        self.max_scene_duration.setValue(max(0.1, min(60.0, max_dur)))
-        try:
-            min_sc = int(s.value("slice/min_scenes", DEFAULT_MIN_SCENES, type=int))
-        except Exception:
-            min_sc = DEFAULT_MIN_SCENES
-        try:
-            max_sc = int(s.value("slice/max_scenes", DEFAULT_MAX_SCENES, type=int))
-        except Exception:
-            max_sc = DEFAULT_MAX_SCENES
-        self.min_scenes.setValue(max(1, min_sc))
-        self.max_scenes.setValue(max(1, max_sc))
-        self._update_scene_duration_controls()
 
     def save_settings(self) -> None:
         s = self._settings
-        s.setValue("slice/output_folder", self.output_dir_edit.text().strip())
-        s.setValue("slice/clip_files", list(self._clip_files))
-        s.setValue("slice/music_files", list(self._music_files))
-        s.setValue("slice/copies_per_track", int(self.copies_per_track.value()))
+        s.setValue("stitch/output_folder", self.output_dir_edit.text().strip())
+        s.setValue("stitch/part1_files", list(self._part1_files))
+        s.setValue("stitch/part2_files", list(self._part2_files))
+        s.setValue("stitch/music_files", list(self._music_files))
+        s.setValue("stitch/copies_per_track", int(self.copies_per_track.value()))
         if hasattr(self, "delete_after_upload"):
             s.setValue(
-                "slice/delete_after_upload", bool(self.delete_after_upload.isChecked())
+                "stitch/delete_after_upload", bool(self.delete_after_upload.isChecked())
             )
-        s.setValue("slice/auto_scene_durations", bool(self.auto_scene_durations.isChecked()))
-        s.setValue("slice/min_scene_duration", float(self.min_scene_duration.value()))
-        s.setValue("slice/max_scene_duration", float(self.max_scene_duration.value()))
-        s.setValue("slice/min_scenes", int(self.min_scenes.value()))
-        s.setValue("slice/max_scenes", int(self.max_scenes.value()))
-        s.setValue("slice/text_overlay_enabled", bool(self.text_overlay_enabled.isChecked()))
-        s.setValue("slice/text_overlay_from_middle", bool(self.text_overlay_from_middle.isChecked()))
+        s.setValue("stitch/text_overlay_enabled", bool(self.text_overlay_enabled.isChecked()))
+        s.setValue(
+            "stitch/text_overlay_from_middle",
+            bool(self.text_overlay_from_middle.isChecked()),
+        )
+        s.setValue(
+            "stitch/text_overlay_after_frame_change",
+            bool(self.text_overlay_after_frame_change.isChecked()),
+        )
         orient = self.text_overlay_orientation.currentData()
         s.setValue(
-            "slice/text_overlay_orientation",
+            "stitch/text_overlay_orientation",
             orient if isinstance(orient, str) else "vertical",
         )
-        s.setValue("slice/text_overlay_glow_color", self._text_glow_color)
-        s.setValue("slice/text_overlay_text_color", self._text_text_color)
-        s.setValue("slice/text_overlay_font_path", self._text_font_path)
+        s.setValue("stitch/text_overlay_glow_color", self._text_glow_color)
+        s.setValue("stitch/text_overlay_text_color", self._text_text_color)
+        s.setValue("stitch/text_overlay_font_path", self._text_font_path)
         s.setValue(
-            "slice/text_overlay_font_bold", bool(self.text_overlay_font_bold.isChecked())
+            "stitch/text_overlay_font_bold", bool(self.text_overlay_font_bold.isChecked())
         )
 
     def set_running(self, *, running: bool) -> None:
@@ -271,7 +248,7 @@ class SlicingTabPane(QWidget):
             self.set_idle()
 
     def set_busy(self) -> None:
-        """Нарезка или залив: Старт выключен, Отмена включена."""
+        """Склейка или залив: Старт выключен, Отмена включена."""
         self.btn_start.setEnabled(False)
         self.btn_cancel.setEnabled(True)
 
@@ -279,6 +256,37 @@ class SlicingTabPane(QWidget):
         """Готов к новому запуску."""
         self.btn_start.setEnabled(True)
         self.btn_cancel.setEnabled(False)
+
+    def _make_clip_row(
+        self,
+        *,
+        pick_label: str,
+        on_pick,
+        on_add,
+        on_clear,
+    ) -> tuple[QWidget, QLabel, QPushButton, QPushButton, QPushButton]:
+        btn_pick = QPushButton(pick_label)
+        btn_pick.setObjectName("secondary")
+        btn_pick.clicked.connect(on_pick)
+        btn_add = QPushButton("Добавить еще файлы…")
+        btn_add.setObjectName("secondary")
+        btn_add.clicked.connect(on_add)
+        btn_clear = QPushButton("Очистить")
+        btn_clear.setObjectName("secondary")
+        btn_clear.clicked.connect(on_clear)
+        btns = FlowLayout(hspacing=6, vspacing=6)
+        btns.addWidget(btn_pick)
+        btns.addWidget(btn_add)
+        btns.addWidget(btn_clear)
+        btns_w = QWidget()
+        btns_w.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        btns_w.setLayout(btns)
+        hint = QLabel("")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        hint.setMinimumWidth(0)
+        hint.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        return btns_w, hint, btn_pick, btn_add, btn_clear
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -320,7 +328,7 @@ class SlicingTabPane(QWidget):
         header_block.addWidget(self.progress_label)
 
         section_nav, section_nav_group, _section_btns = make_work_section_nav(
-            ["Исходники", "Фильтры", "Текст", "Музыка"],
+            ["Исходники", "Текст", "Музыка"],
             parent=self,
         )
         header_block.addWidget(section_nav)
@@ -332,34 +340,35 @@ class SlicingTabPane(QWidget):
         io_grid = QGridLayout(io)
         io_grid.setHorizontalSpacing(8)
         io_grid.setVerticalSpacing(8)
-        self._btn_pick_clips = QPushButton("Выбрать клипы…")
-        self._btn_pick_clips.setObjectName("secondary")
-        self._btn_pick_clips.clicked.connect(self._browse_clips)
-        self._btn_add_clips = QPushButton("Добавить еще файлы…")
-        self._btn_add_clips.setObjectName("secondary")
-        self._btn_add_clips.clicked.connect(self._add_clips)
-        self._btn_clear_clips = QPushButton("Очистить")
-        self._btn_clear_clips.setObjectName("secondary")
-        self._btn_clear_clips.clicked.connect(self._clear_clips)
-        clip_btns = FlowLayout(hspacing=6, vspacing=6)
-        clip_btns.addWidget(self._btn_pick_clips)
-        clip_btns.addWidget(self._btn_add_clips)
-        clip_btns.addWidget(self._btn_clear_clips)
-        clip_btns_w = QWidget()
-        clip_btns_w.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+
+        (
+            part1_btns_w,
+            self._part1_hint,
+            self._btn_pick_part1,
+            self._btn_add_part1,
+            self._btn_clear_part1,
+        ) = self._make_clip_row(
+            pick_label="Выбрать клипы (часть 1)…",
+            on_pick=self._browse_part1,
+            on_add=self._add_part1,
+            on_clear=self._clear_part1,
         )
-        clip_btns_w.setLayout(clip_btns)
-        self._clip_hint = QLabel("")
-        self._clip_hint.setObjectName("hint")
-        self._clip_hint.setWordWrap(True)
-        self._clip_hint.setMinimumWidth(0)
-        self._clip_hint.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        (
+            part2_btns_w,
+            self._part2_hint,
+            self._btn_pick_part2,
+            self._btn_add_part2,
+            self._btn_clear_part2,
+        ) = self._make_clip_row(
+            pick_label="Выбрать клипы (часть 2)…",
+            on_pick=self._browse_part2,
+            on_add=self._add_part2,
+            on_clear=self._clear_part2,
         )
+
         self.output_dir_edit = QLineEdit()
         self.output_dir_edit.setObjectName("ioPathEdit")
-        self.output_dir_edit.setPlaceholderText("Папка для нарезанных роликов…")
+        self.output_dir_edit.setPlaceholderText("Папка для склеенных роликов…")
         self.output_dir_edit.setMinimumWidth(0)
         self.output_dir_edit.setMaximumWidth(480)
         self.output_dir_edit.setSizePolicy(
@@ -367,9 +376,7 @@ class SlicingTabPane(QWidget):
         )
         btn_out = QPushButton("Выходная папка…")
         btn_out.setObjectName("secondary")
-        btn_out.setSizePolicy(
-            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
-        )
+        btn_out.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         btn_out.clicked.connect(self._browse_output_dir)
         out_row = QHBoxLayout()
         out_row.setContentsMargins(0, 0, 0, 0)
@@ -378,21 +385,22 @@ class SlicingTabPane(QWidget):
         out_row.addWidget(btn_out, 0)
         out_row.addStretch(1)
 
-        io_grid.addWidget(QLabel("Исходные клипы:"), 0, 0, Qt.AlignmentFlag.AlignTop)
-        io_grid.addWidget(self._clip_hint, 0, 1)
-        io_grid.addWidget(clip_btns_w, 1, 1)
-        io_grid.addWidget(QLabel("Выходная папка:"), 2, 0)
-        io_grid.addLayout(out_row, 2, 1)
+        io_grid.addWidget(QLabel("Часть 1:"), 0, 0, Qt.AlignmentFlag.AlignTop)
+        io_grid.addWidget(self._part1_hint, 0, 1)
+        io_grid.addWidget(part1_btns_w, 1, 1)
+        io_grid.addWidget(QLabel("Часть 2:"), 2, 0, Qt.AlignmentFlag.AlignTop)
+        io_grid.addWidget(self._part2_hint, 2, 1)
+        io_grid.addWidget(part2_btns_w, 3, 1)
+        io_grid.addWidget(QLabel("Выходная папка:"), 4, 0)
+        io_grid.addLayout(out_row, 4, 1)
         io_grid.setColumnStretch(1, 1)
-        io_grid.setColumnMinimumWidth(0, 0)
-        io_grid.setColumnMinimumWidth(1, 0)
         self.copies_per_track = QSpinBox()
         self.copies_per_track.setRange(1, _INT_MAX)
         self.copies_per_track.setValue(1)
         self.copies_per_track.setMaximumWidth(120)
         self.copies_per_track.valueChanged.connect(lambda *_: self.save_settings())
-        io_grid.addWidget(QLabel("Количество роликов:"), 3, 0)
-        io_grid.addWidget(self.copies_per_track, 3, 1)
+        io_grid.addWidget(QLabel("Количество роликов:"), 5, 0)
+        io_grid.addWidget(self.copies_per_track, 5, 1)
         self.delete_after_upload = QCheckBox("Удалять после залива")
         self.delete_after_upload.setChecked(False)
         self.delete_after_upload.setToolTip(
@@ -400,9 +408,9 @@ class SlicingTabPane(QWidget):
             "удаляются из выходной папки."
         )
         self.delete_after_upload.toggled.connect(self.save_settings)
-        io_grid.addWidget(self.delete_after_upload, 4, 0, 1, 2)
+        io_grid.addWidget(self.delete_after_upload, 6, 0, 1, 2)
 
-        music_gb = QGroupBox("Треки для нарезки")
+        music_gb = QGroupBox("Треки для склейки")
         music_grid = QGridLayout(music_gb)
         self._btn_pick_music = QPushButton("Выбрать треки…")
         self._btn_pick_music.setObjectName("secondary")
@@ -429,87 +437,13 @@ class SlicingTabPane(QWidget):
         music_grid.addWidget(self._music_hint, 0, 1)
         music_grid.addWidget(music_btns_w, 0, 2)
         music_desc = QLabel(
-            "Аудио задаёт длительность и моменты смены кадра. "
-            "Для каждого ролика трек выбирается случайно; "
-            "повторы — только если роликов больше, чем треков."
+            "Случайный полный клип из части 1 и из части 2 склеиваются; "
+            "длительность ролика — их сумма. Переход ставится на бит трека; "
+            "при нехватке музыки хвост зацикливается."
         )
         music_desc.setObjectName("hint")
         music_desc.setWordWrap(True)
         music_grid.addWidget(music_desc, 1, 0, 1, 3)
-
-        duration_gb = QGroupBox("Длительность сцены")
-        dg = QGridLayout(duration_gb)
-        dg.setHorizontalSpacing(8)
-        dg.setVerticalSpacing(6)
-        self.auto_scene_durations = QCheckBox(
-            "Автоматически подобрать оптимальную длительность"
-        )
-        self.auto_scene_durations.setChecked(False)
-        self.auto_scene_durations.setToolTip(
-            "Анализ пиков выбранного трека и рекомендация MIN/MAX длительности сцены. "
-            "При включении ручные значения ниже не используются."
-        )
-        self.auto_scene_durations.toggled.connect(self._update_scene_duration_controls)
-        self.auto_scene_durations.toggled.connect(self.save_settings)
-        self.min_scene_duration = ValueSlider(
-            minimum=0.1,
-            maximum=60.0,
-            value=DEFAULT_MIN_SCENE_DURATION,
-            step=0.05,
-            decimals=2,
-        )
-        self.min_scene_duration.valueChanged.connect(lambda *_: self.save_settings())
-        self.max_scene_duration = ValueSlider(
-            minimum=0.1,
-            maximum=60.0,
-            value=DEFAULT_MAX_SCENE_DURATION,
-            step=0.05,
-            decimals=2,
-        )
-        self.max_scene_duration.valueChanged.connect(lambda *_: self.save_settings())
-        dg.addWidget(self.auto_scene_durations, 0, 0, 1, 2)
-        dg.addWidget(QLabel("Мин. (с):"), 1, 0, Qt.AlignmentFlag.AlignVCenter)
-        dg.addWidget(self.min_scene_duration, 1, 1)
-        dg.addWidget(QLabel("Макс. (с):"), 2, 0, Qt.AlignmentFlag.AlignVCenter)
-        dg.addWidget(self.max_scene_duration, 2, 1)
-        duration_hint = QLabel(
-            "Интервал между сменами кадра на пиках аудио."
-        )
-        duration_hint.setObjectName("hint")
-        duration_hint.setWordWrap(True)
-        dg.addWidget(duration_hint, 3, 0, 1, 2)
-        self._update_scene_duration_controls()
-
-        scenes_gb = QGroupBox("Количество сцен")
-        sg = QGridLayout(scenes_gb)
-        sg.setHorizontalSpacing(8)
-        sg.setVerticalSpacing(6)
-        self.min_scenes = ValueSlider(
-            minimum=1,
-            maximum=999,
-            value=DEFAULT_MIN_SCENES,
-            step=1,
-            decimals=0,
-        )
-        self.min_scenes.valueChanged.connect(lambda *_: self.save_settings())
-        self.max_scenes = ValueSlider(
-            minimum=1,
-            maximum=999,
-            value=DEFAULT_MAX_SCENES,
-            step=1,
-            decimals=0,
-        )
-        self.max_scenes.valueChanged.connect(lambda *_: self.save_settings())
-        sg.addWidget(QLabel("Мин.:"), 0, 0, Qt.AlignmentFlag.AlignVCenter)
-        sg.addWidget(self.min_scenes, 0, 1)
-        sg.addWidget(QLabel("Макс.:"), 1, 0, Qt.AlignmentFlag.AlignVCenter)
-        sg.addWidget(self.max_scenes, 1, 1)
-        scene_hint = QLabel(
-            "Число сцен выбирается случайно в заданном диапазоне."
-        )
-        scene_hint.setObjectName("hint")
-        scene_hint.setWordWrap(True)
-        sg.addWidget(scene_hint, 2, 0, 1, 2)
 
         text_gb = QGroupBox("Текст на видео")
         text_outer = QVBoxLayout(text_gb)
@@ -520,13 +454,27 @@ class SlicingTabPane(QWidget):
         self.text_overlay_enabled.toggled.connect(self.save_settings)
         self.text_overlay_from_middle = QCheckBox("Текст с середины видео до конца")
         self.text_overlay_from_middle.setChecked(True)
+        self.text_overlay_from_middle.toggled.connect(self._on_from_middle_toggled)
         self.text_overlay_from_middle.toggled.connect(self.save_settings)
+        self.text_overlay_after_frame_change = QCheckBox("Текст после смены кадра")
+        self.text_overlay_after_frame_change.setChecked(False)
+        self.text_overlay_after_frame_change.setToolTip(
+            "Показывать текст только после перехода с части 1 на часть 2 "
+            "(в момент смены кадра по ритму)."
+        )
+        self.text_overlay_after_frame_change.toggled.connect(
+            self._on_after_frame_change_toggled
+        )
+        self.text_overlay_after_frame_change.toggled.connect(self.save_settings)
         text_top_row = QHBoxLayout()
         text_top_row.setContentsMargins(0, 0, 0, 0)
         text_top_row.setSpacing(16)
         text_top_row.addWidget(self.text_overlay_enabled, 0, Qt.AlignmentFlag.AlignVCenter)
         text_top_row.addWidget(
             self.text_overlay_from_middle, 0, Qt.AlignmentFlag.AlignVCenter
+        )
+        text_top_row.addWidget(
+            self.text_overlay_after_frame_change, 0, Qt.AlignmentFlag.AlignVCenter
         )
         text_top_row.addStretch(1)
         text_top_w = QWidget()
@@ -537,14 +485,14 @@ class SlicingTabPane(QWidget):
         tp.setContentsMargins(0, 0, 0, 0)
         self.text_overlay_edit = QPlainTextEdit()
         self.text_overlay_edit.setPlaceholderText("Текст для наложения…")
-        self.text_overlay_edit.setPlainText(DEFAULT_SLICE_TEXT_OVERLAY_TEXT)
+        self.text_overlay_edit.setPlainText(DEFAULT_STITCH_TEXT_OVERLAY_TEXT)
         self.text_overlay_edit.setMaximumHeight(72)
         self.text_overlay_edit.textChanged.connect(self._schedule_preview)
         tp.addWidget(self.text_overlay_edit)
         opts = QGridLayout()
         self.text_overlay_font_size = QSpinBox()
         self.text_overlay_font_size.setRange(12, 240)
-        self.text_overlay_font_size.setValue(DEFAULT_SLICE_TEXT_OVERLAY_FONT_SIZE)
+        self.text_overlay_font_size.setValue(DEFAULT_STITCH_TEXT_OVERLAY_FONT_SIZE)
         self.text_overlay_font_size.valueChanged.connect(self._schedule_preview)
         self.text_overlay_orientation = QComboBox()
         self.text_overlay_orientation.addItem("Вертикальное 9:16", "vertical")
@@ -599,12 +547,14 @@ class SlicingTabPane(QWidget):
         opts.addWidget(font_row_w, 5, 1)
         self.text_overlay_wave_amp = SmoothSlider(Qt.Orientation.Horizontal)
         self.text_overlay_wave_amp.setRange(0, 35)
-        self.text_overlay_wave_amp.setValue(int(round(DEFAULT_SLICE_WAVE_AMP_FRAC * 100)))
+        self.text_overlay_wave_amp.setValue(int(round(DEFAULT_STITCH_WAVE_AMP_FRAC * 100)))
         self.text_overlay_wave_amp.valueChanged.connect(self._on_wave_changed)
         self.text_overlay_wave_amp_label = QLabel()
         self.text_overlay_wave_speed = SmoothSlider(Qt.Orientation.Horizontal)
         self.text_overlay_wave_speed.setRange(0, 25)
-        self.text_overlay_wave_speed.setValue(int(round(DEFAULT_SLICE_WAVE_FRAME_SPEED * 100)))
+        self.text_overlay_wave_speed.setValue(
+            int(round(DEFAULT_STITCH_WAVE_FRAME_SPEED * 100))
+        )
         self.text_overlay_wave_speed.valueChanged.connect(self._on_wave_changed)
         self.text_overlay_wave_speed_label = QLabel()
         self._sync_wave_labels()
@@ -638,12 +588,28 @@ class SlicingTabPane(QWidget):
         cw = QWidget()
         cw.setLayout(cr)
         tp.addWidget(cw)
-        self.text_overlay_preview = TextOverlayPreviewWidget()
-        self.text_overlay_preview.setMinimumHeight(240)
-        self.text_overlay_preview.setMaximumHeight(340)
-        self.text_overlay_preview.positionChanged.connect(lambda *_: self.save_settings())
-        tp.addWidget(self.text_overlay_preview)
-        text_hint = QLabel("Перетащите текст · ▶ смотреть ролик с наложением")
+
+        previews_row = QHBoxLayout()
+        previews_row.setContentsMargins(0, 0, 0, 0)
+        previews_row.setSpacing(12)
+        part1_col, self.text_overlay_preview_part1 = self._build_text_preview_column(
+            title="Часть 1",
+            part=1,
+        )
+        part2_col, self.text_overlay_preview_part2 = self._build_text_preview_column(
+            title="Часть 2",
+            part=2,
+        )
+        # Совместимость: основной якорь берём из части 1.
+        self.text_overlay_preview = self.text_overlay_preview_part1
+        previews_row.addWidget(part1_col, 1)
+        previews_row.addWidget(part2_col, 1)
+        previews_w = QWidget()
+        previews_w.setLayout(previews_row)
+        tp.addWidget(previews_w)
+        text_hint = QLabel(
+            "Перетащите текст · ▶ смотреть ролик · стрелки листают исходники каждой части"
+        )
         text_hint.setObjectName("hint")
         text_hint.setWordWrap(True)
         tp.addWidget(text_hint)
@@ -652,14 +618,11 @@ class SlicingTabPane(QWidget):
         self._sync_color_btn(self.text_overlay_glow_btn, self._text_glow_color)
         self._sync_color_btn(self.text_overlay_text_btn, self._text_text_color)
 
-        self._slice_section_stack = QStackedWidget()
-        self._slice_section_stack.addWidget(wrap_work_section_page(io))
-        self._slice_section_stack.addWidget(
-            wrap_work_section_page(duration_gb, scenes_gb)
-        )
-        self._slice_section_stack.addWidget(wrap_work_section_page(text_gb))
-        self._slice_section_stack.addWidget(wrap_work_section_page(music_gb))
-        section_nav_group.idClicked.connect(self._slice_section_stack.setCurrentIndex)
+        self._stitch_section_stack = QStackedWidget()
+        self._stitch_section_stack.addWidget(wrap_work_section_page(io))
+        self._stitch_section_stack.addWidget(wrap_work_section_page(text_gb))
+        self._stitch_section_stack.addWidget(wrap_work_section_page(music_gb))
+        section_nav_group.idClicked.connect(self._stitch_section_stack.setCurrentIndex)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -668,12 +631,10 @@ class SlicingTabPane(QWidget):
         scroll.setMinimumWidth(0)
         inner = QWidget()
         inner.setMinimumWidth(0)
-        inner.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
-        )
+        inner.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         il = QVBoxLayout(inner)
         il.setContentsMargins(0, 0, 0, 0)
-        il.addWidget(self._slice_section_stack)
+        il.addWidget(self._stitch_section_stack)
         il.addStretch()
         scroll.setWidget(inner)
         scroll.setSizePolicy(
@@ -692,7 +653,7 @@ class SlicingTabPane(QWidget):
             make_log_export_button(
                 self.log,
                 self,
-                default_filename="zaliver_slicing_log.txt",
+                default_filename="zaliver_stitching_log.txt",
             )
         )
         rl.addLayout(log_header)
@@ -706,11 +667,6 @@ class SlicingTabPane(QWidget):
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.timeout.connect(self._sync_text_overlay_preview)
-
-    def _update_scene_duration_controls(self, _checked: bool = False) -> None:
-        auto = bool(self.auto_scene_durations.isChecked())
-        self.min_scene_duration.setEnabled(not auto)
-        self.max_scene_duration.setEnabled(not auto)
 
     def _normalize_path_key(self, p: str) -> str:
         try:
@@ -742,52 +698,98 @@ class SlicingTabPane(QWidget):
     def _music_dialog_filter(self) -> str:
         return "Аудио (*.mp3 *.wav *.m4a *.aac *.flac *.ogg);;Все файлы (*)"
 
-    def _clips_start_dir(self) -> str:
-        if self._clip_files:
-            return str(Path(self._clip_files[0]).parent)
+    def _part_start_dir(self, files: list[str]) -> str:
+        if files:
+            return str(Path(files[0]).parent)
         return str(Path.home())
 
     def _music_start_dir(self) -> str:
-        if self._music_files:
-            return str(Path(self._music_files[0]).parent)
-        return str(Path.home())
+        return self._part_start_dir(self._music_files)
 
-    def _browse_clips(self) -> None:
+    def _pick_part_files(
+        self, *, title: str, existing: list[str], replace: bool
+    ) -> list[str] | None:
         files, _ = QFileDialog.getOpenFileNames(
             self,
-            "Выберите видеоклипы для сцен",
-            self._clips_start_dir(),
+            title,
+            self._part_start_dir(existing),
             self._clips_dialog_filter(),
         )
-        if files:
-            self._clip_files = self._merge_unique_paths([], files)
-            self._sync_clip_hint()
-            self.save_settings()
+        if not files:
+            return None
+        if replace:
+            return self._merge_unique_paths([], files)
+        return self._merge_unique_paths(existing, files)
 
-    def _add_clips(self) -> None:
-        files, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Добавить видеоклипы к списку",
-            self._clips_start_dir(),
-            self._clips_dialog_filter(),
+    def _browse_part1(self) -> None:
+        files = self._pick_part_files(
+            title="Выберите видео для первой части",
+            existing=self._part1_files,
+            replace=True,
         )
-        if files:
-            self._clip_files = self._merge_unique_paths(self._clip_files, files)
-            self._sync_clip_hint()
+        if files is not None:
+            self._part1_files = files
+            self._sync_part1_hint()
+            self._sync_text_overlay_preview()
             self.save_settings()
 
-    def _clear_clips(self) -> None:
-        if not self._clip_files:
+    def _add_part1(self) -> None:
+        files = self._pick_part_files(
+            title="Добавить видео к первой части",
+            existing=self._part1_files,
+            replace=False,
+        )
+        if files is not None:
+            self._part1_files = files
+            self._sync_part1_hint()
+            self._sync_text_overlay_preview()
+            self.save_settings()
+
+    def _clear_part1(self) -> None:
+        if not self._part1_files:
             return
-        self._clip_files = []
-        self._sync_clip_hint()
+        self._part1_files = []
+        self._sync_part1_hint()
+        self._sync_text_overlay_preview()
+        self.save_settings()
+
+    def _browse_part2(self) -> None:
+        files = self._pick_part_files(
+            title="Выберите видео для второй части",
+            existing=self._part2_files,
+            replace=True,
+        )
+        if files is not None:
+            self._part2_files = files
+            self._sync_part2_hint()
+            self._sync_text_overlay_preview()
+            self.save_settings()
+
+    def _add_part2(self) -> None:
+        files = self._pick_part_files(
+            title="Добавить видео ко второй части",
+            existing=self._part2_files,
+            replace=False,
+        )
+        if files is not None:
+            self._part2_files = files
+            self._sync_part2_hint()
+            self._sync_text_overlay_preview()
+            self.save_settings()
+
+    def _clear_part2(self) -> None:
+        if not self._part2_files:
+            return
+        self._part2_files = []
+        self._sync_part2_hint()
+        self._sync_text_overlay_preview()
         self.save_settings()
 
     def _browse_output_dir(self) -> None:
-        start = self.output_dir_edit.text().strip() or (
-            str(Path(self._clip_files[0]).parent) if self._clip_files else str(Path.home())
+        start = self.output_dir_edit.text().strip() or self._part_start_dir(
+            self._part1_files or self._part2_files
         )
-        path = QFileDialog.getExistingDirectory(self, "Папка для нарезанных роликов", start)
+        path = QFileDialog.getExistingDirectory(self, "Папка для склеенных роликов", start)
         if path:
             self.output_dir_edit.setText(path)
             self.save_settings()
@@ -795,7 +797,7 @@ class SlicingTabPane(QWidget):
     def _browse_music(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
             self,
-            "Выберите аудиотреки для нарезки (можно несколько)",
+            "Выберите аудиотреки для склейки (можно несколько)",
             self._music_start_dir(),
             self._music_dialog_filter(),
         )
@@ -823,21 +825,48 @@ class SlicingTabPane(QWidget):
         self._sync_music_hint()
         self.save_settings()
 
-    def _sync_clip_hint(self) -> None:
-        n = len(self._clip_files)
+    def _sync_part_hint(
+        self,
+        files: list[str],
+        hint: QLabel,
+        btn_add: QPushButton,
+        btn_clear: QPushButton,
+        empty_text: str,
+    ) -> None:
+        n = len(files)
         has_files = n > 0
-        self._btn_add_clips.setVisible(has_files)
-        self._btn_clear_clips.setVisible(has_files)
+        btn_add.setVisible(has_files)
+        btn_clear.setVisible(has_files)
         if n <= 0:
-            self._clip_hint.setText("Не выбрано — нажмите «Выбрать клипы…»")
+            hint.setText(empty_text)
+            hint.setToolTip("")
             self._schedule_preview()
             return
-        names = [Path(p).name for p in self._clip_files]
+        names = [Path(p).name for p in files]
         preview = ", ".join(names[:4])
         if n > 4:
             preview = f"{preview} и ещё {n - 4}"
-        self._clip_hint.setText(f"Выбрано: {n} ({preview})")
+        hint.setText(f"Выбрано: {n} ({preview})")
+        hint.setToolTip("\n".join(names))
         self._schedule_preview()
+
+    def _sync_part1_hint(self) -> None:
+        self._sync_part_hint(
+            self._part1_files,
+            self._part1_hint,
+            self._btn_add_part1,
+            self._btn_clear_part1,
+            "Не выбрано — нажмите «Выбрать клипы (часть 1)…»",
+        )
+
+    def _sync_part2_hint(self) -> None:
+        self._sync_part_hint(
+            self._part2_files,
+            self._part2_hint,
+            self._btn_add_part2,
+            self._btn_clear_part2,
+            "Не выбрано — нажмите «Выбрать клипы (часть 2)…»",
+        )
 
     def _sync_music_hint(self) -> None:
         n = len(self._music_files)
@@ -870,8 +899,23 @@ class SlicingTabPane(QWidget):
         on = bool(self.text_overlay_enabled.isChecked())
         self._text_panel.setEnabled(on)
         self.text_overlay_from_middle.setEnabled(on)
+        self.text_overlay_after_frame_change.setEnabled(on)
         glow_on = bool(self.text_overlay_glow_enabled.isChecked())
         self.text_overlay_glow_btn.setEnabled(glow_on)
+        self._sync_text_overlay_preview()
+
+    def _on_from_middle_toggled(self, checked: bool) -> None:
+        if checked and self.text_overlay_after_frame_change.isChecked():
+            self.text_overlay_after_frame_change.blockSignals(True)
+            self.text_overlay_after_frame_change.setChecked(False)
+            self.text_overlay_after_frame_change.blockSignals(False)
+        self._sync_text_overlay_preview()
+
+    def _on_after_frame_change_toggled(self, checked: bool) -> None:
+        if checked and self.text_overlay_from_middle.isChecked():
+            self.text_overlay_from_middle.blockSignals(True)
+            self.text_overlay_from_middle.setChecked(False)
+            self.text_overlay_from_middle.blockSignals(False)
         self._sync_text_overlay_preview()
 
     def _populate_text_font_combo(self) -> None:
@@ -949,13 +993,13 @@ class SlicingTabPane(QWidget):
         self.save_settings()
 
     def _center_text(self) -> None:
-        _ax, ay = self.text_overlay_preview.anchor()
-        self.text_overlay_preview.set_anchor(0.5, ay)
+        _ax, ay = self.text_overlay_preview_part1.anchor()
+        self._set_both_preview_anchors(0.5, ay)
         self.save_settings()
 
     def _center_text_vertically(self) -> None:
-        ax, _ay = self.text_overlay_preview.anchor()
-        self.text_overlay_preview.set_anchor(ax, 0.5)
+        ax, _ay = self.text_overlay_preview_part1.anchor()
+        self._set_both_preview_anchors(ax, 0.5)
         self.save_settings()
 
     def _pick_glow(self) -> None:
@@ -976,38 +1020,230 @@ class SlicingTabPane(QWidget):
         self._sync_text_overlay_preview()
         self.save_settings()
 
+    def _build_text_preview_column(
+        self, *, title: str, part: int
+    ) -> tuple[QWidget, TextOverlayPreviewWidget]:
+        col = QVBoxLayout()
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(6)
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("hint")
+        title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        col.addWidget(title_lbl)
+
+        preview = TextOverlayPreviewWidget()
+        preview.setMinimumHeight(220)
+        preview.setMaximumHeight(320)
+        preview.positionChanged.connect(self._on_preview_position_changed)
+        col.addWidget(preview)
+
+        btn_prev = QPushButton("‹")
+        btn_prev.setObjectName("textPreviewNav")
+        btn_prev.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_prev.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_prev.setFixedSize(36, 36)
+        btn_prev.setToolTip("Предыдущий исходник")
+        btn_prev.setAutoDefault(False)
+        btn_prev.setDefault(False)
+        btn_next = QPushButton("›")
+        btn_next.setObjectName("textPreviewNav")
+        btn_next.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_next.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_next.setFixedSize(36, 36)
+        btn_next.setToolTip("Следующий исходник")
+        btn_next.setAutoDefault(False)
+        btn_next.setDefault(False)
+        meta = QLabel("")
+        meta.setObjectName("hint")
+        meta.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        meta.setWordWrap(True)
+
+        if part == 1:
+            btn_prev.clicked.connect(self._text_overlay_preview_prev_part1)
+            btn_next.clicked.connect(self._text_overlay_preview_next_part1)
+            self._btn_text_preview_prev_part1 = btn_prev
+            self._btn_text_preview_next_part1 = btn_next
+            self._text_overlay_preview_meta_part1 = meta
+        else:
+            btn_prev.clicked.connect(self._text_overlay_preview_prev_part2)
+            btn_next.clicked.connect(self._text_overlay_preview_next_part2)
+            self._btn_text_preview_prev_part2 = btn_prev
+            self._btn_text_preview_next_part2 = btn_next
+            self._text_overlay_preview_meta_part2 = meta
+
+        nav = QHBoxLayout()
+        nav.setContentsMargins(0, 0, 0, 0)
+        nav.setSpacing(8)
+        nav.addWidget(btn_prev, 0)
+        nav.addWidget(meta, 1)
+        nav.addWidget(btn_next, 0)
+        nav_w = QWidget()
+        nav_w.setLayout(nav)
+        col.addWidget(nav_w)
+
+        wrap = QWidget()
+        wrap.setLayout(col)
+        return wrap, preview
+
+    def _on_preview_position_changed(self, ax: float, ay: float) -> None:
+        self._set_both_preview_anchors(ax, ay, source=self.sender())
+        self.save_settings()
+
+    def _set_both_preview_anchors(
+        self,
+        ax: float,
+        ay: float,
+        *,
+        source: object | None = None,
+    ) -> None:
+        for preview in (self.text_overlay_preview_part1, self.text_overlay_preview_part2):
+            if preview is source:
+                continue
+            preview.blockSignals(True)
+            preview.set_anchor(ax, ay)
+            preview.blockSignals(False)
+
+    def _text_overlay_preview_videos(self, part: int) -> list[str]:
+        files = self._part1_files if part == 1 else self._part2_files
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in files:
+            try:
+                path = Path(str(raw))
+                if not path.is_file():
+                    continue
+                resolved = str(path.resolve())
+            except OSError:
+                continue
+            key = os.path.normcase(os.path.normpath(resolved))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(resolved)
+        return out
+
+    def _clamp_text_overlay_preview_index(self, part: int) -> None:
+        videos = self._text_overlay_preview_videos(part)
+        n = len(videos)
+        attr = (
+            "_text_overlay_preview_index_part1"
+            if part == 1
+            else "_text_overlay_preview_index_part2"
+        )
+        if n <= 0:
+            setattr(self, attr, 0)
+            return
+        setattr(self, attr, int(getattr(self, attr)) % n)
+
+    def _update_text_overlay_preview_nav(self, part: int) -> None:
+        videos = self._text_overlay_preview_videos(part)
+        n = len(videos)
+        self._clamp_text_overlay_preview_index(part)
+        idx = int(
+            self._text_overlay_preview_index_part1
+            if part == 1
+            else self._text_overlay_preview_index_part2
+        )
+        can_cycle = n > 1
+        if part == 1:
+            btn_prev = self._btn_text_preview_prev_part1
+            btn_next = self._btn_text_preview_next_part1
+            meta = self._text_overlay_preview_meta_part1
+            empty_msg = "Нет исходников части 1"
+        else:
+            btn_prev = self._btn_text_preview_prev_part2
+            btn_next = self._btn_text_preview_next_part2
+            meta = self._text_overlay_preview_meta_part2
+            empty_msg = "Нет исходников части 2"
+        btn_prev.setEnabled(can_cycle)
+        btn_next.setEnabled(can_cycle)
+        if n <= 0:
+            meta.setText(empty_msg)
+        else:
+            meta.setText(f"{idx + 1} / {n} · {Path(videos[idx]).name}")
+
+    def _text_overlay_preview_step(self, part: int, delta: int) -> None:
+        videos = self._text_overlay_preview_videos(part)
+        n = len(videos)
+        attr = (
+            "_text_overlay_preview_index_part1"
+            if part == 1
+            else "_text_overlay_preview_index_part2"
+        )
+        if n <= 0:
+            self._update_text_overlay_preview_nav(part)
+            return
+        if n == 1:
+            setattr(self, attr, 0)
+            self._apply_text_overlay_preview_video(part, force=True)
+            return
+        setattr(self, attr, (int(getattr(self, attr)) + delta) % n)
+        self._apply_text_overlay_preview_video(part, force=True)
+
+    def _text_overlay_preview_prev_part1(self) -> None:
+        self._text_overlay_preview_step(1, -1)
+
+    def _text_overlay_preview_next_part1(self) -> None:
+        self._text_overlay_preview_step(1, 1)
+
+    def _text_overlay_preview_prev_part2(self) -> None:
+        self._text_overlay_preview_step(2, -1)
+
+    def _text_overlay_preview_next_part2(self) -> None:
+        self._text_overlay_preview_step(2, 1)
+
+    def _apply_text_overlay_preview_video(self, part: int, *, force: bool = False) -> None:
+        preview = (
+            self.text_overlay_preview_part1
+            if part == 1
+            else self.text_overlay_preview_part2
+        )
+        videos = self._text_overlay_preview_videos(part)
+        self._update_text_overlay_preview_nav(part)
+        current = None
+        if videos:
+            self._clamp_text_overlay_preview_index(part)
+            idx = int(
+                self._text_overlay_preview_index_part1
+                if part == 1
+                else self._text_overlay_preview_index_part2
+            )
+            current = videos[idx]
+        preview.set_background_video(current, force=force)
+        overlay_on = bool(self.text_overlay_enabled.isChecked())
+        after_cut = bool(self.text_overlay_after_frame_change.isChecked())
+        # «После смены кадра» — текст только на части 2.
+        preview.set_text_visible(overlay_on and not (part == 1 and after_cut))
+
     def _sync_text_overlay_preview(
         self, anchor_x: float | None = None, anchor_y: float | None = None
     ) -> None:
-        preview = self.text_overlay_preview
-        first_clip = next(
-            (
-                p
-                for p in self._clip_files
-                if str(p).strip() and Path(p).is_file()
-            ),
-            None,
-        )
-        preview.set_background_video(first_clip)
+        self._apply_text_overlay_preview_video(1, force=False)
+        self._apply_text_overlay_preview_video(2, force=False)
         overlay_on = bool(self.text_overlay_enabled.isChecked())
-        preview.set_text_visible(overlay_on)
         if not overlay_on:
             return
         orient = self.text_overlay_orientation.currentData()
-        preview.blockSignals(True)
-        preview.set_orientation(orient if isinstance(orient, str) else "vertical")
-        preview.set_font_size(int(self.text_overlay_font_size.value()))
-        preview.set_glow_enabled(bool(self.text_overlay_glow_enabled.isChecked()))
-        preview.set_glow_color(self._text_glow_color)
-        preview.set_text_color(self._text_text_color)
-        preview.set_letter_spacing(int(self.text_overlay_letter_spacing.value()))
-        preview.set_font_path(self._text_font_path)
-        preview.set_font_bold(bool(self.text_overlay_font_bold.isChecked()))
-        preview.set_wave_settings(
-            self.text_overlay_wave_amp.value() / 100.0,
-            self.text_overlay_wave_speed.value() / 100.0,
-        )
-        preview.set_text(self.text_overlay_edit.toPlainText())
-        if anchor_x is not None and anchor_y is not None:
-            preview.set_anchor(anchor_x, anchor_y)
-        preview.blockSignals(False)
+        orientation = orient if isinstance(orient, str) else "vertical"
+        font_size = int(self.text_overlay_font_size.value())
+        glow_on = bool(self.text_overlay_glow_enabled.isChecked())
+        letter_spacing = int(self.text_overlay_letter_spacing.value())
+        font_bold = bool(self.text_overlay_font_bold.isChecked())
+        wave_amp = self.text_overlay_wave_amp.value() / 100.0
+        wave_speed = self.text_overlay_wave_speed.value() / 100.0
+        text = self.text_overlay_edit.toPlainText()
+        for preview in (self.text_overlay_preview_part1, self.text_overlay_preview_part2):
+            preview.blockSignals(True)
+            preview.set_orientation(orientation)
+            preview.set_font_size(font_size)
+            preview.set_glow_enabled(glow_on)
+            preview.set_glow_color(self._text_glow_color)
+            preview.set_text_color(self._text_text_color)
+            preview.set_letter_spacing(letter_spacing)
+            preview.set_font_path(self._text_font_path)
+            preview.set_font_bold(font_bold)
+            preview.set_wave_settings(wave_amp, wave_speed)
+            preview.set_text(text)
+            if anchor_x is not None and anchor_y is not None:
+                preview.set_anchor(anchor_x, anchor_y)
+            preview.blockSignals(False)

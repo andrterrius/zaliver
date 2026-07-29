@@ -38,6 +38,7 @@ class TextOverlaySettings:
     wave_char_phase: float = NEON_WAVE_CHAR_PHASE
     wave_frame_speed: float = NEON_WAVE_FRAME_SPEED
     from_middle: bool = True
+    after_frame_change: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -63,6 +64,7 @@ class TextOverlaySettings:
         s.wave_amp_frac = max(0.0, min(0.35, float(s.wave_amp_frac)))
         s.wave_char_phase = NEON_WAVE_CHAR_PHASE
         s.wave_frame_speed = max(0.0, min(0.25, float(s.wave_frame_speed)))
+        s.after_frame_change = bool(getattr(s, "after_frame_change", False))
         return s
 
     def reference_size(self) -> Tuple[int, int]:
@@ -89,6 +91,7 @@ class ScaledTextOverlay:
     wave_char_phase: float
     wave_frame_speed: float
     from_middle: bool = True
+    enable_after_sec: float | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -131,6 +134,11 @@ class ScaledTextOverlay:
             wave_char_phase=float(d.get("wave_char_phase", NEON_WAVE_CHAR_PHASE)),
             wave_frame_speed=float(d.get("wave_frame_speed", NEON_WAVE_FRAME_SPEED)),
             from_middle=bool(d.get("from_middle", True)),
+            enable_after_sec=(
+                float(d["enable_after_sec"])
+                if d.get("enable_after_sec") is not None
+                else None
+            ),
         )
 
 
@@ -497,17 +505,26 @@ def compute_scaled_overlay(
     ref_w, ref_h = settings.reference_size()
     font_bold = bool(settings.font_bold)
     font_path = effective_font_path(settings.custom_font_path, bold=font_bold)
-    font_size = max(8, int(round(settings.font_size * vh / ref_h)))
+    # Перенос — как в предпросмотре (референс 9:16/16:9 + font_size из UI).
+    # Иначе при другом аспекте исходника шрифт масштабируется по высоте, а
+    # max_width по ширине кадра → лишние переносы на финале.
+    max_w_ref = max(20, int(round(settings.max_width_frac * ref_w)))
+    lines = wrap_text_lines(
+        text,
+        int(settings.font_size),
+        max_w_ref,
+        font_path,
+        int(settings.letter_spacing),
+        bold=font_bold,
+    )
+    if not lines:
+        return None
+    scale = vh / float(ref_h)
+    font_size = max(8, int(round(settings.font_size * scale)))
     ref_font = max(1, int(settings.font_size))
     letter_spacing = int(
         round(settings.letter_spacing * font_size / ref_font)
     )
-    max_w = max(20, int(round(settings.max_width_frac * vw)))
-    lines = wrap_text_lines(
-        text, font_size, max_w, font_path, letter_spacing, bold=font_bold
-    )
-    if not lines:
-        return None
     char_lines = [
         layout_line_chars(ln, font_size, font_path, letter_spacing, bold=font_bold)
         for ln in lines
@@ -541,6 +558,7 @@ def compute_scaled_overlay(
         wave_char_phase=float(NEON_WAVE_CHAR_PHASE),
         wave_frame_speed=float(settings.wave_frame_speed),
         from_middle=bool(settings.from_middle),
+        enable_after_sec=None,
     )
 
 def _ffmpeg_escape_path(path: str) -> str:
@@ -607,16 +625,23 @@ def overlay_enable_expr(
     total_frames: int,
     fps: float = 30.0,
     total_duration_sec: float | None = None,
+    enable_after_sec: float | None = None,
 ) -> Optional[str]:
     """None = always on; '__skip__' = no text in this chunk."""
-    if not from_middle or total_frames <= 0:
-        return None
     fps_v = max(float(fps), 1e-6)
     if total_duration_sec is not None and total_duration_sec > 0:
         total_t = float(total_duration_sec)
     else:
-        total_t = int(total_frames) / fps_v
-    mid_t = total_t / 2.0
+        total_t = int(total_frames) / fps_v if total_frames > 0 else 0.0
+
+    start_t: float | None = None
+    if enable_after_sec is not None:
+        start_t = max(0.0, float(enable_after_sec))
+    elif from_middle and total_frames > 0:
+        start_t = total_t / 2.0
+    else:
+        return None
+
     chunk_start_t = int(chunk_start_frame) / fps_v
     chunk_end_t = (int(chunk_start_frame) + int(chunk_frame_count)) / fps_v
     if (
@@ -626,13 +651,13 @@ def overlay_enable_expr(
         and int(chunk_frame_count) >= int(total_frames)
     ):
         chunk_end_t = float(total_duration_sec)
-    if chunk_end_t <= mid_t + 1e-9:
+    if chunk_end_t <= start_t + 1e-9:
         return "__skip__"
     # После trim+setpts в чанке t=0 в начале фрагмента; для целого ролика — абсолютное время.
-    local_mid_t = mid_t - chunk_start_t
-    if local_mid_t <= 1e-9:
+    local_start_t = start_t - chunk_start_t
+    if local_start_t <= 1e-9:
         return None
-    return f"gte(t\\,{local_mid_t:.6f})"
+    return f"gte(t\\,{local_start_t:.6f})"
 
 
 def build_text_overlay_filters(
@@ -655,6 +680,7 @@ def build_text_overlay_filters(
         total_frames=total_frames,
         fps=fps,
         total_duration_sec=total_duration_sec,
+        enable_after_sec=overlay.enable_after_sec,
     )
     if enable == "__skip__":
         return f"[{input_label}]null[outv]"

@@ -41,9 +41,60 @@ def _ordered_pair_i(lo: int, hi: int) -> Tuple[int, int]:
     return lo, hi
 
 
+def sample_range_value(
+    lo: float,
+    hi: float,
+    *,
+    integer: bool = False,
+    rng: Optional[np.random.Generator] = None,
+) -> float:
+    """Случайное значение в [lo, hi]; при lo==hi возвращает точное значение."""
+    a, b = _ordered_pair_f(float(lo), float(hi))
+    r = rng or np.random.default_rng()
+    if integer:
+        ia, ib = int(round(a)), int(round(b))
+        if ib < ia:
+            ia, ib = ib, ia
+        return float(int(r.integers(ia, ib + 1)))
+    if abs(b - a) < 1e-12:
+        return float(a)
+    return float(r.uniform(a, b))
+
+
+def materialize_text_overlay_ranges(
+    raw: Optional[Dict[str, Any]],
+    *,
+    rng: Optional[np.random.Generator] = None,
+) -> Optional[Dict[str, Any]]:
+    """Выбрать wave amp/speed из min/max (если заданы) для одного ролика."""
+    if not isinstance(raw, dict):
+        return None
+    d = dict(raw)
+    r = rng or np.random.default_rng()
+    amp_lo = d.pop("wave_amp_frac_min", None)
+    amp_hi = d.pop("wave_amp_frac_max", None)
+    spd_lo = d.pop("wave_frame_speed_min", None)
+    spd_hi = d.pop("wave_frame_speed_max", None)
+    if amp_lo is not None or amp_hi is not None:
+        base = float(d.get("wave_amp_frac", 0.0) or 0.0)
+        d["wave_amp_frac"] = sample_range_value(
+            float(base if amp_lo is None else amp_lo),
+            float(base if amp_hi is None else amp_hi),
+            rng=r,
+        )
+    if spd_lo is not None or spd_hi is not None:
+        base = float(d.get("wave_frame_speed", 0.0) or 0.0)
+        d["wave_frame_speed"] = sample_range_value(
+            float(base if spd_lo is None else spd_lo),
+            float(base if spd_hi is None else spd_hi),
+            rng=r,
+        )
+    return d
+
+
 @dataclass
 class RandomUniquifyBounds:
-    """Границы для случайной уникализации (min/max; вероятность хора — одно число)."""
+    """Границы для случайной уникализации (min/max)."""
 
     brightness_min: float = -22.0
     brightness_max: float = 22.0
@@ -62,6 +113,8 @@ class RandomUniquifyBounds:
     playback_speed_min: float = 1.0
     playback_speed_max: float = 1.1
     audio_chorus_prob: float = 0.45
+    audio_chorus_prob_min: float = 0.45
+    audio_chorus_prob_max: float = 0.45
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -71,6 +124,11 @@ class RandomUniquifyBounds:
         plo, phi = _ordered_pair_f(self.playback_speed_min, self.playback_speed_max)
         plo = max(0.25, float(plo))
         phi = max(plo, min(4.0, float(phi)))
+        ch_lo, ch_hi = _ordered_pair_f(
+            float(self.audio_chorus_prob_min), float(self.audio_chorus_prob_max)
+        )
+        ch_lo = max(0.0, min(1.0, ch_lo))
+        ch_hi = max(ch_lo, min(1.0, ch_hi))
         ch = max(0.0, min(1.0, float(self.audio_chorus_prob)))
         jlo, jhi = _ordered_pair_i(int(self.crop_jitter_min), int(self.crop_jitter_max))
         jlo = max(0, jlo)
@@ -101,6 +159,8 @@ class RandomUniquifyBounds:
             playback_speed_min=plo,
             playback_speed_max=phi,
             audio_chorus_prob=ch,
+            audio_chorus_prob_min=ch_lo,
+            audio_chorus_prob_max=ch_hi,
         )
 
     @classmethod
@@ -110,6 +170,14 @@ class RandomUniquifyBounds:
             return base.normalized()
         names = {f.name for f in fields(cls)}
         merged = {**asdict(base), **{k: v for k, v in d.items() if k in names}}
+        # Старые сохранения: одно число вероятности хора → обе границы.
+        if "audio_chorus_prob" in (d or {}) and (
+            "audio_chorus_prob_min" not in (d or {})
+            and "audio_chorus_prob_max" not in (d or {})
+        ):
+            ch = float(d["audio_chorus_prob"])  # type: ignore[index]
+            merged["audio_chorus_prob_min"] = ch
+            merged["audio_chorus_prob_max"] = ch
         return cls(**merged).normalized()  # type: ignore[arg-type]
 
 
@@ -134,7 +202,11 @@ def random_uniquify_settings(
     nlo, nhi = _ordered_pair_f(b.noise_sigma_min, b.noise_sigma_max)
     zlo, zhi = _ordered_pair_i(int(b.seed_min), int(b.seed_max))
     plo, phi = _ordered_pair_f(b.playback_speed_min, b.playback_speed_max)
-    ch_p = max(0.0, min(1.0, float(b.audio_chorus_prob)))
+    ch_lo, ch_hi = _ordered_pair_f(
+        float(getattr(b, "audio_chorus_prob_min", b.audio_chorus_prob)),
+        float(getattr(b, "audio_chorus_prob_max", b.audio_chorus_prob)),
+    )
+    ch_p = max(0.0, min(1.0, float(sample_range_value(ch_lo, ch_hi, rng=r))))
     return UniquifySettings(
         brightness_delta=float(r.uniform(blo, bhi)),
         contrast=float(r.uniform(clo, chi)),

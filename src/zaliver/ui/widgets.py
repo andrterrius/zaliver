@@ -454,6 +454,393 @@ class ValueSlider(QWidget):
         self._label.setEnabled(enabled)
 
 
+class RangeSmoothSlider(QWidget):
+    """Двойной ползунок: одна точка, при разведении — две ручки и заливка между ними."""
+
+    rangeChanged = pyqtSignal(int, int)
+    sliderPressed = pyqtSignal()
+    sliderReleased = pyqtSignal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMinimumHeight(34)
+        self.setMaximumHeight(40)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMouseTracking(False)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
+        self._accent = QColor("#6366f1")
+        self._accent_end = QColor("#a855f7")
+        self._track_bg = QColor("#1e2230")
+        self._handle_fill = QColor("#f8fafc")
+        self._handle_pen = QPen(QColor("#c7d2fe"), 1)
+        self._minimum = 0
+        self._maximum = 100
+        self._low = 0
+        self._high = 0
+        self._single_step = 1
+        self._page_step = 5
+        self._active: str | None = None  # "low" | "high" | "expand"
+        self._press_low = 0
+        self._press_high = 0
+        self._handle_r = 9
+        self._geom_x0 = 0
+        self._geom_x1 = 1
+        self._geom_cy = 0
+        self._geom_valid = False
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # type: ignore[override]
+        event.ignore()
+
+    def set_accent(self, hex_color: str) -> None:
+        self._accent = QColor(hex_color)
+        self.update()
+
+    def minimum(self) -> int:
+        return self._minimum
+
+    def maximum(self) -> int:
+        return self._maximum
+
+    def low(self) -> int:
+        return self._low
+
+    def high(self) -> int:
+        return self._high
+
+    def isSliderDown(self) -> bool:  # noqa: N802
+        return self._active is not None
+
+    def value(self) -> int:
+        """Совместимость с QSlider: нижняя граница (или единственное значение)."""
+        return self._low
+
+    def setMinimum(self, value: int) -> None:  # noqa: N802
+        self.setRange(int(value), self._maximum)
+
+    def setMaximum(self, value: int) -> None:  # noqa: N802
+        self.setRange(self._minimum, int(value))
+
+    def setRange(self, minimum: int, maximum: int) -> None:  # noqa: N802
+        if maximum < minimum:
+            minimum, maximum = maximum, minimum
+        self._minimum = int(minimum)
+        self._maximum = int(maximum)
+        self._low = max(self._minimum, min(self._maximum, self._low))
+        self._high = max(self._low, min(self._maximum, self._high))
+        self._geom_valid = False
+        self.update()
+
+    def setSingleStep(self, step: int) -> None:  # noqa: N802
+        self._single_step = max(1, int(step))
+
+    def setPageStep(self, step: int) -> None:  # noqa: N802
+        self._page_step = max(1, int(step))
+
+    def setLow(self, value: int) -> None:  # noqa: N802
+        self.setSpan(int(value), self._high)
+
+    def setHigh(self, value: int) -> None:  # noqa: N802
+        self.setSpan(self._low, int(value))
+
+    def setValue(self, value: int) -> None:  # noqa: N802
+        """Схлопнуть обе ручки в одно значение."""
+        v = max(self._minimum, min(self._maximum, int(value)))
+        self.setSpan(v, v)
+
+    def setSpan(self, low: int, high: int) -> None:  # noqa: N802
+        lo = max(self._minimum, min(self._maximum, int(low)))
+        hi = max(self._minimum, min(self._maximum, int(high)))
+        if hi < lo:
+            lo, hi = hi, lo
+        if lo == self._low and hi == self._high:
+            return
+        self._low = lo
+        self._high = hi
+        self.update()
+        self.rangeChanged.emit(self._low, self._high)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        self._geom_valid = False
+        super().resizeEvent(event)
+
+    def _ensure_geom(self) -> None:
+        if self._geom_valid:
+            return
+        cr = self.contentsRect()
+        margin = 4 + self._handle_r
+        x0 = cr.left() + margin
+        x1 = cr.right() - margin
+        if x1 <= x0 + 4:
+            x0, x1 = cr.left() + margin, cr.right() - margin
+        self._geom_x0 = x0
+        self._geom_x1 = x1
+        self._geom_cy = cr.center().y()
+        self._geom_valid = True
+
+    def _value_to_x(self, value: int) -> float:
+        self._ensure_geom()
+        span = max(1, self._maximum - self._minimum)
+        t = (value - self._minimum) / float(span)
+        return self._geom_x0 + t * (self._geom_x1 - self._geom_x0)
+
+    def _x_to_value(self, x: float) -> int:
+        self._ensure_geom()
+        x0, x1 = self._geom_x0, self._geom_x1
+        if x1 <= x0:
+            return self._minimum
+        t = max(0.0, min(1.0, (x - x0) / float(x1 - x0)))
+        raw = self._minimum + t * (self._maximum - self._minimum)
+        step = self._single_step
+        snapped = int(round(raw / step) * step)
+        return max(self._minimum, min(self._maximum, snapped))
+
+    def _handle_at(self, pos: QPoint) -> str | None:
+        self._ensure_geom()
+        x = float(pos.x())
+        y = float(pos.y())
+        cy = self._geom_cy
+        if abs(y - cy) > self._handle_r + 6:
+            return None
+        lx = self._value_to_x(self._low)
+        hx = self._value_to_x(self._high)
+        if self._low == self._high:
+            if abs(x - lx) <= self._handle_r + 4:
+                return "expand"
+            return None
+        dl = abs(x - lx)
+        dh = abs(x - hx)
+        hit = self._handle_r + 4
+        if dl <= hit and dl <= dh:
+            return "low"
+        if dh <= hit:
+            return "high"
+        return None
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() != Qt.MouseButton.LeftButton or not self.isEnabled():
+            return
+        self._geom_valid = False
+        pos = event.position().toPoint()
+        hit = self._handle_at(pos)
+        if hit is None:
+            v = self._x_to_value(float(pos.x()))
+            self.setSpan(v, v)
+            hit = "expand"
+        self._active = hit
+        self._press_low = self._low
+        self._press_high = self._high
+        self.sliderPressed.emit()
+        self.update()
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        if self._active is None:
+            return
+        v = self._x_to_value(float(event.position().x()))
+        if self._active == "expand":
+            if v >= self._press_low:
+                self.setSpan(self._press_low, v)
+            else:
+                self.setSpan(v, self._press_high)
+            if self._low != self._high:
+                self._active = "high" if v >= self._press_low else "low"
+        elif self._active == "low":
+            self.setSpan(min(v, self._high), self._high)
+        elif self._active == "high":
+            self.setSpan(self._low, max(v, self._low))
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        was_down = self._active is not None
+        self._active = None
+        if was_down:
+            self.sliderReleased.emit()
+        self.update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._ensure_geom()
+        x0, x1, cy = self._geom_x0, self._geom_x1, self._geom_cy
+        track_h = 6
+        rx = 3
+        y0 = cy - track_h // 2
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._track_bg)
+        painter.drawRoundedRect(x0, y0, x1 - x0, track_h, rx, rx)
+
+        lx = self._value_to_x(self._low)
+        hx = self._value_to_x(self._high)
+        span = hx - lx
+        if span > 1.5:
+            g = QLinearGradient(float(lx), 0, float(hx), 0)
+            g.setColorAt(0, self._accent)
+            g.setColorAt(1, self._accent_end)
+            painter.setBrush(g)
+            painter.drawRoundedRect(int(lx), y0, max(1, int(span)), track_h, rx, rx)
+
+        r = self._handle_r
+        painter.setBrush(self._handle_fill)
+        painter.setPen(self._handle_pen)
+        painter.drawEllipse(int(lx - r), cy - r, 2 * r, 2 * r)
+        if self._low != self._high:
+            painter.drawEllipse(int(hx - r), cy - r, 2 * r, 2 * r)
+
+
+class ValueRangeSlider(QWidget):
+    """Ползунок диапазона + подпись; при совпадении границ — точное значение."""
+
+    rangeChanged = pyqtSignal(float, float)
+    rangeChangeFinished = pyqtSignal(float, float)
+
+    def __init__(
+        self,
+        *,
+        minimum: float,
+        maximum: float,
+        low: float | None = None,
+        high: float | None = None,
+        value: float | None = None,
+        step: float = 1.0,
+        decimals: int = 0,
+        suffix: str = "",
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        if maximum < minimum:
+            minimum, maximum = maximum, minimum
+        step = float(step) if step else 1.0
+        if step <= 0:
+            step = 1.0
+        self._decimals = max(0, int(decimals))
+        self._suffix = str(suffix or "")
+        self._scale = 10 ** self._decimals if self._decimals > 0 else max(
+            1, int(round(1.0 / step)) if step < 1.0 else 1
+        )
+        if self._decimals == 0 and step >= 1.0:
+            self._scale = 1
+        self._last_label = ""
+        self._slider = RangeSmoothSlider()
+        self._slider.setMinimum(int(round(minimum * self._scale)))
+        self._slider.setMaximum(int(round(maximum * self._scale)))
+        tick = max(1, int(round(step * self._scale)))
+        self._slider.setSingleStep(tick)
+        self._slider.setPageStep(tick * 5)
+        if value is not None and low is None and high is None:
+            lo = hi = float(value)
+        else:
+            lo = float(minimum if low is None else low)
+            hi = float(lo if high is None else high)
+        self._slider.blockSignals(True)
+        self._slider.setSpan(
+            int(round(lo * self._scale)),
+            int(round(hi * self._scale)),
+        )
+        self._slider.blockSignals(False)
+        self._label = QLabel()
+        self._label.setObjectName("hint")
+        # Фиксированная ширина по худшему случаю подписи — без reflow layout при drag.
+        worst = f"{self._fmt(maximum)}–{self._fmt(maximum)}"
+        if self._suffix and not worst.endswith(self._suffix):
+            # _fmt уже добавляет suffix к каждому числу; для пары без двойного суффикса:
+            if self._decimals <= 0:
+                worst = f"{int(round(maximum))}–{int(round(maximum))}{self._suffix}"
+            else:
+                worst = (
+                    f"{maximum:.{self._decimals}f}–"
+                    f"{maximum:.{self._decimals}f}{self._suffix}"
+                )
+        fm = self._label.fontMetrics()
+        label_w = fm.boundingRect(worst).width() + fm.horizontalAdvance("0") * 2 + 8
+        self._label.setFixedWidth(max(96, label_w))
+        self._label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        lay.addWidget(self._slider, 1, Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(self._label, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._slider.rangeChanged.connect(self._on_slider)
+        self._slider.sliderReleased.connect(self._on_slider_released)
+        self._sync_label()
+
+    def _from_slider(self, raw: int) -> float:
+        return float(raw) / float(self._scale)
+
+    def _fmt(self, v: float) -> str:
+        if self._decimals <= 0:
+            text = str(int(round(v)))
+        else:
+            text = f"{v:.{self._decimals}f}"
+        return f"{text}{self._suffix}" if self._suffix else text
+
+    def _fmt_pair(self, lo: float, hi: float) -> str:
+        if abs(hi - lo) < 10 ** (-(self._decimals + 1)):
+            return self._fmt(lo)
+        if self._suffix:
+            if self._decimals <= 0:
+                a, b = str(int(round(lo))), str(int(round(hi)))
+            else:
+                a = f"{lo:.{self._decimals}f}"
+                b = f"{hi:.{self._decimals}f}"
+            return f"{a}–{b}{self._suffix}"
+        return f"{self._fmt(lo)}–{self._fmt(hi)}"
+
+    def _on_slider(self, raw_lo: int, raw_hi: int) -> None:
+        self._sync_label()
+        self.rangeChanged.emit(self._from_slider(raw_lo), self._from_slider(raw_hi))
+
+    def _on_slider_released(self) -> None:
+        self.rangeChangeFinished.emit(self.lowValue(), self.highValue())
+
+    def _sync_label(self) -> None:
+        text = self._fmt_pair(self.lowValue(), self.highValue())
+        if text == self._last_label:
+            return
+        self._last_label = text
+        self._label.setText(text)
+
+    def lowValue(self) -> float:  # noqa: N802
+        return self._from_slider(self._slider.low())
+
+    def highValue(self) -> float:  # noqa: N802
+        return self._from_slider(self._slider.high())
+
+    def value(self) -> float:
+        """Нижняя граница (или единственное значение, если диапазон схлопнут)."""
+        return self.lowValue()
+
+    def setValue(self, value: float) -> None:  # noqa: N802
+        self.setValues(float(value), float(value))
+
+    def setValues(self, low: float, high: float) -> None:  # noqa: N802
+        self._slider.setSpan(
+            int(round(float(low) * self._scale)),
+            int(round(float(high) * self._scale)),
+        )
+
+    def setRange(self, minimum: float, maximum: float) -> None:  # noqa: N802
+        if maximum < minimum:
+            minimum, maximum = maximum, minimum
+        lo, hi = self.lowValue(), self.highValue()
+        self._slider.blockSignals(True)
+        self._slider.setMinimum(int(round(minimum * self._scale)))
+        self._slider.setMaximum(int(round(maximum * self._scale)))
+        self._slider.blockSignals(False)
+        self.setValues(lo, hi)
+
+    def setEnabled(self, enabled: bool) -> None:  # noqa: N802
+        super().setEnabled(enabled)
+        self._slider.setEnabled(enabled)
+        self._label.setEnabled(enabled)
+
+    def set_accent(self, hex_color: str) -> None:
+        self._slider.set_accent(hex_color)
+
+
 class ToggleSwitch(QCheckBox):
     """Wide pill switch with animated thumb position via stylesheet + check state."""
 

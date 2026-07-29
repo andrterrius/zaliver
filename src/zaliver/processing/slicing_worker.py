@@ -21,6 +21,7 @@ from zaliver.processing.ffmpeg_merge import (
     pick_best_h264_encoder,
 )
 from zaliver.processing.gpu_detect import detect_gpus, format_gpu_list
+from zaliver.processing.pipeline import materialize_text_overlay_ranges
 from zaliver.processing.slicing import (
     DEFAULT_EDGE_EXCLUDE,
     DEFAULT_MAX_SCENE_DURATION,
@@ -343,15 +344,25 @@ class SlicingService:
                 self._sink.on_finished(False, f"Не удалось создать выходную папку: {e}")
                 return
 
-            text_overlay_cfg: Optional[Dict[str, Any]] = None
+            text_overlay_enabled = False
             raw_text_overlay = options.get("text_overlay")
             if isinstance(raw_text_overlay, dict):
                 toc = TextOverlaySettings.from_dict(raw_text_overlay)
-                if toc.enabled and (toc.text or "").strip():
-                    text_overlay_cfg = toc.to_dict()
-            if text_overlay_cfg and not ffmpeg_has_drawtext():
+                text_overlay_enabled = bool(toc.enabled and (toc.text or "").strip())
+            if text_overlay_enabled and not ffmpeg_has_drawtext():
                 self._sink.on_finished(False, ffmpeg_drawtext_missing_user_message())
                 return
+
+            def _text_overlay_for_job() -> Optional[Dict[str, Any]]:
+                if not text_overlay_enabled or not isinstance(raw_text_overlay, dict):
+                    return None
+                sampled = materialize_text_overlay_ranges(raw_text_overlay)
+                if not sampled:
+                    return None
+                toc = TextOverlaySettings.from_dict(sampled)
+                if toc.enabled and (toc.text or "").strip():
+                    return toc.to_dict()
+                return None
 
             output_count = max(1, int(options.get("copies_per_track", 1)))
             num_workers = max(1, int(options.get("num_workers", 1)))
@@ -498,7 +509,7 @@ class SlicingService:
                         job,
                         music_pool=music_pool,
                         clip_pool=clip_pool,
-                        text_overlay_cfg=text_overlay_cfg,
+                        text_overlay_cfg=_text_overlay_for_job(),
                         use_suggested_durations=use_suggested,
                         min_scene_duration=min_scene_duration,
                         max_scene_duration=max_scene_duration,
@@ -546,7 +557,7 @@ class SlicingService:
                                 job,
                                 music_pool=music_pool,
                                 clip_pool=clip_pool,
-                                text_overlay_cfg=text_overlay_cfg,
+                                text_overlay_cfg=_text_overlay_for_job(),
                                 use_suggested_durations=use_suggested,
                                 min_scene_duration=min_scene_duration,
                                 max_scene_duration=max_scene_duration,

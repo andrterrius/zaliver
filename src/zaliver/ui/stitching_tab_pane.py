@@ -53,8 +53,8 @@ from zaliver.processing.text_overlay import (
 from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
 from zaliver.ui.widgets import (
     AnimatedProgressBar,
-    SmoothSlider,
     ToggleSwitch,
+    ValueRangeSlider,
     configure_log_splitter,
     make_log_export_button,
     make_work_section_nav,
@@ -104,7 +104,7 @@ class StitchingTabPane(QWidget):
             "part2_files": list(self._part2_files),
             "music_files": list(self._music_files),
             "copies_per_track": int(self.copies_per_track.value()),
-            "text_overlay": self.text_overlay_settings().to_dict(),
+            "text_overlay": self.text_overlay_options_dict(),
             "transition": self._selected_transition(),
             "transition_duration": float(DEFAULT_STITCH_TRANSITION_DURATION),
             "transition_random": bool(self.transition_random.isChecked()),
@@ -147,8 +147,12 @@ class StitchingTabPane(QWidget):
     def text_overlay_settings(self) -> TextOverlaySettings:
         orient = self.text_overlay_orientation.currentData()
         ax, ay = self.text_overlay_preview_part1.anchor()
-        waf = self.text_overlay_wave_amp.value() / 100.0
-        wfs = self.text_overlay_wave_speed.value() / 100.0
+        waf_lo = self.text_overlay_wave_amp.lowValue() / 100.0
+        waf_hi = self.text_overlay_wave_amp.highValue() / 100.0
+        wfs_lo = self.text_overlay_wave_speed.lowValue() / 100.0
+        wfs_hi = self.text_overlay_wave_speed.highValue() / 100.0
+        waf = (waf_lo + waf_hi) * 0.5
+        wfs = (wfs_lo + wfs_hi) * 0.5
         return TextOverlaySettings(
             enabled=bool(self.text_overlay_enabled.isChecked()),
             text=self.text_overlay_edit.toPlainText(),
@@ -168,6 +172,14 @@ class StitchingTabPane(QWidget):
             from_middle=bool(self.text_overlay_from_middle.isChecked()),
             after_frame_change=bool(self.text_overlay_after_frame_change.isChecked()),
         )
+
+    def text_overlay_options_dict(self) -> dict[str, Any]:
+        d = self.text_overlay_settings().to_dict()
+        d["wave_amp_frac_min"] = float(self.text_overlay_wave_amp.lowValue() / 100.0)
+        d["wave_amp_frac_max"] = float(self.text_overlay_wave_amp.highValue() / 100.0)
+        d["wave_frame_speed_min"] = float(self.text_overlay_wave_speed.lowValue() / 100.0)
+        d["wave_frame_speed_max"] = float(self.text_overlay_wave_speed.highValue() / 100.0)
+        return d
 
     def _apply_fixed_text_overlay_defaults(self) -> None:
         self.text_overlay_edit.setPlainText(DEFAULT_STITCH_TEXT_OVERLAY_TEXT)
@@ -713,33 +725,33 @@ class StitchingTabPane(QWidget):
         opts.addWidget(self.text_overlay_letter_spacing, 4, 1)
         opts.addWidget(QLabel("Шрифт:"), 5, 0)
         opts.addWidget(font_row_w, 5, 1)
-        self.text_overlay_wave_amp = SmoothSlider(Qt.Orientation.Horizontal)
-        self.text_overlay_wave_amp.setRange(0, 35)
-        self.text_overlay_wave_amp.setValue(int(round(DEFAULT_STITCH_WAVE_AMP_FRAC * 100)))
-        self.text_overlay_wave_amp.valueChanged.connect(self._on_wave_changed)
-        self.text_overlay_wave_amp_label = QLabel()
-        self.text_overlay_wave_speed = SmoothSlider(Qt.Orientation.Horizontal)
-        self.text_overlay_wave_speed.setRange(0, 25)
-        self.text_overlay_wave_speed.setValue(
-            int(round(DEFAULT_STITCH_WAVE_FRAME_SPEED * 100))
+        self.text_overlay_wave_amp = ValueRangeSlider(
+            minimum=0,
+            maximum=35,
+            value=int(round(DEFAULT_STITCH_WAVE_AMP_FRAC * 100)),
+            step=1,
+            decimals=0,
+            suffix=" %",
         )
-        self.text_overlay_wave_speed.valueChanged.connect(self._on_wave_changed)
-        self.text_overlay_wave_speed_label = QLabel()
-        self._sync_wave_labels()
-        wa = QHBoxLayout()
-        wa.addWidget(self.text_overlay_wave_amp, 1)
-        wa.addWidget(self.text_overlay_wave_amp_label)
-        ws = QHBoxLayout()
-        ws.addWidget(self.text_overlay_wave_speed, 1)
-        ws.addWidget(self.text_overlay_wave_speed_label)
+        self.text_overlay_wave_amp.rangeChanged.connect(
+            lambda *_: self._schedule_preview_light()
+        )
+        self.text_overlay_wave_amp.rangeChangeFinished.connect(self._on_wave_changed)
+        self.text_overlay_wave_speed = ValueRangeSlider(
+            minimum=0,
+            maximum=25,
+            value=int(round(DEFAULT_STITCH_WAVE_FRAME_SPEED * 100)),
+            step=1,
+            decimals=0,
+        )
+        self.text_overlay_wave_speed.rangeChanged.connect(
+            lambda *_: self._schedule_preview_light()
+        )
+        self.text_overlay_wave_speed.rangeChangeFinished.connect(self._on_wave_changed)
         opts.addWidget(QLabel("Волна — амплитуда:"), 6, 0)
-        waw = QWidget()
-        waw.setLayout(wa)
-        opts.addWidget(waw, 6, 1)
+        opts.addWidget(self.text_overlay_wave_amp, 6, 1)
         opts.addWidget(QLabel("Скорость:"), 7, 0)
-        wsw = QWidget()
-        wsw.setLayout(ws)
-        opts.addWidget(wsw, 7, 1)
+        opts.addWidget(self.text_overlay_wave_speed, 7, 1)
         ow = QWidget()
         ow.setLayout(opts)
         tp.addWidget(ow)
@@ -1059,10 +1071,11 @@ class StitchingTabPane(QWidget):
         btn.setStyleSheet(f"background-color: {c.name()}; color: {fg}; font-weight: 700;")
 
     def _sync_wave_labels(self) -> None:
-        self.text_overlay_wave_amp_label.setText(f"{self.text_overlay_wave_amp.value()} %")
-        self.text_overlay_wave_speed_label.setText(
-            f"{self.text_overlay_wave_speed.value() / 100.0:.2f}"
-        )
+        return
+
+    def _on_wave_changed(self, *_args) -> None:
+        self._schedule_preview_light()
+        self.save_settings()
 
     def _update_text_overlay_controls(self, _checked: bool = False) -> None:
         on = bool(self.text_overlay_enabled.isChecked())
@@ -1152,12 +1165,11 @@ class StitchingTabPane(QWidget):
         self._preview_timer.start(40)
         self.save_settings()
 
-    def _on_orient_changed(self, _index: int) -> None:
-        self._sync_text_overlay_preview()
-        self.save_settings()
+    def _schedule_preview_light(self) -> None:
+        """Только превью с debounce — без записи настроек (для drag ползунка)."""
+        self._preview_timer.start(40)
 
-    def _on_wave_changed(self, _v: int) -> None:
-        self._sync_wave_labels()
+    def _on_orient_changed(self, _index: int) -> None:
         self._sync_text_overlay_preview()
         self.save_settings()
 
@@ -1398,8 +1410,13 @@ class StitchingTabPane(QWidget):
         glow_on = bool(self.text_overlay_glow_enabled.isChecked())
         letter_spacing = int(self.text_overlay_letter_spacing.value())
         font_bold = bool(self.text_overlay_font_bold.isChecked())
-        wave_amp = self.text_overlay_wave_amp.value() / 100.0
-        wave_speed = self.text_overlay_wave_speed.value() / 100.0
+        wave_amp = (
+            self.text_overlay_wave_amp.lowValue() + self.text_overlay_wave_amp.highValue()
+        ) * 0.005
+        wave_speed = (
+            self.text_overlay_wave_speed.lowValue()
+            + self.text_overlay_wave_speed.highValue()
+        ) * 0.005
         text = self.text_overlay_edit.toPlainText()
         for preview in (self.text_overlay_preview_part1, self.text_overlay_preview_part2):
             preview.blockSignals(True)

@@ -53,8 +53,10 @@ from zaliver.processing.ffmpeg_gpu import gpu_pipeline_label, resolve_gpu_pipeli
 from zaliver.processing.gpu_detect import detect_gpus, format_gpu_list
 from zaliver.processing.pipeline import (
     RandomUniquifyBounds,
+    materialize_text_overlay_ranges,
     neutral_uniquify_settings,
     random_uniquify_settings,
+    sample_range_value,
 )
 from zaliver.processing.text_overlay import TextOverlaySettings, compute_scaled_overlay
 from zaliver.processing.worker import init_worker, process_chunk_disk
@@ -628,21 +630,35 @@ class ProcessingService:
 
             bg_mix_opt = bool(options.get("background_music_mix_with_source", False))
             try:
-                bg_vol_opt = float(options.get("background_music_volume_pct", 35.0))
+                bg_vol_lo = float(
+                    options.get(
+                        "background_music_volume_pct_min",
+                        options.get("background_music_volume_pct", 35.0),
+                    )
+                )
             except (TypeError, ValueError):
-                bg_vol_opt = 35.0
-            bg_vol_opt = max(0.0, min(100.0, bg_vol_opt))
+                bg_vol_lo = 35.0
+            try:
+                bg_vol_hi = float(
+                    options.get(
+                        "background_music_volume_pct_max",
+                        options.get("background_music_volume_pct", bg_vol_lo),
+                    )
+                )
+            except (TypeError, ValueError):
+                bg_vol_hi = bg_vol_lo
+            bg_vol_lo = max(0.0, min(100.0, bg_vol_lo))
+            bg_vol_hi = max(0.0, min(100.0, bg_vol_hi))
 
-            text_overlay_cfg: Optional[Dict[str, Any]] = None
             raw_text_overlay = options.get("text_overlay")
+            text_overlay_enabled = False
             if isinstance(raw_text_overlay, dict):
                 toc = TextOverlaySettings.from_dict(raw_text_overlay)
-                if toc.enabled and (toc.text or "").strip():
-                    text_overlay_cfg = toc.to_dict()
+                text_overlay_enabled = bool(toc.enabled and (toc.text or "").strip())
 
             sync_ffmpeg_env_for_children()
 
-            if text_overlay_cfg and not ffmpeg_has_drawtext():
+            if text_overlay_enabled and not ffmpeg_has_drawtext():
                 self._sink.on_finished(False, ffmpeg_drawtext_missing_user_message())
                 return
 
@@ -689,7 +705,17 @@ class ProcessingService:
                         if not audio_chorus_enabled:
                             settings["audio_chorus"] = False
                     else:
-                        settings = dict(ui_settings)
+                        manual_bounds = options.get("manual_bounds")
+                        if isinstance(manual_bounds, dict) and manual_bounds:
+                            st = random_uniquify_settings(
+                                RandomUniquifyBounds.from_options_dict(manual_bounds)
+                            )
+                            settings = st.to_dict()
+                            settings["audio_chorus"] = bool(
+                                ui_settings.get("audio_chorus", False)
+                            )
+                        else:
+                            settings = dict(ui_settings)
 
                     job_id = str(uuid.uuid4())
 
@@ -697,6 +723,18 @@ class ProcessingService:
                     if bg_music_enabled and music_pool:
                         bg_track = random.choice(music_pool)
                     bg_mix = bool(bg_track) and bg_mix_opt
+                    bg_vol_opt = float(
+                        sample_range_value(bg_vol_lo, bg_vol_hi)
+                    )
+                    bg_vol_opt = max(0.0, min(100.0, bg_vol_opt))
+
+                    job_text_overlay: Optional[Dict[str, Any]] = None
+                    if text_overlay_enabled and isinstance(raw_text_overlay, dict):
+                        sampled = materialize_text_overlay_ranges(raw_text_overlay)
+                        if sampled is not None:
+                            toc = TextOverlaySettings.from_dict(sampled)
+                            if toc.enabled and (toc.text or "").strip():
+                                job_text_overlay = toc.to_dict()
 
                     job = OutputJob(
                         file_idx=file_idx,
@@ -714,7 +752,7 @@ class ProcessingService:
                         ),
                         background_music_mix=bg_mix,
                         background_music_volume_pct=bg_vol_opt,
-                        text_overlay=text_overlay_cfg,
+                        text_overlay=job_text_overlay,
                         use_gpu_finalize=use_gpu_finalize,
                         no_effects=no_effects,
                     )

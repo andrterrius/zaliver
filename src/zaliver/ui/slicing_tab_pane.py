@@ -44,9 +44,8 @@ from zaliver.processing.text_overlay import (
 from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
 from zaliver.ui.widgets import (
     AnimatedProgressBar,
-    SmoothSlider,
     ToggleSwitch,
-    ValueSlider,
+    ValueRangeSlider,
     configure_log_splitter,
     make_log_export_button,
     make_work_section_nav,
@@ -90,27 +89,31 @@ class SlicingTabPane(QWidget):
             "clip_files": list(self._clip_files),
             "music_files": list(self._music_files),
             "copies_per_track": int(self.copies_per_track.value()),
-            "text_overlay": self.text_overlay_settings().to_dict(),
+            "text_overlay": self.text_overlay_options_dict(),
             "use_suggested_durations": bool(self.auto_scene_durations.isChecked()),
-            "min_scene_duration": float(self.min_scene_duration.value()),
-            "max_scene_duration": float(self.max_scene_duration.value()),
-            "min_scenes": int(self.min_scenes.value()),
-            "max_scenes": int(self.max_scenes.value()),
+            "min_scene_duration": float(self.scene_duration.lowValue()),
+            "max_scene_duration": float(self.scene_duration.highValue()),
+            "min_scenes": int(self.scenes_count.lowValue()),
+            "max_scenes": int(self.scenes_count.highValue()),
         }
 
     def validate_scene_options(self) -> str | None:
-        if int(self.min_scenes.value()) > int(self.max_scenes.value()):
+        if int(self.scenes_count.lowValue()) > int(self.scenes_count.highValue()):
             return "Мин. количество сцен не может быть больше максимального."
         if not self.auto_scene_durations.isChecked():
-            if float(self.min_scene_duration.value()) > float(self.max_scene_duration.value()):
+            if float(self.scene_duration.lowValue()) > float(self.scene_duration.highValue()):
                 return "Мин. длительность сцены не может быть больше максимальной."
         return None
 
     def text_overlay_settings(self) -> TextOverlaySettings:
         orient = self.text_overlay_orientation.currentData()
         ax, ay = self.text_overlay_preview.anchor()
-        waf = self.text_overlay_wave_amp.value() / 100.0
-        wfs = self.text_overlay_wave_speed.value() / 100.0
+        waf_lo = self.text_overlay_wave_amp.lowValue() / 100.0
+        waf_hi = self.text_overlay_wave_amp.highValue() / 100.0
+        wfs_lo = self.text_overlay_wave_speed.lowValue() / 100.0
+        wfs_hi = self.text_overlay_wave_speed.highValue() / 100.0
+        waf = (waf_lo + waf_hi) * 0.5
+        wfs = (wfs_lo + wfs_hi) * 0.5
         return TextOverlaySettings(
             enabled=bool(self.text_overlay_enabled.isChecked()),
             text=self.text_overlay_edit.toPlainText(),
@@ -129,6 +132,14 @@ class SlicingTabPane(QWidget):
             wave_frame_speed=float(wfs),
             from_middle=bool(self.text_overlay_from_middle.isChecked()),
         )
+
+    def text_overlay_options_dict(self) -> dict[str, Any]:
+        d = self.text_overlay_settings().to_dict()
+        d["wave_amp_frac_min"] = float(self.text_overlay_wave_amp.lowValue() / 100.0)
+        d["wave_amp_frac_max"] = float(self.text_overlay_wave_amp.highValue() / 100.0)
+        d["wave_frame_speed_min"] = float(self.text_overlay_wave_speed.lowValue() / 100.0)
+        d["wave_frame_speed_max"] = float(self.text_overlay_wave_speed.highValue() / 100.0)
+        return d
 
     def _apply_fixed_text_overlay_defaults(self) -> None:
         self.text_overlay_edit.setPlainText(DEFAULT_SLICE_TEXT_OVERLAY_TEXT)
@@ -221,8 +232,10 @@ class SlicingTabPane(QWidget):
             )
         except Exception:
             max_dur = DEFAULT_MAX_SCENE_DURATION
-        self.min_scene_duration.setValue(max(0.1, min(60.0, min_dur)))
-        self.max_scene_duration.setValue(max(0.1, min(60.0, max_dur)))
+        self.scene_duration.setValues(
+            max(0.1, min(60.0, min_dur)),
+            max(0.1, min(60.0, max_dur)),
+        )
         try:
             min_sc = int(s.value("slice/min_scenes", DEFAULT_MIN_SCENES, type=int))
         except Exception:
@@ -231,8 +244,7 @@ class SlicingTabPane(QWidget):
             max_sc = int(s.value("slice/max_scenes", DEFAULT_MAX_SCENES, type=int))
         except Exception:
             max_sc = DEFAULT_MAX_SCENES
-        self.min_scenes.setValue(max(1, min_sc))
-        self.max_scenes.setValue(max(1, max_sc))
+        self.scenes_count.setValues(max(1, min_sc), max(1, max_sc))
         self._update_scene_duration_controls()
 
     def save_settings(self) -> None:
@@ -246,10 +258,10 @@ class SlicingTabPane(QWidget):
                 "slice/delete_after_upload", bool(self.delete_after_upload.isChecked())
             )
         s.setValue("slice/auto_scene_durations", bool(self.auto_scene_durations.isChecked()))
-        s.setValue("slice/min_scene_duration", float(self.min_scene_duration.value()))
-        s.setValue("slice/max_scene_duration", float(self.max_scene_duration.value()))
-        s.setValue("slice/min_scenes", int(self.min_scenes.value()))
-        s.setValue("slice/max_scenes", int(self.max_scenes.value()))
+        s.setValue("slice/min_scene_duration", float(self.scene_duration.lowValue()))
+        s.setValue("slice/max_scene_duration", float(self.scene_duration.highValue()))
+        s.setValue("slice/min_scenes", int(self.scenes_count.lowValue()))
+        s.setValue("slice/max_scenes", int(self.scenes_count.highValue()))
         s.setValue("slice/text_overlay_enabled", bool(self.text_overlay_enabled.isChecked()))
         s.setValue("slice/text_overlay_from_middle", bool(self.text_overlay_from_middle.isChecked()))
         orient = self.text_overlay_orientation.currentData()
@@ -451,65 +463,49 @@ class SlicingTabPane(QWidget):
         )
         self.auto_scene_durations.toggled.connect(self._update_scene_duration_controls)
         self.auto_scene_durations.toggled.connect(self.save_settings)
-        self.min_scene_duration = ValueSlider(
+        self.scene_duration = ValueRangeSlider(
             minimum=0.1,
             maximum=60.0,
-            value=DEFAULT_MIN_SCENE_DURATION,
+            low=DEFAULT_MIN_SCENE_DURATION,
+            high=DEFAULT_MAX_SCENE_DURATION,
             step=0.05,
             decimals=2,
+            suffix=" с",
         )
-        self.min_scene_duration.valueChanged.connect(lambda *_: self.save_settings())
-        self.max_scene_duration = ValueSlider(
-            minimum=0.1,
-            maximum=60.0,
-            value=DEFAULT_MAX_SCENE_DURATION,
-            step=0.05,
-            decimals=2,
-        )
-        self.max_scene_duration.valueChanged.connect(lambda *_: self.save_settings())
+        self.scene_duration.rangeChangeFinished.connect(lambda *_: self.save_settings())
         dg.addWidget(self.auto_scene_durations, 0, 0, 1, 2)
-        dg.addWidget(QLabel("Мин. (с):"), 1, 0, Qt.AlignmentFlag.AlignVCenter)
-        dg.addWidget(self.min_scene_duration, 1, 1)
-        dg.addWidget(QLabel("Макс. (с):"), 2, 0, Qt.AlignmentFlag.AlignVCenter)
-        dg.addWidget(self.max_scene_duration, 2, 1)
+        dg.addWidget(QLabel("Длительность:"), 1, 0, Qt.AlignmentFlag.AlignVCenter)
+        dg.addWidget(self.scene_duration, 1, 1)
         duration_hint = QLabel(
-            "Интервал между сменами кадра на пиках аудио."
+            "Интервал между сменами кадра на пиках аудио. "
+            "Разведите точки — случайный диапазон."
         )
         duration_hint.setObjectName("hint")
         duration_hint.setWordWrap(True)
-        dg.addWidget(duration_hint, 3, 0, 1, 2)
+        dg.addWidget(duration_hint, 2, 0, 1, 2)
         self._update_scene_duration_controls()
 
         scenes_gb = QGroupBox("Количество сцен")
         sg = QGridLayout(scenes_gb)
         sg.setHorizontalSpacing(8)
         sg.setVerticalSpacing(6)
-        self.min_scenes = ValueSlider(
+        self.scenes_count = ValueRangeSlider(
             minimum=1,
             maximum=999,
-            value=DEFAULT_MIN_SCENES,
+            low=DEFAULT_MIN_SCENES,
+            high=DEFAULT_MAX_SCENES,
             step=1,
             decimals=0,
         )
-        self.min_scenes.valueChanged.connect(lambda *_: self.save_settings())
-        self.max_scenes = ValueSlider(
-            minimum=1,
-            maximum=999,
-            value=DEFAULT_MAX_SCENES,
-            step=1,
-            decimals=0,
-        )
-        self.max_scenes.valueChanged.connect(lambda *_: self.save_settings())
-        sg.addWidget(QLabel("Мин.:"), 0, 0, Qt.AlignmentFlag.AlignVCenter)
-        sg.addWidget(self.min_scenes, 0, 1)
-        sg.addWidget(QLabel("Макс.:"), 1, 0, Qt.AlignmentFlag.AlignVCenter)
-        sg.addWidget(self.max_scenes, 1, 1)
+        self.scenes_count.rangeChangeFinished.connect(lambda *_: self.save_settings())
+        sg.addWidget(QLabel("Сцены:"), 0, 0, Qt.AlignmentFlag.AlignVCenter)
+        sg.addWidget(self.scenes_count, 0, 1)
         scene_hint = QLabel(
             "Число сцен выбирается случайно в заданном диапазоне."
         )
         scene_hint.setObjectName("hint")
         scene_hint.setWordWrap(True)
-        sg.addWidget(scene_hint, 2, 0, 1, 2)
+        sg.addWidget(scene_hint, 1, 0, 1, 2)
 
         text_gb = QGroupBox("Текст на видео")
         text_outer = QVBoxLayout(text_gb)
@@ -597,31 +593,33 @@ class SlicingTabPane(QWidget):
         opts.addWidget(self.text_overlay_letter_spacing, 4, 1)
         opts.addWidget(QLabel("Шрифт:"), 5, 0)
         opts.addWidget(font_row_w, 5, 1)
-        self.text_overlay_wave_amp = SmoothSlider(Qt.Orientation.Horizontal)
-        self.text_overlay_wave_amp.setRange(0, 35)
-        self.text_overlay_wave_amp.setValue(int(round(DEFAULT_SLICE_WAVE_AMP_FRAC * 100)))
-        self.text_overlay_wave_amp.valueChanged.connect(self._on_wave_changed)
-        self.text_overlay_wave_amp_label = QLabel()
-        self.text_overlay_wave_speed = SmoothSlider(Qt.Orientation.Horizontal)
-        self.text_overlay_wave_speed.setRange(0, 25)
-        self.text_overlay_wave_speed.setValue(int(round(DEFAULT_SLICE_WAVE_FRAME_SPEED * 100)))
-        self.text_overlay_wave_speed.valueChanged.connect(self._on_wave_changed)
-        self.text_overlay_wave_speed_label = QLabel()
-        self._sync_wave_labels()
-        wa = QHBoxLayout()
-        wa.addWidget(self.text_overlay_wave_amp, 1)
-        wa.addWidget(self.text_overlay_wave_amp_label)
-        ws = QHBoxLayout()
-        ws.addWidget(self.text_overlay_wave_speed, 1)
-        ws.addWidget(self.text_overlay_wave_speed_label)
+        self.text_overlay_wave_amp = ValueRangeSlider(
+            minimum=0,
+            maximum=35,
+            value=int(round(DEFAULT_SLICE_WAVE_AMP_FRAC * 100)),
+            step=1,
+            decimals=0,
+            suffix=" %",
+        )
+        self.text_overlay_wave_amp.rangeChanged.connect(
+            lambda *_: self._schedule_preview_light()
+        )
+        self.text_overlay_wave_amp.rangeChangeFinished.connect(self._on_wave_changed)
+        self.text_overlay_wave_speed = ValueRangeSlider(
+            minimum=0,
+            maximum=25,
+            value=int(round(DEFAULT_SLICE_WAVE_FRAME_SPEED * 100)),
+            step=1,
+            decimals=0,
+        )
+        self.text_overlay_wave_speed.rangeChanged.connect(
+            lambda *_: self._schedule_preview_light()
+        )
+        self.text_overlay_wave_speed.rangeChangeFinished.connect(self._on_wave_changed)
         opts.addWidget(QLabel("Волна — амплитуда:"), 6, 0)
-        waw = QWidget()
-        waw.setLayout(wa)
-        opts.addWidget(waw, 6, 1)
+        opts.addWidget(self.text_overlay_wave_amp, 6, 1)
         opts.addWidget(QLabel("Скорость:"), 7, 0)
-        wsw = QWidget()
-        wsw.setLayout(ws)
-        opts.addWidget(wsw, 7, 1)
+        opts.addWidget(self.text_overlay_wave_speed, 7, 1)
         ow = QWidget()
         ow.setLayout(opts)
         tp.addWidget(ow)
@@ -709,8 +707,7 @@ class SlicingTabPane(QWidget):
 
     def _update_scene_duration_controls(self, _checked: bool = False) -> None:
         auto = bool(self.auto_scene_durations.isChecked())
-        self.min_scene_duration.setEnabled(not auto)
-        self.max_scene_duration.setEnabled(not auto)
+        self.scene_duration.setEnabled(not auto)
 
     def _normalize_path_key(self, p: str) -> str:
         try:
@@ -861,10 +858,7 @@ class SlicingTabPane(QWidget):
         btn.setStyleSheet(f"background-color: {c.name()}; color: {fg}; font-weight: 700;")
 
     def _sync_wave_labels(self) -> None:
-        self.text_overlay_wave_amp_label.setText(f"{self.text_overlay_wave_amp.value()} %")
-        self.text_overlay_wave_speed_label.setText(
-            f"{self.text_overlay_wave_speed.value() / 100.0:.2f}"
-        )
+        return
 
     def _update_text_overlay_controls(self, _checked: bool = False) -> None:
         on = bool(self.text_overlay_enabled.isChecked())
@@ -939,13 +933,16 @@ class SlicingTabPane(QWidget):
         self._preview_timer.start(40)
         self.save_settings()
 
+    def _schedule_preview_light(self) -> None:
+        """Только превью с debounce — без записи настроек (для drag ползунка)."""
+        self._preview_timer.start(40)
+
     def _on_orient_changed(self, _index: int) -> None:
         self._sync_text_overlay_preview()
         self.save_settings()
 
-    def _on_wave_changed(self, _v: int) -> None:
-        self._sync_wave_labels()
-        self._sync_text_overlay_preview()
+    def _on_wave_changed(self, *_args) -> None:
+        self._schedule_preview_light()
         self.save_settings()
 
     def _center_text(self) -> None:
@@ -1004,8 +1001,16 @@ class SlicingTabPane(QWidget):
         preview.set_font_path(self._text_font_path)
         preview.set_font_bold(bool(self.text_overlay_font_bold.isChecked()))
         preview.set_wave_settings(
-            self.text_overlay_wave_amp.value() / 100.0,
-            self.text_overlay_wave_speed.value() / 100.0,
+            (
+                self.text_overlay_wave_amp.lowValue()
+                + self.text_overlay_wave_amp.highValue()
+            )
+            * 0.005,
+            (
+                self.text_overlay_wave_speed.lowValue()
+                + self.text_overlay_wave_speed.highValue()
+            )
+            * 0.005,
         )
         preview.set_text(self.text_overlay_edit.toPlainText())
         if anchor_x is not None and anchor_y is not None:

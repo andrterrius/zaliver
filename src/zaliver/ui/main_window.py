@@ -153,7 +153,7 @@ from zaliver.ui.widgets import (
     FlowLayout,
     SmoothSlider,
     ToggleSwitch,
-    ValueSlider,
+    ValueRangeSlider,
     configure_log_splitter,
     make_log_export_button,
     make_work_section_nav,
@@ -1235,25 +1235,27 @@ class MainWindow(QWidget):
         self.background_music_mix.toggled.connect(self._update_music_mix_controls)
         self.background_music_mix.toggled.connect(self._save_folder_settings)
         bg_tracks_l.addWidget(self.background_music_mix)
-        self.background_music_volume = SmoothSlider(Qt.Orientation.Horizontal)
-        self.background_music_volume.setMinimum(0)
-        self.background_music_volume.setMaximum(100)
-        self.background_music_volume.setValue(35)
-        self.background_music_volume.setSingleStep(1)
-        self.background_music_volume.setPageStep(5)
-        self.background_music_volume.setToolTip(
-            "Громкость слоя музыки при смешивании (0…100 %). Звук видео не ослабляется."
+        self.background_music_volume = ValueRangeSlider(
+            minimum=0,
+            maximum=100,
+            value=35,
+            step=1,
+            decimals=0,
+            suffix=" %",
         )
-        self.background_music_volume_label = QLabel("35 %")
-        self.background_music_volume_label.setObjectName("hint")
-        self.background_music_volume.valueChanged.connect(self._on_music_volume_slider_changed)
+        self.background_music_volume.setToolTip(
+            "Громкость слоя музыки при смешивании (0…100 %). "
+            "Разведите точки — случайная громкость в диапазоне на каждый ролик."
+        )
+        self.background_music_volume.rangeChangeFinished.connect(
+            lambda *_: self._on_music_volume_slider_changed()
+        )
         vol_row = QHBoxLayout()
         vol_row.setContentsMargins(0, 0, 0, 0)
         vol_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         vol_lbl = QLabel("Громкость музыки:")
         vol_row.addWidget(vol_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
         vol_row.addWidget(self.background_music_volume, 1, Qt.AlignmentFlag.AlignVCenter)
-        vol_row.addWidget(self.background_music_volume_label, 0, Qt.AlignmentFlag.AlignVCenter)
         vw_vol = QWidget()
         vw_vol.setLayout(vol_row)
         bg_tracks_l.addWidget(vw_vol)
@@ -1373,35 +1375,37 @@ class MainWindow(QWidget):
         text_opts.addWidget(QLabel("Шрифт:"), 5, 0)
         text_opts.addWidget(font_row_w, 5, 1)
 
-        self.text_overlay_wave_amp = SmoothSlider(Qt.Orientation.Horizontal)
-        self.text_overlay_wave_amp.setMinimum(0)
-        self.text_overlay_wave_amp.setMaximum(35)
-        self.text_overlay_wave_amp.setValue(int(round(NEON_WAVE_AMP_FRAC * 100)))
-        self.text_overlay_wave_amp.valueChanged.connect(self._on_text_overlay_wave_changed)
-        self.text_overlay_wave_amp_label = QLabel()
-        self.text_overlay_wave_speed = SmoothSlider(Qt.Orientation.Horizontal)
-        self.text_overlay_wave_speed.setMinimum(0)
-        self.text_overlay_wave_speed.setMaximum(25)
-        self.text_overlay_wave_speed.setValue(int(round(NEON_WAVE_FRAME_SPEED * 100)))
-        self.text_overlay_wave_speed.valueChanged.connect(self._on_text_overlay_wave_changed)
-        self.text_overlay_wave_speed_label = QLabel()
-        self._sync_text_overlay_wave_labels()
+        self.text_overlay_wave_amp = ValueRangeSlider(
+            minimum=0,
+            maximum=35,
+            value=int(round(NEON_WAVE_AMP_FRAC * 100)),
+            step=1,
+            decimals=0,
+            suffix=" %",
+        )
+        self.text_overlay_wave_amp.rangeChanged.connect(
+            lambda *_: self._schedule_text_overlay_preview_sync()
+        )
+        self.text_overlay_wave_amp.rangeChangeFinished.connect(
+            self._on_text_overlay_wave_changed
+        )
+        self.text_overlay_wave_speed = ValueRangeSlider(
+            minimum=0,
+            maximum=25,
+            value=int(round(NEON_WAVE_FRAME_SPEED * 100)),
+            step=1,
+            decimals=0,
+        )
+        self.text_overlay_wave_speed.rangeChanged.connect(
+            lambda *_: self._schedule_text_overlay_preview_sync()
+        )
+        self.text_overlay_wave_speed.rangeChangeFinished.connect(
+            self._on_text_overlay_wave_changed
+        )
         text_opts.addWidget(QLabel("Волна — амплитуда:"), 6, 0)
-        wave_amp_row = QHBoxLayout()
-        wave_amp_row.setContentsMargins(0, 0, 0, 0)
-        wave_amp_row.addWidget(self.text_overlay_wave_amp, 1)
-        wave_amp_row.addWidget(self.text_overlay_wave_amp_label)
-        wave_amp_w = QWidget()
-        wave_amp_w.setLayout(wave_amp_row)
-        text_opts.addWidget(wave_amp_w, 6, 1)
+        text_opts.addWidget(self.text_overlay_wave_amp, 6, 1)
         text_opts.addWidget(QLabel("Скорость:"), 7, 0)
-        wave_spd_row = QHBoxLayout()
-        wave_spd_row.setContentsMargins(0, 0, 0, 0)
-        wave_spd_row.addWidget(self.text_overlay_wave_speed, 1)
-        wave_spd_row.addWidget(self.text_overlay_wave_speed_label)
-        wave_spd_w = QWidget()
-        wave_spd_w.setLayout(wave_spd_row)
-        text_opts.addWidget(wave_spd_w, 7, 1)
+        text_opts.addWidget(self.text_overlay_wave_speed, 7, 1)
 
         text_opts_w = QWidget()
         text_opts_w.setLayout(text_opts)
@@ -1488,7 +1492,7 @@ class MainWindow(QWidget):
         rg.setHorizontalSpacing(8)
         rg.setVerticalSpacing(6)
 
-        def _bound_sliders(
+        def _bound_slider(
             *,
             range_min: float,
             range_max: float,
@@ -1496,69 +1500,55 @@ class MainWindow(QWidget):
             hi: float,
             step: float,
             decimals: int,
-        ) -> tuple[ValueSlider, ValueSlider]:
-            a = ValueSlider(
+        ) -> ValueRangeSlider:
+            return ValueRangeSlider(
                 minimum=range_min,
                 maximum=range_max,
-                value=lo,
+                low=lo,
+                high=hi,
                 step=step,
                 decimals=decimals,
             )
-            b = ValueSlider(
-                minimum=range_min,
-                maximum=range_max,
-                value=hi,
-                step=step,
-                decimals=decimals,
-            )
-            return a, b
 
-        def _bounds_row(row: int, title: str, w_lo: QWidget, w_hi: QWidget) -> int:
-            rg.addWidget(QLabel(title), row, 0, 1, 3)
-            rg.addWidget(QLabel("от"), row + 1, 0, Qt.AlignmentFlag.AlignVCenter)
-            rg.addWidget(w_lo, row + 1, 1, 1, 2)
-            rg.addWidget(QLabel("до"), row + 2, 0, Qt.AlignmentFlag.AlignVCenter)
-            rg.addWidget(w_hi, row + 2, 1, 1, 2)
-            return row + 3
+        def _bounds_row(row: int, title: str, w: QWidget) -> int:
+            rg.addWidget(QLabel(title), row, 0, Qt.AlignmentFlag.AlignVCenter)
+            rg.addWidget(w, row, 1, 1, 2)
+            return row + 1
 
         br = 0
-        self.rb_brightness_min, self.rb_brightness_max = _bound_sliders(
+        self.rb_brightness = _bound_slider(
             range_min=-40.0, range_max=40.0, lo=-22.0, hi=22.0, step=0.5, decimals=1
         )
-        br = _bounds_row(br, "Яркость (±)", self.rb_brightness_min, self.rb_brightness_max)
-        self.rb_contrast_min, self.rb_contrast_max = _bound_sliders(
+        br = _bounds_row(br, "Яркость (±)", self.rb_brightness)
+        self.rb_contrast = _bound_slider(
             range_min=0.70, range_max=1.40, lo=0.88, hi=1.14, step=0.01, decimals=2
         )
-        br = _bounds_row(br, "Контраст", self.rb_contrast_min, self.rb_contrast_max)
-        self.rb_saturation_min, self.rb_saturation_max = _bound_sliders(
+        br = _bounds_row(br, "Контраст", self.rb_contrast)
+        self.rb_saturation = _bound_slider(
             range_min=0.70, range_max=1.40, lo=0.88, hi=1.12, step=0.01, decimals=2
         )
-        br = _bounds_row(br, "Насыщенность", self.rb_saturation_min, self.rb_saturation_max)
-        self.rb_crop_jitter_min, self.rb_crop_jitter_max = _bound_sliders(
+        br = _bounds_row(br, "Насыщенность", self.rb_saturation)
+        self.rb_crop_jitter = _bound_slider(
             range_min=0, range_max=12, lo=0, hi=3, step=1, decimals=0
         )
-        br = _bounds_row(
-            br, "Кроп-джиттер (px)", self.rb_crop_jitter_min, self.rb_crop_jitter_max
-        )
-        self.rb_scale_pct_min, self.rb_scale_pct_max = _bound_sliders(
+        br = _bounds_row(br, "Кроп-джиттер (px)", self.rb_crop_jitter)
+        self.rb_scale_pct = _bound_slider(
             range_min=90.0, range_max=110.0, lo=95.0, hi=100.6, step=0.1, decimals=1
         )
-        br = _bounds_row(br, "Масштаб %", self.rb_scale_pct_min, self.rb_scale_pct_max)
-        self.rb_noise_min, self.rb_noise_max = _bound_sliders(
+        br = _bounds_row(br, "Масштаб %", self.rb_scale_pct)
+        self.rb_noise = _bound_slider(
             range_min=0.0, range_max=10.0, lo=0.5, hi=4.0, step=0.05, decimals=2
         )
-        br = _bounds_row(br, "Шум σ", self.rb_noise_min, self.rb_noise_max)
-        self.rb_seed_min, self.rb_seed_max = _bound_sliders(
+        br = _bounds_row(br, "Шум σ", self.rb_noise)
+        self.rb_seed = _bound_slider(
             range_min=0, range_max=99_999_999, lo=0, hi=99_999_999, step=1, decimals=0
         )
-        br = _bounds_row(br, "Seed", self.rb_seed_min, self.rb_seed_max)
-        self.audio_speed_min, self.audio_speed_max = _bound_sliders(
+        br = _bounds_row(br, "Seed", self.rb_seed)
+        self.audio_speed_range = _bound_slider(
             range_min=0.85, range_max=1.25, lo=1.0, hi=1.1, step=0.01, decimals=2
         )
-        br = _bounds_row(
-            br, "Скорость видео+аудио (x)", self.audio_speed_min, self.audio_speed_max
-        )
-        self.audio_chorus_prob = ValueSlider(
+        br = _bounds_row(br, "Скорость видео+аудио (x)", self.audio_speed_range)
+        self.audio_chorus_prob = ValueRangeSlider(
             minimum=0.0, maximum=1.0, value=0.45, step=0.05, decimals=2
         )
         rg.addWidget(QLabel("Вероятность хора:"), br, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -1574,25 +1564,25 @@ class MainWindow(QWidget):
         mg.setHorizontalSpacing(8)
         mg.setVerticalSpacing(6)
 
-        self.brightness = ValueSlider(
+        self.brightness = ValueRangeSlider(
             minimum=-40.0, maximum=40.0, value=0.0, step=0.5, decimals=1
         )
-        self.contrast = ValueSlider(
+        self.contrast = ValueRangeSlider(
             minimum=0.70, maximum=1.40, value=1.0, step=0.01, decimals=2
         )
-        self.saturation = ValueSlider(
+        self.saturation = ValueRangeSlider(
             minimum=0.70, maximum=1.40, value=1.0, step=0.01, decimals=2
         )
-        self.crop_jitter = ValueSlider(
+        self.crop_jitter = ValueRangeSlider(
             minimum=0, maximum=12, value=1, step=1, decimals=0
         )
-        self.scale_pct = ValueSlider(
+        self.scale_pct = ValueRangeSlider(
             minimum=90.0, maximum=110.0, value=100.0, step=0.1, decimals=1
         )
-        self.noise = ValueSlider(
+        self.noise = ValueRangeSlider(
             minimum=0.0, maximum=10.0, value=1.0, step=0.05, decimals=2
         )
-        self.seed = ValueSlider(
+        self.seed = ValueRangeSlider(
             minimum=0, maximum=99_999_999, value=42, step=1, decimals=0
         )
 
@@ -1641,7 +1631,7 @@ class MainWindow(QWidget):
 
         mg.addWidget(QLabel("— Скорость и аудио (ручные) —"), r, 0, 1, 2)
         r += 1
-        self.playback_speed_manual = ValueSlider(
+        self.playback_speed_manual = ValueRangeSlider(
             minimum=0.85, maximum=1.25, value=1.05, step=0.01, decimals=2
         )
         self.audio_chorus_manual = ToggleSwitch("Хорус (включить)")
@@ -4751,15 +4741,30 @@ class MainWindow(QWidget):
             )
         if hasattr(self, "background_music_volume"):
             try:
-                vv = int(self._settings.value("background_music_volume_pct", 35, type=int))
+                vv_lo = int(
+                    self._settings.value(
+                        "background_music_volume_pct_min",
+                        self._settings.value("background_music_volume_pct", 35),
+                        type=int,
+                    )
+                )
             except Exception:
-                vv = 35
-            vv = max(0, min(100, vv))
+                vv_lo = 35
+            try:
+                vv_hi = int(
+                    self._settings.value(
+                        "background_music_volume_pct_max",
+                        vv_lo,
+                        type=int,
+                    )
+                )
+            except Exception:
+                vv_hi = vv_lo
+            vv_lo = max(0, min(100, vv_lo))
+            vv_hi = max(0, min(100, vv_hi))
             self.background_music_volume.blockSignals(True)
-            self.background_music_volume.setValue(vv)
+            self.background_music_volume.setValues(vv_lo, vv_hi)
             self.background_music_volume.blockSignals(False)
-            if hasattr(self, "background_music_volume_label"):
-                self.background_music_volume_label.setText(f"{vv} %")
         self._sync_music_list_widget()
         self._update_music_mix_controls()
         if hasattr(self, "text_overlay_enabled"):
@@ -4812,30 +4817,63 @@ class MainWindow(QWidget):
             except Exception:
                 ax, ay = 0.5, 0.15
             try:
-                waf = float(
+                waf_lo = float(
                     self._settings.value(
-                        "text_overlay_wave_amp_frac", NEON_WAVE_AMP_FRAC, type=float
+                        "text_overlay_wave_amp_frac_min",
+                        self._settings.value(
+                            "text_overlay_wave_amp_frac", NEON_WAVE_AMP_FRAC
+                        ),
+                        type=float,
                     )
                 )
             except Exception:
-                waf = NEON_WAVE_AMP_FRAC
+                waf_lo = NEON_WAVE_AMP_FRAC
             try:
-                wfs = float(
+                waf_hi = float(
                     self._settings.value(
-                        "text_overlay_wave_frame_speed", NEON_WAVE_FRAME_SPEED, type=float
+                        "text_overlay_wave_amp_frac_max",
+                        waf_lo,
+                        type=float,
                     )
                 )
             except Exception:
-                wfs = NEON_WAVE_FRAME_SPEED
-            waf = max(0.0, min(0.35, waf))
-            wfs = max(0.0, min(0.25, wfs))
+                waf_hi = waf_lo
+            try:
+                wfs_lo = float(
+                    self._settings.value(
+                        "text_overlay_wave_frame_speed_min",
+                        self._settings.value(
+                            "text_overlay_wave_frame_speed", NEON_WAVE_FRAME_SPEED
+                        ),
+                        type=float,
+                    )
+                )
+            except Exception:
+                wfs_lo = NEON_WAVE_FRAME_SPEED
+            try:
+                wfs_hi = float(
+                    self._settings.value(
+                        "text_overlay_wave_frame_speed_max",
+                        wfs_lo,
+                        type=float,
+                    )
+                )
+            except Exception:
+                wfs_hi = wfs_lo
+            waf_lo = max(0.0, min(0.35, waf_lo))
+            waf_hi = max(0.0, min(0.35, waf_hi))
+            wfs_lo = max(0.0, min(0.25, wfs_lo))
+            wfs_hi = max(0.0, min(0.25, wfs_hi))
             self.text_overlay_wave_amp.blockSignals(True)
-            self.text_overlay_wave_amp.setValue(int(round(waf * 100)))
+            self.text_overlay_wave_amp.setValues(
+                int(round(waf_lo * 100)), int(round(waf_hi * 100))
+            )
             self.text_overlay_wave_amp.blockSignals(False)
             self.text_overlay_wave_speed.blockSignals(True)
-            self.text_overlay_wave_speed.setValue(int(round(wfs * 100)))
+            self.text_overlay_wave_speed.setValues(
+                int(round(wfs_lo * 100)), int(round(wfs_hi * 100))
+            )
             self.text_overlay_wave_speed.blockSignals(False)
-            self._sync_text_overlay_wave_labels()
             self._sync_text_overlay_color_btn(
                 self.text_overlay_glow_btn, self._text_overlay_glow_color
             )
@@ -4875,7 +4913,16 @@ class MainWindow(QWidget):
             )
         if hasattr(self, "background_music_volume"):
             self._settings.setValue(
-                "background_music_volume_pct", int(self.background_music_volume.value())
+                "background_music_volume_pct",
+                int(round(self.background_music_volume.lowValue())),
+            )
+            self._settings.setValue(
+                "background_music_volume_pct_min",
+                int(round(self.background_music_volume.lowValue())),
+            )
+            self._settings.setValue(
+                "background_music_volume_pct_max",
+                int(round(self.background_music_volume.highValue())),
             )
         if hasattr(self, "text_overlay_enabled"):
             self._settings.setValue(
@@ -4911,9 +4958,13 @@ class MainWindow(QWidget):
             ax, ay = self.text_overlay_preview.anchor()
             self._settings.setValue("text_overlay_anchor_x", float(ax))
             self._settings.setValue("text_overlay_anchor_y", float(ay))
-            waf, wfs = self._text_overlay_wave_values()
-            self._settings.setValue("text_overlay_wave_amp_frac", float(waf))
-            self._settings.setValue("text_overlay_wave_frame_speed", float(wfs))
+            waf_lo, waf_hi, wfs_lo, wfs_hi = self._text_overlay_wave_values()
+            self._settings.setValue("text_overlay_wave_amp_frac", float(waf_lo))
+            self._settings.setValue("text_overlay_wave_amp_frac_min", float(waf_lo))
+            self._settings.setValue("text_overlay_wave_amp_frac_max", float(waf_hi))
+            self._settings.setValue("text_overlay_wave_frame_speed", float(wfs_lo))
+            self._settings.setValue("text_overlay_wave_frame_speed_min", float(wfs_lo))
+            self._settings.setValue("text_overlay_wave_frame_speed_max", float(wfs_hi))
 
     def _antidetect_kind(self) -> str:
         """Режим антидетекта из настроек: local | remote (логика без UI-выбора)."""
@@ -9893,9 +9944,7 @@ class MainWindow(QWidget):
                 "Включите «Смешивать с аудио исходника», чтобы музыка шла поверх звука видео (ползунок громкости)."
             )
 
-    def _on_music_volume_slider_changed(self, value: int) -> None:
-        if hasattr(self, "background_music_volume_label"):
-            self.background_music_volume_label.setText(f"{int(value)} %")
+    def _on_music_volume_slider_changed(self, *_args) -> None:
         self._save_folder_settings()
 
     def _update_music_mix_controls(self, _checked: bool = False) -> None:
@@ -9905,8 +9954,6 @@ class MainWindow(QWidget):
         self.background_music_mix.setEnabled(music_on)
         mix_on = music_on and self.background_music_mix.isChecked()
         self.background_music_volume.setEnabled(mix_on)
-        if hasattr(self, "background_music_volume_label"):
-            self.background_music_volume_label.setEnabled(mix_on)
 
     def _sync_music_list_widget(self) -> None:
         if not hasattr(self, "_music_list"):
@@ -10005,22 +10052,36 @@ class MainWindow(QWidget):
         self._sync_music_list_widget()
         self._save_folder_settings()
 
-    def _text_overlay_wave_values(self) -> tuple[float, float]:
-        amp = max(0.0, min(0.35, int(self.text_overlay_wave_amp.value()) / 100.0))
-        speed = max(0.0, min(0.25, int(self.text_overlay_wave_speed.value()) / 100.0))
-        return amp, speed
+    def _text_overlay_wave_values(self) -> tuple[float, float, float, float]:
+        """(amp_lo, amp_hi, speed_lo, speed_hi) в долях 0..1."""
+        amp_lo = max(0.0, min(0.35, float(self.text_overlay_wave_amp.lowValue()) / 100.0))
+        amp_hi = max(0.0, min(0.35, float(self.text_overlay_wave_amp.highValue()) / 100.0))
+        speed_lo = max(
+            0.0, min(0.25, float(self.text_overlay_wave_speed.lowValue()) / 100.0)
+        )
+        speed_hi = max(
+            0.0, min(0.25, float(self.text_overlay_wave_speed.highValue()) / 100.0)
+        )
+        if amp_hi < amp_lo:
+            amp_lo, amp_hi = amp_hi, amp_lo
+        if speed_hi < speed_lo:
+            speed_lo, speed_hi = speed_hi, speed_lo
+        return amp_lo, amp_hi, speed_lo, speed_hi
 
     def _sync_text_overlay_wave_labels(self) -> None:
-        if not hasattr(self, "text_overlay_wave_amp_label"):
-            return
-        amp, speed = self._text_overlay_wave_values()
-        self.text_overlay_wave_amp_label.setText(f"{int(round(amp * 100))} %")
-        self.text_overlay_wave_speed_label.setText(f"{speed:.2f}")
+        return
+
+    def _on_text_overlay_wave_changed(self, *_args) -> None:
+        self._schedule_text_overlay_preview_sync()
+        self._save_folder_settings()
 
     def _text_overlay_settings(self) -> TextOverlaySettings:
         orient = self.text_overlay_orientation.currentData()
         ax, ay = self.text_overlay_preview.anchor()
-        waf, wfs = self._text_overlay_wave_values()
+        waf_lo, waf_hi, wfs_lo, wfs_hi = self._text_overlay_wave_values()
+        # Для превью/базового значения — середина диапазона.
+        waf = (waf_lo + waf_hi) * 0.5
+        wfs = (wfs_lo + wfs_hi) * 0.5
         return TextOverlaySettings(
             enabled=bool(self.text_overlay_enabled.isChecked()),
             text=self.text_overlay_edit.toPlainText(),
@@ -10039,6 +10100,15 @@ class MainWindow(QWidget):
             wave_frame_speed=float(wfs),
             from_middle=bool(self.text_overlay_from_middle.isChecked()),
         )
+
+    def _text_overlay_options_dict(self) -> dict:
+        d = self._text_overlay_settings().to_dict()
+        waf_lo, waf_hi, wfs_lo, wfs_hi = self._text_overlay_wave_values()
+        d["wave_amp_frac_min"] = float(waf_lo)
+        d["wave_amp_frac_max"] = float(waf_hi)
+        d["wave_frame_speed_min"] = float(wfs_lo)
+        d["wave_frame_speed_max"] = float(wfs_hi)
+        return d
 
     def _text_overlay_preview_videos(self) -> list[str]:
         """Выбранные исходники в том же порядке, что в списке файлов."""
@@ -10160,8 +10230,8 @@ class MainWindow(QWidget):
         preview.set_letter_spacing(int(self.text_overlay_letter_spacing.value()))
         preview.set_font_path(self._text_overlay_font_path)
         preview.set_font_bold(bool(self.text_overlay_font_bold.isChecked()))
-        waf, wfs = self._text_overlay_wave_values()
-        preview.set_wave_settings(waf, wfs)
+        waf_lo, waf_hi, wfs_lo, wfs_hi = self._text_overlay_wave_values()
+        preview.set_wave_settings((waf_lo + waf_hi) * 0.5, (wfs_lo + wfs_hi) * 0.5)
         preview.set_text(self.text_overlay_edit.toPlainText())
         if anchor_x is not None and anchor_y is not None:
             preview.set_anchor(anchor_x, anchor_y)
@@ -10262,11 +10332,6 @@ class MainWindow(QWidget):
         self._sync_text_overlay_preview()
         self._save_folder_settings()
 
-    def _on_text_overlay_wave_changed(self, _value: int) -> None:
-        self._sync_text_overlay_wave_labels()
-        self._sync_text_overlay_preview()
-        self._save_folder_settings()
-
     def _center_text_overlay_horizontally(self) -> None:
         if not hasattr(self, "text_overlay_preview"):
             return
@@ -10337,22 +10402,44 @@ class MainWindow(QWidget):
 
     def _build_options(self) -> dict:
         st = UniquifySettings(
-            brightness_delta=float(self.brightness.value()),
-            contrast=float(self.contrast.value()),
-            saturation_scale=float(self.saturation.value()),
-            crop_jitter_px=int(self.crop_jitter.value()),
-            scale_pct=float(self.scale_pct.value()),
-            noise_sigma=float(self.noise.value()),
-            seed_base=int(self.seed.value()),
-            playback_speed_factor=float(self.playback_speed_manual.value()),
+            brightness_delta=float(self.brightness.lowValue()),
+            contrast=float(self.contrast.lowValue()),
+            saturation_scale=float(self.saturation.lowValue()),
+            crop_jitter_px=int(self.crop_jitter.lowValue()),
+            scale_pct=float(self.scale_pct.lowValue()),
+            noise_sigma=float(self.noise.lowValue()),
+            seed_base=int(self.seed.lowValue()),
+            playback_speed_factor=float(self.playback_speed_manual.lowValue()),
             audio_chorus=bool(self.audio_chorus_manual.isChecked()),
         )
+        manual_bounds = RandomUniquifyBounds(
+            brightness_min=float(self.brightness.lowValue()),
+            brightness_max=float(self.brightness.highValue()),
+            contrast_min=float(self.contrast.lowValue()),
+            contrast_max=float(self.contrast.highValue()),
+            saturation_min=float(self.saturation.lowValue()),
+            saturation_max=float(self.saturation.highValue()),
+            crop_jitter_min=int(self.crop_jitter.lowValue()),
+            crop_jitter_max=int(self.crop_jitter.highValue()),
+            scale_pct_min=float(self.scale_pct.lowValue()),
+            scale_pct_max=float(self.scale_pct.highValue()),
+            noise_sigma_min=float(self.noise.lowValue()),
+            noise_sigma_max=float(self.noise.highValue()),
+            seed_min=int(self.seed.lowValue()),
+            seed_max=int(self.seed.highValue()),
+            playback_speed_min=float(self.playback_speed_manual.lowValue()),
+            playback_speed_max=float(self.playback_speed_manual.highValue()),
+            audio_chorus_prob=1.0 if self.audio_chorus_manual.isChecked() else 0.0,
+            audio_chorus_prob_min=1.0 if self.audio_chorus_manual.isChecked() else 0.0,
+            audio_chorus_prob_max=1.0 if self.audio_chorus_manual.isChecked() else 0.0,
+        ).to_dict()
         return {
             "input_dir": "",
             "output_dir": self.output_dir_edit.text().strip(),
             "input_files": list(self._selected_input_files),
             **self._processing_run_options(),
             "settings": st.to_dict(),
+            "manual_bounds": manual_bounds,
             "randomize_uniquify": self.random_uniquify.isChecked(),
             "copies_per_file": int(self.copies_per_file.value()),
             "one_copy_no_effects": bool(self.one_copy_no_effects.isChecked()),
@@ -10360,30 +10447,40 @@ class MainWindow(QWidget):
             "audio_chorus_enabled": bool(self.audio_chorus.isChecked()),
             "background_music_enabled": bool(self.background_music.isChecked()),
             "background_music_mix_with_source": bool(self.background_music_mix.isChecked()),
-            "background_music_volume_pct": int(self.background_music_volume.value()),
+            "background_music_volume_pct": int(
+                round(self.background_music_volume.lowValue())
+            ),
+            "background_music_volume_pct_min": int(
+                round(self.background_music_volume.lowValue())
+            ),
+            "background_music_volume_pct_max": int(
+                round(self.background_music_volume.highValue())
+            ),
             "background_music_files": [
                 p for p in self._background_music_files if Path(p).is_file()
             ],
             "random_bounds": RandomUniquifyBounds(
-                brightness_min=float(self.rb_brightness_min.value()),
-                brightness_max=float(self.rb_brightness_max.value()),
-                contrast_min=float(self.rb_contrast_min.value()),
-                contrast_max=float(self.rb_contrast_max.value()),
-                saturation_min=float(self.rb_saturation_min.value()),
-                saturation_max=float(self.rb_saturation_max.value()),
-                crop_jitter_min=int(self.rb_crop_jitter_min.value()),
-                crop_jitter_max=int(self.rb_crop_jitter_max.value()),
-                scale_pct_min=float(self.rb_scale_pct_min.value()),
-                scale_pct_max=float(self.rb_scale_pct_max.value()),
-                noise_sigma_min=float(self.rb_noise_min.value()),
-                noise_sigma_max=float(self.rb_noise_max.value()),
-                seed_min=int(self.rb_seed_min.value()),
-                seed_max=int(self.rb_seed_max.value()),
-                playback_speed_min=float(self.audio_speed_min.value()),
-                playback_speed_max=float(self.audio_speed_max.value()),
-                audio_chorus_prob=float(self.audio_chorus_prob.value()),
+                brightness_min=float(self.rb_brightness.lowValue()),
+                brightness_max=float(self.rb_brightness.highValue()),
+                contrast_min=float(self.rb_contrast.lowValue()),
+                contrast_max=float(self.rb_contrast.highValue()),
+                saturation_min=float(self.rb_saturation.lowValue()),
+                saturation_max=float(self.rb_saturation.highValue()),
+                crop_jitter_min=int(self.rb_crop_jitter.lowValue()),
+                crop_jitter_max=int(self.rb_crop_jitter.highValue()),
+                scale_pct_min=float(self.rb_scale_pct.lowValue()),
+                scale_pct_max=float(self.rb_scale_pct.highValue()),
+                noise_sigma_min=float(self.rb_noise.lowValue()),
+                noise_sigma_max=float(self.rb_noise.highValue()),
+                seed_min=int(self.rb_seed.lowValue()),
+                seed_max=int(self.rb_seed.highValue()),
+                playback_speed_min=float(self.audio_speed_range.lowValue()),
+                playback_speed_max=float(self.audio_speed_range.highValue()),
+                audio_chorus_prob=float(self.audio_chorus_prob.lowValue()),
+                audio_chorus_prob_min=float(self.audio_chorus_prob.lowValue()),
+                audio_chorus_prob_max=float(self.audio_chorus_prob.highValue()),
             ).to_dict(),
-            "text_overlay": self._text_overlay_settings().to_dict(),
+            "text_overlay": self._text_overlay_options_dict(),
         }
 
     def _start(self) -> None:

@@ -23,6 +23,7 @@ from zaliver.processing.slicing_worker import (
     _pick_random_tracks_for_jobs,
     _slice_music_try_order,
 )
+from zaliver.processing.pipeline import materialize_text_overlay_ranges
 from zaliver.processing.stitching import (
     DEFAULT_STITCH_FPS_MODE,
     DEFAULT_STITCH_TRANSITION,
@@ -255,15 +256,25 @@ class StitchingService:
                 self._sink.on_finished(False, f"Не удалось создать выходную папку: {e}")
                 return
 
-            text_overlay_cfg: Optional[Dict[str, Any]] = None
+            text_overlay_enabled = False
             raw_text_overlay = options.get("text_overlay")
             if isinstance(raw_text_overlay, dict):
                 toc = TextOverlaySettings.from_dict(raw_text_overlay)
-                if toc.enabled and (toc.text or "").strip():
-                    text_overlay_cfg = toc.to_dict()
-            if text_overlay_cfg and not ffmpeg_has_drawtext():
+                text_overlay_enabled = bool(toc.enabled and (toc.text or "").strip())
+            if text_overlay_enabled and not ffmpeg_has_drawtext():
                 self._sink.on_finished(False, ffmpeg_drawtext_missing_user_message())
                 return
+
+            def _text_overlay_for_job() -> Optional[Dict[str, Any]]:
+                if not text_overlay_enabled or not isinstance(raw_text_overlay, dict):
+                    return None
+                sampled = materialize_text_overlay_ranges(raw_text_overlay)
+                if not sampled:
+                    return None
+                toc = TextOverlaySettings.from_dict(sampled)
+                if toc.enabled and (toc.text or "").strip():
+                    return toc.to_dict()
+                return None
 
             output_count = max(1, int(options.get("copies_per_track", 1)))
             num_workers = max(1, int(options.get("num_workers", 1)))
@@ -423,7 +434,6 @@ class StitchingService:
                 music_pool=music_pool,
                 part1_pool=part1_pool,
                 part2_pool=part2_pool,
-                text_overlay_cfg=text_overlay_cfg,
                 use_gpu=use_gpu,
                 use_gpu_finalize=use_gpu_finalize,
                 stitch_fps_mode=stitch_fps_mode,
@@ -440,7 +450,7 @@ class StitchingService:
                     if cancelled():
                         self._sink.on_finished(False, "Отменено.")
                         return
-                    _run_stitch_job(job, **job_kwargs)
+                    _run_stitch_job(job, text_overlay_cfg=_text_overlay_for_job(), **job_kwargs)
                     on_job_done(job)
             else:
                 with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
@@ -466,7 +476,12 @@ class StitchingService:
                             return
                         while pending and len(fut_map) < _stitch_slot_limit():
                             job = pending.pop(0)
-                            fut = pool.submit(_run_stitch_job, job, **job_kwargs)
+                            fut = pool.submit(
+                                _run_stitch_job,
+                                job,
+                                text_overlay_cfg=_text_overlay_for_job(),
+                                **job_kwargs,
+                            )
                             fut_map[fut] = job
                         if not fut_map:
                             break

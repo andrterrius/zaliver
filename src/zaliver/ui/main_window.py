@@ -2282,19 +2282,6 @@ class MainWindow(QWidget):
         gsu.addWidget(self._stats_server_username)
         gsu.addWidget(_settings_save_row(self._btn_save_stats_username))
 
-        api_pick = QHBoxLayout()
-        api_pick.setContentsMargins(0, 0, 0, 0)
-        api_pick.setSpacing(8)
-        api_pick.addWidget(QLabel("API антидетекта:"))
-        self._default_browser_combo = QComboBox()
-        self._default_browser_combo.setObjectName("defaultBrowserCombo")
-        self._default_browser_combo.addItem("Локальный", "local")
-        self._default_browser_combo.addItem("Удалённый", "remote")
-        self._default_browser_combo.currentIndexChanged.connect(
-            self._on_default_browser_combo_changed
-        )
-        api_pick.addWidget(self._default_browser_combo, 1)
-
         self._dolphin_headless = QCheckBox("Headless (без окна браузера)")
         self._dolphin_headless.setChecked(True)
         self._dolphin_headless.setToolTip(
@@ -2632,7 +2619,6 @@ class MainWindow(QWidget):
         settings_l.addWidget(settings_hint)
         settings_l.addWidget(self._gb_stats_username)
         settings_l.addWidget(self._gb_processing)
-        settings_l.addLayout(api_pick)
         settings_l.addWidget(self._dolphin_headless)
         settings_l.addWidget(self._gb_max_concurrent_browsers)
         settings_l.addWidget(self._gb_antydetect_local)
@@ -2644,7 +2630,6 @@ class MainWindow(QWidget):
         settings_l.addStretch()
         settings_scroll.setWidget(settings_inner)
         settings_outer.addWidget(settings_scroll, 1)
-        self._sync_antydetect_settings_groups_visibility()
 
         self._stack = QStackedWidget()
         self._stack.addWidget(home)
@@ -4931,11 +4916,7 @@ class MainWindow(QWidget):
             self._settings.setValue("text_overlay_wave_frame_speed", float(wfs))
 
     def _antidetect_kind(self) -> str:
-        """Текущий режим антидетекта: только local | remote."""
-        if hasattr(self, "_default_browser_combo"):
-            k = self._default_browser_combo.currentData()
-            if isinstance(k, str) and k.strip():
-                return _normalize_antidetect_kind(k)
+        """Режим антидетекта из настроек: local | remote (логика без UI-выбора)."""
         stored = (
             self._settings.value("antydetect/default_browser", "local", type=str) or "local"
         )
@@ -4946,21 +4927,6 @@ class MainWindow(QWidget):
         return (
             self._settings.value("antydetect/dolphin_token", "", type=str) or ""
         ).strip()
-
-    def _on_default_browser_combo_changed(self, _index: int) -> None:
-        self._update_profiles_section_header()
-        self._sync_antydetect_settings_groups_visibility()
-        self._sync_profiles_tab_action_buttons()
-
-    def _sync_antydetect_settings_groups_visibility(self) -> None:
-        if not hasattr(self, "_gb_antydetect_local") or not hasattr(
-            self, "_default_browser_combo"
-        ):
-            return
-        kind = self._antidetect_kind()
-        self._gb_antydetect_local.setVisible(kind == "local")
-        if hasattr(self, "_gb_antydetect_remote"):
-            self._gb_antydetect_remote.setVisible(kind == "remote")
 
     def _update_profiles_section_header(self) -> None:
         if not hasattr(self, "_profiles_title"):
@@ -5033,34 +4999,23 @@ class MainWindow(QWidget):
                 self._populate_uploaded_ig_checker_profiles()
 
     def _load_antydetect_settings(self) -> None:
-        if not hasattr(self, "_default_browser_combo"):
+        if not hasattr(self, "_local_api_base_url"):
             return
         if hasattr(self, "_dolphin_headless"):
             headless = self._settings.value(
                 "antydetect/dolphin_headless", True, type=bool
             )
             self._dolphin_headless.setChecked(bool(headless))
-        br = _normalize_antidetect_kind(
-            self._settings.value("antydetect/default_browser", "local", type=str)
-            or "local"
-        )
         # Старый режим dolphin больше не поддерживается в UI.
         if (
             self._settings.value("antydetect/default_browser", "", type=str) or ""
         ).strip().lower() == "dolphin":
             self._settings.setValue("antydetect/default_browser", "local")
-        idx = self._default_browser_combo.findData(br)
-        if idx < 0:
-            idx = 0
-        self._default_browser_combo.blockSignals(True)
-        self._default_browser_combo.setCurrentIndex(idx)
-        self._default_browser_combo.blockSignals(False)
-        if hasattr(self, "_local_api_base_url"):
-            if self._settings.contains("antydetect/local_api_base_url"):
-                url = (self._settings.value("antydetect/local_api_base_url", "", type=str) or "").strip()
-            else:
-                url = DEFAULT_LOCAL_API_BASE_URL
-            self._local_api_base_url.setText(url)
+        if self._settings.contains("antydetect/local_api_base_url"):
+            url = (self._settings.value("antydetect/local_api_base_url", "", type=str) or "").strip()
+        else:
+            url = DEFAULT_LOCAL_API_BASE_URL
+        self._local_api_base_url.setText(url)
         if hasattr(self, "_remote_api_base_url"):
             remote_url = (
                 self._settings.value("antydetect/remote_api_base_url", "", type=str) or ""
@@ -5080,17 +5035,12 @@ class MainWindow(QWidget):
             self._update_max_concurrent_browsers_label(
                 self._max_concurrent_browsers_slider.value()
             )
-        self._sync_antydetect_settings_groups_visibility()
 
     def _save_antydetect_settings(self) -> None:
         if hasattr(self, "_dolphin_headless"):
             self._settings.setValue(
                 "antydetect/dolphin_headless",
                 bool(self._dolphin_headless.isChecked()),
-            )
-        if hasattr(self, "_default_browser_combo"):
-            self._settings.setValue(
-                "antydetect/default_browser", self._antidetect_kind()
             )
         if hasattr(self, "_local_api_base_url"):
             self._settings.setValue(
@@ -5115,6 +5065,7 @@ class MainWindow(QWidget):
         if hasattr(self, "_settings_status"):
             self._settings_status.setText("Сохранено.")
         self._update_profiles_section_header()
+
     def _update_max_concurrent_browsers_label(self, value: int) -> None:
         if hasattr(self, "_max_concurrent_browsers_label"):
             self._max_concurrent_browsers_label.setText(

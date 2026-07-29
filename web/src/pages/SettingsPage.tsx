@@ -1,10 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 
-type BrowserKind = "local" | "remote";
-
 export function SettingsPage() {
-  const [browserKind, setBrowserKind] = useState<BrowserKind>("local");
   const [localBase, setLocalBase] = useState("http://127.0.0.1:18765");
   const [remoteBase, setRemoteBase] = useState("");
   const [remoteCdpHost, setRemoteCdpHost] = useState("");
@@ -21,8 +18,6 @@ export function SettingsPage() {
       try {
         const s = await api.getSettings();
         const v = s.values;
-        const kind = String(v["antydetect/default_browser"] ?? "local").toLowerCase();
-        setBrowserKind(kind === "remote" ? "remote" : "local");
         setLocalBase(
           String(
             v["antydetect/local_api_base_url"] ||
@@ -50,7 +45,6 @@ export function SettingsPage() {
       const base = localBase.trim().replace(/\/$/, "");
       const remote = remoteBase.trim().replace(/\/$/, "");
       await api.patchSettings({
-        "antydetect/default_browser": browserKind,
         "antydetect/local_api_base_url": base,
         "antydetect/own_base_url": base,
         "antydetect/remote_api_base_url": remote,
@@ -75,47 +69,32 @@ export function SettingsPage() {
 
       <section className="group stack">
         <h3 className="group-title">Антидетект</h3>
-        <label className="hint">API антидетекта</label>
-        <select
-          className="field"
-          value={browserKind}
-          onChange={(e) => setBrowserKind(e.target.value as BrowserKind)}
-        >
-          <option value="local">Локальный</option>
-          <option value="remote">Удалённый</option>
-        </select>
 
-        {browserKind === "local" ? (
-          <>
-            <label className="hint">URL локального антидетекта</label>
-            <input
-              className="field"
-              value={localBase}
-              onChange={(e) => setLocalBase(e.target.value)}
-              placeholder="http://127.0.0.1:18765"
-            />
-            <p className="hint">
-              На сервере антидетект должен слушать этот адрес (рядом с Zaliver API).
-            </p>
-          </>
-        ) : (
-          <>
-            <label className="hint">URL удалённого антидетекта</label>
-            <input
-              className="field"
-              value={remoteBase}
-              onChange={(e) => setRemoteBase(e.target.value)}
-              placeholder="https://example.com:18765"
-            />
-            <label className="hint">CDP public host</label>
-            <input
-              className="field"
-              value={remoteCdpHost}
-              onChange={(e) => setRemoteCdpHost(e.target.value)}
-              placeholder="Публичный IP или хост для CDP"
-            />
-          </>
-        )}
+        <label className="hint">URL локального антидетекта</label>
+        <input
+          className="field"
+          value={localBase}
+          onChange={(e) => setLocalBase(e.target.value)}
+          placeholder="http://127.0.0.1:18765"
+        />
+        <p className="hint">
+          На сервере антидетект должен слушать этот адрес (рядом с Zaliver API).
+        </p>
+
+        <label className="hint">URL удалённого антидетекта</label>
+        <input
+          className="field"
+          value={remoteBase}
+          onChange={(e) => setRemoteBase(e.target.value)}
+          placeholder="https://example.com:18765"
+        />
+        <label className="hint">CDP public host</label>
+        <input
+          className="field"
+          value={remoteCdpHost}
+          onChange={(e) => setRemoteCdpHost(e.target.value)}
+          placeholder="Публичный IP или хост для CDP"
+        />
 
         <label className="check">
           <input

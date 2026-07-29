@@ -1200,6 +1200,8 @@ def _encode_args_for_scenes(
     gpu_pipeline: GpuPipeline | None = None,
     scaled_overlay: ScaledTextOverlay | None = None,
     total_duration_sec: float | None = None,
+    video_transition: str | None = None,
+    video_transition_duration: float = 0.0,
 ) -> tuple[list[str], list[str], int, list[str]]:
     """Собирает input_args, filter_complex, суммарное число кадров и global hw args."""
     input_args: list[str] = []
@@ -1219,23 +1221,71 @@ def _encode_args_for_scenes(
             )
         )
     n = len(scene_clips)
+    fps_f = float(fps)
     total_frames = sum(int(fragment['frame_count']) for fragment in scene_clips)
     concat_out = "[outv]"
     if scaled_overlay is not None and scaled_overlay.lines:
         concat_out = "[concatv]"
-    filter_complex = (
-        ';'.join(filters)
-        + ';'
-        + ''.join(concat_labels)
-        + f"concat=n={n}:v=1:a=0{concat_out}"
+
+    xfade_name = str(video_transition or "").strip().lower()
+    use_xfade = (
+        n == 2
+        and xfade_name not in ("", "cut", "none")
+        and float(video_transition_duration) > 1e-3
     )
+    if use_xfade:
+        fc0 = max(1, int(scene_clips[0]["frame_count"]))
+        fc1 = max(1, int(scene_clips[1]["frame_count"]))
+        overlap_frames = max(
+            1, int(round(float(video_transition_duration) * fps_f))
+        )
+        overlap_frames = min(overlap_frames, fc0 - 1, fc1 - 1)
+        if overlap_frames < 1:
+            use_xfade = False
+        else:
+            offset = (fc0 - overlap_frames) / fps_f
+            dur = overlap_frames / fps_f
+            total_frames = fc0 + fc1 - overlap_frames
+            # ffmpeg xfade transition names; unknown → fade
+            xfade_aliases = {
+                "fade": "fade",
+                "dissolve": "fade",
+                "crossfade": "fade",
+                "circleopen": "circleopen",
+                "circle": "circleopen",
+                "wipeleft": "wipeleft",
+                "slideleft": "slideleft",
+                "zoomin": "zoomin",
+                "zoom": "zoomin",
+                "punch": "zoomin",
+                "fadewhite": "fadewhite",
+                "flash": "fadewhite",
+                "whiteflash": "fadewhite",
+                "hblur": "hblur",
+                "whip": "hblur",
+                "blur": "hblur",
+            }
+            xname = xfade_aliases.get(xfade_name, "fade")
+            filter_complex = (
+                ";".join(filters)
+                + f";[s0][s1]xfade=transition={xname}:duration={dur:.6f}"
+                f":offset={offset:.6f}{concat_out}"
+            )
+
+    if not use_xfade:
+        filter_complex = (
+            ";".join(filters)
+            + ";"
+            + "".join(concat_labels)
+            + f"concat=n={n}:v=1:a=0{concat_out}"
+        )
     if concat_out == "[concatv]":
-        dur = float(total_duration_sec) if total_duration_sec else total_frames / float(fps)
+        dur = float(total_duration_sec) if total_duration_sec else total_frames / fps_f
         filter_complex += ";" + _append_text_overlay_to_graph(
             "[concatv]",
             scaled_overlay,
             total_frames=total_frames,
-            fps=float(fps),
+            fps=fps_f,
             total_duration_sec=dur,
         )
     return input_args, [filter_complex], total_frames, global_hw
@@ -1295,6 +1345,8 @@ def _render_with_gpu_fallback(
     prefer_gpu: bool,
     scaled_overlay: ScaledTextOverlay | None = None,
     total_duration_sec: float | None = None,
+    video_transition: str | None = None,
+    video_transition_duration: float = 0.0,
     log: Optional[LogCallback] = None,
 ) -> None:
     enc, _ = pick_best_h264_encoder(
@@ -1321,6 +1373,8 @@ def _render_with_gpu_fallback(
                 gpu_pipeline=pipeline,
                 scaled_overlay=scaled_overlay,
                 total_duration_sec=total_duration_sec,
+                video_transition=video_transition,
+                video_transition_duration=video_transition_duration,
             )
             if pipeline is not None and log is not None:
                 _log(f"    GPU: {gpu_pipeline_label(pipeline)}", log)
@@ -1359,9 +1413,11 @@ def render_scenes_combined(
     prefer_gpu: bool = False,
     scaled_overlay: ScaledTextOverlay | None = None,
     total_duration_sec: float | None = None,
+    video_transition: str | None = None,
+    video_transition_duration: float = 0.0,
     log: Optional[LogCallback] = None,
 ) -> None:
-    """Рендерит все сцены одним ffmpeg (общий filter_complex + concat)."""
+    """Рендерит все сцены одним ffmpeg (общий filter_complex + concat/xfade)."""
     _render_with_gpu_fallback(
         scene_clips,
         output_path,
@@ -1371,6 +1427,8 @@ def render_scenes_combined(
         prefer_gpu=prefer_gpu,
         scaled_overlay=scaled_overlay,
         total_duration_sec=total_duration_sec,
+        video_transition=video_transition,
+        video_transition_duration=video_transition_duration,
         log=log,
     )
 
@@ -1395,6 +1453,8 @@ def render_scenes_batched(
     scaled_overlay: ScaledTextOverlay | None = None,
     total_duration_sec: float | None = None,
     batch_size: int = SLICE_SCENE_BATCH_SIZE,
+    video_transition: str | None = None,
+    video_transition_duration: float = 0.0,
     log: Optional[LogCallback] = None,
 ) -> None:
     """
@@ -1414,6 +1474,8 @@ def render_scenes_batched(
             prefer_gpu=prefer_gpu,
             scaled_overlay=scaled_overlay,
             total_duration_sec=total_duration_sec,
+            video_transition=video_transition,
+            video_transition_duration=video_transition_duration,
             log=log,
         )
         return
@@ -2221,14 +2283,32 @@ def generate_video_from_segment(
         f"(как у {os.path.basename(size_source)})"
     )
 
+    stitch_transition = str(segment.get("stitch_transition") or "cut").strip().lower()
+    stitch_overlap = max(0.0, float(segment.get("stitch_transition_duration") or 0.0))
+    if stitch_transition in ("", "none"):
+        stitch_transition = "cut"
+    if stitch_transition == "cut" or stitch_overlap <= 1e-6 or len(scene_clips) != 2:
+        stitch_transition = "cut"
+        stitch_overlap = 0.0
+    else:
+        # Перекрытие xfade укорачивает ролик; клипы остаются полными.
+        total_video_duration = max(0.05, sum(scene_durations) - stitch_overlap)
+        video_end = video_start + total_video_duration
+        _log(
+            f"    Визуальный переход «{stitch_transition}» "
+            f"{stitch_overlap:.2f}с → длительность {total_video_duration:.2f}с",
+            log,
+        )
+
     scaled_overlay: ScaledTextOverlay | None = None
     if text_overlay_cfg:
         toc = TextOverlaySettings.from_dict(text_overlay_cfg)
         scaled_overlay = compute_scaled_overlay(toc, video_w=width, video_h=height)
         if scaled_overlay is not None and scaled_overlay.lines:
             if bool(getattr(toc, "after_frame_change", False)) and len(scene_durations) >= 2:
-                # Текст с момента перехода (конец части 1 / смена кадра).
-                scaled_overlay.enable_after_sec = float(scene_durations[0])
+                # Текст с середины визуального перехода (или стыка cut).
+                enable_at = float(scene_durations[0]) - stitch_overlap * 0.5
+                scaled_overlay.enable_after_sec = max(0.0, enable_at)
                 scaled_overlay.from_middle = False
                 _log(
                     f"    Текст после смены кадра (с {scaled_overlay.enable_after_sec:.3f}с)…",
@@ -2248,19 +2328,37 @@ def generate_video_from_segment(
 
     try:
         try:
-            render_scenes_batched(
-                scene_clips,
-                temp_video,
-                temp_dir,
-                width,
-                height,
-                fps,
-                prefer_gpu=prefer_gpu_render,
-                scaled_overlay=scaled_overlay,
-                total_duration_sec=total_video_duration,
-                log=log,
-            )
+            if stitch_transition != "cut":
+                # xfade только в одном filter_complex (не через -c copy).
+                render_scenes_combined(
+                    scene_clips,
+                    temp_video,
+                    width,
+                    height,
+                    fps,
+                    prefer_gpu=prefer_gpu_render,
+                    scaled_overlay=scaled_overlay,
+                    total_duration_sec=total_video_duration,
+                    video_transition=stitch_transition,
+                    video_transition_duration=stitch_overlap,
+                    log=log,
+                )
+            else:
+                render_scenes_batched(
+                    scene_clips,
+                    temp_video,
+                    temp_dir,
+                    width,
+                    height,
+                    fps,
+                    prefer_gpu=prefer_gpu_render,
+                    scaled_overlay=scaled_overlay,
+                    total_duration_sec=total_video_duration,
+                    log=log,
+                )
         except Exception as batched_err:
+            if stitch_transition != "cut":
+                raise
             workers = _scene_parallel_workers(num_scenes)
             _log(
                 f"    Батчевый рендер не удался ({batched_err}), "

@@ -9,6 +9,7 @@ from typing import Any
 from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QColorDialog,
     QComboBox,
@@ -21,6 +22,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
@@ -30,6 +32,19 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from zaliver.processing.stitching import (
+    DEFAULT_STITCH_TRANSITION,
+    DEFAULT_STITCH_TRANSITION_DURATION,
+    STITCH_TRANSITION_CIRCLE,
+    STITCH_TRANSITION_CUT,
+    STITCH_TRANSITION_FADE,
+    STITCH_TRANSITION_FLASH,
+    STITCH_TRANSITION_WHIP,
+    STITCH_TRANSITION_ZOOM,
+    STITCH_TRANSITION_LABELS,
+    STITCH_TRANSITIONS,
+    normalize_stitch_transition,
+)
 from zaliver.processing.text_overlay import (
     NEON_WAVE_CHAR_PHASE,
     TextOverlaySettings,
@@ -77,6 +92,8 @@ class StitchingTabPane(QWidget):
         self._text_font_path = ""
         self._text_overlay_preview_index_part1 = 0
         self._text_overlay_preview_index_part2 = 0
+        self._loading_settings = False
+        self._last_transition = DEFAULT_STITCH_TRANSITION
         self._build_ui()
         self.load_settings()
 
@@ -88,7 +105,41 @@ class StitchingTabPane(QWidget):
             "music_files": list(self._music_files),
             "copies_per_track": int(self.copies_per_track.value()),
             "text_overlay": self.text_overlay_settings().to_dict(),
+            "transition": self._selected_transition(),
+            "transition_duration": float(DEFAULT_STITCH_TRANSITION_DURATION),
+            "transition_random": bool(self.transition_random.isChecked()),
         }
+
+    def _selected_transition(self) -> str:
+        btn = self._transition_group.checkedButton()
+        if btn is None:
+            return normalize_stitch_transition(self._last_transition)
+        data = btn.property("transition_id")
+        return normalize_stitch_transition(data)
+
+    def _clear_transition_selection(self) -> None:
+        self._transition_group.setExclusive(False)
+        for btn in self._transition_group.buttons():
+            btn.blockSignals(True)
+            btn.setChecked(False)
+            btn.blockSignals(False)
+
+    def _sync_transition_controls(self) -> None:
+        random_on = bool(self.transition_random.isChecked())
+        for rb in self._transition_group.buttons():
+            rb.setEnabled(not random_on)
+        if random_on:
+            # Запомнить текущий выбор, затем снять выделение.
+            checked = self._transition_group.checkedButton()
+            if checked is not None:
+                self._last_transition = normalize_stitch_transition(
+                    checked.property("transition_id")
+                )
+            self._clear_transition_selection()
+        else:
+            self._transition_group.setExclusive(True)
+            if self._transition_group.checkedButton() is None:
+                self._set_transition(self._last_transition)
 
     def validate_part_options(self) -> str | None:
         return None
@@ -148,6 +199,13 @@ class StitchingTabPane(QWidget):
         return out
 
     def load_settings(self) -> None:
+        self._loading_settings = True
+        try:
+            self._load_settings_impl()
+        finally:
+            self._loading_settings = False
+
+    def _load_settings_impl(self) -> None:
         s = self._settings
         self.output_dir_edit.setText(s.value("stitch/output_folder", "", type=str) or "")
         self._part1_files = self._load_file_list("stitch/part1_files")
@@ -156,6 +214,15 @@ class StitchingTabPane(QWidget):
         self._sync_part1_hint()
         self._sync_part2_hint()
         self._sync_music_hint()
+        saved_transition = normalize_stitch_transition(
+            s.value("stitch/transition", DEFAULT_STITCH_TRANSITION, type=str)
+        )
+        self._last_transition = saved_transition
+        self.transition_random.blockSignals(True)
+        self.transition_random.setChecked(
+            bool(s.value("stitch/transition_random", False, type=bool))
+        )
+        self.transition_random.blockSignals(False)
         self.text_overlay_enabled.setChecked(
             bool(s.value("stitch/text_overlay_enabled", True, type=bool))
         )
@@ -208,8 +275,15 @@ class StitchingTabPane(QWidget):
             self.delete_after_upload.setChecked(
                 bool(s.value("stitch/delete_after_upload", False, type=bool))
             )
+        self._set_transition(saved_transition)
+        self._sync_transition_controls()
 
     def save_settings(self) -> None:
+        # Во время _build_ui / load_settings слоты не должны писать настройки.
+        if getattr(self, "_loading_settings", False):
+            return
+        if not hasattr(self, "text_overlay_enabled"):
+            return
         s = self._settings
         s.setValue("stitch/output_folder", self.output_dir_edit.text().strip())
         s.setValue("stitch/part1_files", list(self._part1_files))
@@ -219,6 +293,18 @@ class StitchingTabPane(QWidget):
         if hasattr(self, "delete_after_upload"):
             s.setValue(
                 "stitch/delete_after_upload", bool(self.delete_after_upload.isChecked())
+            )
+        if hasattr(self, "_transition_group"):
+            # При рандоме сохраняем последний явный выбор (не «пусто»).
+            s.setValue(
+                "stitch/transition",
+                self._selected_transition()
+                if self._transition_group.checkedButton() is not None
+                else normalize_stitch_transition(self._last_transition),
+            )
+        if hasattr(self, "transition_random"):
+            s.setValue(
+                "stitch/transition_random", bool(self.transition_random.isChecked())
             )
         s.setValue("stitch/text_overlay_enabled", bool(self.text_overlay_enabled.isChecked()))
         s.setValue(
@@ -240,6 +326,38 @@ class StitchingTabPane(QWidget):
         s.setValue(
             "stitch/text_overlay_font_bold", bool(self.text_overlay_font_bold.isChecked())
         )
+
+    def _set_transition(self, transition_id: str) -> None:
+        key = normalize_stitch_transition(transition_id)
+        self._last_transition = key
+        self._transition_group.setExclusive(True)
+        for btn in self._transition_group.buttons():
+            if str(btn.property("transition_id") or "") == key:
+                btn.blockSignals(True)
+                btn.setChecked(True)
+                btn.blockSignals(False)
+                return
+        # fallback
+        self._last_transition = DEFAULT_STITCH_TRANSITION
+        for btn in self._transition_group.buttons():
+            if str(btn.property("transition_id") or "") == DEFAULT_STITCH_TRANSITION:
+                btn.blockSignals(True)
+                btn.setChecked(True)
+                btn.blockSignals(False)
+                return
+
+    def _on_transition_toggled(self, checked: bool) -> None:
+        if checked:
+            btn = self.sender()
+            if btn is not None:
+                self._last_transition = normalize_stitch_transition(
+                    btn.property("transition_id")
+                )
+            self.save_settings()
+
+    def _on_transition_random_toggled(self, *_args) -> None:
+        self._sync_transition_controls()
+        self.save_settings()
 
     def set_running(self, *, running: bool) -> None:
         if running:
@@ -328,7 +446,7 @@ class StitchingTabPane(QWidget):
         header_block.addWidget(self.progress_label)
 
         section_nav, section_nav_group, _section_btns = make_work_section_nav(
-            ["Исходники", "Текст", "Музыка"],
+            ["Исходники", "Текст", "Музыка", "Переходы"],
             parent=self,
         )
         header_block.addWidget(section_nav)
@@ -438,12 +556,62 @@ class StitchingTabPane(QWidget):
         music_grid.addWidget(music_btns_w, 0, 2)
         music_desc = QLabel(
             "Случайный полный клип из части 1 и из части 2 склеиваются; "
-            "длительность ролика — их сумма. Переход ставится на бит трека; "
-            "при нехватке музыки хвост зацикливается."
+            "длительность ролика — их сумма. "
+            "Переход ставится на бит трека; при нехватке музыки хвост зацикливается."
         )
         music_desc.setObjectName("hint")
         music_desc.setWordWrap(True)
         music_grid.addWidget(music_desc, 1, 0, 1, 3)
+
+        transitions_gb = QGroupBox("Переход между частями")
+        transitions_layout = QVBoxLayout(transitions_gb)
+        transitions_layout.setSpacing(8)
+        self.transition_random = QCheckBox("Выбирать рандомно")
+        self.transition_random.setToolTip(
+            "Перед каждым роликом случайно выбирается любой переход, "
+            "включая простую склейку."
+        )
+        self.transition_random.toggled.connect(self._on_transition_random_toggled)
+        transitions_layout.addWidget(self.transition_random)
+        self._transition_group = QButtonGroup(self)
+        self._transition_radios: dict[str, QRadioButton] = {}
+        transition_hints = {
+            STITCH_TRANSITION_CUT: "Жёсткий стык двух клипов без эффекта.",
+            STITCH_TRANSITION_FADE: "Плавное растворение одного кадра в другой (~0.4с).",
+            STITCH_TRANSITION_CIRCLE: "Вторая часть открывается кругом из центра (~0.4с).",
+            STITCH_TRANSITION_ZOOM: "Punch-zoom как в эдитах: наезд в стык (~0.4с).",
+            STITCH_TRANSITION_FLASH: "Белая вспышка на бите — классика эдитов (~0.4с).",
+            STITCH_TRANSITION_WHIP: "Горизонтальный смаз, как whip-pan между кадрами (~0.4с).",
+        }
+        for tid in STITCH_TRANSITIONS:
+            rb = QRadioButton(STITCH_TRANSITION_LABELS.get(tid, tid))
+            rb.setProperty("transition_id", tid)
+            rb.setToolTip(transition_hints.get(tid, ""))
+            self._transition_group.addButton(rb)
+            self._transition_radios[tid] = rb
+            row = QVBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(2)
+            row.addWidget(rb)
+            hint = QLabel(transition_hints.get(tid, ""))
+            hint.setObjectName("hint")
+            hint.setWordWrap(True)
+            row.addWidget(hint)
+            wrap = QWidget()
+            wrap.setLayout(row)
+            transitions_layout.addWidget(wrap)
+        # Не вызываем save_settings до полной сборки UI (иначе краш в слоте Qt).
+        self._transition_radios[DEFAULT_STITCH_TRANSITION].setChecked(True)
+        for rb in self._transition_group.buttons():
+            rb.toggled.connect(self._on_transition_toggled)
+        transitions_note = QLabel(
+            "Если клипы слишком короткие — автоматически останется простая склейка. "
+            "Галочка «Выбирать рандомно» — свой эффект на каждый ролик."
+        )
+        transitions_note.setObjectName("hint")
+        transitions_note.setWordWrap(True)
+        transitions_layout.addWidget(transitions_note)
+        transitions_layout.addStretch(1)
 
         text_gb = QGroupBox("Текст на видео")
         text_outer = QVBoxLayout(text_gb)
@@ -622,6 +790,7 @@ class StitchingTabPane(QWidget):
         self._stitch_section_stack.addWidget(wrap_work_section_page(io))
         self._stitch_section_stack.addWidget(wrap_work_section_page(text_gb))
         self._stitch_section_stack.addWidget(wrap_work_section_page(music_gb))
+        self._stitch_section_stack.addWidget(wrap_work_section_page(transitions_gb))
         section_nav_group.idClicked.connect(self._stitch_section_stack.setCurrentIndex)
 
         scroll = QScrollArea()

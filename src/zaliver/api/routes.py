@@ -381,6 +381,9 @@ def build_router() -> APIRouter:
             "use_gpu": bool(body.use_gpu),
             "use_gpu_finalize": bool(body.use_gpu_finalize),
             "slice_fps_mode": str(body.slice_fps_mode or "auto"),
+            "transition": str(body.transition or "cut"),
+            "transition_duration": float(body.transition_duration),
+            "transition_random": bool(body.transition_random),
             "youtube_upload_after_processing": bool(
                 body.youtube_upload_after_processing
             ),

@@ -125,6 +125,9 @@ class StitchingJobRequest(BaseModel):
     min_part_duration: float = Field(default=2.0, ge=0.3, le=120.0)
     max_part_duration: float = Field(default=6.0, ge=0.3, le=120.0)
     slice_fps_mode: str = "auto"
+    transition: str = "cut"
+    transition_duration: float = Field(default=0.4, ge=0.05, le=2.0)
+    transition_random: bool = False
     text_overlay: TextOverlayModel = Field(default_factory=TextOverlayModel)
     youtube_upload_after_processing: bool = False
 

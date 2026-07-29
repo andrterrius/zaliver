@@ -25,7 +25,11 @@ from zaliver.processing.slicing_worker import (
 )
 from zaliver.processing.stitching import (
     DEFAULT_STITCH_FPS_MODE,
+    DEFAULT_STITCH_TRANSITION,
+    DEFAULT_STITCH_TRANSITION_DURATION,
+    STITCH_TRANSITION_LABELS,
     generate_stitched_video,
+    normalize_stitch_transition,
 )
 from zaliver.processing.text_overlay import TextOverlaySettings
 
@@ -70,6 +74,9 @@ def _attempt_stitch_with_music(
     use_gpu: bool,
     use_gpu_finalize: bool,
     stitch_fps_mode: str,
+    transition: str,
+    transition_duration: float,
+    transition_random: bool,
     log: LogCallback,
     cancel_check: Callable[[], bool],
     tag: str,
@@ -89,6 +96,9 @@ def _attempt_stitch_with_music(
             use_gpu=bool(use_gpu),
             use_gpu_finalize=bool(use_gpu_finalize),
             text_overlay_cfg=text_overlay_cfg,
+            transition=transition,
+            transition_duration=transition_duration,
+            transition_random=bool(transition_random),
         )
         if not result or not output_path.is_file():
             return "Не удалось склеить видео из исходников."
@@ -109,6 +119,9 @@ def _run_stitch_job(
     use_gpu: bool,
     use_gpu_finalize: bool,
     stitch_fps_mode: str,
+    transition: str,
+    transition_duration: float,
+    transition_random: bool,
     log: LogCallback,
     cancel_check: Callable[[], bool],
     n_jobs: int,
@@ -142,6 +155,9 @@ def _run_stitch_job(
             use_gpu=use_gpu,
             use_gpu_finalize=use_gpu_finalize,
             stitch_fps_mode=stitch_fps_mode,
+            transition=transition,
+            transition_duration=transition_duration,
+            transition_random=transition_random,
             log=log,
             cancel_check=cancel_check,
             tag=tag,
@@ -260,6 +276,35 @@ class StitchingService:
             )
             if stitch_fps_mode.strip().lower() in ("auto", "авто"):
                 stitch_fps_mode = DEFAULT_STITCH_FPS_MODE
+            transition = normalize_stitch_transition(
+                options.get("transition") or options.get("stitch_transition")
+            )
+            transition_random = bool(
+                options.get("transition_random")
+                or options.get("stitch_transition_random")
+            )
+            try:
+                transition_duration = float(
+                    options.get("transition_duration")
+                    if options.get("transition_duration") is not None
+                    else options.get(
+                        "stitch_transition_duration",
+                        DEFAULT_STITCH_TRANSITION_DURATION,
+                    )
+                )
+            except (TypeError, ValueError):
+                transition_duration = DEFAULT_STITCH_TRANSITION_DURATION
+            if (
+                not transition_random
+                and transition == DEFAULT_STITCH_TRANSITION
+            ):
+                transition_duration = 0.0
+            elif transition_random:
+                # Для эффектов нужен overlap; cut сам обнулит внутри.
+                transition_duration = max(
+                    float(DEFAULT_STITCH_TRANSITION_DURATION),
+                    float(transition_duration),
+                )
 
             if use_gpu or use_gpu_finalize:
                 try:
@@ -319,10 +364,24 @@ class StitchingService:
                     f"часть1={len(part1_pool)}, часть2={len(part2_pool)}, "
                     f"потоков {num_workers}"
                 )
-            log(
-                "Хронометраж: сумма полных исходников; переход на бит; "
-                "при нехватке музыки — старт ~10% и/или зацикливание хвоста"
-            )
+            trans_label = STITCH_TRANSITION_LABELS.get(transition, transition)
+            if transition_random:
+                log(
+                    "Хронометраж: сумма полных исходников; переход на бит; "
+                    "эффект случайный из всех переходов (включая простую склейку); "
+                    "при нехватке музыки — старт ~10% и/или зацикливание хвоста"
+                )
+            else:
+                log(
+                    "Хронометраж: сумма полных исходников; переход на бит; "
+                    f"эффект «{trans_label}»"
+                    + (
+                        f" ({transition_duration:.2f}с)"
+                        if transition != DEFAULT_STITCH_TRANSITION
+                        else ""
+                    )
+                    + "; при нехватке музыки — старт ~10% и/или зацикливание хвоста"
+                )
             fps_label = {"30": "30", "60": "60"}.get(
                 stitch_fps_mode.strip().lower(), stitch_fps_mode
             )
@@ -368,6 +427,9 @@ class StitchingService:
                 use_gpu=use_gpu,
                 use_gpu_finalize=use_gpu_finalize,
                 stitch_fps_mode=stitch_fps_mode,
+                transition=transition,
+                transition_duration=transition_duration,
+                transition_random=transition_random,
                 log=log,
                 cancel_check=cancelled,
                 n_jobs=n_jobs,

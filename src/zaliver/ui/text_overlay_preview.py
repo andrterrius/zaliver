@@ -703,16 +703,6 @@ class TextOverlayPreviewWidget(QWidget):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(frame_rect, radius, radius)
 
-        orient_lbl = "9:16" if self._orientation == "vertical" else "16:9"
-        painter.setPen(QColor("#e2e8f0" if bg is not None else "#64748b"))
-        if self._playing:
-            hint = f"▶ {orient_lbl}"
-        elif self._text_visible:
-            hint = f"Пример {orient_lbl} · ▶ видео · перетащи текст"
-        else:
-            hint = f"Пример {orient_lbl}"
-        painter.drawText(int(fx) + 8, int(fy) + 18, hint)
-
         if not self._text_visible:
             return
 

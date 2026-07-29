@@ -186,6 +186,43 @@ def neutral_uniquify_settings() -> UniquifySettings:
     return UniquifySettings()
 
 
+# Флаги «эффект включён» в options → поле UniquifySettings и нейтральное значение.
+UNIQUIFY_EFFECT_ENABLE_FIELDS: tuple[tuple[str, str, Any], ...] = (
+    ("brightness_enabled", "brightness_delta", 0.0),
+    ("contrast_enabled", "contrast", 1.0),
+    ("saturation_enabled", "saturation_scale", 1.0),
+    ("crop_jitter_enabled", "crop_jitter_px", 0),
+    ("scale_enabled", "scale_pct", 100.0),
+    ("noise_enabled", "noise_sigma", 0.0),
+    ("seed_enabled", "seed_base", 0),
+    ("playback_speed_enabled", "playback_speed_factor", 1.0),
+    ("audio_chorus_enabled", "audio_chorus", False),
+)
+
+
+def apply_uniquify_effect_enables(
+    settings: Dict[str, Any],
+    options: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Обнуляет эффекты, для которых в options стоит enabled=False (по умолчанию вкл.)."""
+    out = dict(settings or {})
+    opts = options or {}
+    for flag, field, neutral in UNIQUIFY_EFFECT_ENABLE_FIELDS:
+        # Совместимость: раньше audio_speed_enabled = playback_speed_enabled.
+        if flag == "playback_speed_enabled":
+            enabled = bool(
+                opts.get(
+                    "playback_speed_enabled",
+                    opts.get("audio_speed_enabled", True),
+                )
+            )
+        else:
+            enabled = bool(opts.get(flag, True))
+        if not enabled:
+            out[field] = neutral
+    return out
+
+
 def random_uniquify_settings(
     bounds: Optional[RandomUniquifyBounds] = None,
 ) -> UniquifySettings:

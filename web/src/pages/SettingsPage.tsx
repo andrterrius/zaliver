@@ -3,8 +3,6 @@ import { api } from "../api/client";
 
 export function SettingsPage() {
   const [localBase, setLocalBase] = useState("http://127.0.0.1:18765");
-  const [remoteBase, setRemoteBase] = useState("");
-  const [remoteCdpHost, setRemoteCdpHost] = useState("");
   const [headless, setHeadless] = useState(true);
   const [maxBrowsers, setMaxBrowsers] = useState(5);
   const [aiBase, setAiBase] = useState("");
@@ -25,8 +23,6 @@ export function SettingsPage() {
               "http://127.0.0.1:18765",
           ),
         );
-        setRemoteBase(String(v["antydetect/remote_api_base_url"] ?? ""));
-        setRemoteCdpHost(String(v["antydetect/remote_cdp_public_host"] ?? ""));
         setHeadless(Boolean(v["antydetect/dolphin_headless"] ?? true));
         setMaxBrowsers(Number(v["antydetect/max_concurrent_browsers"] ?? 5));
         setAiBase(String(v["ai/base_url"] ?? ""));
@@ -43,12 +39,9 @@ export function SettingsPage() {
     setStatus("");
     try {
       const base = localBase.trim().replace(/\/$/, "");
-      const remote = remoteBase.trim().replace(/\/$/, "");
       await api.patchSettings({
         "antydetect/local_api_base_url": base,
         "antydetect/own_base_url": base,
-        "antydetect/remote_api_base_url": remote,
-        "antydetect/remote_cdp_public_host": remoteCdpHost.trim(),
         "antydetect/dolphin_headless": headless,
         "antydetect/max_concurrent_browsers": maxBrowsers,
         "ai/base_url": aiBase,
@@ -80,21 +73,6 @@ export function SettingsPage() {
         <p className="hint">
           На сервере антидетект должен слушать этот адрес (рядом с Zaliver API).
         </p>
-
-        <label className="hint">URL удалённого антидетекта</label>
-        <input
-          className="field"
-          value={remoteBase}
-          onChange={(e) => setRemoteBase(e.target.value)}
-          placeholder="https://example.com:18765"
-        />
-        <label className="hint">CDP public host</label>
-        <input
-          className="field"
-          value={remoteCdpHost}
-          onChange={(e) => setRemoteCdpHost(e.target.value)}
-          placeholder="Публичный IP или хост для CDP"
-        />
 
         <label className="check">
           <input

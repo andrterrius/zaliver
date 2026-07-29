@@ -83,8 +83,15 @@ class UniquifyJobRequest(BaseModel):
     use_gpu_finalize: bool = False
     randomize_uniquify: bool = True
     one_copy_no_effects: bool = False
-    playback_speed_enabled: bool = False
-    audio_chorus_enabled: bool = False
+    brightness_enabled: bool = True
+    contrast_enabled: bool = True
+    saturation_enabled: bool = True
+    crop_jitter_enabled: bool = True
+    scale_enabled: bool = True
+    noise_enabled: bool = True
+    seed_enabled: bool = True
+    playback_speed_enabled: bool = True
+    audio_chorus_enabled: bool = True
     background_music_enabled: bool = False
     background_music_mix_with_source: bool = False
     background_music_volume_pct: int = Field(default=35, ge=0, le=100)

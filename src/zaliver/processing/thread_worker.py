@@ -53,6 +53,7 @@ from zaliver.processing.ffmpeg_gpu import gpu_pipeline_label, resolve_gpu_pipeli
 from zaliver.processing.gpu_detect import detect_gpus, format_gpu_list
 from zaliver.processing.pipeline import (
     RandomUniquifyBounds,
+    apply_uniquify_effect_enables,
     materialize_text_overlay_ranges,
     neutral_uniquify_settings,
     random_uniquify_settings,
@@ -613,10 +614,6 @@ class ProcessingService:
             randomize = bool(options.get("randomize_uniquify", True))
             one_copy_no_effects = bool(options.get("one_copy_no_effects", False))
             ui_settings = dict(options.get("settings", {}))
-            playback_speed_enabled = bool(
-                options.get("playback_speed_enabled", options.get("audio_speed_enabled", True))
-            )
-            audio_chorus_enabled = bool(options.get("audio_chorus_enabled", True))
             bg_music_enabled = bool(options.get("background_music_enabled", False))
             raw_music = options.get("background_music_files") or []
             music_pool: List[str] = []
@@ -697,25 +694,21 @@ class ProcessingService:
                         rb = RandomUniquifyBounds.from_options_dict(
                             options.get("random_bounds") or {}
                         )
-                        st = random_uniquify_settings(rb)
-                        settings = st.to_dict()
-                        # Тумблеры отключают соответствующую случайность (значения из границ не используются).
-                        if not playback_speed_enabled:
-                            settings["playback_speed_factor"] = 1.0
-                        if not audio_chorus_enabled:
-                            settings["audio_chorus"] = False
+                        settings = random_uniquify_settings(rb).to_dict()
                     else:
                         manual_bounds = options.get("manual_bounds")
                         if isinstance(manual_bounds, dict) and manual_bounds:
-                            st = random_uniquify_settings(
+                            settings = random_uniquify_settings(
                                 RandomUniquifyBounds.from_options_dict(manual_bounds)
-                            )
-                            settings = st.to_dict()
+                            ).to_dict()
                             settings["audio_chorus"] = bool(
                                 ui_settings.get("audio_chorus", False)
                             )
                         else:
                             settings = dict(ui_settings)
+                    if not no_effects:
+                        # Галочки в UI: выключенный фильтр → нейтральное значение.
+                        settings = apply_uniquify_effect_enables(settings, options)
 
                     job_id = str(uuid.uuid4())
 

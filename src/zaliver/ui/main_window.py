@@ -1186,11 +1186,16 @@ class MainWindow(QWidget):
         bg_tracks = QGroupBox("Фоновые треки")
         bg_tracks_l = QVBoxLayout(bg_tracks)
         bg_tracks_l.setSpacing(8)
-        self.background_music = ToggleSwitch(
-            "Случайный трек и отрезок для каждого выхода (по списку ниже)"
-        )
+        self.background_music = ToggleSwitch("Добавить музыку")
         self.background_music.setChecked(False)
+        self.background_music.toggled.connect(self._update_music_mix_controls)
+        self.background_music.toggled.connect(self._save_folder_settings)
         bg_tracks_l.addWidget(self.background_music)
+
+        self._music_settings_panel = QWidget()
+        music_panel_l = QVBoxLayout(self._music_settings_panel)
+        music_panel_l.setContentsMargins(0, 0, 0, 0)
+        music_panel_l.setSpacing(8)
         music_btns = QHBoxLayout()
         self.btn_add_music = QPushButton("Добавить треки…")
         self.btn_add_music.setObjectName("secondary")
@@ -1210,7 +1215,7 @@ class MainWindow(QWidget):
         music_btns.addStretch()
         mw_music = QWidget()
         mw_music.setLayout(music_btns)
-        bg_tracks_l.addWidget(mw_music)
+        music_panel_l.addWidget(mw_music)
         self._music_list = QListWidget()
         self._music_list.setObjectName("musicTracksList")
         self._music_list.setSpacing(4)
@@ -1223,18 +1228,18 @@ class MainWindow(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self._music_list.setFrameShape(QFrame.Shape.NoFrame)
-        bg_tracks_l.addWidget(self._music_list)
+        music_panel_l.addWidget(self._music_list)
         self._music_hint = QLabel()
         self._music_hint.setObjectName("hint")
         self._music_hint.setWordWrap(True)
-        bg_tracks_l.addWidget(self._music_hint)
+        music_panel_l.addWidget(self._music_hint)
         self.background_music_mix = ToggleSwitch(
             "Смешивать с аудио исходника (иначе — полная замена дорожки)"
         )
         self.background_music_mix.setChecked(False)
         self.background_music_mix.toggled.connect(self._update_music_mix_controls)
         self.background_music_mix.toggled.connect(self._save_folder_settings)
-        bg_tracks_l.addWidget(self.background_music_mix)
+        music_panel_l.addWidget(self.background_music_mix)
         self.background_music_volume = ValueRangeSlider(
             minimum=0,
             maximum=100,
@@ -1258,9 +1263,8 @@ class MainWindow(QWidget):
         vol_row.addWidget(self.background_music_volume, 1, Qt.AlignmentFlag.AlignVCenter)
         vw_vol = QWidget()
         vw_vol.setLayout(vol_row)
-        bg_tracks_l.addWidget(vw_vol)
-        self.background_music.toggled.connect(self._update_music_mix_controls)
-        self.background_music.toggled.connect(self._save_folder_settings)
+        music_panel_l.addWidget(vw_vol)
+        bg_tracks_l.addWidget(self._music_settings_panel)
         self._update_music_mix_controls()
         self._sync_music_list_widget()
 
@@ -1271,31 +1275,23 @@ class MainWindow(QWidget):
         text_gb = QGroupBox("Текст на видео")
         text_l = QVBoxLayout(text_gb)
         text_l.setSpacing(8)
-        self.text_overlay_enabled = ToggleSwitch("Накладывать свой текст на каждое видео")
+        self.text_overlay_enabled = ToggleSwitch("Добавить текст")
         self.text_overlay_enabled.setChecked(True)
         self.text_overlay_enabled.toggled.connect(self._update_text_overlay_controls)
         self.text_overlay_enabled.toggled.connect(self._save_folder_settings)
-        self.text_overlay_from_middle = QCheckBox(
-            "Текст с середины видео до конца"
-        )
-        self.text_overlay_from_middle.setChecked(True)
-        self.text_overlay_from_middle.toggled.connect(self._save_folder_settings)
-        text_top_row = QHBoxLayout()
-        text_top_row.setContentsMargins(0, 0, 0, 0)
-        text_top_row.setSpacing(16)
-        text_top_row.addWidget(self.text_overlay_enabled, 0, Qt.AlignmentFlag.AlignVCenter)
-        text_top_row.addWidget(
-            self.text_overlay_from_middle, 0, Qt.AlignmentFlag.AlignVCenter
-        )
-        text_top_row.addStretch(1)
-        text_top_w = QWidget()
-        text_top_w.setLayout(text_top_row)
-        text_l.addWidget(text_top_w)
+        text_l.addWidget(self.text_overlay_enabled)
 
         self._text_overlay_panel = QWidget()
         text_controls_l = QVBoxLayout(self._text_overlay_panel)
         text_controls_l.setContentsMargins(0, 0, 0, 0)
         text_controls_l.setSpacing(8)
+
+        self.text_overlay_from_middle = QCheckBox(
+            "Текст с середины видео до конца"
+        )
+        self.text_overlay_from_middle.setChecked(True)
+        self.text_overlay_from_middle.toggled.connect(self._save_folder_settings)
+        text_controls_l.addWidget(self.text_overlay_from_middle)
 
         self.text_overlay_edit = QPlainTextEdit()
         self.text_overlay_edit.setPlaceholderText("Текст для наложения…")
@@ -1362,18 +1358,18 @@ class MainWindow(QWidget):
         font_row_w = QWidget()
         font_row_w.setLayout(font_row)
         self._populate_text_overlay_font_combo()
-        text_opts.addWidget(QLabel("Размер шрифта (на примере):"), 0, 0)
+        # orientation остаётся в коде для превью/сохранения, в UI не показываем.
+        self.text_overlay_orientation.hide()
+        text_opts.addWidget(QLabel("Размер"), 0, 0)
         text_opts.addWidget(self.text_overlay_font_size, 0, 1)
-        text_opts.addWidget(QLabel("Пример кадра:"), 1, 0)
-        text_opts.addWidget(self.text_overlay_orientation, 1, 1)
-        text_opts.addWidget(QLabel("Свечение:"), 2, 0)
-        text_opts.addWidget(glow_row_w, 2, 1)
-        text_opts.addWidget(QLabel("Текст:"), 3, 0)
-        text_opts.addWidget(self.text_overlay_text_btn, 3, 1)
-        text_opts.addWidget(QLabel("Межбуквенный интервал:"), 4, 0)
-        text_opts.addWidget(self.text_overlay_letter_spacing, 4, 1)
-        text_opts.addWidget(QLabel("Шрифт:"), 5, 0)
-        text_opts.addWidget(font_row_w, 5, 1)
+        text_opts.addWidget(QLabel("Свечение"), 1, 0)
+        text_opts.addWidget(glow_row_w, 1, 1)
+        text_opts.addWidget(QLabel("Цвет"), 2, 0)
+        text_opts.addWidget(self.text_overlay_text_btn, 2, 1)
+        text_opts.addWidget(QLabel("Межбуквенный интервал"), 3, 0)
+        text_opts.addWidget(self.text_overlay_letter_spacing, 3, 1)
+        text_opts.addWidget(QLabel("Шрифт"), 4, 0)
+        text_opts.addWidget(font_row_w, 4, 1)
 
         self.text_overlay_wave_amp = ValueRangeSlider(
             minimum=0,
@@ -1402,10 +1398,10 @@ class MainWindow(QWidget):
         self.text_overlay_wave_speed.rangeChangeFinished.connect(
             self._on_text_overlay_wave_changed
         )
-        text_opts.addWidget(QLabel("Волна — амплитуда:"), 6, 0)
-        text_opts.addWidget(self.text_overlay_wave_amp, 6, 1)
-        text_opts.addWidget(QLabel("Скорость:"), 7, 0)
-        text_opts.addWidget(self.text_overlay_wave_speed, 7, 1)
+        text_opts.addWidget(QLabel("Волна - амплитуда"), 5, 0)
+        text_opts.addWidget(self.text_overlay_wave_amp, 5, 1)
+        text_opts.addWidget(QLabel("Волна - скорость"), 6, 0)
+        text_opts.addWidget(self.text_overlay_wave_speed, 6, 1)
 
         text_opts_w = QWidget()
         text_opts_w.setLayout(text_opts)
@@ -1467,13 +1463,6 @@ class MainWindow(QWidget):
         preview_nav_w.setLayout(preview_nav)
         text_controls_l.addWidget(preview_nav_w)
 
-        text_hint = QLabel(
-            "Перетащите текст · ▶ смотреть ролик · стрелки листают исходники"
-        )
-        text_hint.setObjectName("hint")
-        text_hint.setWordWrap(True)
-        text_controls_l.addWidget(text_hint)
-
         text_l.addWidget(self._text_overlay_panel)
         self._update_text_overlay_controls()
 
@@ -1510,49 +1499,113 @@ class MainWindow(QWidget):
                 decimals=decimals,
             )
 
-        def _bounds_row(row: int, title: str, w: QWidget) -> int:
-            rg.addWidget(QLabel(title), row, 0, Qt.AlignmentFlag.AlignVCenter)
-            rg.addWidget(w, row, 1, 1, 2)
+        def _fx_enable(tooltip: str) -> QCheckBox:
+            cb = QCheckBox()
+            cb.setChecked(True)
+            cb.setToolTip(tooltip)
+            cb.toggled.connect(self._on_fx_enable_toggled)
+            return cb
+
+        # Общие галочки включения фильтров (случайный и ручной режимы).
+        self.fx_brightness_enabled = _fx_enable(
+            "Применять яркость. Выкл. — яркость не меняется."
+        )
+        self.fx_contrast_enabled = _fx_enable(
+            "Применять контраст. Выкл. — контраст без изменений."
+        )
+        self.fx_saturation_enabled = _fx_enable(
+            "Применять насыщенность. Выкл. — насыщенность без изменений."
+        )
+        self.fx_crop_jitter_enabled = _fx_enable(
+            "Применять кроп-джиттер. Выкл. — без случайного кропа."
+        )
+        self.fx_scale_enabled = _fx_enable(
+            "Применять масштаб. Выкл. — масштаб 100%."
+        )
+        self.fx_noise_enabled = _fx_enable(
+            "Применять шум. Выкл. — без шума."
+        )
+        self.fx_seed_enabled = _fx_enable(
+            "Случайный seed для джиттера. Выкл. — фиксированный seed 0."
+        )
+        self.audio_speed = _fx_enable(
+            "Применять скорость видео+аудио. Выкл. — скорость 1.0×."
+        )
+        self.audio_chorus = _fx_enable(
+            "Применять хорус. Выкл. — хорус не добавляется."
+        )
+        self._fx_enable_checks = [
+            self.fx_brightness_enabled,
+            self.fx_contrast_enabled,
+            self.fx_saturation_enabled,
+            self.fx_crop_jitter_enabled,
+            self.fx_scale_enabled,
+            self.fx_noise_enabled,
+            self.fx_seed_enabled,
+            self.audio_speed,
+            self.audio_chorus,
+        ]
+
+        def _bounds_row(row: int, title: str, w: QWidget, enable_cb: QCheckBox) -> int:
+            rg.addWidget(enable_cb, row, 0, Qt.AlignmentFlag.AlignVCenter)
+            rg.addWidget(QLabel(title), row, 1, Qt.AlignmentFlag.AlignVCenter)
+            rg.addWidget(w, row, 2)
             return row + 1
 
         br = 0
         self.rb_brightness = _bound_slider(
             range_min=-40.0, range_max=40.0, lo=-22.0, hi=22.0, step=0.5, decimals=1
         )
-        br = _bounds_row(br, "Яркость (±)", self.rb_brightness)
+        br = _bounds_row(br, "Яркость (±)", self.rb_brightness, self.fx_brightness_enabled)
         self.rb_contrast = _bound_slider(
             range_min=0.70, range_max=1.40, lo=0.88, hi=1.14, step=0.01, decimals=2
         )
-        br = _bounds_row(br, "Контраст", self.rb_contrast)
+        br = _bounds_row(br, "Контраст", self.rb_contrast, self.fx_contrast_enabled)
         self.rb_saturation = _bound_slider(
             range_min=0.70, range_max=1.40, lo=0.88, hi=1.12, step=0.01, decimals=2
         )
-        br = _bounds_row(br, "Насыщенность", self.rb_saturation)
+        br = _bounds_row(br, "Насыщенность", self.rb_saturation, self.fx_saturation_enabled)
         self.rb_crop_jitter = _bound_slider(
             range_min=0, range_max=12, lo=0, hi=3, step=1, decimals=0
         )
-        br = _bounds_row(br, "Кроп-джиттер (px)", self.rb_crop_jitter)
+        br = _bounds_row(
+            br, "Кроп-джиттер (px)", self.rb_crop_jitter, self.fx_crop_jitter_enabled
+        )
         self.rb_scale_pct = _bound_slider(
             range_min=90.0, range_max=110.0, lo=95.0, hi=100.6, step=0.1, decimals=1
         )
-        br = _bounds_row(br, "Масштаб %", self.rb_scale_pct)
+        br = _bounds_row(br, "Масштаб %", self.rb_scale_pct, self.fx_scale_enabled)
         self.rb_noise = _bound_slider(
             range_min=0.0, range_max=10.0, lo=0.5, hi=4.0, step=0.05, decimals=2
         )
-        br = _bounds_row(br, "Шум σ", self.rb_noise)
+        br = _bounds_row(br, "Шум σ", self.rb_noise, self.fx_noise_enabled)
         self.rb_seed = _bound_slider(
             range_min=0, range_max=99_999_999, lo=0, hi=99_999_999, step=1, decimals=0
         )
-        br = _bounds_row(br, "Seed", self.rb_seed)
+        br = _bounds_row(br, "Seed", self.rb_seed, self.fx_seed_enabled)
         self.audio_speed_range = _bound_slider(
             range_min=0.85, range_max=1.25, lo=1.0, hi=1.1, step=0.01, decimals=2
         )
-        br = _bounds_row(br, "Скорость видео+аудио (x)", self.audio_speed_range)
+        br = _bounds_row(
+            br, "Скорость видео+аудио (x)", self.audio_speed_range, self.audio_speed
+        )
         self.audio_chorus_prob = ValueRangeSlider(
             minimum=0.0, maximum=1.0, value=0.45, step=0.05, decimals=2
         )
-        rg.addWidget(QLabel("Вероятность хора:"), br, 0, Qt.AlignmentFlag.AlignVCenter)
-        rg.addWidget(self.audio_chorus_prob, br, 1, 1, 2)
+        br = _bounds_row(
+            br, "Вероятность хора", self.audio_chorus_prob, self.audio_chorus
+        )
+        self._random_bound_sliders = [
+            self.rb_brightness,
+            self.rb_contrast,
+            self.rb_saturation,
+            self.rb_crop_jitter,
+            self.rb_scale_pct,
+            self.rb_noise,
+            self.rb_seed,
+            self.audio_speed_range,
+            self.audio_chorus_prob,
+        ]
         self._random_bounds_section.content_layout().addWidget(bounds_inner)
         self._random_bounds_section.set_expanded(True)
         fx_layout.addWidget(self._random_bounds_section)
@@ -1596,40 +1649,40 @@ class MainWindow(QWidget):
             self.seed,
         ]
 
+        def _bind_enable_pair(src: QCheckBox, dst: QCheckBox) -> None:
+            def _to_dst(v: bool, _src=src, _dst=dst) -> None:
+                if _dst.isChecked() != v:
+                    _dst.blockSignals(True)
+                    _dst.setChecked(v)
+                    _dst.blockSignals(False)
+
+            def _to_src(v: bool, _src=src, _dst=dst) -> None:
+                if _src.isChecked() != v:
+                    _src.setChecked(v)
+
+            src.toggled.connect(_to_dst)
+            dst.toggled.connect(_to_src)
+
         r = 0
-        for label, w in [
-            ("Яркость (±):", self.brightness),
-            ("Контраст:", self.contrast),
-            ("Насыщенность:", self.saturation),
-            ("Кроп-джиттер (px):", self.crop_jitter),
-            ("Масштаб %:", self.scale_pct),
-            ("Шум σ:", self.noise),
-            ("Seed:", self.seed),
+        for label, w, en in [
+            ("Яркость (±):", self.brightness, self.fx_brightness_enabled),
+            ("Контраст:", self.contrast, self.fx_contrast_enabled),
+            ("Насыщенность:", self.saturation, self.fx_saturation_enabled),
+            ("Кроп-джиттер (px):", self.crop_jitter, self.fx_crop_jitter_enabled),
+            ("Масштаб %:", self.scale_pct, self.fx_scale_enabled),
+            ("Шум σ:", self.noise, self.fx_noise_enabled),
+            ("Seed:", self.seed, self.fx_seed_enabled),
         ]:
-            mg.addWidget(QLabel(label), r, 0, Qt.AlignmentFlag.AlignVCenter)
-            mg.addWidget(w, r, 1)
+            mirror = QCheckBox()
+            mirror.setChecked(en.isChecked())
+            mirror.setToolTip(en.toolTip())
+            _bind_enable_pair(en, mirror)
+            mg.addWidget(mirror, r, 0, Qt.AlignmentFlag.AlignVCenter)
+            mg.addWidget(QLabel(label), r, 1, Qt.AlignmentFlag.AlignVCenter)
+            mg.addWidget(w, r, 2)
             r += 1
 
-        mg.addWidget(QLabel("— Случайные: включение —"), r, 0, 1, 2)
-        r += 1
-        self.audio_speed = ToggleSwitch(
-            "Ускорение видео и аудио (случайно, один коэффициент)"
-        )
-        self.audio_speed.setChecked(True)
-        self.audio_chorus = ToggleSwitch("Лёгкий хорус (случайно)")
-        self.audio_chorus.setChecked(True)
-
-        self._random_audio_widgets = [
-            self.audio_speed,
-            self.audio_chorus,
-        ]
-
-        mg.addWidget(self.audio_speed, r, 0, 1, 2)
-        r += 1
-        mg.addWidget(self.audio_chorus, r, 0, 1, 2)
-        r += 1
-
-        mg.addWidget(QLabel("— Скорость и аудио (ручные) —"), r, 0, 1, 2)
+        mg.addWidget(QLabel("— Скорость и аудио (ручные) —"), r, 0, 1, 3)
         r += 1
         self.playback_speed_manual = ValueRangeSlider(
             minimum=0.85, maximum=1.25, value=1.05, step=0.01, decimals=2
@@ -1640,12 +1693,22 @@ class MainWindow(QWidget):
             self.playback_speed_manual,
             self.audio_chorus_manual,
         ]
+        speed_mirror = QCheckBox()
+        speed_mirror.setChecked(self.audio_speed.isChecked())
+        speed_mirror.setToolTip(self.audio_speed.toolTip())
+        _bind_enable_pair(self.audio_speed, speed_mirror)
+        mg.addWidget(speed_mirror, r, 0, Qt.AlignmentFlag.AlignVCenter)
         mg.addWidget(
-            QLabel("Скорость видео+аудио (x):"), r, 0, Qt.AlignmentFlag.AlignVCenter
+            QLabel("Скорость видео+аудио (x):"), r, 1, Qt.AlignmentFlag.AlignVCenter
         )
-        mg.addWidget(self.playback_speed_manual, r, 1)
+        mg.addWidget(self.playback_speed_manual, r, 2)
         r += 1
-        mg.addWidget(self.audio_chorus_manual, r, 0, 1, 2)
+        chorus_mirror = QCheckBox()
+        chorus_mirror.setChecked(self.audio_chorus.isChecked())
+        chorus_mirror.setToolTip(self.audio_chorus.toolTip())
+        _bind_enable_pair(self.audio_chorus, chorus_mirror)
+        mg.addWidget(chorus_mirror, r, 0, Qt.AlignmentFlag.AlignVCenter)
+        mg.addWidget(self.audio_chorus_manual, r, 1, 1, 2)
         r += 1
 
         self._manual_section.content_layout().addWidget(manual_inner)
@@ -1653,6 +1716,7 @@ class MainWindow(QWidget):
         self._manual_panel = manual_inner
         self._manual_section.set_expanded(True)
         self._on_random_uniquify_toggled(self.random_uniquify.isChecked())
+        self._sync_fx_enable_slider_states()
 
         self._uniquify_section_stack = QStackedWidget()
         self._uniquify_section_stack.addWidget(wrap_work_section_page(io))
@@ -2249,7 +2313,7 @@ class MainWindow(QWidget):
         settings_title = QLabel("Настройки")
         settings_title.setObjectName("title")
         settings_hint = QLabel(
-            "Настройки своего антидетекта (локальный или удалённый HTTP API) "
+            "Настройки своего антидетекта (локальный HTTP API) "
             "и параметры обработки видео (GPU, потоки, ffmpeg)."
             if self._platform != PLATFORM_YT_INST
             else "Общие настройки антидетекта и ИИ, плюс разделы YouTube и Instagram "
@@ -2322,25 +2386,6 @@ class MainWindow(QWidget):
         )
         gl.addWidget(QLabel("Базовый URL:"), 0, 0)
         gl.addWidget(self._local_api_base_url, 0, 1)
-
-        self._gb_antydetect_remote = QGroupBox("Удалённый HTTP API")
-        gr = _compact_settings_grid(self._gb_antydetect_remote)
-        self._remote_api_base_url = QLineEdit()
-        self._remote_api_base_url.setPlaceholderText("https://example.com:18765")
-        self._remote_api_base_url.setToolTip(
-            "Корень HTTP-сервиса на удалённой машине (без завершающего слэша), "
-            "как в OpenAPI: /profiles, /health, …"
-        )
-        gr.addWidget(QLabel("Базовый URL:"), 0, 0)
-        gr.addWidget(self._remote_api_base_url, 0, 1)
-        self._remote_cdp_public_host = QLineEdit()
-        self._remote_cdp_public_host.setPlaceholderText("Публичный IP или хост для CDP")
-        self._remote_cdp_public_host.setToolTip(
-            "Значение cdp_public_host в запросе /launch: адрес, по которому Zaliver "
-            "подключится к CDP удалённого браузера."
-        )
-        gr.addWidget(QLabel("CDP public host:"), 1, 0)
-        gr.addWidget(self._remote_cdp_public_host, 1, 1)
 
         self._btn_save_antydetect = QPushButton("Сохранить")
         self._btn_save_antydetect.setObjectName("secondary")
@@ -2612,7 +2657,6 @@ class MainWindow(QWidget):
         settings_l.addWidget(self._dolphin_headless)
         settings_l.addWidget(self._gb_max_concurrent_browsers)
         settings_l.addWidget(self._gb_antydetect_local)
-        settings_l.addWidget(self._gb_antydetect_remote)
         settings_l.addWidget(self._antydetect_save_row)
         settings_l.addWidget(gb_yt)
         settings_l.addWidget(gb_ig)
@@ -4882,6 +4926,29 @@ class MainWindow(QWidget):
             )
             self._sync_text_overlay_preview(ax, ay)
             self._update_text_overlay_controls()
+        self._load_fx_enable_settings()
+
+    def _load_fx_enable_settings(self) -> None:
+        if not hasattr(self, "fx_brightness_enabled"):
+            return
+        pairs = [
+            ("fx_brightness_enabled", self.fx_brightness_enabled),
+            ("fx_contrast_enabled", self.fx_contrast_enabled),
+            ("fx_saturation_enabled", self.fx_saturation_enabled),
+            ("fx_crop_jitter_enabled", self.fx_crop_jitter_enabled),
+            ("fx_scale_enabled", self.fx_scale_enabled),
+            ("fx_noise_enabled", self.fx_noise_enabled),
+            ("fx_seed_enabled", self.fx_seed_enabled),
+            ("playback_speed_enabled", self.audio_speed),
+            ("audio_chorus_enabled", self.audio_chorus),
+        ]
+        self._fx_loading = True
+        try:
+            for key, cb in pairs:
+                cb.setChecked(bool(self._settings.value(key, True, type=bool)))
+        finally:
+            self._fx_loading = False
+        self._sync_fx_enable_slider_states()
 
     def _save_folder_settings(self) -> None:
         self._settings.setValue("output_folder", self.output_dir_edit.text().strip())
@@ -4965,6 +5032,34 @@ class MainWindow(QWidget):
             self._settings.setValue("text_overlay_wave_frame_speed", float(wfs_lo))
             self._settings.setValue("text_overlay_wave_frame_speed_min", float(wfs_lo))
             self._settings.setValue("text_overlay_wave_frame_speed_max", float(wfs_hi))
+        if hasattr(self, "fx_brightness_enabled"):
+            self._settings.setValue(
+                "fx_brightness_enabled", bool(self.fx_brightness_enabled.isChecked())
+            )
+            self._settings.setValue(
+                "fx_contrast_enabled", bool(self.fx_contrast_enabled.isChecked())
+            )
+            self._settings.setValue(
+                "fx_saturation_enabled", bool(self.fx_saturation_enabled.isChecked())
+            )
+            self._settings.setValue(
+                "fx_crop_jitter_enabled", bool(self.fx_crop_jitter_enabled.isChecked())
+            )
+            self._settings.setValue(
+                "fx_scale_enabled", bool(self.fx_scale_enabled.isChecked())
+            )
+            self._settings.setValue(
+                "fx_noise_enabled", bool(self.fx_noise_enabled.isChecked())
+            )
+            self._settings.setValue(
+                "fx_seed_enabled", bool(self.fx_seed_enabled.isChecked())
+            )
+            self._settings.setValue(
+                "playback_speed_enabled", bool(self.audio_speed.isChecked())
+            )
+            self._settings.setValue(
+                "audio_chorus_enabled", bool(self.audio_chorus.isChecked())
+            )
 
     def _antidetect_kind(self) -> str:
         """Режим антидетекта из настроек: local | remote (логика без UI-выбора)."""
@@ -5067,16 +5162,6 @@ class MainWindow(QWidget):
         else:
             url = DEFAULT_LOCAL_API_BASE_URL
         self._local_api_base_url.setText(url)
-        if hasattr(self, "_remote_api_base_url"):
-            remote_url = (
-                self._settings.value("antydetect/remote_api_base_url", "", type=str) or ""
-            ).strip()
-            self._remote_api_base_url.setText(remote_url)
-        if hasattr(self, "_remote_cdp_public_host"):
-            remote_host = (
-                self._settings.value("antydetect/remote_cdp_public_host", "", type=str) or ""
-            ).strip()
-            self._remote_cdp_public_host.setText(remote_host)
         if hasattr(self, "_max_concurrent_browsers_slider"):
             self._max_concurrent_browsers_slider.blockSignals(True)
             self._max_concurrent_browsers_slider.setValue(
@@ -5097,16 +5182,6 @@ class MainWindow(QWidget):
             self._settings.setValue(
                 "antydetect/local_api_base_url",
                 (self._local_api_base_url.text() or "").strip(),
-            )
-        if hasattr(self, "_remote_api_base_url"):
-            self._settings.setValue(
-                "antydetect/remote_api_base_url",
-                (self._remote_api_base_url.text() or "").strip(),
-            )
-        if hasattr(self, "_remote_cdp_public_host"):
-            self._settings.setValue(
-                "antydetect/remote_cdp_public_host",
-                (self._remote_cdp_public_host.text() or "").strip(),
             )
         self._save_max_concurrent_browsers_setting()
         try:
@@ -8599,25 +8674,21 @@ class MainWindow(QWidget):
                 base_url = DEFAULT_LOCAL_API_BASE_URL
             return base_url
         if k == "remote":
-            base_url = (self._remote_api_base_url.text() or "").strip()
-            if not base_url:
-                base_url = (
-                    self._settings.value("antydetect/remote_api_base_url", "", type=str) or ""
-                ).strip()
-            return base_url
+            return (
+                self._settings.value("antydetect/remote_api_base_url", "", type=str) or ""
+            ).strip()
         return ""
 
     def _remote_cdp_launch_options_for_kind(self, kind: str) -> RemoteCdpLaunchOptions | None:
         if (kind or "").strip() != "remote":
             return None
-        host = (self._remote_cdp_public_host.text() or "").strip()
-        if not host:
-            host = (
-                self._settings.value("antydetect/remote_cdp_public_host", "", type=str) or ""
-            ).strip()
+        host = (
+            self._settings.value("antydetect/remote_cdp_public_host", "", type=str) or ""
+        ).strip()
         if not host:
             raise LocalAntidetectError(
-                "Укажите CDP public host (IP) для удалённого антидетекта в настройках."
+                "Для удалённого антидетекта в настройках нужен CDP public host "
+                "(ключ antydetect/remote_cdp_public_host)."
             )
         return RemoteCdpLaunchOptions(cdp_public_host=host)
 
@@ -9951,6 +10022,8 @@ class MainWindow(QWidget):
         if not hasattr(self, "background_music_mix"):
             return
         music_on = bool(self.background_music.isChecked())
+        if hasattr(self, "_music_settings_panel"):
+            self._music_settings_panel.setVisible(music_on)
         self.background_music_mix.setEnabled(music_on)
         mix_on = music_on and self.background_music_mix.isChecked()
         self.background_music_volume.setEnabled(mix_on)
@@ -10248,12 +10321,12 @@ class MainWindow(QWidget):
         if not hasattr(self, "text_overlay_enabled"):
             return
         on = bool(self.text_overlay_enabled.isChecked())
+        self._text_overlay_panel.setVisible(on)
         self._text_overlay_panel.setEnabled(on)
-        if hasattr(self, "text_overlay_from_middle"):
-            self.text_overlay_from_middle.setEnabled(on)
         glow_on = bool(self.text_overlay_glow_enabled.isChecked())
-        self.text_overlay_glow_btn.setEnabled(glow_on)
-        self._sync_text_overlay_preview()
+        self.text_overlay_glow_btn.setEnabled(on and glow_on)
+        if on:
+            self._sync_text_overlay_preview()
 
     def _populate_text_overlay_font_combo(self) -> None:
         if not hasattr(self, "text_overlay_font_combo"):
@@ -10373,19 +10446,60 @@ class MainWindow(QWidget):
         self._sync_text_overlay_preview()
         self._save_folder_settings()
 
+    def _on_fx_enable_toggled(self, _checked: bool = False) -> None:
+        self._sync_fx_enable_slider_states()
+        if getattr(self, "_fx_loading", False):
+            return
+        self._save_folder_settings()
+
+    def _sync_fx_enable_slider_states(self) -> None:
+        """Галочки всегда активны; слайдеры — по режиму и включению эффекта."""
+        if not hasattr(self, "fx_brightness_enabled"):
+            return
+        random_on = bool(
+            self.random_uniquify.isChecked()
+            if hasattr(self, "random_uniquify")
+            else True
+        )
+        pairs_random = [
+            (self.fx_brightness_enabled, self.rb_brightness),
+            (self.fx_contrast_enabled, self.rb_contrast),
+            (self.fx_saturation_enabled, self.rb_saturation),
+            (self.fx_crop_jitter_enabled, self.rb_crop_jitter),
+            (self.fx_scale_enabled, self.rb_scale_pct),
+            (self.fx_noise_enabled, self.rb_noise),
+            (self.fx_seed_enabled, self.rb_seed),
+            (self.audio_speed, self.audio_speed_range),
+            (self.audio_chorus, self.audio_chorus_prob),
+        ]
+        pairs_manual = [
+            (self.fx_brightness_enabled, self.brightness),
+            (self.fx_contrast_enabled, self.contrast),
+            (self.fx_saturation_enabled, self.saturation),
+            (self.fx_crop_jitter_enabled, self.crop_jitter),
+            (self.fx_scale_enabled, self.scale_pct),
+            (self.fx_noise_enabled, self.noise),
+            (self.fx_seed_enabled, self.seed),
+            (self.audio_speed, self.playback_speed_manual),
+            (self.audio_chorus, self.audio_chorus_manual),
+        ]
+        for cb, w in pairs_random:
+            w.setEnabled(bool(random_on and cb.isChecked()))
+        for cb, w in pairs_manual:
+            w.setEnabled(bool((not random_on) and cb.isChecked()))
+        for cb in getattr(self, "_fx_enable_checks", []):
+            cb.setEnabled(True)
+
     def _on_random_uniquify_toggled(self, random_on: bool) -> None:
         # Keep section visible, but toggle relevant controls.
         if hasattr(self, "_manual_panel"):
             self._manual_panel.setEnabled(True)
-        for w in getattr(self, "_manual_video_widgets", []):
-            w.setEnabled(not random_on)
-        for w in getattr(self, "_manual_audio_widgets", []):
-            w.setEnabled(not random_on)
-        for w in getattr(self, "_random_audio_widgets", []):
-            w.setEnabled(bool(random_on))
+        if hasattr(self, "_manual_section"):
+            self._manual_section.setEnabled(True)
         if hasattr(self, "_random_bounds_panel"):
-            self._random_bounds_panel.setEnabled(bool(random_on))
-        self._manual_section.setEnabled(True)
+            # Панель не блокируем целиком — галочки включения остаются доступны.
+            self._random_bounds_panel.setEnabled(True)
+        self._sync_fx_enable_slider_states()
 
     def _processing_run_options(self, *, for_slicing: bool = False) -> dict:
         """Общие параметры обработки из раздела «Настройки»."""
@@ -10443,6 +10557,13 @@ class MainWindow(QWidget):
             "randomize_uniquify": self.random_uniquify.isChecked(),
             "copies_per_file": int(self.copies_per_file.value()),
             "one_copy_no_effects": bool(self.one_copy_no_effects.isChecked()),
+            "brightness_enabled": bool(self.fx_brightness_enabled.isChecked()),
+            "contrast_enabled": bool(self.fx_contrast_enabled.isChecked()),
+            "saturation_enabled": bool(self.fx_saturation_enabled.isChecked()),
+            "crop_jitter_enabled": bool(self.fx_crop_jitter_enabled.isChecked()),
+            "scale_enabled": bool(self.fx_scale_enabled.isChecked()),
+            "noise_enabled": bool(self.fx_noise_enabled.isChecked()),
+            "seed_enabled": bool(self.fx_seed_enabled.isChecked()),
             "playback_speed_enabled": bool(self.audio_speed.isChecked()),
             "audio_chorus_enabled": bool(self.audio_chorus.isChecked()),
             "background_music_enabled": bool(self.background_music.isChecked()),

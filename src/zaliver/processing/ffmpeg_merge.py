@@ -877,7 +877,7 @@ def _h264_amf_args(target_video_bps: Optional[int], *, gpu_cq: int = 23) -> List
             "-bf",
             "0",
             "-async_depth",
-            "32",
+            "4",
         ]
     b = clamp_target_video_bps(target_video_bps)
     maxr = max(b + 1, int(b * 1.5))
@@ -893,7 +893,7 @@ def _h264_amf_args(target_video_bps: Optional[int], *, gpu_cq: int = 23) -> List
         "-maxrate",
         str(maxr),
         "-async_depth",
-        "32",
+        "4",
     ]
 
 

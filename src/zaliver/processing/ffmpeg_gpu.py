@@ -173,7 +173,7 @@ def build_gpu_uniquify_filtergraph(
     text_overlay: Optional[ScaledTextOverlay] = None,
     total_frames: int = 0,
     fps: float = 30.0,
-) -> str:
+) -> tuple[str, list[str]]:
     s = int(start_frame)
     fc = int(frame_count)
     e = s + fc
@@ -215,10 +215,17 @@ def build_gpu_uniquify_filtergraph(
     tail_s = ",".join(chain)
     base = f"[0:v]{tail_s}[v0]"
     if text_overlay and text_overlay.lines:
-        return (
-            f"{base};{build_text_overlay_filters(text_overlay, 'v0', start_frame=s, frame_count=fc, total_frames=int(total_frames), fps=float(fps))}"
+        built = build_text_overlay_filters(
+            text_overlay,
+            "v0",
+            start_frame=s,
+            frame_count=fc,
+            total_frames=int(total_frames),
+            fps=float(fps),
+            emoji_input_start=1,
         )
-    return f"{base};[v0]null[outv]"
+        return f"{base};{built.graph}", list(built.emoji_input_argv)
+    return f"{base};[v0]null[outv]", []
 
 
 def is_gpu_filter_fallback_error(stderr_lines: List[str]) -> bool:
@@ -243,3 +250,16 @@ def is_gpu_filter_fallback_error(stderr_lines: List[str]) -> bool:
         "generic error in an external library",
     )
     return any(m in low for m in markers)
+
+
+def is_gpu_encoder_oom_error(stderr_lines: List[str]) -> bool:
+    """AMF/NVENC/QSV ran out of VRAM while encoding — retry with libx264."""
+    low = "\n".join(stderr_lines).lower()
+    if "cannot allocate memory" in low:
+        return True
+    if "error submitting video frame to the encoder" in low and (
+        "h264_amf" in low or "hevc_amf" in low or "nvenc" in low or "qsv" in low
+    ):
+        return True
+    return False
+

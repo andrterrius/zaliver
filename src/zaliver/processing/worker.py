@@ -14,11 +14,13 @@ from typing import Any, Dict, Optional
 
 from zaliver.processing.fd_limit import raise_fd_limit_soft
 from zaliver.processing.ffmpeg_merge import (
+    libx264_encode_args_for_target,
     pick_best_h264_encoder,
     resolve_ffmpeg_executable,
 )
 from zaliver.processing.ffmpeg_gpu import (
     build_gpu_uniquify_filtergraph,
+    is_gpu_encoder_oom_error,
     is_gpu_filter_fallback_error,
     resolve_gpu_pipeline,
 )
@@ -235,7 +237,7 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
         fps=float(fps),
     )
 
-    attempts: list[tuple[str, Optional[object], list[str]]] = []
+    attempts: list[tuple[str, Optional[object], list[str], str, list[str]]] = []
     if use_gpu:
         gpu_pipeline = resolve_gpu_pipeline(prefer_gpu=True, encoder=enc)
         if gpu_pipeline is not None:
@@ -247,23 +249,30 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
                         *gpu_pipeline.global_args,
                         *gpu_pipeline.input_args,
                     ],
+                    enc,
+                    list(enc_args),
                 )
             )
-    attempts.append(("cpu", None, []))
+    attempts.append(("cpu", None, [], enc, list(enc_args)))
+    if use_gpu and enc != "libx264":
+        # Last resort if GPU encoder OOMs (common with AMF + heavy overlays).
+        attempts.append(
+            ("cpu", None, [], "libx264", libx264_encode_args_for_target(tb_i))
+        )
 
     filter_script: Path | None = None
     last_stderr: list[str] = []
     code = 1
 
     try:
-        for mode, pipeline, hw_args in attempts:
+        for mode, pipeline, hw_args, enc_name, enc_name_args in attempts:
             if mode == "gpu" and pipeline is not None:
-                graph = build_gpu_uniquify_filtergraph(
+                graph, emoji_argv = build_gpu_uniquify_filtergraph(
                     pipeline=pipeline,  # type: ignore[arg-type]
                     **graph_common,
                 )
             else:
-                graph = build_uniquify_filtergraph(**graph_common)
+                graph, emoji_argv = build_uniquify_filtergraph(**graph_common)
 
             if filter_script is not None:
                 try:
@@ -283,6 +292,7 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
                 *hw_args,
                 "-i",
                 path,
+                *emoji_argv,
                 *filter_argv,
                 "-map",
                 "[outv]",
@@ -294,10 +304,12 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
                 "-movflags",
                 "+faststart",
                 "-c:v",
-                enc,
-                *enc_args,
-                part_path,
+                enc_name,
+                *enc_name_args,
             ]
+            if emoji_argv:
+                cmd.append("-shortest")
+            cmd.append(part_path)
 
             try:
                 code, last_stderr = _run_ffmpeg_cmd(
@@ -312,6 +324,12 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
             if code == 0:
                 break
             if use_gpu and mode == "gpu" and is_gpu_filter_fallback_error(last_stderr):
+                continue
+            if (
+                use_gpu
+                and enc_name != "libx264"
+                and is_gpu_encoder_oom_error(last_stderr)
+            ):
                 continue
             break
 

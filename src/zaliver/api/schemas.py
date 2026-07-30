@@ -72,6 +72,10 @@ class TextOverlayModel(BaseModel):
     anchor_y: float = 0.15
     wave_amp_frac: float = 0.0
     wave_frame_speed: float = 0.0
+    wave_amp_frac_min: float | None = None
+    wave_amp_frac_max: float | None = None
+    wave_frame_speed_min: float | None = None
+    wave_frame_speed_max: float | None = None
 
 
 class UniquifyJobRequest(BaseModel):
@@ -95,6 +99,8 @@ class UniquifyJobRequest(BaseModel):
     background_music_enabled: bool = False
     background_music_mix_with_source: bool = False
     background_music_volume_pct: int = Field(default=35, ge=0, le=100)
+    background_music_volume_pct_min: int | None = Field(default=None, ge=0, le=100)
+    background_music_volume_pct_max: int | None = Field(default=None, ge=0, le=100)
     background_music_files: list[str] = Field(default_factory=list)
     settings: UniquifySettingsModel = Field(default_factory=UniquifySettingsModel)
     random_bounds: dict[str, Any] = Field(default_factory=dict)

@@ -87,9 +87,10 @@ def build_uniquify_filtergraph(
     text_overlay: Optional[ScaledTextOverlay] = None,
     total_frames: int = 0,
     fps: float = 30.0,
-) -> str:
+) -> tuple[str, list[str]]:
     """
     Full -filter_complex graph: one video input [0:v] -> uniquified [outv].
+    Returns (graph, extra_input_argv) for optional color emoji stills.
     """
     s = int(start_frame)
     fc = int(frame_count)
@@ -112,7 +113,14 @@ def build_uniquify_filtergraph(
 
     base = f"[0:v]{head},{tail_s}[v0]"
     if text_overlay and text_overlay.lines:
-        return (
-            f"{base};{build_text_overlay_filters(text_overlay, 'v0', start_frame=s, frame_count=fc, total_frames=int(total_frames), fps=float(fps))}"
+        built = build_text_overlay_filters(
+            text_overlay,
+            "v0",
+            start_frame=s,
+            frame_count=fc,
+            total_frames=int(total_frames),
+            fps=float(fps),
+            emoji_input_start=1,
         )
-    return f"{base};[v0]null[outv]"
+        return f"{base};{built.graph}", list(built.emoji_input_argv)
+    return f"{base};[v0]null[outv]", []

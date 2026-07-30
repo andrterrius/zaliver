@@ -1163,8 +1163,9 @@ def _append_text_overlay_to_graph(
     total_frames: int,
     fps: float,
     total_duration_sec: float,
-) -> str:
-    overlay_part = build_text_overlay_filters(
+    emoji_input_start: int = 1,
+) -> tuple[str, list[str]]:
+    built = build_text_overlay_filters(
         overlay,
         "v0",
         start_frame=0,
@@ -1172,10 +1173,11 @@ def _append_text_overlay_to_graph(
         total_frames=int(total_frames),
         fps=float(fps),
         total_duration_sec=total_duration_sec,
+        emoji_input_start=int(emoji_input_start),
     )
-    if "drawtext" not in overlay_part:
-        return f"{concat_label}null[outv]"
-    return f"{concat_label}null[v0];{overlay_part}"
+    if not built.has_content:
+        return f"{concat_label}null[outv]", []
+    return f"{concat_label}null[v0];{built.graph}", list(built.emoji_input_argv)
 
 
 def _scene_parallel_workers(n_scenes: int) -> int:
@@ -1281,13 +1283,17 @@ def _encode_args_for_scenes(
         )
     if concat_out == "[concatv]":
         dur = float(total_duration_sec) if total_duration_sec else total_frames / fps_f
-        filter_complex += ";" + _append_text_overlay_to_graph(
+        emoji_start = sum(1 for a in input_args if a == "-i")
+        ov_graph, emoji_argv = _append_text_overlay_to_graph(
             "[concatv]",
             scaled_overlay,
             total_frames=total_frames,
             fps=fps_f,
             total_duration_sec=dur,
+            emoji_input_start=emoji_start,
         )
+        input_args.extend(emoji_argv)
+        filter_complex += ";" + ov_graph
     return input_args, [filter_complex], total_frames, global_hw
 
 

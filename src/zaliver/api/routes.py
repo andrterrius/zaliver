@@ -217,7 +217,7 @@ def build_router() -> APIRouter:
             music = resolve_path_list(
                 body.background_music_files, st.config.allowed_roots
             )
-            overlay = body.text_overlay.model_dump()
+            overlay = body.text_overlay.model_dump(exclude_none=True)
             if "orientation" in overlay:
                 overlay["preview_orientation"] = overlay.pop("orientation")
             if overlay.get("custom_font_path"):
@@ -253,6 +253,16 @@ def build_router() -> APIRouter:
                 body.background_music_mix_with_source
             ),
             "background_music_volume_pct": int(body.background_music_volume_pct),
+            "background_music_volume_pct_min": int(
+                body.background_music_volume_pct_min
+                if body.background_music_volume_pct_min is not None
+                else body.background_music_volume_pct
+            ),
+            "background_music_volume_pct_max": int(
+                body.background_music_volume_pct_max
+                if body.background_music_volume_pct_max is not None
+                else body.background_music_volume_pct
+            ),
             "background_music_files": music,
             "random_bounds": dict(body.random_bounds or {}),
             "text_overlay": overlay,
@@ -299,7 +309,7 @@ def build_router() -> APIRouter:
             )
             clips = resolve_path_list(body.clip_files, st.config.allowed_roots)
             music = resolve_path_list(body.music_files, st.config.allowed_roots)
-            overlay = body.text_overlay.model_dump()
+            overlay = body.text_overlay.model_dump(exclude_none=True)
             if "orientation" in overlay:
                 overlay["preview_orientation"] = overlay.pop("orientation")
             if overlay.get("custom_font_path"):
@@ -364,7 +374,7 @@ def build_router() -> APIRouter:
             part1 = resolve_path_list(body.part1_files, st.config.allowed_roots)
             part2 = resolve_path_list(body.part2_files, st.config.allowed_roots)
             music = resolve_path_list(body.music_files, st.config.allowed_roots)
-            overlay = body.text_overlay.model_dump()
+            overlay = body.text_overlay.model_dump(exclude_none=True)
             if "orientation" in overlay:
                 overlay["preview_orientation"] = overlay.pop("orientation")
             if overlay.get("custom_font_path"):

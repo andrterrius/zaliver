@@ -1,25 +1,124 @@
 import { useState } from "react";
 import { api } from "../api/client";
 import { useJobPoll } from "../hooks/useJobPoll";
+import { useProcessingDefaults } from "../hooks/useProcessingDefaults";
 import { ProgressBar } from "../components/ProgressBar";
+import { SectionNav } from "../components/SectionNav";
+import { ToggleSwitch } from "../components/ToggleSwitch";
+import { RangeSlider, type RangeValue } from "../components/RangeSlider";
+import {
+  TextOverlayFields,
+  defaultUniquifyTextOverlay,
+  textOverlayToApi,
+  type TextOverlayState,
+} from "../components/TextOverlayFields";
+import { linesToList } from "../lib/paths";
 
-function linesToList(text: string): string[] {
-  return text
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+const SECTIONS = ["Исходники", "Фильтры", "Текст", "Музыка"];
+
+type FxKey =
+  | "brightness"
+  | "contrast"
+  | "saturation"
+  | "scale"
+  | "noise"
+  | "speed";
+
+type FxRow = {
+  key: FxKey;
+  label: string;
+  enabled: boolean;
+  range: RangeValue;
+  min: number;
+  max: number;
+  step: number;
+  decimals: number;
+  suffix?: string;
+};
+
+const DEFAULT_FX: FxRow[] = [
+  {
+    key: "brightness",
+    label: "Яркость",
+    enabled: true,
+    range: { lo: -22, hi: 22 },
+    min: -40,
+    max: 40,
+    step: 0.5,
+    decimals: 1,
+  },
+  {
+    key: "contrast",
+    label: "Контраст",
+    enabled: true,
+    range: { lo: 0.88, hi: 1.14 },
+    min: 0.7,
+    max: 1.4,
+    step: 0.01,
+    decimals: 2,
+  },
+  {
+    key: "saturation",
+    label: "Насыщенность",
+    enabled: true,
+    range: { lo: 0.88, hi: 1.12 },
+    min: 0.7,
+    max: 1.4,
+    step: 0.01,
+    decimals: 2,
+  },
+  {
+    key: "scale",
+    label: "Масштаб",
+    enabled: true,
+    range: { lo: 95, hi: 100.6 },
+    min: 90,
+    max: 110,
+    step: 0.1,
+    decimals: 1,
+  },
+  {
+    key: "noise",
+    label: "Шум",
+    enabled: true,
+    range: { lo: 0.5, hi: 4 },
+    min: 0,
+    max: 10,
+    step: 0.05,
+    decimals: 2,
+  },
+  {
+    key: "speed",
+    label: "Скорость видео+аудио",
+    enabled: true,
+    range: { lo: 1, hi: 1.1 },
+    min: 0.85,
+    max: 1.25,
+    step: 0.01,
+    decimals: 2,
+  },
+];
+
+function fxByKey(rows: FxRow[], key: FxKey): FxRow {
+  return rows.find((r) => r.key === key)!;
 }
 
 export function UniquifyPage() {
+  const proc = useProcessingDefaults();
+  const [section, setSection] = useState(0);
   const [inputFiles, setInputFiles] = useState("");
   const [outputDir, setOutputDir] = useState("");
   const [copies, setCopies] = useState(1);
-  const [workers, setWorkers] = useState(2);
-  const [useGpu, setUseGpu] = useState(false);
-  const [randomize, setRandomize] = useState(true);
+  const [oneCopyNoFx, setOneCopyNoFx] = useState(false);
   const [deleteAfter, setDeleteAfter] = useState(false);
-  const [musicFiles, setMusicFiles] = useState("");
+  const [fx, setFx] = useState<FxRow[]>(DEFAULT_FX);
+  const [textOverlay, setTextOverlay] = useState<TextOverlayState>(
+    defaultUniquifyTextOverlay,
+  );
   const [musicEnabled, setMusicEnabled] = useState(false);
+  const [musicFiles, setMusicFiles] = useState("");
+  const [musicMix, setMusicMix] = useState(false);
+  const [musicVol, setMusicVol] = useState<RangeValue>({ lo: 35, hi: 35 });
   const [jobId, setJobId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -28,6 +127,10 @@ export function UniquifyPage() {
   const running =
     busy || (job != null && ["queued", "running"].includes(job.status));
 
+  const updateFx = (key: FxKey, partial: Partial<FxRow>) => {
+    setFx((rows) => rows.map((r) => (r.key === key ? { ...r, ...partial } : r)));
+  };
+
   const onStart = async () => {
     setError("");
     setBusy(true);
@@ -35,21 +138,76 @@ export function UniquifyPage() {
       const files = linesToList(inputFiles);
       if (!outputDir.trim()) throw new Error("Укажите выходную папку.");
       if (!files.length) throw new Error("Укажите хотя бы один входной файл.");
+
+      const br = fxByKey(fx, "brightness");
+      const ct = fxByKey(fx, "contrast");
+      const sat = fxByKey(fx, "saturation");
+      const sc = fxByKey(fx, "scale");
+      const nz = fxByKey(fx, "noise");
+      const sp = fxByKey(fx, "speed");
+
+      const random_bounds = {
+        brightness_min: br.range.lo,
+        brightness_max: br.range.hi,
+        contrast_min: ct.range.lo,
+        contrast_max: ct.range.hi,
+        saturation_min: sat.range.lo,
+        saturation_max: sat.range.hi,
+        crop_jitter_min: 0,
+        crop_jitter_max: 0,
+        scale_pct_min: sc.range.lo,
+        scale_pct_max: sc.range.hi,
+        noise_sigma_min: nz.range.lo,
+        noise_sigma_max: nz.range.hi,
+        seed_min: 0,
+        seed_max: 0,
+        playback_speed_min: sp.range.lo,
+        playback_speed_max: sp.range.hi,
+        audio_chorus_prob: 0,
+        audio_chorus_prob_min: 0,
+        audio_chorus_prob_max: 0,
+      };
+
+      const settings = {
+        brightness_delta: br.range.lo,
+        contrast: ct.range.lo,
+        saturation_scale: sat.range.lo,
+        crop_jitter_px: 0,
+        scale_pct: sc.range.lo,
+        noise_sigma: nz.range.lo,
+        seed_base: 0,
+        playback_speed_factor: sp.range.lo,
+        audio_chorus: false,
+      };
+
+      await api.patchSettings({ delete_after_upload: deleteAfter });
+
       const res = await api.startUniquify({
         output_dir: outputDir.trim(),
         input_files: files,
         copies_per_file: copies,
-        num_workers: workers,
-        use_gpu: useGpu,
-        use_gpu_finalize: useGpu,
-        randomize_uniquify: randomize,
+        num_workers: proc.numWorkers,
+        use_gpu: proc.useGpu,
+        use_gpu_finalize: proc.useGpuFinalize,
+        randomize_uniquify: true,
+        one_copy_no_effects: oneCopyNoFx,
+        brightness_enabled: br.enabled,
+        contrast_enabled: ct.enabled,
+        saturation_enabled: sat.enabled,
+        scale_enabled: sc.enabled,
+        noise_enabled: nz.enabled,
+        playback_speed_enabled: sp.enabled,
         background_music_enabled: musicEnabled,
+        background_music_mix_with_source: musicMix,
+        background_music_volume_pct: Math.round(musicVol.lo),
+        background_music_volume_pct_min: Math.round(musicVol.lo),
+        background_music_volume_pct_max: Math.round(musicVol.hi),
         background_music_files: linesToList(musicFiles),
+        settings,
+        random_bounds,
+        text_overlay: textOverlayToApi(textOverlay),
       });
       setJobId(res.id);
-      if (deleteAfter) {
-        await api.patchSettings({ delete_after_upload: true });
-      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -92,16 +250,18 @@ export function UniquifyPage() {
           Отмена
         </button>
       </div>
+      <SectionNav sections={SECTIONS} active={section} onChange={setSection} />
       <p className="hint">
-        Выбор видео → папка результатов · случайная уникализация
+        Выбор видео → папка результатов · случайная уникализация · GPU/потоки в
+        Настройках
       </p>
       {error ? <div className="error-banner">{error}</div> : null}
 
       <div className="grid-2">
         <div className="stack">
-          <section className="group">
-            <h3 className="group-title">Файлы и папка результата</h3>
-            <div className="stack">
+          {section === 0 ? (
+            <section className="group stack">
+              <h3 className="group-title">Файлы и папка результата</h3>
               <label className="hint">Исходные видео (по одному пути на строку)</label>
               <textarea
                 className="field"
@@ -124,39 +284,24 @@ export function UniquifyPage() {
                     style={{ width: 90 }}
                     type="number"
                     min={1}
+                    max={100}
                     value={copies}
                     onChange={(e) => setCopies(Number(e.target.value) || 1)}
                   />
                 </label>
-                <label>
-                  Потоки{" "}
+                <label className="check">
                   <input
-                    className="field"
-                    style={{ width: 90 }}
-                    type="number"
-                    min={1}
-                    max={32}
-                    value={workers}
-                    onChange={(e) => setWorkers(Number(e.target.value) || 1)}
+                    type="checkbox"
+                    checked={oneCopyNoFx}
+                    onChange={(e) => setOneCopyNoFx(e.target.checked)}
                   />
+                  1 копия без эффектов
                 </label>
               </div>
-              <label className="check">
-                <input
-                  type="checkbox"
-                  checked={randomize}
-                  onChange={(e) => setRandomize(e.target.checked)}
-                />
-                Случайная уникализация
-              </label>
-              <label className="check">
-                <input
-                  type="checkbox"
-                  checked={useGpu}
-                  onChange={(e) => setUseGpu(e.target.checked)}
-                />
-                GPU
-              </label>
+              <p className="hint">
+                Каждая копия — отдельный прогон со своими случайными параметрами.
+                Имена: имя_u_&lt;hex&gt;.mp4.
+              </p>
               <label className="check">
                 <input
                   type="checkbox"
@@ -165,28 +310,88 @@ export function UniquifyPage() {
                 />
                 Удалять после залива
               </label>
-            </div>
-          </section>
+            </section>
+          ) : null}
 
-          <section className="group">
-            <h3 className="group-title">Фоновые треки</h3>
-            <label className="check">
-              <input
-                type="checkbox"
+          {section === 1 ? (
+            <section className="group stack">
+              <h3 className="group-title">Фильтры</h3>
+              <p className="hint">
+                Включите эффект и задайте диапазон — на каждый ролик значения
+                выбираются случайно.
+              </p>
+              {fx.map((row) => (
+                <div key={row.key} className="fx-row">
+                  <label className="check" title={row.label}>
+                    <input
+                      type="checkbox"
+                      checked={row.enabled}
+                      onChange={(e) => updateFx(row.key, { enabled: e.target.checked })}
+                    />
+                  </label>
+                  <span className="fx-label">{row.label}</span>
+                  <RangeSlider
+                    min={row.min}
+                    max={row.max}
+                    step={row.step}
+                    decimals={row.decimals}
+                    suffix={row.suffix}
+                    value={row.range}
+                    disabled={!row.enabled}
+                    onChange={(range) => updateFx(row.key, { range })}
+                  />
+                </div>
+              ))}
+            </section>
+          ) : null}
+
+          {section === 2 ? (
+            <TextOverlayFields value={textOverlay} onChange={setTextOverlay} />
+          ) : null}
+
+          {section === 3 ? (
+            <section className="group stack">
+              <h3 className="group-title">Фоновые треки</h3>
+              <ToggleSwitch
+                label="Добавить музыку"
                 checked={musicEnabled}
-                onChange={(e) => setMusicEnabled(e.target.checked)}
+                onChange={setMusicEnabled}
               />
-              Добавить музыку
-            </label>
-            {musicEnabled ? (
-              <textarea
-                className="field"
-                value={musicFiles}
-                onChange={(e) => setMusicFiles(e.target.value)}
-                placeholder="Пути к аудиофайлам…"
-              />
-            ) : null}
-          </section>
+              {musicEnabled ? (
+                <>
+                  <label className="hint">Треки (по одному пути на строку)</label>
+                  <textarea
+                    className="field"
+                    value={musicFiles}
+                    onChange={(e) => setMusicFiles(e.target.value)}
+                    placeholder="Пути к аудиофайлам…"
+                  />
+                  <ToggleSwitch
+                    label="Смешивать с аудио исходника (иначе — полная замена дорожки)"
+                    checked={musicMix}
+                    onChange={setMusicMix}
+                  />
+                  <div className="form-grid">
+                    <label className="hint">Громкость музыки</label>
+                    <RangeSlider
+                      min={0}
+                      max={100}
+                      step={1}
+                      decimals={0}
+                      suffix=" %"
+                      value={musicVol}
+                      disabled={!musicMix}
+                      onChange={setMusicVol}
+                    />
+                  </div>
+                  <p className="hint">
+                    Разведите точки — случайная громкость в диапазоне на каждый
+                    ролик. Громкость активна при смешивании.
+                  </p>
+                </>
+              ) : null}
+            </section>
+          ) : null}
         </div>
 
         <section className="group">

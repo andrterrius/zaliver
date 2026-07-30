@@ -29,14 +29,14 @@ def apply_text_overlay_to_video(
     log: Optional[LogCallback] = None,
     prefer_gpu: bool = False,
 ) -> None:
-    """Re-encode video with drawtext overlay; audio copied from input."""
+    """Re-encode video with drawtext/emoji overlay; audio copied from input."""
     _w, _h, fps, frame_count, _fourcc = probe_video_stream(input_path)
     if frame_count <= 0:
         raise RuntimeError(f"Не удалось определить число кадров: {input_path}")
     fc = int(frame_count)
     duration_sec = probe_media_duration_seconds(input_path)
 
-    overlay_part = build_text_overlay_filters(
+    built = build_text_overlay_filters(
         overlay,
         "v0",
         start_frame=0,
@@ -44,8 +44,9 @@ def apply_text_overlay_to_video(
         total_frames=fc,
         fps=float(fps),
         total_duration_sec=duration_sec,
+        emoji_input_start=1,
     )
-    if "drawtext" not in overlay_part:
+    if not built.has_content:
         msg = "Текст на видео: макет пуст или все кадры пропущены — сохраняем без текста."
         if log:
             log(msg)
@@ -53,7 +54,7 @@ def apply_text_overlay_to_video(
         return
 
     # Как во вкладке уникализации: отдельная метка v0, не [0:v] напрямую в цепочке drawtext.
-    graph = f"[0:v]null[v0];{overlay_part}"
+    graph = f"[0:v]null[v0];{built.graph}"
 
     out_p = Path(output_path)
     tmp = out_p.with_name(f"{out_p.stem}._zaliver_overlay{out_p.suffix}")
@@ -66,30 +67,31 @@ def apply_text_overlay_to_video(
     filter_script: Path | None = None
     try:
         filter_argv, filter_script = _filter_complex_argv(graph)
-        run_ffmpeg(
-            [
-                "-i",
-                input_path,
-                *filter_argv,
-                "-map",
-                "[outv]",
-                "-map",
-                "0:a?",
-                "-c:v",
-                enc,
-                *enc_args,
-                "-pix_fmt",
-                "yuv420p",
-                "-r",
-                f"{fps:.6f}",
-                "-c:a",
-                "copy",
-                "-movflags",
-                "+faststart",
-                str(tmp),
-            ],
-            log=log,
-        )
+        cmd = [
+            "-i",
+            input_path,
+            *built.emoji_input_argv,
+            *filter_argv,
+            "-map",
+            "[outv]",
+            "-map",
+            "0:a?",
+            "-c:v",
+            enc,
+            *enc_args,
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            f"{fps:.6f}",
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+        ]
+        if built.emoji_input_argv:
+            cmd.append("-shortest")
+        cmd.append(str(tmp))
+        run_ffmpeg(cmd, log=log)
         os.replace(str(tmp), str(out_p))
     except Exception:
         try:

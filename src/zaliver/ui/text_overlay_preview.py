@@ -28,9 +28,12 @@ from zaliver.processing.text_overlay import (
     REF_HORIZONTAL,
     REF_VERTICAL,
     effective_font_path,
+    font_path_for_unit,
+    is_emoji_unit,
     layout_line_chars,
     measure_text_block,
     neon_glow_layers,
+    resolve_color_emoji_font_path,
     wave_offset_y,
     wrap_text_lines,
     _make_qfont,
@@ -649,20 +652,23 @@ class TextOverlayPreviewWidget(QWidget):
         y: int,
         wave_dy: float,
         glow_layers: list[tuple[int, int, float]],
+        *,
+        fill_color: QColor | None = None,
+        apply_glow: bool = True,
     ) -> None:
         cy = int(y + wave_dy)
         cx = int(x)
         text_y = cy + fm.ascent()
         glow = self._glow_color
 
-        if self._glow_enabled:
+        if apply_glow and self._glow_enabled:
             for dx, dy, alpha in glow_layers:
                 c = QColor(glow)
                 c.setAlpha(max(0, min(255, int(alpha * 255))))
                 painter.setPen(c)
                 painter.drawText(int(cx + dx), int(text_y + dy), ch)
 
-        core = QColor(self._text_color)
+        core = QColor(fill_color) if fill_color is not None else QColor(self._text_color)
         painter.setPen(core)
         painter.drawText(int(cx), int(text_y), ch)
 
@@ -716,12 +722,11 @@ class TextOverlayPreviewWidget(QWidget):
             return
 
         block_x, block_y = self._block_top_left()
-        font = self._font_for_paint(scale)
-        painter.setFont(font)
-        fm = QFontMetrics(font)
-        line_h = max(int(self._line_h * scale), fm.height())
-        wave_pad = int(self._wave_amp)
+        main_font = self._font_for_paint(scale)
         painted_size = max(8, int(round(self._font_size * scale)))
+        main_fm = QFontMetrics(main_font)
+        line_h = max(int(self._line_h * scale), main_fm.height())
+        wave_pad = int(self._wave_amp)
         glow_layers = neon_glow_layers(
             painted_size, max_layers=10, alpha_scale=0.48
         )
@@ -733,6 +738,16 @@ class TextOverlayPreviewWidget(QWidget):
                 y += line_h
                 continue
             for ch, x_off in chars:
+                emoji = is_emoji_unit(ch)
+                color_path = resolve_color_emoji_font_path() if emoji else ""
+                unit_path = (
+                    color_path
+                    if color_path
+                    else font_path_for_unit(ch, self._font_path, bold=self._font_bold)
+                )
+                font = _make_qfont(unit_path, painted_size, bold=self._font_bold)
+                painter.setFont(font)
+                fm = QFontMetrics(font)
                 wave_dy = wave_offset_y(
                     char_global,
                     self._anim_frame,
@@ -740,6 +755,7 @@ class TextOverlayPreviewWidget(QWidget):
                     char_phase=self._wave_char_phase,
                     frame_speed=self._wave_frame_speed,
                 )
+                color_emoji = bool(emoji and color_path)
                 self._paint_neon_char(
                     painter,
                     fm,
@@ -748,6 +764,13 @@ class TextOverlayPreviewWidget(QWidget):
                     y,
                     wave_dy,
                     glow_layers,
+                    # Color glyphs ignore pen on Win/macOS; black avoids tinting.
+                    fill_color=(
+                        QColor(0, 0, 0)
+                        if color_emoji
+                        else (QColor("#FFFFFF") if emoji else None)
+                    ),
+                    apply_glow=not emoji,
                 )
                 char_global += 1
             y += line_h

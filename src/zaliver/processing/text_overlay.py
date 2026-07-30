@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import sys
-import math
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -262,6 +264,162 @@ def resolve_font_path() -> str:
     return effective_font_path("", bold=True)
 
 
+_BUNDLED_EMOJI_FONT = "NotoEmoji.ttf"
+
+
+def _system_emoji_font_candidates(*, color_preferred: bool = True) -> list[Path]:
+    """System emoji fonts. Color fonts first when color_preferred."""
+    if sys.platform == "win32":
+        root = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+        return [
+            root / "seguiemj.ttf",
+            root / "Segoe UI Emoji.ttf",
+        ]
+    if sys.platform == "darwin":
+        return [
+            Path("/System/Library/Fonts/Apple Color Emoji.ttc"),
+            Path("/Library/Fonts/Apple Color Emoji.ttc"),
+        ]
+    # Linux: Noto Color is CBDT (Qt may draw color); mono NotoEmoji last.
+    color = [
+        Path("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"),
+        Path("/usr/share/fonts/noto/NotoColorEmoji.ttf"),
+    ]
+    mono = [
+        Path("/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf"),
+    ]
+    return color + mono if color_preferred else mono + color
+
+
+_color_emoji_font_cache: Optional[str] = None
+_mono_emoji_font_cache: Optional[str] = None
+_emoji_font_path_cache: Optional[str] = None
+
+
+def resolve_color_emoji_font_path() -> str:
+    """System color emoji font for Qt rasterization (Windows/macOS/Linux)."""
+    global _color_emoji_font_cache
+    if _color_emoji_font_cache is not None:
+        return _color_emoji_font_cache
+    for p in _system_emoji_font_candidates(color_preferred=True):
+        try:
+            if not p.is_file():
+                continue
+            # Skip clearly mono-only names on Linux list order
+            name = p.name.lower()
+            if name.startswith("notoemoji") and "color" not in name:
+                continue
+            _color_emoji_font_cache = str(p.resolve())
+            return _color_emoji_font_cache
+        except OSError:
+            continue
+    _color_emoji_font_cache = ""
+    return ""
+
+
+def resolve_mono_emoji_font_path() -> str:
+    """Bundled monochrome Noto Emoji (ffmpeg drawtext fallback)."""
+    global _mono_emoji_font_cache
+    if _mono_emoji_font_cache is not None:
+        return _mono_emoji_font_cache
+    for root in _overlay_font_dirs():
+        bundled = root / _BUNDLED_EMOJI_FONT
+        try:
+            if bundled.is_file():
+                _mono_emoji_font_cache = str(bundled.resolve())
+                return _mono_emoji_font_cache
+        except OSError:
+            continue
+    for p in _system_emoji_font_candidates(color_preferred=False):
+        try:
+            name = p.name.lower()
+            if p.is_file() and (
+                "notoemoji" in name or name.startswith("seguiemj")
+            ):
+                _mono_emoji_font_cache = str(p.resolve())
+                return _mono_emoji_font_cache
+        except OSError:
+            continue
+    _mono_emoji_font_cache = ""
+    return ""
+
+
+def resolve_emoji_font_path() -> str:
+    """Layout/metrics for emoji: bundled mono (matches ffmpeg drawtext)."""
+    global _emoji_font_path_cache
+    if _emoji_font_path_cache is not None:
+        return _emoji_font_path_cache
+    # Prefer mono for width parity with drawtext; color font only for UI preview paint.
+    path = resolve_mono_emoji_font_path() or resolve_color_emoji_font_path()
+    _emoji_font_path_cache = path
+    return path
+
+
+def is_emoji_unit(unit: str) -> bool:
+    """True if the grapheme is (or contains) an emoji / pictograph codepoint."""
+    if not unit:
+        return False
+    for ch in unit:
+        cp = ord(ch)
+        if (
+            0x1F300 <= cp <= 0x1FAFF
+            or 0x1F1E0 <= cp <= 0x1F1FF
+            or 0x2600 <= cp <= 0x27BF
+            or 0x2300 <= cp <= 0x23FF
+            or 0x2B50 <= cp <= 0x2B55
+            or cp in (0x200D, 0xFE0F, 0x20E3)
+            or 0x1F000 <= cp <= 0x1F02F
+        ):
+            return True
+    return False
+
+
+def iter_text_units(text: str) -> List[str]:
+    """Split into drawable units; keep ZWJ / VS16 / skin-tone / flag sequences together.
+
+    Pure Python (not Qt): QTextBoundaryFinder returns UTF-16 offsets which break
+    on non-BMP emoji when slicing Python str.
+    """
+    if not text:
+        return []
+    out: list[str] = []
+    buf = ""
+
+    def _is_skin_tone(cp: int) -> bool:
+        return 0x1F3FB <= cp <= 0x1F3FF
+
+    def _is_regional(cp: int) -> bool:
+        return 0x1F1E6 <= cp <= 0x1F1FF
+
+    def _continues(buf: str, ch: str) -> bool:
+        if not buf:
+            return False
+        cp = ord(ch)
+        prev = ord(buf[-1])
+        if cp in (0x200D, 0xFE0F, 0x20E3):
+            return True
+        if _is_skin_tone(cp):
+            return True
+        if 0xE0020 <= cp <= 0xE007F:  # tag sequences
+            return True
+        if prev == 0x200D:
+            return True
+        if _is_regional(prev) and _is_regional(cp) and len(buf) == 1:
+            return True
+        return False
+
+    for ch in text:
+        if _continues(buf, ch):
+            buf += ch
+        else:
+            if buf:
+                out.append(buf)
+            buf = ch
+    if buf:
+        out.append(buf)
+    return out
+
+
 def effective_font_path(custom_path: str = "", *, bold: bool = True) -> str:
     """User font file if valid, else bundled / system font for the chosen weight."""
     custom = (custom_path or "").strip()
@@ -296,6 +454,20 @@ def effective_font_path(custom_path: str = "", *, bold: bool = True) -> str:
     return ""
 
 
+def font_path_for_unit(
+    unit: str,
+    main_font_path: str = "",
+    *,
+    bold: bool = True,
+) -> str:
+    """Main overlay font, or system emoji font when the unit is an emoji."""
+    if is_emoji_unit(unit):
+        emoji = resolve_emoji_font_path()
+        if emoji:
+            return emoji
+    return main_font_path or effective_font_path("", bold=bold)
+
+
 def list_bundled_overlay_fonts() -> List[Tuple[str, str]]:
     """(display label, absolute path) for fonts shipped with the app."""
     out: list[tuple[str, str]] = []
@@ -315,6 +487,8 @@ def list_bundled_overlay_fonts() -> List[Tuple[str, str]]:
                 try:
                     if not p.is_file():
                         continue
+                    if _is_emoji_font_path(str(p)):
+                        continue
                     key = str(p.resolve())
                 except OSError:
                     continue
@@ -326,10 +500,22 @@ def list_bundled_overlay_fonts() -> List[Tuple[str, str]]:
     return out
 
 
+def _is_emoji_font_path(font_path: str) -> bool:
+    if not font_path:
+        return False
+    name_l = Path(font_path).name.lower()
+    return any(
+        key in name_l
+        for key in ("seguiemj", "emoji", "notocoloremoji", "notoemoji")
+    )
+
+
 def _make_qfont(font_path: str, font_size: int, *, bold: bool = True):
     from PyQt6.QtGui import QFont, QFontDatabase
 
     px = max(8, int(font_size))
+    # Emoji fonts have no bold face — forcing bold breaks glyph metrics.
+    use_bold = bool(bold) and not _is_emoji_font_path(font_path)
     if font_path:
         p = Path(font_path)
         if p.is_file():
@@ -339,7 +525,7 @@ def _make_qfont(font_path: str, font_size: int, *, bold: bool = True):
                 if families:
                     font = QFont(families[0])
                     font.setPixelSize(px)
-                    if bold:
+                    if use_bold:
                         font.setWeight(QFont.Weight.Bold)
                         font.setBold(True)
                     else:
@@ -349,7 +535,7 @@ def _make_qfont(font_path: str, font_size: int, *, bold: bool = True):
     font = QFont("Montserrat")
     font.setFamilies(["Montserrat", "Segoe UI", "Bahnschrift", "Calibri", "Arial"])
     font.setPixelSize(px)
-    if bold:
+    if use_bold:
         font.setWeight(QFont.Weight.Bold)
         font.setBold(True)
     else:
@@ -368,16 +554,22 @@ def layout_line_chars(
 ) -> List[Tuple[str, int]]:
     if not line:
         return []
-    font = _make_qfont(font_path, font_size, bold=bold)
     from PyQt6.QtGui import QFontMetrics
 
-    fm = QFontMetrics(font)
     out: list[tuple[str, int]] = []
     x = 0
-    for i, ch in enumerate(line):
-        out.append((ch, x))
-        x += fm.horizontalAdvance(ch)
-        if i < len(line) - 1:
+    units = iter_text_units(line)
+    for i, unit in enumerate(units):
+        unit_font_path = font_path_for_unit(unit, font_path, bold=bold)
+        font = _make_qfont(
+            unit_font_path,
+            font_size,
+            bold=bold,
+        )
+        fm = QFontMetrics(font)
+        out.append((unit, x))
+        x += fm.horizontalAdvance(unit)
+        if i < len(units) - 1:
             x += int(letter_spacing)
     return out
 
@@ -395,11 +587,16 @@ def line_pixel_width(
     )
     if not chars:
         return 0
-    font = _make_qfont(font_path, font_size, bold=bold)
     from PyQt6.QtGui import QFontMetrics
 
-    fm = QFontMetrics(font)
     last_ch, last_x = chars[-1]
+    unit_font_path = font_path_for_unit(last_ch, font_path, bold=bold)
+    font = _make_qfont(
+        unit_font_path,
+        font_size,
+        bold=bold,
+    )
+    fm = QFontMetrics(font)
     return int(last_x + fm.horizontalAdvance(last_ch))
 
 
@@ -449,11 +646,15 @@ def measure_text_block(
 ) -> Tuple[int, int, int]:
     if not lines:
         return 0, 0, font_size
-    font = _make_qfont(font_path, font_size, bold=bold)
     from PyQt6.QtGui import QFontMetrics
 
+    font = _make_qfont(font_path, font_size, bold=bold)
     fm = QFontMetrics(font)
     line_h = max(font_size, fm.height())
+    emoji_path = resolve_emoji_font_path()
+    if emoji_path:
+        efm = QFontMetrics(_make_qfont(emoji_path, font_size, bold=False))
+        line_h = max(line_h, efm.height())
     width = max(
         (
             line_pixel_width(line, font_size, font_path, letter_spacing, bold=bold)
@@ -576,6 +777,288 @@ def _ffmpeg_escape_text(text: str) -> str:
     )
 
 
+def text_overlay_filter_has_content(overlay_part: str) -> bool:
+    """True if filter graph actually draws overlay text/emoji."""
+    s = overlay_part or ""
+    return "drawtext" in s or "overlay=" in s
+
+
+# Twemoji 72×72 PNGs (CC-BY 4.0) — color emoji without ffmpeg color-font / movie hacks.
+_TWEMOJI_CDN = (
+    "https://cdn.jsdelivr.net/gh/jdecked/twemoji@15.1.0/assets/72x72"
+)
+
+
+def _twemoji_cache_dir() -> Path:
+    d = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".cache") / "zaliver" / "twemoji_72"
+    if sys.platform != "win32":
+        d = Path.home() / ".cache" / "zaliver" / "twemoji_72"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def twemoji_codepoint_keys(unit: str) -> list[str]:
+    """Candidate Twemoji filenames (hex codepoints) for a grapheme."""
+    if not unit:
+        return []
+    full = "-".join(f"{ord(ch):x}" for ch in unit)
+    no_vs = "-".join(f"{ord(ch):x}" for ch in unit if ord(ch) != 0xFE0F)
+    keys: list[str] = []
+    for k in (full, no_vs, full.lower(), no_vs.lower()):
+        if k and k not in keys:
+            keys.append(k)
+    return keys
+
+
+def ensure_twemoji_png(unit: str) -> Optional[Path]:
+    """Download/cached Twemoji PNG for unit; None if unavailable."""
+    if not unit or not is_emoji_unit(unit):
+        return None
+    cache = _twemoji_cache_dir()
+    for key in twemoji_codepoint_keys(unit):
+        dest = cache / f"{key}.png"
+        try:
+            if dest.is_file() and dest.stat().st_size > 32:
+                return dest
+        except OSError:
+            continue
+        url = f"{_TWEMOJI_CDN}/{key}.png"
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "zaliver-emoji/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = resp.read()
+            if not data or len(data) < 32:
+                continue
+            tmp = dest.with_suffix(".part")
+            tmp.write_bytes(data)
+            tmp.replace(dest)
+            return dest
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
+            continue
+    return None
+
+
+@dataclass
+class TextOverlayFilterBuild:
+    """Filter graph fragment plus optional emoji still inputs (-loop 1 -i)."""
+
+    graph: str
+    emoji_input_argv: list[str]
+    emoji_count: int = 0
+
+    @property
+    def has_content(self) -> bool:
+        return text_overlay_filter_has_content(self.graph)
+
+
+def _emoji_still_input_argv(
+    pngs: list[Path],
+    *,
+    duration_sec: float,
+    fps: float = 30.0,
+) -> list[str]:
+    """Finite looped PNG inputs covering the whole clip (avoids early EOF at the end)."""
+    argv: list[str] = []
+    dur = max(0.25, float(duration_sec))
+    fps_v = max(1.0, float(fps))
+    for p in pngs:
+        # -t caps the loop so AMF/GPU don't see an infinite secondary stream.
+        argv.extend(
+            [
+                "-loop",
+                "1",
+                "-t",
+                f"{dur:.6f}",
+                "-r",
+                f"{fps_v:.6f}",
+                "-i",
+                str(p),
+            ]
+        )
+    return argv
+
+
+def _emoji_stream_duration_sec(
+    *,
+    start_frame: int,
+    frame_count: int,
+    total_frames: int,
+    fps: float,
+    total_duration_sec: float | None,
+) -> float:
+    fps_v = max(float(fps), 1e-6)
+    chunk_dur = max(1, int(frame_count)) / fps_v
+    if total_duration_sec is not None and total_duration_sec > 0:
+        full_dur = float(total_duration_sec)
+    elif int(total_frames) > 0:
+        full_dur = int(total_frames) / fps_v
+    else:
+        full_dur = chunk_dur
+    # Whole-clip overlay: cover full timeline; chunked encode: cover this chunk.
+    if int(start_frame) == 0 and int(frame_count) >= max(1, int(total_frames)):
+        return full_dur + 0.5
+    return chunk_dur + 0.5
+
+
+def build_text_overlay_filters(
+    overlay: ScaledTextOverlay,
+    input_label: str = "v0",
+    *,
+    start_frame: int = 0,
+    frame_count: int = 0,
+    total_frames: int = 0,
+    fps: float = 30.0,
+    total_duration_sec: float | None = None,
+    emoji_input_start: int = 1,
+) -> TextOverlayFilterBuild:
+    """Build [input_label]…[outv] plus optional -i argv for color emoji PNGs.
+
+    Color emoji use Twemoji PNGs overlaid via normal still inputs (fast, no movie/loop).
+    Letters stay on drawtext (neon/wave). emoji_input_start = first ffmpeg input index
+    reserved for emoji stills (1 when video is input 0).
+    """
+    empty = TextOverlayFilterBuild(
+        graph=f"[{input_label}]null[outv]", emoji_input_argv=[], emoji_count=0
+    )
+    if not overlay.lines or not overlay.char_lines:
+        return empty
+    enable = overlay_enable_expr(
+        from_middle=overlay.from_middle,
+        chunk_start_frame=start_frame,
+        chunk_frame_count=frame_count,
+        total_frames=total_frames,
+        fps=fps,
+        total_duration_sec=total_duration_sec,
+        enable_after_sec=overlay.enable_after_sec,
+    )
+    if enable == "__skip__":
+        return empty
+    enable_part = f":enable='{enable}'" if enable else ""
+    fill = _hex_to_ffmpeg_color(overlay.text_color, 1.0)
+    emoji_fill = _hex_to_ffmpeg_color("#FFFFFF", 1.0)
+    glow_layers: list[tuple[int, int, float]] = []
+    if overlay.glow_enabled:
+        glow_layers = neon_glow_layers(
+            overlay.font_size, max_layers=FFMPEG_GLOW_MAX_LAYERS
+        )
+    mono_emoji_font = resolve_mono_emoji_font_path()
+    emoji_font = mono_emoji_font or resolve_emoji_font_path()
+    em_size = max(8, int(overlay.font_size))
+    em_dur = _emoji_stream_duration_sec(
+        start_frame=start_frame,
+        frame_count=frame_count,
+        total_frames=total_frames,
+        fps=fps,
+        total_duration_sec=total_duration_sec,
+    )
+    def _font_part_for(unit: str) -> str:
+        path = overlay.font_path
+        if emoji_font and is_emoji_unit(unit):
+            path = emoji_font
+        if not path:
+            return ""
+        return f"fontfile='{_ffmpeg_escape_path(path)}':"
+
+    glyphs: list[tuple[int, str, int, int]] = []
+    char_global = 0
+    for li, chars in enumerate(overlay.char_lines):
+        if not chars:
+            continue
+        base_y = overlay.y + li * overlay.line_height + overlay.wave_amp
+        for ch, x_off in chars:
+            glyphs.append((base_y, ch, overlay.x + x_off, char_global))
+            char_global += 1
+    if not glyphs:
+        return empty
+
+    # Deduplicate Twemoji files → one -i per unique PNG.
+    png_list: list[Path] = []
+    png_index: dict[str, int] = {}
+    glyph_em: list[Optional[int]] = []
+    for _base_y, ch, _cx, _cg in glyphs:
+        if not is_emoji_unit(ch):
+            glyph_em.append(None)
+            continue
+        png = ensure_twemoji_png(ch)
+        if png is None:
+            glyph_em.append(None)
+            continue
+        key = str(png.resolve())
+        if key not in png_index:
+            png_index[key] = len(png_list)
+            png_list.append(png)
+        glyph_em.append(png_index[key])
+
+    prep: list[str] = []
+    for i, _png in enumerate(png_list):
+        inp = emoji_input_start + i
+        prep.append(
+            f"[{inp}:v]format=rgba,scale={em_size}:{em_size}:"
+            f"force_original_aspect_ratio=decrease,setsar=1[__em{i}]"
+        )
+
+    parts: list[str] = []
+    cur = input_label
+    for step, ((base_y, ch, cx, cg), em_i) in enumerate(zip(glyphs, glyph_em)):
+        y_expr = wave_y_ffmpeg_expr(
+            base_y,
+            cg,
+            overlay.wave_amp,
+            start_frame,
+            char_phase=overlay.wave_char_phase,
+            frame_speed=overlay.wave_frame_speed,
+        )
+        nxt = "outv" if step == len(glyphs) - 1 else f"tc{step}"
+        label = cur
+
+        if em_i is not None:
+            y_ov = _y_expr_with_offset(y_expr, 0)
+            y_inner = y_ov[1:-1] if y_ov.startswith("'") and y_ov.endswith("'") else y_ov
+            # Center-ish: Twemoji box vs drawtext y_align=font — nudge up slightly.
+            parts.append(
+                f"[{label}][__em{em_i}]overlay=x={cx}:y='{y_inner}':"
+                f"format=auto:eof_action=repeat{enable_part}[{nxt}]"
+            )
+            cur = nxt
+            continue
+
+        esc = _ffmpeg_escape_text(ch)
+        is_emoji = bool(emoji_font and is_emoji_unit(ch))
+        font_part = _font_part_for(ch)
+        glyph_fill = emoji_fill if is_emoji else fill
+        glyph_glow = [] if is_emoji else glow_layers
+        for gi, (dx, dy, alpha) in enumerate(glyph_glow):
+            col = _hex_to_ffmpeg_color(overlay.glow_color, alpha)
+            gl = f"tg{step}_{gi}"
+            layer = (
+                f"drawtext={font_part}text='{esc}':fontsize={overlay.font_size}:"
+                f"y_align=font:x={cx + dx}:y={_y_expr_with_offset(y_expr, dy)}:fontcolor={col}:borderw=0"
+                f"{enable_part}"
+            )
+            parts.append(f"[{label}]{layer}[{gl}]")
+            label = gl
+        core = (
+            f"drawtext={font_part}text='{esc}':fontsize={overlay.font_size}:"
+            f"y_align=font:x={cx}:y={_y_expr_with_offset(y_expr, 0)}:fontcolor={glyph_fill}:borderw=0"
+            f"{enable_part}"
+        )
+        parts.append(f"[{label}]{core}[{nxt}]")
+        cur = nxt
+
+    graph_body = ";".join(parts)
+    graph = ";".join([*prep, graph_body]) if prep else graph_body
+    return TextOverlayFilterBuild(
+        graph=graph,
+        emoji_input_argv=_emoji_still_input_argv(
+            png_list, duration_sec=em_dur, fps=float(fps)
+        ),
+        emoji_count=len(png_list),
+    )
+
+
 FFMPEG_GLOW_MAX_LAYERS = 6
 
 
@@ -637,7 +1120,7 @@ def overlay_enable_expr(
     start_t: float | None = None
     if enable_after_sec is not None:
         start_t = max(0.0, float(enable_after_sec))
-    elif from_middle and total_frames > 0:
+    elif from_middle and total_t > 0:
         start_t = total_t / 2.0
     else:
         return None
@@ -658,84 +1141,3 @@ def overlay_enable_expr(
     if local_start_t <= 1e-9:
         return None
     return f"gte(t\\,{local_start_t:.6f})"
-
-
-def build_text_overlay_filters(
-    overlay: ScaledTextOverlay,
-    input_label: str = "v0",
-    *,
-    start_frame: int = 0,
-    frame_count: int = 0,
-    total_frames: int = 0,
-    fps: float = 30.0,
-    total_duration_sec: float | None = None,
-) -> str:
-    """Return filter chain fragment: [input_label]...filters...[outv]"""
-    if not overlay.lines or not overlay.char_lines:
-        return f"[{input_label}]null[outv]"
-    enable = overlay_enable_expr(
-        from_middle=overlay.from_middle,
-        chunk_start_frame=start_frame,
-        chunk_frame_count=frame_count,
-        total_frames=total_frames,
-        fps=fps,
-        total_duration_sec=total_duration_sec,
-        enable_after_sec=overlay.enable_after_sec,
-    )
-    if enable == "__skip__":
-        return f"[{input_label}]null[outv]"
-    enable_part = f":enable='{enable}'" if enable else ""
-    fill = _hex_to_ffmpeg_color(overlay.text_color, 1.0)
-    glow_layers: list[tuple[int, int, float]] = []
-    if overlay.glow_enabled:
-        glow_layers = neon_glow_layers(
-            overlay.font_size, max_layers=FFMPEG_GLOW_MAX_LAYERS
-        )
-    font_part = ""
-    if overlay.font_path:
-        font_part = f"fontfile='{_ffmpeg_escape_path(overlay.font_path)}':"
-
-    glyphs: list[tuple[int, str, int, int]] = []
-    char_global = 0
-    for li, chars in enumerate(overlay.char_lines):
-        if not chars:
-            continue
-        base_y = overlay.y + li * overlay.line_height + overlay.wave_amp
-        for ch, x_off in chars:
-            glyphs.append((base_y, ch, overlay.x + x_off, char_global))
-            char_global += 1
-    if not glyphs:
-        return f"[{input_label}]null[outv]"
-
-    parts: list[str] = []
-    cur = input_label
-    for step, (base_y, ch, cx, cg) in enumerate(glyphs):
-        esc = _ffmpeg_escape_text(ch)
-        y_expr = wave_y_ffmpeg_expr(
-            base_y,
-            cg,
-            overlay.wave_amp,
-            start_frame,
-            char_phase=overlay.wave_char_phase,
-            frame_speed=overlay.wave_frame_speed,
-        )
-        nxt = "outv" if step == len(glyphs) - 1 else f"tc{step}"
-        label = cur
-        for gi, (dx, dy, alpha) in enumerate(glow_layers):
-            col = _hex_to_ffmpeg_color(overlay.glow_color, alpha)
-            gl = f"tg{step}_{gi}"
-            layer = (
-                f"drawtext={font_part}text='{esc}':fontsize={overlay.font_size}:"
-                f"y_align=font:x={cx + dx}:y={_y_expr_with_offset(y_expr, dy)}:fontcolor={col}:borderw=0"
-                f"{enable_part}"
-            )
-            parts.append(f"[{label}]{layer}[{gl}]")
-            label = gl
-        core = (
-            f"drawtext={font_part}text='{esc}':fontsize={overlay.font_size}:"
-            f"y_align=font:x={cx}:y={_y_expr_with_offset(y_expr, 0)}:fontcolor={fill}:borderw=0"
-            f"{enable_part}"
-        )
-        parts.append(f"[{label}]{core}[{nxt}]")
-        cur = nxt
-    return ";".join(parts)

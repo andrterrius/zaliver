@@ -902,25 +902,22 @@ def ensure_twemoji_png(unit: str) -> Optional[Path]:
     return None
 
 
-_emoji_qt_app = None
+# Fixed raster size for color emoji cache. FFmpeg scales to font size; varying
+# pixel_size caused cache misses in spawn workers → they created a Qt app and
+# left console/Dock windows open on macOS.
+_COLOR_EMOJI_RASTER_PX = 160
 
 
-def _ensure_qt_gui_for_emoji() -> bool:
-    """Workers are spawn processes without QApplication — color emoji needs CoreText/DirectWrite."""
-    global _emoji_qt_app
+def _qt_gui_ready_for_emoji() -> bool:
+    """Use an existing Qt app only — never create one in spawn workers."""
     try:
         from PyQt6.QtGui import QGuiApplication
         from PyQt6.QtWidgets import QApplication
 
-        if QApplication.instance() is not None or QGuiApplication.instance() is not None:
-            return True
-        # Do not force offscreen on macOS — Apple Color Emoji needs cocoa.
-        if sys.platform != "darwin":
-            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        _emoji_qt_app = QGuiApplication(
-            sys.argv[:1] if sys.argv else ["zaliver-emoji"]
+        return (
+            QApplication.instance() is not None
+            or QGuiApplication.instance() is not None
         )
-        return True
     except Exception:
         return False
 
@@ -972,14 +969,15 @@ def _image_has_ink(img, *, w: int, h: int) -> bool:
 def render_system_color_emoji_png(
     unit: str,
     *,
-    pixel_size: int = 160,
+    pixel_size: int = _COLOR_EMOJI_RASTER_PX,
 ) -> Optional[Path]:
     """Rasterize a color emoji with Qt/system color font → transparent PNG."""
     if not unit or not is_emoji_unit(unit):
         return None
-    if not _ensure_qt_gui_for_emoji():
+    # Only when UI QApplication already exists (prefetch on main thread).
+    if not _qt_gui_ready_for_emoji():
         return None
-    px = max(48, min(512, int(pixel_size)))
+    px = max(48, min(512, int(pixel_size or _COLOR_EMOJI_RASTER_PX)))
     key = "-".join(f"{ord(ch):x}" for ch in unit)
     out = _system_emoji_png_cache_dir() / f"{key}_{px}.png"
     try:
@@ -1024,29 +1022,33 @@ def render_system_color_emoji_png(
 def ensure_color_emoji_png(
     unit: str,
     *,
-    pixel_size: int = 160,
+    pixel_size: int = _COLOR_EMOJI_RASTER_PX,
 ) -> Optional[Path]:
     """Color emoji asset for overlay: system Qt on macOS, Twemoji elsewhere, with fallbacks."""
     if not unit or not is_emoji_unit(unit):
         return None
-    # macOS .app: CDN/SSL often fails in workers — prefer Apple Color Emoji via Qt.
+    # Always the same raster size so prefetch (UI) and workers share the cache.
+    px = _COLOR_EMOJI_RASTER_PX
+    _ = pixel_size  # kept for call-site compatibility; size is fixed above
+    # macOS: prefer Apple Color Emoji when Qt UI is available (prefetch).
     if sys.platform == "darwin":
-        local = render_system_color_emoji_png(unit, pixel_size=pixel_size)
+        local = render_system_color_emoji_png(unit, pixel_size=px)
         if local is not None:
             return local
         return ensure_twemoji_png(unit)
     tw = ensure_twemoji_png(unit)
     if tw is not None:
         return tw
-    return render_system_color_emoji_png(unit, pixel_size=pixel_size)
+    return render_system_color_emoji_png(unit, pixel_size=px)
 
 
-def prefetch_color_emoji_for_text(text: str, *, pixel_size: int = 160) -> None:
+def prefetch_color_emoji_for_text(text: str, *, pixel_size: int = _COLOR_EMOJI_RASTER_PX) -> None:
     """Warm color-emoji PNG cache (UI / main thread before spawn workers)."""
+    _ = pixel_size
     for unit in iter_text_units(text or ""):
         if is_emoji_unit(unit):
             try:
-                ensure_color_emoji_png(unit, pixel_size=pixel_size)
+                ensure_color_emoji_png(unit, pixel_size=_COLOR_EMOJI_RASTER_PX)
             except Exception:
                 continue
 
@@ -1195,7 +1197,7 @@ def build_text_overlay_filters(
         if not is_emoji_unit(ch):
             glyph_em.append(None)
             continue
-        png = ensure_color_emoji_png(ch, pixel_size=max(128, em_size * 2))
+        png = ensure_color_emoji_png(ch)
         if png is None:
             glyph_em.append(None)
             continue

@@ -176,15 +176,16 @@ export function UniquifyPage() {
                 checked={musicEnabled}
                 onChange={(e) => setMusicEnabled(e.target.checked)}
               />
-              Случайный трек для каждого выхода
+              Добавить музыку
             </label>
-            <textarea
-              className="field"
-              value={musicFiles}
-              onChange={(e) => setMusicFiles(e.target.value)}
-              placeholder="Пути к аудиофайлам…"
-              disabled={!musicEnabled}
-            />
+            {musicEnabled ? (
+              <textarea
+                className="field"
+                value={musicFiles}
+                onChange={(e) => setMusicFiles(e.target.value)}
+                placeholder="Пути к аудиофайлам…"
+              />
+            ) : null}
           </section>
         </div>
 

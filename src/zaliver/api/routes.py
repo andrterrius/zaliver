@@ -242,12 +242,12 @@ def build_router() -> APIRouter:
             "brightness_enabled": bool(body.brightness_enabled),
             "contrast_enabled": bool(body.contrast_enabled),
             "saturation_enabled": bool(body.saturation_enabled),
-            "crop_jitter_enabled": bool(body.crop_jitter_enabled),
+            "crop_jitter_enabled": False,
             "scale_enabled": bool(body.scale_enabled),
             "noise_enabled": bool(body.noise_enabled),
-            "seed_enabled": bool(body.seed_enabled),
+            "seed_enabled": False,
             "playback_speed_enabled": bool(body.playback_speed_enabled),
-            "audio_chorus_enabled": bool(body.audio_chorus_enabled),
+            "audio_chorus_enabled": False,
             "background_music_enabled": bool(body.background_music_enabled),
             "background_music_mix_with_source": bool(
                 body.background_music_mix_with_source

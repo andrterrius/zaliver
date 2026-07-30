@@ -86,12 +86,12 @@ class UniquifyJobRequest(BaseModel):
     brightness_enabled: bool = True
     contrast_enabled: bool = True
     saturation_enabled: bool = True
-    crop_jitter_enabled: bool = True
+    crop_jitter_enabled: bool = False
     scale_enabled: bool = True
     noise_enabled: bool = True
-    seed_enabled: bool = True
+    seed_enabled: bool = False
     playback_speed_enabled: bool = True
-    audio_chorus_enabled: bool = True
+    audio_chorus_enabled: bool = False
     background_music_enabled: bool = False
     background_music_mix_with_source: bool = False
     background_music_volume_pct: int = Field(default=35, ge=0, le=100)

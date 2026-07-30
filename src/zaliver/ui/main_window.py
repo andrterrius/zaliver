@@ -149,7 +149,6 @@ from zaliver.ui.uploaded_instagram_stats_refresh_worker import (
 from zaliver.ui.uploaded_stats_refresh_worker import UploadedStatsRefreshWorker
 from zaliver.ui.widgets import (
     AnimatedProgressBar,
-    CollapsibleSection,
     FlowLayout,
     SmoothSlider,
     ToggleSwitch,
@@ -1162,8 +1161,8 @@ class MainWindow(QWidget):
         io_grid.addWidget(QLabel("Копий на исходник:"), 3, 0)
         io_grid.addLayout(copies_row, 3, 1)
         copies_hint = QLabel(
-            "Каждая копия — отдельный прогон со своими случайными параметрами "
-            "(при включённой случайной уникализации). Например: 10 видео × 5 = 50 файлов."
+            "Каждая копия — отдельный прогон со своими случайными параметрами. "
+            "Например: 10 видео × 5 = 50 файлов."
         )
         copies_hint.setObjectName("hint")
         copies_hint.setWordWrap(True)
@@ -1268,8 +1267,9 @@ class MainWindow(QWidget):
         self._update_music_mix_controls()
         self._sync_music_list_widget()
 
-        fx = QGroupBox("Уникализация (лёгкие эффекты)")
+        fx = QWidget()
         fx_layout = QVBoxLayout(fx)
+        fx_layout.setContentsMargins(0, 0, 0, 0)
         fx_layout.setSpacing(8)
 
         text_gb = QGroupBox("Текст на видео")
@@ -1466,18 +1466,9 @@ class MainWindow(QWidget):
         text_l.addWidget(self._text_overlay_panel)
         self._update_text_overlay_controls()
 
-        self.random_uniquify = ToggleSwitch(
-            "Случайные параметры для каждого файла (каждый запуск — новый набор)"
-        )
-        self.random_uniquify.setChecked(True)
-        self.random_uniquify.toggled.connect(self._on_random_uniquify_toggled)
-        fx_layout.addWidget(self.random_uniquify)
-
-        self._random_bounds_section = CollapsibleSection(
-            "Границы случайной уникализации (от / до)"
-        )
         bounds_inner = QWidget()
         rg = QGridLayout(bounds_inner)
+        rg.setContentsMargins(0, 0, 0, 0)
         rg.setHorizontalSpacing(8)
         rg.setVerticalSpacing(6)
 
@@ -1506,7 +1497,6 @@ class MainWindow(QWidget):
             cb.toggled.connect(self._on_fx_enable_toggled)
             return cb
 
-        # Общие галочки включения фильтров (случайный и ручной режимы).
         self.fx_brightness_enabled = _fx_enable(
             "Применять яркость. Выкл. — яркость не меняется."
         )
@@ -1516,34 +1506,22 @@ class MainWindow(QWidget):
         self.fx_saturation_enabled = _fx_enable(
             "Применять насыщенность. Выкл. — насыщенность без изменений."
         )
-        self.fx_crop_jitter_enabled = _fx_enable(
-            "Применять кроп-джиттер. Выкл. — без случайного кропа."
-        )
         self.fx_scale_enabled = _fx_enable(
             "Применять масштаб. Выкл. — масштаб 100%."
         )
         self.fx_noise_enabled = _fx_enable(
             "Применять шум. Выкл. — без шума."
         )
-        self.fx_seed_enabled = _fx_enable(
-            "Случайный seed для джиттера. Выкл. — фиксированный seed 0."
-        )
         self.audio_speed = _fx_enable(
             "Применять скорость видео+аудио. Выкл. — скорость 1.0×."
-        )
-        self.audio_chorus = _fx_enable(
-            "Применять хорус. Выкл. — хорус не добавляется."
         )
         self._fx_enable_checks = [
             self.fx_brightness_enabled,
             self.fx_contrast_enabled,
             self.fx_saturation_enabled,
-            self.fx_crop_jitter_enabled,
             self.fx_scale_enabled,
             self.fx_noise_enabled,
-            self.fx_seed_enabled,
             self.audio_speed,
-            self.audio_chorus,
         ]
 
         def _bounds_row(row: int, title: str, w: QWidget, enable_cb: QCheckBox) -> int:
@@ -1556,7 +1534,7 @@ class MainWindow(QWidget):
         self.rb_brightness = _bound_slider(
             range_min=-40.0, range_max=40.0, lo=-22.0, hi=22.0, step=0.5, decimals=1
         )
-        br = _bounds_row(br, "Яркость (±)", self.rb_brightness, self.fx_brightness_enabled)
+        br = _bounds_row(br, "Яркость", self.rb_brightness, self.fx_brightness_enabled)
         self.rb_contrast = _bound_slider(
             range_min=0.70, range_max=1.40, lo=0.88, hi=1.14, step=0.01, decimals=2
         )
@@ -1565,157 +1543,29 @@ class MainWindow(QWidget):
             range_min=0.70, range_max=1.40, lo=0.88, hi=1.12, step=0.01, decimals=2
         )
         br = _bounds_row(br, "Насыщенность", self.rb_saturation, self.fx_saturation_enabled)
-        self.rb_crop_jitter = _bound_slider(
-            range_min=0, range_max=12, lo=0, hi=3, step=1, decimals=0
-        )
-        br = _bounds_row(
-            br, "Кроп-джиттер (px)", self.rb_crop_jitter, self.fx_crop_jitter_enabled
-        )
         self.rb_scale_pct = _bound_slider(
             range_min=90.0, range_max=110.0, lo=95.0, hi=100.6, step=0.1, decimals=1
         )
-        br = _bounds_row(br, "Масштаб %", self.rb_scale_pct, self.fx_scale_enabled)
+        br = _bounds_row(br, "Масштаб", self.rb_scale_pct, self.fx_scale_enabled)
         self.rb_noise = _bound_slider(
             range_min=0.0, range_max=10.0, lo=0.5, hi=4.0, step=0.05, decimals=2
         )
-        br = _bounds_row(br, "Шум σ", self.rb_noise, self.fx_noise_enabled)
-        self.rb_seed = _bound_slider(
-            range_min=0, range_max=99_999_999, lo=0, hi=99_999_999, step=1, decimals=0
-        )
-        br = _bounds_row(br, "Seed", self.rb_seed, self.fx_seed_enabled)
+        br = _bounds_row(br, "Шум", self.rb_noise, self.fx_noise_enabled)
         self.audio_speed_range = _bound_slider(
             range_min=0.85, range_max=1.25, lo=1.0, hi=1.1, step=0.01, decimals=2
         )
         br = _bounds_row(
-            br, "Скорость видео+аудио (x)", self.audio_speed_range, self.audio_speed
-        )
-        self.audio_chorus_prob = ValueRangeSlider(
-            minimum=0.0, maximum=1.0, value=0.45, step=0.05, decimals=2
-        )
-        br = _bounds_row(
-            br, "Вероятность хора", self.audio_chorus_prob, self.audio_chorus
+            br, "Скорость видео+аудио", self.audio_speed_range, self.audio_speed
         )
         self._random_bound_sliders = [
             self.rb_brightness,
             self.rb_contrast,
             self.rb_saturation,
-            self.rb_crop_jitter,
             self.rb_scale_pct,
             self.rb_noise,
-            self.rb_seed,
             self.audio_speed_range,
-            self.audio_chorus_prob,
         ]
-        self._random_bounds_section.content_layout().addWidget(bounds_inner)
-        self._random_bounds_section.set_expanded(True)
-        fx_layout.addWidget(self._random_bounds_section)
-        self._random_bounds_panel = bounds_inner
-
-        self._manual_section = CollapsibleSection("Ручные параметры и аудио")
-        manual_inner = QWidget()
-        mg = QGridLayout(manual_inner)
-        mg.setHorizontalSpacing(8)
-        mg.setVerticalSpacing(6)
-
-        self.brightness = ValueRangeSlider(
-            minimum=-40.0, maximum=40.0, value=0.0, step=0.5, decimals=1
-        )
-        self.contrast = ValueRangeSlider(
-            minimum=0.70, maximum=1.40, value=1.0, step=0.01, decimals=2
-        )
-        self.saturation = ValueRangeSlider(
-            minimum=0.70, maximum=1.40, value=1.0, step=0.01, decimals=2
-        )
-        self.crop_jitter = ValueRangeSlider(
-            minimum=0, maximum=12, value=1, step=1, decimals=0
-        )
-        self.scale_pct = ValueRangeSlider(
-            minimum=90.0, maximum=110.0, value=100.0, step=0.1, decimals=1
-        )
-        self.noise = ValueRangeSlider(
-            minimum=0.0, maximum=10.0, value=1.0, step=0.05, decimals=2
-        )
-        self.seed = ValueRangeSlider(
-            minimum=0, maximum=99_999_999, value=42, step=1, decimals=0
-        )
-
-        self._manual_video_widgets = [
-            self.brightness,
-            self.contrast,
-            self.saturation,
-            self.crop_jitter,
-            self.scale_pct,
-            self.noise,
-            self.seed,
-        ]
-
-        def _bind_enable_pair(src: QCheckBox, dst: QCheckBox) -> None:
-            def _to_dst(v: bool, _src=src, _dst=dst) -> None:
-                if _dst.isChecked() != v:
-                    _dst.blockSignals(True)
-                    _dst.setChecked(v)
-                    _dst.blockSignals(False)
-
-            def _to_src(v: bool, _src=src, _dst=dst) -> None:
-                if _src.isChecked() != v:
-                    _src.setChecked(v)
-
-            src.toggled.connect(_to_dst)
-            dst.toggled.connect(_to_src)
-
-        r = 0
-        for label, w, en in [
-            ("Яркость (±):", self.brightness, self.fx_brightness_enabled),
-            ("Контраст:", self.contrast, self.fx_contrast_enabled),
-            ("Насыщенность:", self.saturation, self.fx_saturation_enabled),
-            ("Кроп-джиттер (px):", self.crop_jitter, self.fx_crop_jitter_enabled),
-            ("Масштаб %:", self.scale_pct, self.fx_scale_enabled),
-            ("Шум σ:", self.noise, self.fx_noise_enabled),
-            ("Seed:", self.seed, self.fx_seed_enabled),
-        ]:
-            mirror = QCheckBox()
-            mirror.setChecked(en.isChecked())
-            mirror.setToolTip(en.toolTip())
-            _bind_enable_pair(en, mirror)
-            mg.addWidget(mirror, r, 0, Qt.AlignmentFlag.AlignVCenter)
-            mg.addWidget(QLabel(label), r, 1, Qt.AlignmentFlag.AlignVCenter)
-            mg.addWidget(w, r, 2)
-            r += 1
-
-        mg.addWidget(QLabel("— Скорость и аудио (ручные) —"), r, 0, 1, 3)
-        r += 1
-        self.playback_speed_manual = ValueRangeSlider(
-            minimum=0.85, maximum=1.25, value=1.05, step=0.01, decimals=2
-        )
-        self.audio_chorus_manual = ToggleSwitch("Хорус (включить)")
-        self.audio_chorus_manual.setChecked(False)
-        self._manual_audio_widgets = [
-            self.playback_speed_manual,
-            self.audio_chorus_manual,
-        ]
-        speed_mirror = QCheckBox()
-        speed_mirror.setChecked(self.audio_speed.isChecked())
-        speed_mirror.setToolTip(self.audio_speed.toolTip())
-        _bind_enable_pair(self.audio_speed, speed_mirror)
-        mg.addWidget(speed_mirror, r, 0, Qt.AlignmentFlag.AlignVCenter)
-        mg.addWidget(
-            QLabel("Скорость видео+аудио (x):"), r, 1, Qt.AlignmentFlag.AlignVCenter
-        )
-        mg.addWidget(self.playback_speed_manual, r, 2)
-        r += 1
-        chorus_mirror = QCheckBox()
-        chorus_mirror.setChecked(self.audio_chorus.isChecked())
-        chorus_mirror.setToolTip(self.audio_chorus.toolTip())
-        _bind_enable_pair(self.audio_chorus, chorus_mirror)
-        mg.addWidget(chorus_mirror, r, 0, Qt.AlignmentFlag.AlignVCenter)
-        mg.addWidget(self.audio_chorus_manual, r, 1, 1, 2)
-        r += 1
-
-        self._manual_section.content_layout().addWidget(manual_inner)
-        fx_layout.addWidget(self._manual_section)
-        self._manual_panel = manual_inner
-        self._manual_section.set_expanded(True)
-        self._on_random_uniquify_toggled(self.random_uniquify.isChecked())
+        fx_layout.addWidget(bounds_inner)
         self._sync_fx_enable_slider_states()
 
         self._uniquify_section_stack = QStackedWidget()
@@ -4935,12 +4785,9 @@ class MainWindow(QWidget):
             ("fx_brightness_enabled", self.fx_brightness_enabled),
             ("fx_contrast_enabled", self.fx_contrast_enabled),
             ("fx_saturation_enabled", self.fx_saturation_enabled),
-            ("fx_crop_jitter_enabled", self.fx_crop_jitter_enabled),
             ("fx_scale_enabled", self.fx_scale_enabled),
             ("fx_noise_enabled", self.fx_noise_enabled),
-            ("fx_seed_enabled", self.fx_seed_enabled),
             ("playback_speed_enabled", self.audio_speed),
-            ("audio_chorus_enabled", self.audio_chorus),
         ]
         self._fx_loading = True
         try:
@@ -5043,23 +4890,17 @@ class MainWindow(QWidget):
                 "fx_saturation_enabled", bool(self.fx_saturation_enabled.isChecked())
             )
             self._settings.setValue(
-                "fx_crop_jitter_enabled", bool(self.fx_crop_jitter_enabled.isChecked())
-            )
-            self._settings.setValue(
                 "fx_scale_enabled", bool(self.fx_scale_enabled.isChecked())
             )
             self._settings.setValue(
                 "fx_noise_enabled", bool(self.fx_noise_enabled.isChecked())
             )
             self._settings.setValue(
-                "fx_seed_enabled", bool(self.fx_seed_enabled.isChecked())
-            )
-            self._settings.setValue(
                 "playback_speed_enabled", bool(self.audio_speed.isChecked())
             )
-            self._settings.setValue(
-                "audio_chorus_enabled", bool(self.audio_chorus.isChecked())
-            )
+            self._settings.setValue("fx_crop_jitter_enabled", False)
+            self._settings.setValue("fx_seed_enabled", False)
+            self._settings.setValue("audio_chorus_enabled", False)
 
     def _antidetect_kind(self) -> str:
         """Режим антидетекта из настроек: local | remote (логика без UI-выбора)."""
@@ -10453,53 +10294,21 @@ class MainWindow(QWidget):
         self._save_folder_settings()
 
     def _sync_fx_enable_slider_states(self) -> None:
-        """Галочки всегда активны; слайдеры — по режиму и включению эффекта."""
+        """Галочки всегда активны; слайдеры — по включению эффекта."""
         if not hasattr(self, "fx_brightness_enabled"):
             return
-        random_on = bool(
-            self.random_uniquify.isChecked()
-            if hasattr(self, "random_uniquify")
-            else True
-        )
-        pairs_random = [
+        pairs = [
             (self.fx_brightness_enabled, self.rb_brightness),
             (self.fx_contrast_enabled, self.rb_contrast),
             (self.fx_saturation_enabled, self.rb_saturation),
-            (self.fx_crop_jitter_enabled, self.rb_crop_jitter),
             (self.fx_scale_enabled, self.rb_scale_pct),
             (self.fx_noise_enabled, self.rb_noise),
-            (self.fx_seed_enabled, self.rb_seed),
             (self.audio_speed, self.audio_speed_range),
-            (self.audio_chorus, self.audio_chorus_prob),
         ]
-        pairs_manual = [
-            (self.fx_brightness_enabled, self.brightness),
-            (self.fx_contrast_enabled, self.contrast),
-            (self.fx_saturation_enabled, self.saturation),
-            (self.fx_crop_jitter_enabled, self.crop_jitter),
-            (self.fx_scale_enabled, self.scale_pct),
-            (self.fx_noise_enabled, self.noise),
-            (self.fx_seed_enabled, self.seed),
-            (self.audio_speed, self.playback_speed_manual),
-            (self.audio_chorus, self.audio_chorus_manual),
-        ]
-        for cb, w in pairs_random:
-            w.setEnabled(bool(random_on and cb.isChecked()))
-        for cb, w in pairs_manual:
-            w.setEnabled(bool((not random_on) and cb.isChecked()))
+        for cb, w in pairs:
+            w.setEnabled(bool(cb.isChecked()))
         for cb in getattr(self, "_fx_enable_checks", []):
             cb.setEnabled(True)
-
-    def _on_random_uniquify_toggled(self, random_on: bool) -> None:
-        # Keep section visible, but toggle relevant controls.
-        if hasattr(self, "_manual_panel"):
-            self._manual_panel.setEnabled(True)
-        if hasattr(self, "_manual_section"):
-            self._manual_section.setEnabled(True)
-        if hasattr(self, "_random_bounds_panel"):
-            # Панель не блокируем целиком — галочки включения остаются доступны.
-            self._random_bounds_panel.setEnabled(True)
-        self._sync_fx_enable_slider_states()
 
     def _processing_run_options(self, *, for_slicing: bool = False) -> dict:
         """Общие параметры обработки из раздела «Настройки»."""
@@ -10515,57 +10324,57 @@ class MainWindow(QWidget):
         return out
 
     def _build_options(self) -> dict:
-        st = UniquifySettings(
-            brightness_delta=float(self.brightness.lowValue()),
-            contrast=float(self.contrast.lowValue()),
-            saturation_scale=float(self.saturation.lowValue()),
-            crop_jitter_px=int(self.crop_jitter.lowValue()),
-            scale_pct=float(self.scale_pct.lowValue()),
-            noise_sigma=float(self.noise.lowValue()),
-            seed_base=int(self.seed.lowValue()),
-            playback_speed_factor=float(self.playback_speed_manual.lowValue()),
-            audio_chorus=bool(self.audio_chorus_manual.isChecked()),
-        )
-        manual_bounds = RandomUniquifyBounds(
-            brightness_min=float(self.brightness.lowValue()),
-            brightness_max=float(self.brightness.highValue()),
-            contrast_min=float(self.contrast.lowValue()),
-            contrast_max=float(self.contrast.highValue()),
-            saturation_min=float(self.saturation.lowValue()),
-            saturation_max=float(self.saturation.highValue()),
-            crop_jitter_min=int(self.crop_jitter.lowValue()),
-            crop_jitter_max=int(self.crop_jitter.highValue()),
-            scale_pct_min=float(self.scale_pct.lowValue()),
-            scale_pct_max=float(self.scale_pct.highValue()),
-            noise_sigma_min=float(self.noise.lowValue()),
-            noise_sigma_max=float(self.noise.highValue()),
-            seed_min=int(self.seed.lowValue()),
-            seed_max=int(self.seed.highValue()),
-            playback_speed_min=float(self.playback_speed_manual.lowValue()),
-            playback_speed_max=float(self.playback_speed_manual.highValue()),
-            audio_chorus_prob=1.0 if self.audio_chorus_manual.isChecked() else 0.0,
-            audio_chorus_prob_min=1.0 if self.audio_chorus_manual.isChecked() else 0.0,
-            audio_chorus_prob_max=1.0 if self.audio_chorus_manual.isChecked() else 0.0,
+        bounds = RandomUniquifyBounds(
+            brightness_min=float(self.rb_brightness.lowValue()),
+            brightness_max=float(self.rb_brightness.highValue()),
+            contrast_min=float(self.rb_contrast.lowValue()),
+            contrast_max=float(self.rb_contrast.highValue()),
+            saturation_min=float(self.rb_saturation.lowValue()),
+            saturation_max=float(self.rb_saturation.highValue()),
+            crop_jitter_min=0,
+            crop_jitter_max=0,
+            scale_pct_min=float(self.rb_scale_pct.lowValue()),
+            scale_pct_max=float(self.rb_scale_pct.highValue()),
+            noise_sigma_min=float(self.rb_noise.lowValue()),
+            noise_sigma_max=float(self.rb_noise.highValue()),
+            seed_min=0,
+            seed_max=0,
+            playback_speed_min=float(self.audio_speed_range.lowValue()),
+            playback_speed_max=float(self.audio_speed_range.highValue()),
+            audio_chorus_prob=0.0,
+            audio_chorus_prob_min=0.0,
+            audio_chorus_prob_max=0.0,
         ).to_dict()
+        st = UniquifySettings(
+            brightness_delta=float(self.rb_brightness.lowValue()),
+            contrast=float(self.rb_contrast.lowValue()),
+            saturation_scale=float(self.rb_saturation.lowValue()),
+            crop_jitter_px=0,
+            scale_pct=float(self.rb_scale_pct.lowValue()),
+            noise_sigma=float(self.rb_noise.lowValue()),
+            seed_base=0,
+            playback_speed_factor=float(self.audio_speed_range.lowValue()),
+            audio_chorus=False,
+        )
         return {
             "input_dir": "",
             "output_dir": self.output_dir_edit.text().strip(),
             "input_files": list(self._selected_input_files),
             **self._processing_run_options(),
             "settings": st.to_dict(),
-            "manual_bounds": manual_bounds,
-            "randomize_uniquify": self.random_uniquify.isChecked(),
+            "manual_bounds": bounds,
+            "randomize_uniquify": True,
             "copies_per_file": int(self.copies_per_file.value()),
             "one_copy_no_effects": bool(self.one_copy_no_effects.isChecked()),
             "brightness_enabled": bool(self.fx_brightness_enabled.isChecked()),
             "contrast_enabled": bool(self.fx_contrast_enabled.isChecked()),
             "saturation_enabled": bool(self.fx_saturation_enabled.isChecked()),
-            "crop_jitter_enabled": bool(self.fx_crop_jitter_enabled.isChecked()),
+            "crop_jitter_enabled": False,
             "scale_enabled": bool(self.fx_scale_enabled.isChecked()),
             "noise_enabled": bool(self.fx_noise_enabled.isChecked()),
-            "seed_enabled": bool(self.fx_seed_enabled.isChecked()),
+            "seed_enabled": False,
             "playback_speed_enabled": bool(self.audio_speed.isChecked()),
-            "audio_chorus_enabled": bool(self.audio_chorus.isChecked()),
+            "audio_chorus_enabled": False,
             "background_music_enabled": bool(self.background_music.isChecked()),
             "background_music_mix_with_source": bool(self.background_music_mix.isChecked()),
             "background_music_volume_pct": int(
@@ -10580,27 +10389,7 @@ class MainWindow(QWidget):
             "background_music_files": [
                 p for p in self._background_music_files if Path(p).is_file()
             ],
-            "random_bounds": RandomUniquifyBounds(
-                brightness_min=float(self.rb_brightness.lowValue()),
-                brightness_max=float(self.rb_brightness.highValue()),
-                contrast_min=float(self.rb_contrast.lowValue()),
-                contrast_max=float(self.rb_contrast.highValue()),
-                saturation_min=float(self.rb_saturation.lowValue()),
-                saturation_max=float(self.rb_saturation.highValue()),
-                crop_jitter_min=int(self.rb_crop_jitter.lowValue()),
-                crop_jitter_max=int(self.rb_crop_jitter.highValue()),
-                scale_pct_min=float(self.rb_scale_pct.lowValue()),
-                scale_pct_max=float(self.rb_scale_pct.highValue()),
-                noise_sigma_min=float(self.rb_noise.lowValue()),
-                noise_sigma_max=float(self.rb_noise.highValue()),
-                seed_min=int(self.rb_seed.lowValue()),
-                seed_max=int(self.rb_seed.highValue()),
-                playback_speed_min=float(self.audio_speed_range.lowValue()),
-                playback_speed_max=float(self.audio_speed_range.highValue()),
-                audio_chorus_prob=float(self.audio_chorus_prob.lowValue()),
-                audio_chorus_prob_min=float(self.audio_chorus_prob.lowValue()),
-                audio_chorus_prob_max=float(self.audio_chorus_prob.highValue()),
-            ).to_dict(),
+            "random_bounds": bounds,
             "text_overlay": self._text_overlay_options_dict(),
         }
 

@@ -865,9 +865,12 @@ def _emoji_still_input_argv(
     dur = max(0.25, float(duration_sec))
     fps_v = max(1.0, float(fps))
     for p in pngs:
-        # -t caps the loop so AMF/GPU don't see an infinite secondary stream.
+        # Disable hwaccel so AMF/d3d11va from the video input does not swallow PNGs
+        # (wrong stream → tiny copy of the main frame instead of the emoji).
         argv.extend(
             [
+                "-hwaccel",
+                "none",
                 "-loop",
                 "1",
                 "-t",
@@ -974,9 +977,9 @@ def build_text_overlay_filters(
     if not glyphs:
         return empty
 
-    # Deduplicate Twemoji files → one -i per unique PNG.
+    # One ffmpeg input + label per emoji use (never reuse a pad — that overlays
+    # a tiny copy of the main frame instead of the PNG on the 2nd+ emoji).
     png_list: list[Path] = []
-    png_index: dict[str, int] = {}
     glyph_em: list[Optional[int]] = []
     for _base_y, ch, _cx, _cg in glyphs:
         if not is_emoji_unit(ch):
@@ -986,18 +989,16 @@ def build_text_overlay_filters(
         if png is None:
             glyph_em.append(None)
             continue
-        key = str(png.resolve())
-        if key not in png_index:
-            png_index[key] = len(png_list)
-            png_list.append(png)
-        glyph_em.append(png_index[key])
+        glyph_em.append(len(png_list))
+        png_list.append(png)
 
     prep: list[str] = []
     for i, _png in enumerate(png_list):
         inp = emoji_input_start + i
+        # Twemoji is pal8 — convert before scale; force exact WxH box.
         prep.append(
-            f"[{inp}:v]format=rgba,scale={em_size}:{em_size}:"
-            f"force_original_aspect_ratio=decrease,setsar=1[__em{i}]"
+            f"[{inp}:v]format=rgba,scale={em_size}:{em_size}:flags=lanczos,"
+            f"setsar=1,format=rgba[__em{i}]"
         )
 
     parts: list[str] = []
@@ -1017,7 +1018,6 @@ def build_text_overlay_filters(
         if em_i is not None:
             y_ov = _y_expr_with_offset(y_expr, 0)
             y_inner = y_ov[1:-1] if y_ov.startswith("'") and y_ov.endswith("'") else y_ov
-            # Center-ish: Twemoji box vs drawtext y_align=font — nudge up slightly.
             parts.append(
                 f"[{label}][__em{em_i}]overlay=x={cx}:y='{y_inner}':"
                 f"format=auto:eof_action=repeat{enable_part}[{nxt}]"

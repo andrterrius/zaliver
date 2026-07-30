@@ -89,6 +89,15 @@ def materialize_text_overlay_ranges(
             float(base if spd_hi is None else spd_hi),
             rng=r,
         )
+    # Color emoji PNGs: render/download on the orchestrator process (has Qt on macOS).
+    text = str(d.get("text") or "")
+    if text.strip():
+        try:
+            from zaliver.processing.text_overlay import prefetch_color_emoji_for_text
+
+            prefetch_color_emoji_for_text(text)
+        except Exception:
+            pass
     return d
 
 

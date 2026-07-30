@@ -261,6 +261,15 @@ class StitchingService:
             if isinstance(raw_text_overlay, dict):
                 toc = TextOverlaySettings.from_dict(raw_text_overlay)
                 text_overlay_enabled = bool(toc.enabled and (toc.text or "").strip())
+                if text_overlay_enabled:
+                    try:
+                        from zaliver.processing.text_overlay import (
+                            prefetch_color_emoji_for_text,
+                        )
+
+                        prefetch_color_emoji_for_text(toc.text)
+                    except Exception:
+                        pass
             if text_overlay_enabled and not ffmpeg_has_drawtext():
                 self._sink.on_finished(False, ffmpeg_drawtext_missing_user_message())
                 return

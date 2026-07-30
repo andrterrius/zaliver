@@ -790,9 +790,37 @@ _TWEMOJI_CDN = (
 
 
 def _twemoji_cache_dir() -> Path:
-    d = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".cache") / "zaliver" / "twemoji_72"
-    if sys.platform != "win32":
+    if sys.platform == "win32":
+        root = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+        d = root / "zaliver" / "twemoji_72"
+    elif sys.platform == "darwin":
+        d = (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "zaliver"
+            / "emoji_png"
+        )
+    else:
         d = Path.home() / ".cache" / "zaliver" / "twemoji_72"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _system_emoji_png_cache_dir() -> Path:
+    if sys.platform == "win32":
+        root = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+        d = root / "zaliver" / "emoji_qt"
+    elif sys.platform == "darwin":
+        d = (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "zaliver"
+            / "emoji_qt"
+        )
+    else:
+        d = Path.home() / ".cache" / "zaliver" / "emoji_qt"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -810,6 +838,30 @@ def twemoji_codepoint_keys(unit: str) -> list[str]:
     return keys
 
 
+def _twemoji_ssl_contexts() -> list:
+    """SSL contexts to try for CDN fetch (packaged macOS Python often needs help)."""
+    import ssl
+
+    contexts: list = []
+    try:
+        contexts.append(ssl.create_default_context())
+    except Exception:
+        pass
+    # certifi if installed (optional)
+    try:
+        import certifi  # type: ignore
+
+        contexts.append(ssl.create_default_context(cafile=certifi.where()))
+    except Exception:
+        pass
+    # Last resort: still better than silent mono emoji in export.
+    try:
+        contexts.append(ssl._create_unverified_context())  # noqa: S323
+    except Exception:
+        pass
+    return contexts or [None]
+
+
 def ensure_twemoji_png(unit: str) -> Optional[Path]:
     """Download/cached Twemoji PNG for unit; None if unavailable."""
     if not unit or not is_emoji_unit(unit):
@@ -823,22 +875,180 @@ def ensure_twemoji_png(unit: str) -> Optional[Path]:
         except OSError:
             continue
         url = f"{_TWEMOJI_CDN}/{key}.png"
-        try:
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": "zaliver-emoji/1.0"},
-            )
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                data = resp.read()
-            if not data or len(data) < 32:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "zaliver-emoji/1.0"},
+        )
+        data: Optional[bytes] = None
+        for ctx in _twemoji_ssl_contexts():
+            try:
+                with urllib.request.urlopen(req, timeout=12, context=ctx) as resp:
+                    data = resp.read()
+                if data and len(data) >= 32:
+                    break
+                data = None
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
+                data = None
                 continue
+        if not data:
+            continue
+        try:
             tmp = dest.with_suffix(".part")
             tmp.write_bytes(data)
             tmp.replace(dest)
             return dest
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
+        except OSError:
             continue
     return None
+
+
+_emoji_qt_app = None
+
+
+def _ensure_qt_gui_for_emoji() -> bool:
+    """Workers are spawn processes without QApplication — color emoji needs CoreText/DirectWrite."""
+    global _emoji_qt_app
+    try:
+        from PyQt6.QtGui import QGuiApplication
+        from PyQt6.QtWidgets import QApplication
+
+        if QApplication.instance() is not None or QGuiApplication.instance() is not None:
+            return True
+        # Do not force offscreen on macOS — Apple Color Emoji needs cocoa.
+        if sys.platform != "darwin":
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        _emoji_qt_app = QGuiApplication(
+            sys.argv[:1] if sys.argv else ["zaliver-emoji"]
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _color_emoji_qfont(pixel_size: int):
+    """QFont that can paint color emoji (Apple / Segoe / Noto Color)."""
+    from PyQt6.QtGui import QFont, QFontDatabase
+
+    px = max(24, int(pixel_size))
+    # Family names are more reliable for color glyphs than loading .ttc paths.
+    preferred: list[str] = []
+    if sys.platform == "darwin":
+        preferred.append("Apple Color Emoji")
+    elif sys.platform == "win32":
+        preferred.extend(["Segoe UI Emoji", "Segoe UI Symbol"])
+    else:
+        preferred.extend(["Noto Color Emoji", "Emoji One"])
+    preferred.extend(["Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji"])
+
+    available = set(QFontDatabase.families())
+    for family in preferred:
+        if family in available:
+            font = QFont(family)
+            font.setPixelSize(px)
+            try:
+                font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+            except Exception:
+                pass
+            return font
+
+    path = resolve_color_emoji_font_path()
+    if path:
+        return _make_qfont(path, px, bold=False)
+
+    font = QFont()
+    font.setPixelSize(px)
+    return font
+
+
+def _image_has_ink(img, *, w: int, h: int) -> bool:
+    step = max(1, min(w, h) // 48)
+    for yy in range(0, h, step):
+        for xx in range(0, w, step):
+            if img.pixelColor(xx, yy).alpha() > 8:
+                return True
+    return False
+
+
+def render_system_color_emoji_png(
+    unit: str,
+    *,
+    pixel_size: int = 160,
+) -> Optional[Path]:
+    """Rasterize a color emoji with Qt/system color font → transparent PNG."""
+    if not unit or not is_emoji_unit(unit):
+        return None
+    if not _ensure_qt_gui_for_emoji():
+        return None
+    px = max(48, min(512, int(pixel_size)))
+    key = "-".join(f"{ord(ch):x}" for ch in unit)
+    out = _system_emoji_png_cache_dir() / f"{key}_{px}.png"
+    try:
+        if out.is_file() and out.stat().st_size > 32:
+            return out
+    except OSError:
+        pass
+
+    try:
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QColor, QFontMetrics, QImage, QPainter
+
+        font = _color_emoji_qfont(px)
+        fm = QFontMetrics(font)
+        w = max(px, fm.horizontalAdvance(unit) + 8)
+        h = max(px, fm.height() + 8)
+        # Non-premultiplied: color emoji alpha is more reliable across platforms.
+        img = QImage(w, h, QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(img)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setFont(font)
+            painter.setPen(QColor(255, 255, 255, 255))
+            painter.drawText(4, fm.ascent() + 4, unit)
+        finally:
+            painter.end()
+
+        if not _image_has_ink(img, w=w, h=h):
+            return None
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_suffix(".part.png")
+        if not img.save(str(tmp), "PNG"):
+            return None
+        tmp.replace(out)
+        return out
+    except Exception:
+        return None
+
+
+def ensure_color_emoji_png(
+    unit: str,
+    *,
+    pixel_size: int = 160,
+) -> Optional[Path]:
+    """Color emoji asset for overlay: system Qt on macOS, Twemoji elsewhere, with fallbacks."""
+    if not unit or not is_emoji_unit(unit):
+        return None
+    # macOS .app: CDN/SSL often fails in workers — prefer Apple Color Emoji via Qt.
+    if sys.platform == "darwin":
+        local = render_system_color_emoji_png(unit, pixel_size=pixel_size)
+        if local is not None:
+            return local
+        return ensure_twemoji_png(unit)
+    tw = ensure_twemoji_png(unit)
+    if tw is not None:
+        return tw
+    return render_system_color_emoji_png(unit, pixel_size=pixel_size)
+
+
+def prefetch_color_emoji_for_text(text: str, *, pixel_size: int = 160) -> None:
+    """Warm color-emoji PNG cache (UI / main thread before spawn workers)."""
+    for unit in iter_text_units(text or ""):
+        if is_emoji_unit(unit):
+            try:
+                ensure_color_emoji_png(unit, pixel_size=pixel_size)
+            except Exception:
+                continue
 
 
 @dataclass
@@ -865,12 +1075,12 @@ def _emoji_still_input_argv(
     dur = max(0.25, float(duration_sec))
     fps_v = max(1.0, float(fps))
     for p in pngs:
-        # Disable hwaccel so AMF/d3d11va from the video input does not swallow PNGs
-        # (wrong stream → tiny copy of the main frame instead of the emoji).
+        # On Windows, disable hwaccel so AMF/d3d11va from the video input does not
+        # swallow PNGs (wrong stream → tiny copy of the main frame).
+        if sys.platform == "win32":
+            argv.extend(["-hwaccel", "none"])
         argv.extend(
             [
-                "-hwaccel",
-                "none",
                 "-loop",
                 "1",
                 "-t",
@@ -919,9 +1129,9 @@ def build_text_overlay_filters(
 ) -> TextOverlayFilterBuild:
     """Build [input_label]…[outv] plus optional -i argv for color emoji PNGs.
 
-    Color emoji use Twemoji PNGs overlaid via normal still inputs (fast, no movie/loop).
-    Letters stay on drawtext (neon/wave). emoji_input_start = first ffmpeg input index
-    reserved for emoji stills (1 when video is input 0).
+    Color emoji use cached PNGs (Twemoji / Apple Color Emoji via Qt) overlaid as
+    still inputs. Letters stay on drawtext (neon/wave). emoji_input_start = first
+    ffmpeg input index reserved for emoji stills (1 when video is input 0).
     """
     empty = TextOverlayFilterBuild(
         graph=f"[{input_label}]null[outv]", emoji_input_argv=[], emoji_count=0
@@ -985,7 +1195,7 @@ def build_text_overlay_filters(
         if not is_emoji_unit(ch):
             glyph_em.append(None)
             continue
-        png = ensure_twemoji_png(ch)
+        png = ensure_color_emoji_png(ch, pixel_size=max(128, em_size * 2))
         if png is None:
             glyph_em.append(None)
             continue

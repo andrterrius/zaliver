@@ -37,6 +37,9 @@ export function AppShell({ platform, onBack }: Props) {
   return (
     <div className="shell">
       <aside className="side-nav">
+        <div className="side-nav-brand">
+          Zaliver<span>.</span>
+        </div>
         <ul className="side-nav-list">
           {navItems.map(({ id, label }) => (
             <li key={label}>
@@ -59,11 +62,11 @@ export function AppShell({ platform, onBack }: Props) {
         {tab === 1 ? <SlicingPage /> : null}
         {tab === 2 ? <StitchingPage /> : null}
         {tab === 3 ? <ReadyPage /> : null}
-        {tab === 4 ? <UploadedPage /> : null}
+        {tab === 4 ? <UploadedPage platform={platform} /> : null}
         {tab === 5 ? <ProfilesPage platform={platform} /> : null}
-        {tab === 6 ? <ChannelEditPage /> : null}
-        {tab === 7 ? <AiPage /> : null}
-        {tab === 8 ? <SettingsPage /> : null}
+        {tab === 6 ? <ChannelEditPage platform={platform} /> : null}
+        {tab === 7 ? <AiPage platform={platform} /> : null}
+        {tab === 8 ? <SettingsPage platform={platform} /> : null}
       </main>
     </div>
   );

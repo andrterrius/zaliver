@@ -79,7 +79,8 @@ class TextOverlayModel(BaseModel):
 
 
 class UniquifyJobRequest(BaseModel):
-    output_dir: str
+    # Ignored: server uses managed output under data_dir/output/<platform>/uniquify
+    output_dir: str = ""
     input_files: list[str] = Field(min_length=1)
     num_workers: int = Field(default=2, ge=1, le=32)
     copies_per_file: int = Field(default=1, ge=1, le=100)
@@ -109,7 +110,8 @@ class UniquifyJobRequest(BaseModel):
 
 
 class SlicingJobRequest(BaseModel):
-    output_dir: str
+    # Ignored: server uses managed output under data_dir/output/<platform>/slicing
+    output_dir: str = ""
     clip_files: list[str] = Field(min_length=1)
     music_files: list[str] = Field(min_length=1)
     num_workers: int = Field(default=2, ge=1, le=32)
@@ -127,7 +129,8 @@ class SlicingJobRequest(BaseModel):
 
 
 class StitchingJobRequest(BaseModel):
-    output_dir: str
+    # Ignored: server uses managed output under data_dir/output/<platform>/gluing
+    output_dir: str = ""
     part1_files: list[str] = Field(min_length=1)
     part2_files: list[str] = Field(min_length=1)
     music_files: list[str] = Field(min_length=1)
@@ -279,6 +282,40 @@ class JobCreatedResponse(BaseModel):
     id: str
     kind: str
     status: str
+    output_dir: str = ""
+
+
+class OutputDirsResponse(BaseModel):
+    root: str
+    platform: str
+    dirs: dict[str, str]
+
+
+class SourceEntry(BaseModel):
+    name: str
+    path: str
+    is_dir: bool
+    size: int | None = None
+    abs_path: str | None = None
+
+
+class SourceListResponse(BaseModel):
+    root: str
+    path: str
+    parent: str | None = None
+    entries: list[SourceEntry] = Field(default_factory=list)
+
+
+class SourceUploadResponse(BaseModel):
+    paths: list[str] = Field(default_factory=list)
+    relative: list[str] = Field(default_factory=list)
+
+
+class SourceDeleteRequest(BaseModel):
+    paths: list[str] = Field(
+        default_factory=list,
+        description="Relative paths under sources root to delete",
+    )
 
 
 class JobListResponse(BaseModel):
@@ -302,6 +339,92 @@ class UploadedVideoItem(BaseModel):
     video_id: str
     profile_id: str
     uploaded_at: str
+    session_id: int = 0
+    view_count: int | None = None
+    like_count: int | None = None
+    comment_count: int | None = None
+    stats_updated_at: str | None = None
+    stats_unavailable: bool = False
+    stats_unavailable_data_api: bool = False
+    age_restricted: bool | None = None
+
+
+class IdsRequest(BaseModel):
+    ids: list[int] = Field(default_factory=list)
+
+
+class DeleteUploadedRequest(BaseModel):
+    ids: list[int] = Field(default_factory=list)
+    filter: Literal["", "unavailable", "age_restricted"] = ""
+
+
+class DeleteResult(BaseModel):
+    deleted: int
+
+
+class UploadSessionItem(BaseModel):
+    id: int
+    started_at: str
+    planned_videos: int
+    processed_videos: int
+    uploaded_ok: int
+    ended_at: str | None = None
+    status: str = ""
+
+
+class StatsRefreshRequest(BaseModel):
+    """Refresh view/like/comment stats for uploaded videos."""
+
+    video_ids: list[str] = Field(default_factory=list)
+    # Prefer session scope: when set and video_ids empty, only that session.
+    session_id: int | None = Field(default=None, ge=1)
+    limit: int = Field(default=500, ge=1, le=2000)
+    # Instagram: antidetect profile used as checker session.
+    checker_profile_id: str = ""
+    checker_custom_data: dict[str, Any] = Field(default_factory=dict)
+    checker_proxy: str = ""
+
+
+class AiPromptItem(BaseModel):
+    id: str
+    title: str
+    text: str
+    builtin: bool = False
+
+
+class AiPromptsResponse(BaseModel):
+    prompts: list[AiPromptItem]
+
+
+class AiPromptsPutRequest(BaseModel):
+    prompts: list[AiPromptItem] = Field(default_factory=list)
+
+
+class AiPromptCreateRequest(BaseModel):
+    title: str = ""
+    text: str = ""
+
+
+class AiGenerateRequest(BaseModel):
+    prompt_id: str = ""
+    prompt_text: str = ""
+    reply_lines: int = Field(default=1, ge=1, le=500)
+
+
+class AiGenerateResponse(BaseModel):
+    text: str
+
+
+class TitleVariableItem(BaseModel):
+    token: str
+    example: str
+    description: str
+
+
+class TitleVariablesResponse(BaseModel):
+    variables: list[TitleVariableItem]
+    example: str
+    max_youtube_title_length: int
 
 
 class ErrorResponse(BaseModel):

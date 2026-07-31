@@ -104,7 +104,8 @@ def _start(
     registry_kind = _KIND_MAP[job_kind]
     service = ProfileJobsService()
 
-    def runner(sink: JobProgressSink, register_cancel) -> None:
+    def runner(sink: JobProgressSink, register_cancel, job_id: str = "") -> None:
+        del job_id
         service.run(request, sink, register_cancel=register_cancel)
 
     try:

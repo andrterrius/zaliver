@@ -1,16 +1,19 @@
 import { useState } from "react";
 import { api } from "../api/client";
 import { useJobPoll } from "../hooks/useJobPoll";
+import { useManagedOutputDir } from "../hooks/useManagedOutputDir";
+import { usePersistedJobId } from "../hooks/usePersistedJobId";
 import { useProcessingDefaults } from "../hooks/useProcessingDefaults";
 import { ProgressBar } from "../components/ProgressBar";
 import { SectionNav } from "../components/SectionNav";
+import { SourcePicker } from "../components/SourcePicker";
 import {
   TextOverlayFields,
   defaultStitchTextOverlay,
   textOverlayToApi,
   type TextOverlayState,
 } from "../components/TextOverlayFields";
-import { linesToList } from "../lib/paths";
+import { RangeSlider, type RangeValue } from "../components/RangeSlider";
 
 const SECTIONS = ["Исходники", "Текст", "Музыка", "Переходы"];
 
@@ -50,10 +53,10 @@ const TRANSITIONS = [
 export function StitchingPage() {
   const proc = useProcessingDefaults();
   const [section, setSection] = useState(0);
-  const [part1, setPart1] = useState("");
-  const [part2, setPart2] = useState("");
-  const [music, setMusic] = useState("");
-  const [outputDir, setOutputDir] = useState("");
+  const [part1, setPart1] = useState<string[]>([]);
+  const [part2, setPart2] = useState<string[]>([]);
+  const [music, setMusic] = useState<string[]>([]);
+  const { path: outputDir } = useManagedOutputDir("gluing");
   const [copies, setCopies] = useState(1);
   const [transition, setTransition] = useState<(typeof TRANSITIONS)[number]["id"] | "">(
     "cut",
@@ -61,10 +64,14 @@ export function StitchingPage() {
   const [lastTransition, setLastTransition] =
     useState<(typeof TRANSITIONS)[number]["id"]>("cut");
   const [transitionRandom, setTransitionRandom] = useState(false);
+  const [partDuration, setPartDuration] = useState<RangeValue>({
+    lo: 2,
+    hi: 6,
+  });
   const [textOverlay, setTextOverlay] = useState<TextOverlayState>(
     defaultStitchTextOverlay,
   );
-  const [jobId, setJobId] = useState<string | null>(null);
+  const [jobId, setJobId] = usePersistedJobId("stitching");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const { job } = useJobPoll(jobId);
@@ -75,15 +82,13 @@ export function StitchingPage() {
     setError("");
     setBusy(true);
     try {
-      const part1_files = linesToList(part1);
-      const part2_files = linesToList(part2);
-      const music_files = linesToList(music);
-      if (!outputDir.trim()) throw new Error("Укажите выходную папку.");
+      const part1_files = part1;
+      const part2_files = part2;
+      const music_files = music;
       if (!part1_files.length) throw new Error("Добавьте клипы для части 1.");
       if (!part2_files.length) throw new Error("Добавьте клипы для части 2.");
       if (!music_files.length) throw new Error("Добавьте аудиотреки.");
       const res = await api.startStitching({
-        output_dir: outputDir.trim(),
         part1_files,
         part2_files,
         music_files,
@@ -94,6 +99,8 @@ export function StitchingPage() {
         transition: transition || lastTransition,
         transition_duration: 0.4,
         transition_random: transitionRandom,
+        min_part_duration: partDuration.lo,
+        max_part_duration: partDuration.hi,
         text_overlay: textOverlayToApi(textOverlay),
       });
       setJobId(res.id);
@@ -135,25 +142,26 @@ export function StitchingPage() {
         <div className="stack">
           {section === 0 ? (
             <section className="group stack">
-              <h3 className="group-title">Части и папка</h3>
-              <label className="hint">Часть 1 — видео (пути)</label>
-              <textarea
-                className="field"
+              <h3 className="group-title">Части</h3>
+              <SourcePicker
+                label="Часть 1 — видео"
                 value={part1}
-                onChange={(e) => setPart1(e.target.value)}
+                onChange={setPart1}
+                kind="video"
+                accept="video/*"
               />
-              <label className="hint">Часть 2 — видео (пути)</label>
-              <textarea
-                className="field"
+              <SourcePicker
+                label="Часть 2 — видео"
                 value={part2}
-                onChange={(e) => setPart2(e.target.value)}
+                onChange={setPart2}
+                kind="video"
+                accept="video/*"
               />
-              <label className="hint">Выходная папка</label>
-              <input
-                className="field"
-                value={outputDir}
-                onChange={(e) => setOutputDir(e.target.value)}
-              />
+              <p className="hint">
+                Результат сохраняется на сервере:
+                <br />
+                <code>{outputDir || "…"}</code>
+              </p>
               <label>
                 Количество роликов{" "}
                 <input
@@ -166,6 +174,16 @@ export function StitchingPage() {
                   onChange={(e) => setCopies(Number(e.target.value) || 1)}
                 />
               </label>
+              <label className="hint">Длительность частей (сек)</label>
+              <RangeSlider
+                min={0.3}
+                max={30}
+                step={0.1}
+                decimals={1}
+                value={partDuration}
+                onChange={setPartDuration}
+                suffix="с"
+              />
               <p className="hint">GPU / потоки — в Настройках.</p>
             </section>
           ) : null}
@@ -181,11 +199,12 @@ export function StitchingPage() {
           {section === 2 ? (
             <section className="group stack">
               <h3 className="group-title">Музыка</h3>
-              <label className="hint">Аудиотреки (пути)</label>
-              <textarea
-                className="field"
+              <SourcePicker
+                label="Аудиотреки"
                 value={music}
-                onChange={(e) => setMusic(e.target.value)}
+                onChange={setMusic}
+                kind="audio"
+                accept="audio/*"
               />
             </section>
           ) : null}

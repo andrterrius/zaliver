@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -61,8 +62,17 @@ def _mount_web_ui(app: FastAPI, dist: Path) -> None:
 
 
 def create_app(config: ApiConfig | None = None) -> FastAPI:
+    # Also set when launched via `uvicorn …:create_app` (not only `python -m zaliver.api`).
+    os.environ.setdefault("ZALIVER_API_SERVER", "1")
+    try:
+        from zaliver.processing.win_console import install_permanent_ctrl_break_guard
+
+        install_permanent_ctrl_break_guard()
+    except Exception:
+        pass
     cfg = config or load_api_config()
     cfg.validate_startup()
+    os.environ["ZALIVER_JOB_LOG_DIR"] = str((cfg.data_dir / "job_logs").resolve())
     state = build_app_state(cfg)
     auth = make_auth_dependency(state)
     ensure_antidetect_defaults(state.core().settings)

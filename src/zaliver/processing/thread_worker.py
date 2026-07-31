@@ -1,7 +1,8 @@
-"""Headless orchestration: process pool, progress queue, cancel."""
+"""Headless orchestration: process/thread pool, progress queue, cancel."""
 
 from __future__ import annotations
 
+import os
 import queue
 import random
 import secrets
@@ -23,6 +24,117 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import multiprocessing
+
+
+def _prefer_thread_pool() -> bool:
+    """
+    Under the API server on Windows, ProcessPoolExecutor(spawn) can tear down
+    the whole uvicorn process (console CTRL_* / abrupt worker death). Encode
+    work is ffmpeg subprocesses, so a thread pool is equivalent and safer.
+    Override: ZALIVER_FORCE_PROCESS_POOL=1 or ZALIVER_FORCE_THREAD_POOL=1.
+    """
+    force_proc = (os.environ.get("ZALIVER_FORCE_PROCESS_POOL") or "").strip().lower()
+    if force_proc in {"1", "true", "yes", "on"}:
+        return False
+    force_thr = (os.environ.get("ZALIVER_FORCE_THREAD_POOL") or "").strip().lower()
+    if force_thr in {"1", "true", "yes", "on"}:
+        return True
+    api = (os.environ.get("ZALIVER_API_SERVER") or "").strip().lower()
+    if api in {"1", "true", "yes", "on"} and sys.platform == "win32":
+        return True
+    return False
+
+
+def _windows_api_stable_mode() -> bool:
+    """Avoid ThreadPoolExecutor on Windows API — some hosts AV (0xC0000005) on first task."""
+    if sys.platform != "win32":
+        return False
+    force_pool = (os.environ.get("ZALIVER_FORCE_THREAD_POOL") or "").strip().lower()
+    if force_pool in {"1", "true", "yes", "on"}:
+        return False
+    api = (os.environ.get("ZALIVER_API_SERVER") or "").strip().lower()
+    return api in {"1", "true", "yes", "on"}
+
+
+def _process_chunk_isolated(task: Dict[str, Any], work_dir: Path) -> Dict[str, Any]:
+    """Run one encode in a disposable pythonw process so AV cannot kill the parent."""
+    import json
+    import subprocess
+    import uuid
+
+    from zaliver.processing.subprocess_flags import (
+        popen_creationflags,
+        resolve_python_executable,
+    )
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex[:12]
+    task_path = work_dir / f"task_{token}.json"
+    result_path = work_dir / f"task_{token}_out.json"
+    stderr_path = work_dir / f"task_{token}.stderr.txt"
+    task_path.write_text(json.dumps(task, ensure_ascii=False), encoding="utf-8")
+    try:
+        result_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    # Prefer short 8.3 path on Windows if available (avoids some native AV path bugs).
+    video = str(task.get("video_path") or "")
+    if sys.platform == "win32" and video:
+        try:
+            import ctypes
+
+            buf = ctypes.create_unicode_buffer(32768)
+            got = ctypes.windll.kernel32.GetShortPathNameW(video, buf, len(buf))
+            if got and buf.value:
+                task = dict(task)
+                task["video_path"] = buf.value
+                task_path.write_text(
+                    json.dumps(task, ensure_ascii=False), encoding="utf-8"
+                )
+        except Exception:
+            pass
+    cmd = [
+        resolve_python_executable(),
+        "-m",
+        "zaliver.api.encode_one",
+        "--task-file",
+        str(task_path),
+        "--result-file",
+        str(result_path),
+    ]
+    env = os.environ.copy()
+    env["ZALIVER_API_SERVER"] = "1"
+    try:
+        with stderr_path.open("wb") as err_f:
+            proc = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=err_f,
+                env=env,
+                creationflags=popen_creationflags(),
+                timeout=7200,
+                check=False,
+            )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "encode subprocess timeout"}
+    except OSError as e:
+        return {"ok": False, "error": f"encode subprocess failed: {e}"}
+    if result_path.is_file():
+        try:
+            data = json.loads(result_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except (OSError, json.JSONDecodeError) as e:
+            return {"ok": False, "error": f"bad encode result: {e}"}
+    code = int(proc.returncode or 0)
+    u = code & 0xFFFFFFFF
+    if u == 0xC0000005:
+        return {
+            "ok": False,
+            "error": "encode process crashed (access violation 0xC0000005)",
+        }
+    return {"ok": False, "error": f"encode process exited {code} without result"}
 
 from zaliver.core.sinks import JobProgressSink
 from zaliver.processing.batch_paths import list_video_files
@@ -496,7 +608,7 @@ class ProcessingService:
 
     def __init__(self, sink: JobProgressSink | None = None) -> None:
         self._sink = sink or JobProgressSink()
-        self._mp_cancel: Optional[multiprocessing.synchronize.Event] = None
+        self._mp_cancel: Any = None
         self._upload_throttle = threading.Event()
         self._upload_throttle_logged = False
 
@@ -668,9 +780,15 @@ class ProcessingService:
                 self._sink.on_finished(False, ffmpeg_drawtext_missing_user_message())
                 return
 
-            ctx = multiprocessing.get_context("spawn")
-            progress_q: multiprocessing.Queue = ctx.Queue()
-            cancel_ev = ctx.Event()
+            use_threads = _prefer_thread_pool()
+            ctx = None
+            if use_threads:
+                progress_q: queue.Queue = queue.Queue()
+                cancel_ev: threading.Event = threading.Event()
+            else:
+                ctx = multiprocessing.get_context("spawn")
+                progress_q = ctx.Queue()  # type: ignore[assignment]
+                cancel_ev = ctx.Event()  # type: ignore[assignment]
             self._mp_cancel = cancel_ev
 
             def cancelled() -> bool:
@@ -791,7 +909,9 @@ class ProcessingService:
                                 else ""
                             )
                         )
-                    _try_enable_chunk_mode(job, num_workers, out_dir, log, n_jobs)
+                    # Windows API: skip chunk parallelism (ThreadPool AV on some hosts).
+                    if not _windows_api_stable_mode():
+                        _try_enable_chunk_mode(job, num_workers, out_dir, log, n_jobs)
                     if not job.chunk_mode:
                         log(
                             f"{job.tag(n_jobs)}: целый файл → один процесс пула "
@@ -912,12 +1032,119 @@ class ProcessingService:
                 _cleanup_partial_outputs()
                 self._sink.on_finished(False, msg)
 
-            with ProcessPoolExecutor(
-                max_workers=num_workers,
-                mp_context=ctx,
-                initializer=init_worker,
-                initargs=(progress_q, cancel_ev),
-            ) as pool:
+            pool_cm: Any
+            stable = _windows_api_stable_mode()
+            if stable:
+                log(
+                    "Пул кодирования: последовательно "
+                    "(encode в отдельном процессе, стабильный режим Windows API)."
+                )
+                # Do not call init_worker here — encode_one process owns the worker TLS.
+                last_emit = 0.0
+
+                def emit_progress_global() -> None:
+                    nonlocal last_emit
+                    now = time.monotonic()
+                    if now - last_emit < 0.05:
+                        return
+                    last_emit = now
+                    cur = sum(
+                        (j.info.frame_count if j.finished else min(j.done_frames, j.info.frame_count))
+                        for j in jobs
+                    )
+                    self._sink.on_progress(min(cur, total_all), total_all, "")
+
+                def scaled_overlay(j: OutputJob) -> Optional[Dict[str, Any]]:
+                    if not j.text_overlay:
+                        return None
+                    toc = TextOverlaySettings.from_dict(j.text_overlay)
+                    scaled = compute_scaled_overlay(
+                        toc, j.info.width, j.info.height
+                    )
+                    return scaled.to_dict() if scaled else None
+
+                for j in jobs:
+                    if cancelled():
+                        _cleanup_partial_outputs()
+                        self._sink.on_finished(False, "Отменено.")
+                        return
+                    temp_out = j.outp.with_name(
+                        f"{j.outp.stem}._zaliver_video{j.outp.suffix}"
+                    )
+                    task = {
+                        "video_path": str(j.p),
+                        "start_frame": 0,
+                        "frame_count": int(j.info.frame_count),
+                        "output_path": str(temp_out),
+                        "chunk_index": 0,
+                        "job_id": j.job_id,
+                        "settings": j.settings,
+                        "width": j.info.width,
+                        "height": j.info.height,
+                        "fps": j.info.fps,
+                        "use_gpu": use_gpu,
+                        "target_video_bps": j.target_video_bps,
+                        "text_overlay": scaled_overlay(j),
+                        "total_frames": int(j.info.frame_count),
+                    }
+                    log(f"{j.tag(n_jobs)}: кодирование (subprocess)…")
+                    try:
+                        res = _process_chunk_isolated(task, out_dir / ".zaliver_encode")
+                    except Exception as e:
+                        res = {"ok": False, "error": str(e)}
+                    if not res.get("ok"):
+                        err = res.get("error") or "unknown"
+                        _cleanup_partial_outputs()
+                        self._sink.on_finished(
+                            False,
+                            "Отменено."
+                            if err == "cancelled"
+                            else f"Ошибка обработки: {err}",
+                        )
+                        return
+                    if cancelled():
+                        _cleanup_partial_outputs()
+                        self._sink.on_finished(False, "Отменено.")
+                        return
+                    j.done_frames = j.info.frame_count
+                    status = _run_whole_file_finalize(
+                        j,
+                        log=log,
+                        n_jobs=n_jobs,
+                        music_pool=music_pool,
+                        cancel_check=cancelled,
+                    )
+                    if status == "cancelled":
+                        _cleanup_partial_outputs()
+                        self._sink.on_finished(False, "Отменено.")
+                        return
+                    if status == "ok" and not j.finalize_error:
+                        log(f"{j.tag(n_jobs)}: Сохранено: {j.outp.name}")
+                        try:
+                            self._sink.on_output_saved(
+                                str(j.outp), not j.skip_youtube_upload
+                            )
+                        except RuntimeError:
+                            pass
+                    emit_progress_global()
+            elif use_threads:
+                log("Пул кодирования: потоки (без ProcessPool под API на Windows).")
+                pool_cm = ThreadPoolExecutor(
+                    max_workers=num_workers,
+                    initializer=init_worker,
+                    initargs=(progress_q, cancel_ev),
+                    thread_name_prefix="zaliver-encode",
+                )
+            else:
+                assert ctx is not None
+                pool_cm = ProcessPoolExecutor(
+                    max_workers=num_workers,
+                    mp_context=ctx,
+                    initializer=init_worker,
+                    initargs=(progress_q, cancel_ev),
+                )
+            if not stable:
+              with pool_cm as pool:
                 with ThreadPoolExecutor(
                     max_workers=_finalize_thread_count(num_workers),
                     thread_name_prefix="zaliver-finalize",

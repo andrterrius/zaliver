@@ -28,9 +28,9 @@ def resolve_ffprobe_executable() -> Optional[str]:
 
 
 def _popen_flags() -> int:
-    if sys.platform == "win32":
-        return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    return 0
+    from zaliver.processing.subprocess_flags import popen_creationflags
+
+    return popen_creationflags()
 
 
 def _parse_frame_rate(s: str) -> float:

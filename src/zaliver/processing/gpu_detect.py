@@ -12,6 +12,8 @@ import sys
 from dataclasses import dataclass
 from typing import List, Optional
 
+from zaliver.processing.subprocess_flags import popen_creationflags
+
 
 @dataclass(frozen=True)
 class GPUInfo:
@@ -40,9 +42,7 @@ def _run(cmd: List[str], timeout_s: float = 6.0) -> str:
             encoding="utf-8",
             errors="replace",
             timeout=timeout_s,
-            creationflags=int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            if sys.platform == "win32"
-            else 0,
+            creationflags=popen_creationflags(),
         )
         return (p.stdout or p.stderr or "").strip()
     except Exception:

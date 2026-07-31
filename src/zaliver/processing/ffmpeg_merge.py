@@ -81,9 +81,9 @@ _explicit_ffmpeg: Optional[str] = None
 
 def _popen_flags() -> int:
     """Hide console window on Windows for child processes (ffmpeg)."""
-    if sys.platform == "win32":
-        return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    return 0
+    from zaliver.processing.subprocess_flags import popen_creationflags
+
+    return popen_creationflags()
 
 
 def is_resource_exhausted_error(exc: BaseException) -> bool:

@@ -55,9 +55,9 @@ SLICE_ENCODE_VIDEOTOOLBOX_Q = 75
 
 
 def _popen_flags() -> int:
-    if sys.platform == "win32":
-        return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    return 0
+    from zaliver.processing.subprocess_flags import popen_creationflags
+
+    return popen_creationflags()
 
 
 def _log(msg: str, log: Optional[LogCallback] = None) -> None:

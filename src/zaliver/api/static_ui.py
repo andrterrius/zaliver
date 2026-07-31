@@ -24,14 +24,15 @@ def resolve_web_dist() -> Path | None:
             return p.parent.resolve()
 
     here = Path(__file__).resolve().parent
+
+    # Prefer repo web/dist in a source checkout so `npm run build` is enough.
+    # .../src/zaliver/api -> repo/web/dist
+    repo_dist = here.parents[2] / "web" / "dist"
+    if (repo_dist / "index.html").is_file():
+        return repo_dist.resolve()
+
     bundled = here / "web_dist"
     if (bundled / "index.html").is_file():
         return bundled
 
-    # .../src/zaliver/api -> repo/web/dist
-    repo_dist = here.parents[2] / "web" / "dist"
-    if (repo_dist / "index.html").is_file():
-        return repo_dist
-
-    # .../zaliver/api (flat install) -> sibling web/dist unlikely; stop
     return None

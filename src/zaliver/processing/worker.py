@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import multiprocessing
 import os
 import re
 import subprocess
@@ -28,8 +27,12 @@ from zaliver.processing.ffmpeg_vf import build_uniquify_filtergraph
 from zaliver.processing.pipeline import UniquifySettings, pick_chunk_crop_offsets
 from zaliver.processing.text_overlay import ScaledTextOverlay
 
-_progress_queue: Optional[multiprocessing.Queue] = None
-_cancel_event: Optional[multiprocessing.synchronize.Event] = None
+# Per-worker (process or thread) progress/cancel — thread-local so concurrent
+# ThreadPool jobs in the API process do not clobber each other.
+_tls = threading.local()
+# ProcessPool fallback (one worker thread per process).
+_progress_queue: Any = None
+_cancel_event: Any = None
 
 _FRAME_RE = re.compile(r"frame=\s*(\d+)")
 _MAX_FFMPEG_STDERR_LINES = 48
@@ -52,29 +55,30 @@ def _ffmpeg_error_message(code: int, stderr_lines: list[str]) -> str:
     return f"ffmpeg exited with code {code}"
 
 
-def init_worker(
-    progress_queue: multiprocessing.Queue,
-    cancel_event: multiprocessing.synchronize.Event,
-) -> None:
+def init_worker(progress_queue: Any, cancel_event: Any) -> None:
     global _progress_queue, _cancel_event
     raise_fd_limit_soft()
+    _tls.progress_queue = progress_queue
+    _tls.cancel_event = cancel_event
     _progress_queue = progress_queue
     _cancel_event = cancel_event
 
 
 def _report(job_id: str, chunk_index: int, done: int, total: int) -> None:
-    if _progress_queue is not None:
-        _progress_queue.put((job_id, chunk_index, done, total))
+    q = getattr(_tls, "progress_queue", None) or _progress_queue
+    if q is not None:
+        q.put((job_id, chunk_index, done, total))
 
 
 def _cancelled() -> bool:
-    return _cancel_event is not None and _cancel_event.is_set()
+    ev = getattr(_tls, "cancel_event", None) or _cancel_event
+    return ev is not None and ev.is_set()
 
 
 def _popen_flags() -> int:
-    if sys.platform == "win32":
-        return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    return 0
+    from zaliver.processing.subprocess_flags import popen_creationflags
+
+    return popen_creationflags()
 
 
 def _filter_complex_argv(graph: str) -> tuple[list[str], Path | None]:

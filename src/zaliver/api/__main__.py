@@ -21,6 +21,15 @@ def main() -> None:
 
     from zaliver.api.config import load_api_config
 
+    # Mark API process so ProcessPool is avoided on Windows (spawn can kill uvicorn).
+    os.environ["ZALIVER_API_SERVER"] = "1"
+    try:
+        from zaliver.processing.win_console import install_permanent_ctrl_break_guard
+
+        install_permanent_ctrl_break_guard()
+    except Exception:
+        pass
+
     # Allow generating a one-shot token for local insecure bootstrap messaging.
     if not (os.environ.get("ZALIVER_API_TOKEN") or "").strip():
         # Dev default matches load_api_config() → "secret"
@@ -70,4 +79,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     main()

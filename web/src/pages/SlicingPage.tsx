@@ -1,9 +1,12 @@
 import { useState } from "react";
 import { api } from "../api/client";
 import { useJobPoll } from "../hooks/useJobPoll";
+import { useManagedOutputDir } from "../hooks/useManagedOutputDir";
+import { usePersistedJobId } from "../hooks/usePersistedJobId";
 import { useProcessingDefaults } from "../hooks/useProcessingDefaults";
 import { ProgressBar } from "../components/ProgressBar";
 import { SectionNav } from "../components/SectionNav";
+import { SourcePicker } from "../components/SourcePicker";
 import { RangeSlider, type RangeValue } from "../components/RangeSlider";
 import {
   TextOverlayFields,
@@ -11,16 +14,15 @@ import {
   textOverlayToApi,
   type TextOverlayState,
 } from "../components/TextOverlayFields";
-import { linesToList } from "../lib/paths";
 
 const SECTIONS = ["Исходники", "Сцены", "Текст", "Музыка"];
 
 export function SlicingPage() {
   const proc = useProcessingDefaults();
   const [section, setSection] = useState(0);
-  const [clips, setClips] = useState("");
-  const [music, setMusic] = useState("");
-  const [outputDir, setOutputDir] = useState("");
+  const [clips, setClips] = useState<string[]>([]);
+  const [music, setMusic] = useState<string[]>([]);
+  const { path: outputDir } = useManagedOutputDir("slicing");
   const [copies, setCopies] = useState(1);
   const [autoDurations, setAutoDurations] = useState(false);
   const [sceneDuration, setSceneDuration] = useState<RangeValue>({
@@ -31,7 +33,7 @@ export function SlicingPage() {
   const [textOverlay, setTextOverlay] = useState<TextOverlayState>(
     defaultSliceTextOverlay,
   );
-  const [jobId, setJobId] = useState<string | null>(null);
+  const [jobId, setJobId] = usePersistedJobId("slicing");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const { job } = useJobPoll(jobId);
@@ -42,9 +44,8 @@ export function SlicingPage() {
     setError("");
     setBusy(true);
     try {
-      const clip_files = linesToList(clips);
-      const music_files = linesToList(music);
-      if (!outputDir.trim()) throw new Error("Укажите выходную папку.");
+      const clip_files = clips;
+      const music_files = music;
       if (!clip_files.length) throw new Error("Добавьте клипы.");
       if (!music_files.length) throw new Error("Добавьте аудиотреки.");
       if (scenesCount.lo > scenesCount.hi) {
@@ -56,7 +57,6 @@ export function SlicingPage() {
         );
       }
       const res = await api.startSlicing({
-        output_dir: outputDir.trim(),
         clip_files,
         music_files,
         copies_per_track: copies,
@@ -110,19 +110,19 @@ export function SlicingPage() {
         <div className="stack">
           {section === 0 ? (
             <section className="group stack">
-              <h3 className="group-title">Клипы и папка</h3>
-              <label className="hint">Видеоклипы (пути)</label>
-              <textarea
-                className="field"
+              <h3 className="group-title">Клипы</h3>
+              <SourcePicker
+                label="Видеоклипы"
                 value={clips}
-                onChange={(e) => setClips(e.target.value)}
+                onChange={setClips}
+                kind="video"
+                accept="video/*"
               />
-              <label className="hint">Выходная папка</label>
-              <input
-                className="field"
-                value={outputDir}
-                onChange={(e) => setOutputDir(e.target.value)}
-              />
+              <p className="hint">
+                Результат сохраняется на сервере:
+                <br />
+                <code>{outputDir || "…"}</code>
+              </p>
               <label>
                 Копий на трек{" "}
                 <input
@@ -191,11 +191,12 @@ export function SlicingPage() {
           {section === 3 ? (
             <section className="group stack">
               <h3 className="group-title">Музыка</h3>
-              <label className="hint">Аудиотреки (пути)</label>
-              <textarea
-                className="field"
+              <SourcePicker
+                label="Аудиотреки"
                 value={music}
-                onChange={(e) => setMusic(e.target.value)}
+                onChange={setMusic}
+                kind="audio"
+                accept="audio/*"
               />
             </section>
           ) : null}

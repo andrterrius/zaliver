@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from zaliver.api.config import ApiConfig
+from zaliver.api.job_log_store import JobLogStore
 from zaliver.api.jobs_registry import JobRegistry
 from zaliver.config.platform_settings import normalize_platform
 from zaliver.config.store import JsonFileSettingsStore, SettingsStore
@@ -46,11 +47,20 @@ class AppState:
 
 def build_app_state(config: ApiConfig) -> AppState:
     config.data_dir.mkdir(parents=True, exist_ok=True)
+    config.resolved_output_root().mkdir(parents=True, exist_ok=True)
+    config.resolved_sources_root().mkdir(parents=True, exist_ok=True)
+    (config.resolved_sources_root() / "uploads").mkdir(parents=True, exist_ok=True)
     settings_path = config.settings_path or (config.data_dir / "settings.json")
     store = JsonFileSettingsStore(settings_path)
+    log_store = JobLogStore(
+        config.data_dir / "job_logs",
+        retention_days=config.job_log_retention_days,
+        max_jobs=config.job_log_max_jobs,
+    )
     jobs = JobRegistry(
         max_concurrent=config.max_concurrent_jobs,
         max_log_lines=config.max_log_lines,
+        log_store=log_store,
     )
     state = AppState(
         config=config,

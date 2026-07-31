@@ -1,9 +1,12 @@
 import { useState } from "react";
 import { api } from "../api/client";
 import { useJobPoll } from "../hooks/useJobPoll";
+import { useManagedOutputDir } from "../hooks/useManagedOutputDir";
+import { usePersistedJobId } from "../hooks/usePersistedJobId";
 import { useProcessingDefaults } from "../hooks/useProcessingDefaults";
 import { ProgressBar } from "../components/ProgressBar";
 import { SectionNav } from "../components/SectionNav";
+import { SourcePicker } from "../components/SourcePicker";
 import { ToggleSwitch } from "../components/ToggleSwitch";
 import { RangeSlider, type RangeValue } from "../components/RangeSlider";
 import {
@@ -12,7 +15,6 @@ import {
   textOverlayToApi,
   type TextOverlayState,
 } from "../components/TextOverlayFields";
-import { linesToList } from "../lib/paths";
 
 const SECTIONS = ["Исходники", "Фильтры", "Текст", "Музыка"];
 
@@ -106,8 +108,8 @@ function fxByKey(rows: FxRow[], key: FxKey): FxRow {
 export function UniquifyPage() {
   const proc = useProcessingDefaults();
   const [section, setSection] = useState(0);
-  const [inputFiles, setInputFiles] = useState("");
-  const [outputDir, setOutputDir] = useState("");
+  const [inputFiles, setInputFiles] = useState<string[]>([]);
+  const { path: outputDir } = useManagedOutputDir("uniquify");
   const [copies, setCopies] = useState(1);
   const [oneCopyNoFx, setOneCopyNoFx] = useState(false);
   const [deleteAfter, setDeleteAfter] = useState(false);
@@ -116,10 +118,10 @@ export function UniquifyPage() {
     defaultUniquifyTextOverlay,
   );
   const [musicEnabled, setMusicEnabled] = useState(false);
-  const [musicFiles, setMusicFiles] = useState("");
+  const [musicFiles, setMusicFiles] = useState<string[]>([]);
   const [musicMix, setMusicMix] = useState(false);
   const [musicVol, setMusicVol] = useState<RangeValue>({ lo: 35, hi: 35 });
-  const [jobId, setJobId] = useState<string | null>(null);
+  const [jobId, setJobId] = usePersistedJobId("uniquify");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const { job } = useJobPoll(jobId);
@@ -135,8 +137,7 @@ export function UniquifyPage() {
     setError("");
     setBusy(true);
     try {
-      const files = linesToList(inputFiles);
-      if (!outputDir.trim()) throw new Error("Укажите выходную папку.");
+      const files = inputFiles;
       if (!files.length) throw new Error("Укажите хотя бы один входной файл.");
 
       const br = fxByKey(fx, "brightness");
@@ -183,7 +184,6 @@ export function UniquifyPage() {
       await api.patchSettings({ delete_after_upload: deleteAfter });
 
       const res = await api.startUniquify({
-        output_dir: outputDir.trim(),
         input_files: files,
         copies_per_file: copies,
         num_workers: proc.numWorkers,
@@ -202,7 +202,7 @@ export function UniquifyPage() {
         background_music_volume_pct: Math.round(musicVol.lo),
         background_music_volume_pct_min: Math.round(musicVol.lo),
         background_music_volume_pct_max: Math.round(musicVol.hi),
-        background_music_files: linesToList(musicFiles),
+        background_music_files: musicFiles,
         settings,
         random_bounds,
         text_overlay: textOverlayToApi(textOverlay),
@@ -261,21 +261,19 @@ export function UniquifyPage() {
         <div className="stack">
           {section === 0 ? (
             <section className="group stack">
-              <h3 className="group-title">Файлы и папка результата</h3>
-              <label className="hint">Исходные видео (по одному пути на строку)</label>
-              <textarea
-                className="field"
+              <h3 className="group-title">Файлы</h3>
+              <SourcePicker
+                label="Исходные видео"
                 value={inputFiles}
-                onChange={(e) => setInputFiles(e.target.value)}
-                placeholder={"C:\\Videos\\a.mp4\nC:\\Videos\\b.mp4"}
+                onChange={setInputFiles}
+                kind="video"
+                accept="video/*"
               />
-              <label className="hint">Выходная папка</label>
-              <input
-                className="field"
-                value={outputDir}
-                onChange={(e) => setOutputDir(e.target.value)}
-                placeholder="Папка для уникализированных файлов…"
-              />
+              <p className="hint">
+                Результат сохраняется на сервере:
+                <br />
+                <code>{outputDir || "…"}</code>
+              </p>
               <div className="row">
                 <label>
                   Копий на исходник{" "}
@@ -359,12 +357,12 @@ export function UniquifyPage() {
               />
               {musicEnabled ? (
                 <>
-                  <label className="hint">Треки (по одному пути на строку)</label>
-                  <textarea
-                    className="field"
+                  <SourcePicker
+                    label="Треки"
                     value={musicFiles}
-                    onChange={(e) => setMusicFiles(e.target.value)}
-                    placeholder="Пути к аудиофайлам…"
+                    onChange={setMusicFiles}
+                    kind="audio"
+                    accept="audio/*"
                   />
                   <ToggleSwitch
                     label="Смешивать с аудио исходника (иначе — полная замена дорожки)"

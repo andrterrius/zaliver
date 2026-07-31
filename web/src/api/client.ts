@@ -11,13 +11,14 @@ export function setToken(token: string): void {
   localStorage.setItem(TOKEN_KEY, token.trim());
 }
 
+/** Always same-origin; custom API base UI removed. */
 export function getApiBase(): string {
-  // Same-origin when UI is served by FastAPI; Vite dev uses proxy.
-  return localStorage.getItem(BASE_KEY) || "";
-}
-
-export function setApiBase(base: string): void {
-  localStorage.setItem(BASE_KEY, base.trim());
+  try {
+    localStorage.removeItem(BASE_KEY);
+  } catch {
+    /* ignore */
+  }
+  return "";
 }
 
 export class ApiError extends Error {
@@ -100,6 +101,44 @@ export type UploadedItem = {
   video_id: string;
   profile_id: string;
   uploaded_at: string;
+  session_id?: number;
+  view_count?: number | null;
+  like_count?: number | null;
+  comment_count?: number | null;
+  stats_updated_at?: string | null;
+  stats_unavailable?: boolean;
+  stats_unavailable_data_api?: boolean;
+  age_restricted?: boolean | null;
+};
+
+export type UploadSession = {
+  id: number;
+  started_at: string;
+  planned_videos: number;
+  processed_videos: number;
+  uploaded_ok: number;
+  ended_at: string | null;
+  status: string;
+};
+
+export type AiPrompt = {
+  id: string;
+  title: string;
+  text: string;
+  builtin: boolean;
+};
+
+export type TitleVariable = {
+  token: string;
+  example: string;
+  description: string;
+};
+
+export type Profile = {
+  id: string;
+  name: string;
+  tags: unknown[];
+  custom_data?: Record<string, unknown>;
 };
 
 export const api = {
@@ -118,7 +157,154 @@ export const api = {
       body: JSON.stringify({ values }),
     }),
   listVideos: () => request<VideoItem[]>("/v1/library/videos?limit=200"),
-  listUploaded: () => request<UploadedItem[]>("/v1/library/uploaded?limit=200"),
+  getOutputDirs: () =>
+    request<{
+      root: string;
+      platform: string;
+      dirs: Record<string, string>;
+    }>("/v1/library/output-dirs"),
+  listSources: (path = "", kind: "media" | "video" | "audio" | "all" = "media") =>
+    request<{
+      root: string;
+      path: string;
+      parent: string | null;
+      entries: Array<{
+        name: string;
+        path: string;
+        is_dir: boolean;
+        size: number | null;
+        abs_path: string | null;
+      }>;
+    }>(
+      `/v1/library/sources?path=${encodeURIComponent(path)}&kind=${encodeURIComponent(kind)}`,
+    ),
+  listOutput: (path = "", kind: "media" | "video" | "audio" | "all" = "all") =>
+    request<{
+      root: string;
+      path: string;
+      parent: string | null;
+      entries: Array<{
+        name: string;
+        path: string;
+        is_dir: boolean;
+        size: number | null;
+        abs_path: string | null;
+      }>;
+    }>(
+      `/v1/library/output?path=${encodeURIComponent(path)}&kind=${encodeURIComponent(kind)}`,
+    ),
+  deleteOutput: (paths: string[]) =>
+    request<{ deleted: number }>("/v1/library/output/delete", {
+      method: "POST",
+      body: JSON.stringify({ paths }),
+    }),
+  downloadLibrary: async (
+    area: "sources" | "output",
+    paths: string[],
+  ): Promise<void> => {
+    const headers = new Headers();
+    headers.set("Content-Type", "application/json");
+    const token = getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const res = await fetch(
+      `${getApiBase()}/v1/library/${area}/download`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ paths }),
+      },
+    );
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const data = await res.json();
+        detail =
+          typeof data.detail === "string"
+            ? data.detail
+            : JSON.stringify(data.detail);
+      } catch {
+        /* ignore */
+      }
+      throw new ApiError(res.status, detail || `HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    let filename = area === "output" ? "zaliver-output.zip" : "zaliver-files.zip";
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m =
+      /filename\*=UTF-8''([^;]+)|filename="([^"]+)"|filename=([^;]+)/i.exec(cd);
+    if (m) {
+      const raw = decodeURIComponent((m[1] || m[2] || m[3] || "").trim());
+      if (raw) filename = raw;
+    }
+    const url = URL.createObjectURL(blob);
+    try {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  },
+    uploadSources: async (files: File[], subdir = "uploads") => {
+    const body = new FormData();
+    for (const f of files) body.append("files", f);
+    const headers = new Headers();
+    const token = getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const res = await fetch(
+      `${getApiBase()}/v1/library/sources/upload?subdir=${encodeURIComponent(subdir)}`,
+      { method: "POST", headers, body },
+    );
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const data = await res.json();
+        detail =
+          typeof data.detail === "string"
+            ? data.detail
+            : JSON.stringify(data.detail);
+      } catch {
+        /* ignore */
+      }
+      throw new ApiError(res.status, detail || `HTTP ${res.status}`);
+    }
+    return (await res.json()) as { paths: string[]; relative: string[] };
+  },
+  deleteSources: (paths: string[]) =>
+    request<{ deleted: number }>("/v1/library/sources/delete", {
+      method: "POST",
+      body: JSON.stringify({ paths }),
+    }),
+  deleteVideos: (ids: number[]) =>
+    request<{ deleted: number }>("/v1/library/videos/delete", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    }),
+  listUploaded: (sessionId?: number | null) => {
+    const q =
+      sessionId != null && sessionId > 0
+        ? `?limit=500&session_id=${sessionId}`
+        : "?limit=500";
+    return request<UploadedItem[]>(`/v1/library/uploaded${q}`);
+  },
+  listSessions: () =>
+    request<UploadSession[]>("/v1/library/sessions?limit=200"),
+  deleteUploaded: (body: {
+    ids?: number[];
+    filter?: "" | "unavailable" | "age_restricted";
+  }) =>
+    request<{ deleted: number }>("/v1/library/uploaded/delete", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  refreshUploadedStats: (body: Record<string, unknown> = {}) =>
+    request<{ id: string; kind: string; status: string }>(
+      "/v1/library/uploaded/refresh-stats",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   listJobs: () => request<{ jobs: Job[] }>("/v1/jobs?limit=30"),
   getJob: (id: string, logTail = 200) =>
     request<Job>(`/v1/jobs/${id}?log_tail=${logTail}`),
@@ -139,17 +325,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  startUpload: (body: Record<string, unknown>) =>
+    request<{ id: string; kind: string; status: string }>("/v1/jobs/upload", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   listProfiles: () =>
     request<{
       kind?: string;
       base_url?: string;
       count: number;
-      profiles: {
-        id: string;
-        name: string;
-        tags: unknown[];
-        custom_data?: Record<string, unknown>;
-      }[];
+      profiles: Profile[];
     }>("/v1/antidetect/profiles"),
   startProfileJob: (path: string, body: Record<string, unknown>) =>
     request<{ id: string; kind: string; status: string }>(
@@ -159,4 +345,35 @@ export const api = {
         body: JSON.stringify(body),
       },
     ),
+  getAiPrompts: () =>
+    request<{ prompts: AiPrompt[] }>("/v1/ai/prompts"),
+  putAiPrompts: (prompts: AiPrompt[]) =>
+    request<{ prompts: AiPrompt[] }>("/v1/ai/prompts", {
+      method: "PUT",
+      body: JSON.stringify({ prompts }),
+    }),
+  createAiPrompt: (title = "", text = "") =>
+    request<AiPrompt>("/v1/ai/prompts", {
+      method: "POST",
+      body: JSON.stringify({ title, text }),
+    }),
+  deleteAiPrompt: (id: string) =>
+    request<{ deleted: number }>(`/v1/ai/prompts/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+  aiGenerate: (body: {
+    prompt_id?: string;
+    prompt_text?: string;
+    reply_lines?: number;
+  }) =>
+    request<{ text: string }>("/v1/ai/generate", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  titleVariables: () =>
+    request<{
+      variables: TitleVariable[];
+      example: string;
+      max_youtube_title_length: number;
+    }>("/v1/title-variables"),
 };

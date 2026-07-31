@@ -55,7 +55,7 @@ export function RangeSlider({
         />
         <input
           id={`${id}-lo`}
-          className="range-slider-input"
+          className="range-slider-input range-slider-input-lo"
           type="range"
           min={min}
           max={max}
@@ -67,7 +67,7 @@ export function RangeSlider({
         />
         <input
           id={`${id}-hi`}
-          className="range-slider-input"
+          className="range-slider-input range-slider-input-hi"
           type="range"
           min={min}
           max={max}

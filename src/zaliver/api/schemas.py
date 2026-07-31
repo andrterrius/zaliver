@@ -83,7 +83,7 @@ class UniquifyJobRequest(BaseModel):
     output_dir: str = ""
     input_files: list[str] = Field(min_length=1)
     num_workers: int = Field(default=2, ge=1, le=32)
-    copies_per_file: int = Field(default=1, ge=1, le=100)
+    copies_per_file: int = Field(default=1, ge=1)
     use_gpu: bool = False
     use_gpu_finalize: bool = False
     randomize_uniquify: bool = True
@@ -115,7 +115,7 @@ class SlicingJobRequest(BaseModel):
     clip_files: list[str] = Field(min_length=1)
     music_files: list[str] = Field(min_length=1)
     num_workers: int = Field(default=2, ge=1, le=32)
-    copies_per_track: int = Field(default=1, ge=1, le=100)
+    copies_per_track: int = Field(default=1, ge=1)
     use_gpu: bool = False
     use_gpu_finalize: bool = False
     use_suggested_durations: bool = False
@@ -135,7 +135,7 @@ class StitchingJobRequest(BaseModel):
     part2_files: list[str] = Field(min_length=1)
     music_files: list[str] = Field(min_length=1)
     num_workers: int = Field(default=2, ge=1, le=32)
-    copies_per_track: int = Field(default=1, ge=1, le=100)
+    copies_per_track: int = Field(default=1, ge=1)
     use_gpu: bool = False
     use_gpu_finalize: bool = False
     min_part_duration: float = Field(default=2.0, ge=0.3, le=120.0)
@@ -161,6 +161,14 @@ class UploadJobRequest(BaseModel):
     headless: bool = True
     max_concurrent_browsers: int = Field(default=3, ge=1, le=10)
     cooldown_s: float = Field(default=0.0, ge=0.0, le=86400.0)
+    publish_before_checks: bool = True
+    keep_studio_title: bool = False
+    schedule_publish: bool = False
+    schedule_times_iso: list[str] = Field(default_factory=list)
+    schedule_warmup_shorts: bool = False
+    schedule_warmup_shorts_recommendations: bool = True
+    schedule_warmup_search_query: str = ""
+    delete_after_upload: bool = False
 
 
 class ProfileJobBaseRequest(BaseModel):

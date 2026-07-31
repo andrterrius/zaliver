@@ -1066,6 +1066,19 @@ def build_router() -> APIRouter:
         cooldown = float(body.cooldown_s)
         title = body.title
         description = body.description
+        publish_before_checks = bool(body.publish_before_checks)
+        keep_studio_title = bool(body.keep_studio_title)
+        schedule_times_raw = [
+            str(x).strip() for x in (body.schedule_times_iso or []) if str(x).strip()
+        ]
+        if body.schedule_publish and schedule_times_raw:
+            schedule_times = schedule_times_raw
+        else:
+            schedule_times = []
+        schedule_warmup_shorts = bool(body.schedule_warmup_shorts)
+        schedule_warmup_reco = bool(body.schedule_warmup_shorts_recommendations)
+        schedule_warmup_q = str(body.schedule_warmup_search_query or "").strip()
+        delete_after_upload = bool(body.delete_after_upload)
 
         def runner(sink, register_cancel, job_id: str = "") -> None:
             del job_id
@@ -1083,6 +1096,13 @@ def build_router() -> APIRouter:
                 cooldown_s=cooldown,
                 sink=sink,
                 register_cancel=register_cancel,
+                publish_before_checks=publish_before_checks,
+                keep_studio_title=keep_studio_title,
+                schedule_times=schedule_times,
+                schedule_warmup_shorts=schedule_warmup_shorts,
+                schedule_warmup_shorts_recommendations=schedule_warmup_reco,
+                schedule_warmup_search_query=schedule_warmup_q,
+                delete_after_upload=delete_after_upload,
             )
 
         try:

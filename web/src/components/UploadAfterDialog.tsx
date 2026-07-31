@@ -8,6 +8,15 @@ export type UploadAfterChoice = {
   description: string;
   headless: boolean;
   maxBrowsers: number;
+  publishBeforeChecks: boolean;
+  keepStudioTitle: boolean;
+  uploadAsReady: boolean;
+  schedulePublish: boolean;
+  scheduleTimesIso: string[];
+  scheduleWarmupShorts: boolean;
+  scheduleWarmupRecommendations: boolean;
+  scheduleWarmupSearchQuery: string;
+  deleteAfterUpload: boolean;
 };
 
 type Mode = "uniquify" | "slicing" | "stitching";
@@ -31,6 +40,29 @@ function dialogTitle(mode: Mode, platform: Platform | null): string {
   return `Загрузка в ${where} после уникализации`;
 }
 
+function defaultScheduleLocal(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  d.setHours(10, 0, 0, 0);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function addHoursLocal(isoLocal: string, hours: number): string {
+  const d = new Date(isoLocal);
+  if (Number.isNaN(d.getTime())) return defaultScheduleLocal();
+  d.setHours(d.getHours() + hours);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** datetime-local → ISO naive (сервер трактует как МСК). */
+function localToIsoNaive(local: string): string {
+  const s = (local || "").trim();
+  if (!s) return "";
+  return s.length === 16 ? `${s}:00` : s;
+}
+
 export function UploadAfterDialog({
   open,
   mode,
@@ -44,16 +76,31 @@ export function UploadAfterDialog({
   const [description, setDescription] = useState("");
   const [headless, setHeadless] = useState(true);
   const [maxBrowsers, setMaxBrowsers] = useState(3);
+  const [publishBeforeChecks, setPublishBeforeChecks] = useState(true);
+  const [keepStudioTitle, setKeepStudioTitle] = useState(false);
+  const [uploadAsReady, setUploadAsReady] = useState(false);
+  const [schedulePublish, setSchedulePublish] = useState(false);
+  const [scheduleTimes, setScheduleTimes] = useState<string[]>([
+    defaultScheduleLocal(),
+  ]);
+  const [scheduleWarmupShorts, setScheduleWarmupShorts] = useState(true);
+  const [scheduleWarmupRecommendations, setScheduleWarmupRecommendations] =
+    useState(true);
+  const [scheduleWarmupSearchQuery, setScheduleWarmupSearchQuery] = useState("");
+  const [deleteAfterUpload, setDeleteAfterUpload] = useState(false);
   const [search, setSearch] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
   const isIg = platform === "instagram";
+  const showYtOptions = !isIg;
 
   useEffect(() => {
     if (!open) return;
     setError("");
     setSearch("");
+    setSchedulePublish(false);
+    setScheduleTimes([defaultScheduleLocal()]);
     setLoading(true);
     void (async () => {
       try {
@@ -64,15 +111,26 @@ export function UploadAfterDialog({
         ]);
         setPlatform(plat.platform);
         setProfiles(prof.profiles || []);
-        setHeadless(
-          Boolean(settings.values["antydetect/dolphin_headless"] ?? true),
-        );
+        const v = settings.values;
+        setHeadless(Boolean(v["antydetect/dolphin_headless"] ?? true));
         setMaxBrowsers(
-          Number(settings.values["antydetect/max_concurrent_browsers"] ?? 3) ||
-            3,
+          Number(v["antydetect/max_concurrent_browsers"] ?? 3) || 3,
         );
-        const savedTitle = String(settings.values["upload_title"] ?? "");
-        const savedDesc = String(settings.values["upload_description"] ?? "");
+        setUploadAsReady(Boolean(v["upload_as_ready"] ?? false));
+        const delKey =
+          mode === "slicing"
+            ? "slice/delete_after_upload"
+            : mode === "stitching"
+              ? "stitch/delete_after_upload"
+              : "delete_after_upload";
+        setDeleteAfterUpload(Boolean(v[delKey] ?? false));
+        setPublishBeforeChecks(true);
+        setKeepStudioTitle(false);
+        setScheduleWarmupShorts(true);
+        setScheduleWarmupRecommendations(true);
+        setScheduleWarmupSearchQuery("");
+        const savedTitle = String(v["upload_title"] ?? "");
+        const savedDesc = String(v["upload_description"] ?? "");
         if (savedTitle) setTitle(savedTitle);
         if (savedDesc) setDescription(savedDesc);
       } catch (e) {
@@ -81,7 +139,7 @@ export function UploadAfterDialog({
         setLoading(false);
       }
     })();
-  }, [open]);
+  }, [open, mode]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -109,16 +167,46 @@ export function UploadAfterDialog({
     setError("");
     const ids = [...selected];
     const t = title.trim();
-    if (ids.length && !isIg && !t) {
+    if (ids.length && showYtOptions && !keepStudioTitle && !t) {
       setError("Название видео обязательно для загрузки в YouTube.");
+      return;
+    }
+    if (
+      showYtOptions &&
+      schedulePublish &&
+      scheduleWarmupShorts &&
+      !scheduleWarmupRecommendations &&
+      !scheduleWarmupSearchQuery.trim()
+    ) {
+      setError(
+        "Укажите поисковый запрос для прогрева Shorts или включите «Рекомендации Shorts».",
+      );
+      return;
+    }
+    const timesIso =
+      showYtOptions && schedulePublish
+        ? scheduleTimes.map(localToIsoNaive).filter(Boolean)
+        : [];
+    if (showYtOptions && schedulePublish && !timesIso.length) {
+      setError("Укажите хотя бы одно время отложки (МСК).");
       return;
     }
     onConfirm({
       profileIds: ids,
-      title: t,
+      title: keepStudioTitle ? "" : t,
       description: isIg ? "" : description.trim(),
       headless,
       maxBrowsers,
+      publishBeforeChecks: isIg ? true : publishBeforeChecks,
+      keepStudioTitle: isIg ? false : keepStudioTitle,
+      uploadAsReady,
+      schedulePublish: isIg ? false : schedulePublish,
+      scheduleTimesIso: timesIso,
+      scheduleWarmupShorts:
+        !isIg && schedulePublish ? scheduleWarmupShorts : false,
+      scheduleWarmupRecommendations: scheduleWarmupRecommendations,
+      scheduleWarmupSearchQuery: scheduleWarmupSearchQuery.trim(),
+      deleteAfterUpload,
     });
   };
 
@@ -147,21 +235,26 @@ export function UploadAfterDialog({
 
         <label className="hint">
           {isIg ? "Подпись" : "Название"}{" "}
-          <TitleVariablesHint onInsert={(tok) => setTitle((v) => v + tok)} />
+          {!keepStudioTitle ? (
+            <TitleVariablesHint onInsert={(tok) => setTitle((v) => v + tok)} />
+          ) : null}
         </label>
         <input
           className="field"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
+          disabled={keepStudioTitle}
           placeholder={
-            isIg
-              ? "Подпись к Reels (необязательно). {date}, {profile}…"
-              : "Название ({date}, {profile}, {video}, {index}…)"
+            keepStudioTitle
+              ? "Название не вводится — из Studio (настройки канала или имя файла)…"
+              : isIg
+                ? "Подпись к Reels (необязательно). {date}, {profile}…"
+                : "Название ({date}, {profile}, {video}, {index}…)"
           }
-          autoFocus
+          autoFocus={!keepStudioTitle}
         />
 
-        {!isIg ? (
+        {showYtOptions ? (
           <>
             <label className="hint">Описание</label>
             <textarea
@@ -174,6 +267,150 @@ export function UploadAfterDialog({
           </>
         ) : null}
 
+        <div className="stack" style={{ gap: 8 }}>
+          {showYtOptions ? (
+            <>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={publishBeforeChecks}
+                  onChange={(e) => setPublishBeforeChecks(e.target.checked)}
+                />
+                Опубликовать до проверок
+              </label>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={keepStudioTitle}
+                  onChange={(e) => setKeepStudioTitle(e.target.checked)}
+                />
+                Название из настроек/названия файлов
+              </label>
+            </>
+          ) : null}
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={uploadAsReady}
+              onChange={(e) => setUploadAsReady(e.target.checked)}
+            />
+            Заливать по мере готовности
+          </label>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={deleteAfterUpload}
+              onChange={(e) => setDeleteAfterUpload(e.target.checked)}
+            />
+            Удалять после залива
+          </label>
+          {showYtOptions ? (
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={schedulePublish}
+                onChange={(e) => setSchedulePublish(e.target.checked)}
+              />
+              Опубликовать в отложку
+            </label>
+          ) : null}
+        </div>
+
+        {showYtOptions && schedulePublish ? (
+          <div className="stack" style={{ gap: 8, marginLeft: 8 }}>
+            <p className="hint">
+              Время по Москве. На каждый профиль — по одному видео на каждое
+              время.
+            </p>
+            {scheduleTimes.map((t, i) => (
+              <label key={i} className="hint" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                Время {i + 1} (МСК)
+                <input
+                  className="field"
+                  type="datetime-local"
+                  value={t}
+                  onChange={(e) => {
+                    const next = [...scheduleTimes];
+                    next[i] = e.target.value;
+                    setScheduleTimes(next);
+                  }}
+                  style={{ flex: 1 }}
+                />
+              </label>
+            ))}
+            <div className="row" style={{ gap: 8 }}>
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={() =>
+                  setScheduleTimes((prev) => [
+                    ...prev,
+                    addHoursLocal(prev[prev.length - 1] || defaultScheduleLocal(), 5),
+                  ])
+                }
+              >
+                Добавить время
+              </button>
+              <button
+                type="button"
+                className="btn secondary"
+                disabled={scheduleTimes.length <= 1}
+                onClick={() =>
+                  setScheduleTimes((prev) =>
+                    prev.length <= 1 ? prev : prev.slice(0, -1),
+                  )
+                }
+              >
+                Убрать время
+              </button>
+            </div>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={scheduleWarmupShorts}
+                onChange={(e) => setScheduleWarmupShorts(e.target.checked)}
+              />
+              Прогрев Shorts во второй вкладке
+            </label>
+            {scheduleWarmupShorts ? (
+              <>
+                <label className="check" style={{ marginLeft: 16 }}>
+                  <input
+                    type="checkbox"
+                    checked={scheduleWarmupRecommendations}
+                    onChange={(e) =>
+                      setScheduleWarmupRecommendations(e.target.checked)
+                    }
+                  />
+                  Рекомендации Shorts
+                </label>
+                {!scheduleWarmupRecommendations ? (
+                  <label
+                    className="hint"
+                    style={{
+                      display: "flex",
+                      gap: 8,
+                      alignItems: "center",
+                      marginLeft: 16,
+                    }}
+                  >
+                    Поисковый запрос
+                    <input
+                      className="field"
+                      style={{ flex: 1 }}
+                      value={scheduleWarmupSearchQuery}
+                      onChange={(e) =>
+                        setScheduleWarmupSearchQuery(e.target.value)
+                      }
+                      placeholder="Текст для поиска Shorts"
+                    />
+                  </label>
+                ) : null}
+              </>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="row">
           <label className="check">
             <input
@@ -181,9 +418,12 @@ export function UploadAfterDialog({
               checked={headless}
               onChange={(e) => setHeadless(e.target.checked)}
             />
-            Headless
+            Headless (без окна браузера)
           </label>
-          <label className="hint" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <label
+            className="hint"
+            style={{ display: "flex", gap: 8, alignItems: "center" }}
+          >
             Браузеров
             <input
               className="field"
@@ -228,7 +468,9 @@ export function UploadAfterDialog({
         <div className="list-panel upload-after-profiles">
           {filtered.length === 0 ? (
             <div className="list-item hint">
-              {loading ? "…" : "Нет профилей (проверьте антидетект в Настройках)."}
+              {loading
+                ? "…"
+                : "Нет профилей (проверьте антидетект в Настройках)."}
             </div>
           ) : (
             filtered.map((p) => (

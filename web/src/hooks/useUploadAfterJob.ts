@@ -56,12 +56,20 @@ export function useUploadAfterJob(
     startedFor.current = job.id;
     savePendingUpload(kind, null);
     void (async () => {
+      const delKey =
+        kind === "slicing"
+          ? "slice/delete_after_upload"
+          : kind === "stitching"
+            ? "stitch/delete_after_upload"
+            : "delete_after_upload";
       try {
         await api.patchSettings({
           "antydetect/dolphin_headless": pending.headless,
           "antydetect/max_concurrent_browsers": pending.maxBrowsers,
           upload_title: pending.title,
           upload_description: pending.description,
+          upload_as_ready: pending.uploadAsReady,
+          [delKey]: pending.deleteAfterUpload,
         });
       } catch {
         /* optional persist */
@@ -75,6 +83,15 @@ export function useUploadAfterJob(
           headless: pending.headless,
           max_concurrent_browsers: pending.maxBrowsers,
           kind: "local",
+          publish_before_checks: pending.publishBeforeChecks,
+          keep_studio_title: pending.keepStudioTitle,
+          schedule_publish: pending.schedulePublish,
+          schedule_times_iso: pending.scheduleTimesIso || [],
+          schedule_warmup_shorts: pending.scheduleWarmupShorts,
+          schedule_warmup_shorts_recommendations:
+            pending.scheduleWarmupRecommendations,
+          schedule_warmup_search_query: pending.scheduleWarmupSearchQuery || "",
+          delete_after_upload: pending.deleteAfterUpload,
         });
         setUploadJobId(res.id);
       } catch (e) {

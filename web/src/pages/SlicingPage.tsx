@@ -251,7 +251,6 @@ export function SlicingPage() {
                   style={{ width: 90 }}
                   type="number"
                   min={1}
-                  max={100}
                   value={copies}
                   onChange={(e) => setCopies(Number(e.target.value) || 1)}
                 />

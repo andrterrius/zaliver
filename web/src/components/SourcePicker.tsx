@@ -250,7 +250,7 @@ export function SourcePicker({
               </button>
             </div>
             <p className="hint">{cwd ? cwd : "корень исходников"}</p>
-            {diskHint ? <p className="hint">{diskHint}</p> : null}
+            {diskHint ? <p className="disk-usage">{diskHint}</p> : null}
             <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
               <button
                 type="button"

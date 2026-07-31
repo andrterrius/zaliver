@@ -244,7 +244,7 @@ export function OutputFolderPicker({
               </button>
             </div>
             <p className="hint">{cwd || baseRel}</p>
-            {diskHint ? <p className="hint">{diskHint}</p> : null}
+            {diskHint ? <p className="disk-usage">{diskHint}</p> : null}
             {error ? <div className="error-banner">{error}</div> : null}
             <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
               <button

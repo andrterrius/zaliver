@@ -381,6 +381,18 @@ input[type='number'].field {
   white-space: pre-wrap;
 }
 
+.disk-usage {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--input-bg);
+  color: var(--title);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
 .list-panel {
   background: var(--input-bg);
   border: 1px solid var(--border);

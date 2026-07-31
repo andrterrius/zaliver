@@ -12,8 +12,8 @@ def resolve_web_dist() -> Path | None:
 
     Order:
     1. ZALIVER_WEB_DIST
-    2. zaliver/api/web_dist (bundled next to this package)
-    3. <repo>/web/dist (dev checkout with src/ layout)
+    2. zaliver/api/web_dist (bundled with the package — what git pull ships)
+    3. <repo>/web/dist (local ``npm run build`` without copying)
     """
     env = (os.environ.get("ZALIVER_WEB_DIST") or "").strip()
     if env:
@@ -25,14 +25,13 @@ def resolve_web_dist() -> Path | None:
 
     here = Path(__file__).resolve().parent
 
-    # Prefer repo web/dist in a source checkout so `npm run build` is enough.
+    bundled = here / "web_dist"
+    if (bundled / "index.html").is_file():
+        return bundled.resolve()
+
     # .../src/zaliver/api -> repo/web/dist
     repo_dist = here.parents[2] / "web" / "dist"
     if (repo_dist / "index.html").is_file():
         return repo_dist.resolve()
-
-    bundled = here / "web_dist"
-    if (bundled / "index.html").is_file():
-        return bundled
 
     return None

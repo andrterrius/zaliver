@@ -10,6 +10,7 @@ import { api, type Platform, type Profile } from "../api/client";
 import { useJobPoll } from "../hooks/useJobPoll";
 import { usePersistedJobId } from "../hooks/usePersistedJobId";
 import { ProgressBar } from "../components/ProgressBar";
+import { JobLogBox } from "../components/JobLogBox";
 import { TitleVariablesHint } from "../components/TitleVariablesHint";
 import { ToggleSwitch } from "../components/ToggleSwitch";
 
@@ -639,7 +640,7 @@ export function ChannelEditPage({ platform }: Props) {
       ) : null}
 
       {job?.logs?.length ? (
-        <div className="log-box">{job.logs.slice(-40).join("\n")}</div>
+        <JobLogBox lines={job.logs.slice(-40)} emptyHint="" />
       ) : null}
 
       {pickerOpen ? (

@@ -79,7 +79,7 @@ class TextOverlayModel(BaseModel):
 
 
 class UniquifyJobRequest(BaseModel):
-    # Ignored: server uses managed output under data_dir/output/<platform>/uniquify
+    # Optional; must be under managed output/<platform>/uniquify (or empty = that folder).
     output_dir: str = ""
     input_files: list[str] = Field(min_length=1)
     num_workers: int = Field(default=2, ge=1, le=32)
@@ -110,7 +110,7 @@ class UniquifyJobRequest(BaseModel):
 
 
 class SlicingJobRequest(BaseModel):
-    # Ignored: server uses managed output under data_dir/output/<platform>/slicing
+    # Optional; must be under managed output/<platform>/slicing (or empty = that folder).
     output_dir: str = ""
     clip_files: list[str] = Field(min_length=1)
     music_files: list[str] = Field(min_length=1)
@@ -129,7 +129,7 @@ class SlicingJobRequest(BaseModel):
 
 
 class StitchingJobRequest(BaseModel):
-    # Ignored: server uses managed output under data_dir/output/<platform>/gluing
+    # Optional; must be under managed output/<platform>/gluing (or empty = that folder).
     output_dir: str = ""
     part1_files: list[str] = Field(min_length=1)
     part2_files: list[str] = Field(min_length=1)

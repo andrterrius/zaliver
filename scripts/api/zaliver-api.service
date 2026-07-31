@@ -1,0 +1,54 @@
+# Zaliver API — systemd unit
+#
+# Install (path к репо поправьте при необходимости):
+#   cp scripts/api/zaliver-api.service /etc/systemd/system/
+#   mkdir -p /etc/zaliver
+#   cp scripts/api/zaliver-api.env.example /etc/zaliver/api.env
+#   nano /etc/zaliver/api.env
+#   systemctl daemon-reload
+#   systemctl enable --now zaliver-api
+#   systemctl status zaliver-api
+#   journalctl -u zaliver-api -f
+
+[Unit]
+Description=Zaliver API (web UI + video jobs)
+Documentation=file:///root/zaliver/web/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/zaliver
+
+# Optional env overrides (token, port, workers). File may be missing.
+EnvironmentFile=-/etc/zaliver/api.env
+
+Environment=PYTHONPATH=/root/zaliver/src
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=ZALIVER_API_HOST=0.0.0.0
+Environment=ZALIVER_API_PORT=80
+
+# Prefer .venv if present; otherwise system python3.
+ExecStart=/bin/bash -lc 'if [ -x /root/zaliver/.venv/bin/python ]; then exec /root/zaliver/.venv/bin/python -m zaliver.api; else exec /usr/bin/python3 -m zaliver.api; fi'
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Keep API preferred over ffmpeg children under memory pressure.
+OOMPolicy=continue
+OOMScoreAdjust=-200
+
+# Video jobs open many files / pipes.
+LimitNOFILE=65535
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zaliver-api
+
+[Install]
+WantedBy=multi-user.target

@@ -81,6 +81,33 @@ def _popen_flags() -> int:
     return popen_creationflags()
 
 
+_ffmpeg_major_by_exe: Dict[str, int] = {}
+
+
+def _ffmpeg_major_version() -> int:
+    """Major version of the resolved ffmpeg binary (0 if unknown)."""
+    exe = resolve_ffmpeg_executable() or "ffmpeg"
+    cached = _ffmpeg_major_by_exe.get(exe)
+    if cached is not None:
+        return cached
+    major = 0
+    try:
+        out = subprocess.run(
+            [exe, "-version"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=_popen_flags(),
+        )
+        m = re.search(r"ffmpeg version\s+n?(\d+)", out.stdout or "", re.I)
+        if m:
+            major = int(m.group(1))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        major = 0
+    _ffmpeg_major_by_exe[exe] = major
+    return major
+
+
 def _filter_complex_argv(graph: str) -> tuple[list[str], Path | None]:
     """Windows command line is ~32K; long neon drawtext graphs need a script file."""
     use_script = sys.platform == "win32" or len(graph) > 7000
@@ -90,8 +117,10 @@ def _filter_complex_argv(graph: str) -> tuple[list[str], Path | None]:
     os.close(fd)
     script = Path(name)
     script.write_text(graph, encoding="utf-8")
-    # FFmpeg 8+: -filter_complex_script deprecated; -/filter_complex reads graph from file.
-    return ["-/filter_complex", str(script)], script
+    # FFmpeg 8+: -/filter_complex. Older (Ubuntu apt 4–7): -filter_complex_script.
+    if _ffmpeg_major_version() >= 8:
+        return ["-/filter_complex", str(script)], script
+    return ["-filter_complex_script", str(script)], script
 
 
 def _run_ffmpeg_cmd(

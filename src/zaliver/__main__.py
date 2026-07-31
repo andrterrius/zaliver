@@ -62,6 +62,7 @@ def main() -> None:
     if icon_path is not None:
         w.setWindowIcon(ico)
     w.show()
+
     raise SystemExit(app.exec())
 
 

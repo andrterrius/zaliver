@@ -1,0 +1,4 @@
+# Shell / systemd must stay LF or bash fails on Linux ($'\r': command not found).
+*.sh text eol=lf
+*.service text eol=lf
+*.env.example text eol=lf

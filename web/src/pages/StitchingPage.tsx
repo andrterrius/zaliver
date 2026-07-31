@@ -23,6 +23,8 @@ import {
   UploadAfterDialog,
   type UploadAfterChoice,
 } from "../components/UploadAfterDialog";
+import { JobLogBox, mergeJobLogLines } from "../components/JobLogBox";
+import { OutputFolderPicker } from "../components/OutputFolderPicker";
 import {
   TextOverlayFields,
   defaultStitchTextOverlay,
@@ -74,6 +76,7 @@ export function StitchingPage() {
   const [hydrated, setHydrated] = useState(false);
   const [part1, setPart1] = useState<string[]>([]);
   const [part2, setPart2] = useState<string[]>([]);
+  const [outputDir, setOutputDir] = useState("");
   const [music, setMusic] = useState<string[]>([]);
   const [copies, setCopies] = useState(1);
   const [transition, setTransition] = useState<TransitionId | "">("cut");
@@ -113,6 +116,7 @@ export function StitchingPage() {
         const v = s.values;
         setPart1(asStringList(v["stitch/part1_files"]));
         setPart2(asStringList(v["stitch/part2_files"]));
+        setOutputDir(String(v["stitch/output_folder"] || "").trim());
         setMusic(asStringList(v["stitch/music_files"]));
         setCopies(
           Math.max(1, Math.round(asNumber(v["stitch/copies_per_track"], 1))),
@@ -145,6 +149,7 @@ export function StitchingPage() {
     return {
       "stitch/part1_files": part1,
       "stitch/part2_files": part2,
+      "stitch/output_folder": outputDir,
       "stitch/music_files": music,
       "stitch/copies_per_track": copies,
       "stitch/transition": transition || lastTransition || "cut",
@@ -157,6 +162,7 @@ export function StitchingPage() {
     hydrated,
     part1,
     part2,
+    outputDir,
     music,
     copies,
     transition,
@@ -196,6 +202,7 @@ export function StitchingPage() {
       const willUpload = choice.profileIds.length > 0;
       savePendingUpload("stitching", willUpload ? choice : null);
       const res = await api.startStitching({
+        output_dir: outputDir,
         part1_files: part1,
         part2_files: part2,
         music_files: music,
@@ -273,9 +280,12 @@ export function StitchingPage() {
                 kind="video"
                 accept="video/*"
               />
-              <p className="hint">
-                Результат сохраняется на сервере в папке результатов (склейка).
-              </p>
+              <OutputFolderPicker
+                kind="gluing"
+                value={outputDir}
+                onChange={setOutputDir}
+                disabled={running}
+              />
               <label>
                 Количество роликов{" "}
                 <input
@@ -384,19 +394,10 @@ export function StitchingPage() {
             </section>
           ) : null}
         </div>
-        <section className="group">
-          <h3 className="group-title">Лог</h3>
-          <div className="log-box">
-            {[
-              ...(job?.logs || []),
-              ...(uploadJob?.logs || []).map((l) => `[upload] ${l}`),
-            ].length
-              ? [
-                  ...(job?.logs || []),
-                  ...(uploadJob?.logs || []).map((l) => `[upload] ${l}`),
-                ].join("\n")
-              : "Лог склейки…"}
-          </div>
+        <JobLogBox
+          lines={mergeJobLogLines(job?.logs, uploadJob?.logs)}
+          emptyHint="Лог склейки…"
+        >
           {uploadJob ? (
             <p className="hint" style={{ marginTop: 8 }}>
               Залив {uploadJob.status}
@@ -405,7 +406,7 @@ export function StitchingPage() {
                 : ""}
             </p>
           ) : null}
-        </section>
+        </JobLogBox>
       </div>
     </div>
   );

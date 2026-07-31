@@ -25,6 +25,8 @@ import {
   UploadAfterDialog,
   type UploadAfterChoice,
 } from "../components/UploadAfterDialog";
+import { JobLogBox, mergeJobLogLines } from "../components/JobLogBox";
+import { OutputFolderPicker } from "../components/OutputFolderPicker";
 import {
   TextOverlayFields,
   defaultUniquifyTextOverlay,
@@ -140,6 +142,7 @@ export function UniquifyPage() {
   const [section, setSection] = useState(0);
   const [hydrated, setHydrated] = useState(false);
   const [inputFiles, setInputFiles] = useState<string[]>([]);
+  const [outputDir, setOutputDir] = useState("");
   const [copies, setCopies] = useState(1);
   const [oneCopyNoFx, setOneCopyNoFx] = useState(false);
   const [deleteAfter, setDeleteAfter] = useState(true);
@@ -172,6 +175,7 @@ export function UniquifyPage() {
         const s = await api.getSettings();
         const v = s.values;
         setInputFiles(asStringList(v.input_files));
+        setOutputDir(String(v.output_folder || "").trim());
         setCopies(Math.max(1, Math.round(asNumber(v.copies_per_file, 1))));
         setOneCopyNoFx(asBool(v.one_copy_no_effects, false));
         setDeleteAfter(asBool(v.delete_after_upload, true));
@@ -205,6 +209,7 @@ export function UniquifyPage() {
     const sp = fxByKey(fx, "speed");
     return {
       input_files: inputFiles,
+      output_folder: outputDir,
       copies_per_file: copies,
       one_copy_no_effects: oneCopyNoFx,
       delete_after_upload: deleteAfter,
@@ -237,6 +242,7 @@ export function UniquifyPage() {
   }, [
     hydrated,
     inputFiles,
+    outputDir,
     copies,
     oneCopyNoFx,
     deleteAfter,
@@ -326,6 +332,7 @@ export function UniquifyPage() {
       savePendingUpload("uniquify", willUpload ? choice : null);
 
       const res = await api.startUniquify({
+        output_dir: outputDir,
         input_files: files,
         copies_per_file: copies,
         num_workers: proc.numWorkers,
@@ -421,8 +428,15 @@ export function UniquifyPage() {
                 kind="video"
                 accept="video/*"
               />
+              <OutputFolderPicker
+                kind="uniquify"
+                value={outputDir}
+                onChange={setOutputDir}
+                disabled={running}
+              />
               <p className="hint">
-                Результат сохраняется на сервере в папке результатов (уникализация).
+                Результат сохраняется в выбранную папку внутри результатов
+                (уникализация).
               </p>
               <div className="row">
                 <label>
@@ -542,19 +556,10 @@ export function UniquifyPage() {
           ) : null}
         </div>
 
-        <section className="group">
-          <h3 className="group-title">Лог</h3>
-          <div className="log-box">
-            {[
-              ...(job?.logs || []),
-              ...(uploadJob?.logs || []).map((l) => `[upload] ${l}`),
-            ].length
-              ? [
-                  ...(job?.logs || []),
-                  ...(uploadJob?.logs || []).map((l) => `[upload] ${l}`),
-                ].join("\n")
-              : "Лог появится после старта задачи…"}
-          </div>
+        <JobLogBox
+          lines={mergeJobLogLines(job?.logs, uploadJob?.logs)}
+          emptyHint="Лог появится после старта задачи…"
+        >
           {job ? (
             <p className="hint" style={{ marginTop: 8 }}>
               Задача {job.id.slice(0, 8)}… · {job.status}
@@ -570,7 +575,7 @@ export function UniquifyPage() {
               {uploadJob.message ? ` · ${uploadJob.message}` : ""}
             </p>
           ) : null}
-        </section>
+        </JobLogBox>
       </div>
     </div>
   );

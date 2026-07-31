@@ -285,6 +285,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ parent, name }),
     }),
+  mkdirOutput: (parent: string, name: string) =>
+    request<{ path: string }>("/v1/library/output/mkdir", {
+      method: "POST",
+      body: JSON.stringify({ parent, name }),
+    }),
   deleteVideos: (ids: number[]) =>
     request<{ deleted: number }>("/v1/library/videos/delete", {
       method: "POST",

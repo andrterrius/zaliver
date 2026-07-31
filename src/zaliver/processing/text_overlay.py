@@ -1494,6 +1494,10 @@ def build_text_overlay_filters(
 
     parts: list[str] = []
     cur = input_label
+    from zaliver.processing.ffmpeg_merge import ffmpeg_drawtext_has_y_align
+
+    # y_align=font needs FFmpeg ~6.1+; older Ubuntu builds reject the option.
+    y_align_part = "y_align=font:" if ffmpeg_drawtext_has_y_align() else ""
     for step, ((base_y, ch, cx, cg), em_i) in enumerate(zip(glyphs, glyph_em)):
         y_expr = wave_y_ffmpeg_expr(
             base_y,
@@ -1526,14 +1530,14 @@ def build_text_overlay_filters(
             gl = f"tg{step}_{gi}"
             layer = (
                 f"drawtext={font_part}text='{esc}':fontsize={overlay.font_size}:"
-                f"y_align=font:x={cx + dx}:y={_y_expr_with_offset(y_expr, dy)}:fontcolor={col}:borderw=0"
+                f"{y_align_part}x={cx + dx}:y={_y_expr_with_offset(y_expr, dy)}:fontcolor={col}:borderw=0"
                 f"{enable_part}"
             )
             parts.append(f"[{label}]{layer}[{gl}]")
             label = gl
         core = (
             f"drawtext={font_part}text='{esc}':fontsize={overlay.font_size}:"
-            f"y_align=font:x={cx}:y={_y_expr_with_offset(y_expr, 0)}:fontcolor={glyph_fill}:borderw=0"
+            f"{y_align_part}x={cx}:y={_y_expr_with_offset(y_expr, 0)}:fontcolor={glyph_fill}:borderw=0"
             f"{enable_part}"
         )
         parts.append(f"[{label}]{core}[{nxt}]")

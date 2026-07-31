@@ -24,6 +24,8 @@ import {
   UploadAfterDialog,
   type UploadAfterChoice,
 } from "../components/UploadAfterDialog";
+import { JobLogBox, mergeJobLogLines } from "../components/JobLogBox";
+import { OutputFolderPicker } from "../components/OutputFolderPicker";
 import {
   TextOverlayFields,
   defaultSliceTextOverlay,
@@ -38,6 +40,7 @@ export function SlicingPage() {
   const [section, setSection] = useState(0);
   const [hydrated, setHydrated] = useState(false);
   const [clips, setClips] = useState<string[]>([]);
+  const [outputDir, setOutputDir] = useState("");
   const [music, setMusic] = useState<string[]>([]);
   const [copies, setCopies] = useState(1);
   const [autoDurations, setAutoDurations] = useState(false);
@@ -75,6 +78,7 @@ export function SlicingPage() {
         const s = await api.getSettings();
         const v = s.values;
         setClips(asStringList(v["slice/clip_files"]));
+        setOutputDir(String(v["slice/output_folder"] || "").trim());
         setMusic(asStringList(v["slice/music_files"]));
         setCopies(
           Math.max(1, Math.round(asNumber(v["slice/copies_per_track"], 1))),
@@ -107,6 +111,7 @@ export function SlicingPage() {
     if (!hydrated) return null;
     return {
       "slice/clip_files": clips,
+      "slice/output_folder": outputDir,
       "slice/music_files": music,
       "slice/copies_per_track": copies,
       "slice/auto_scene_durations": autoDurations,
@@ -119,6 +124,7 @@ export function SlicingPage() {
   }, [
     hydrated,
     clips,
+    outputDir,
     music,
     copies,
     autoDurations,
@@ -161,6 +167,7 @@ export function SlicingPage() {
       const willUpload = choice.profileIds.length > 0;
       savePendingUpload("slicing", willUpload ? choice : null);
       const res = await api.startSlicing({
+        output_dir: outputDir,
         clip_files: clips,
         music_files: music,
         copies_per_track: copies,
@@ -231,9 +238,12 @@ export function SlicingPage() {
                 kind="video"
                 accept="video/*"
               />
-              <p className="hint">
-                Результат сохраняется на сервере в папке результатов (нарезка).
-              </p>
+              <OutputFolderPicker
+                kind="slicing"
+                value={outputDir}
+                onChange={setOutputDir}
+                disabled={running}
+              />
               <label>
                 Копий на трек{" "}
                 <input
@@ -312,19 +322,10 @@ export function SlicingPage() {
             </section>
           ) : null}
         </div>
-        <section className="group">
-          <h3 className="group-title">Лог</h3>
-          <div className="log-box">
-            {[
-              ...(job?.logs || []),
-              ...(uploadJob?.logs || []).map((l) => `[upload] ${l}`),
-            ].length
-              ? [
-                  ...(job?.logs || []),
-                  ...(uploadJob?.logs || []).map((l) => `[upload] ${l}`),
-                ].join("\n")
-              : "Лог нарезки…"}
-          </div>
+        <JobLogBox
+          lines={mergeJobLogLines(job?.logs, uploadJob?.logs)}
+          emptyHint="Лог нарезки…"
+        >
           {uploadJob ? (
             <p className="hint" style={{ marginTop: 8 }}>
               Залив {uploadJob.status}
@@ -333,7 +334,7 @@ export function SlicingPage() {
                 : ""}
             </p>
           ) : null}
-        </section>
+        </JobLogBox>
       </div>
     </div>
   );

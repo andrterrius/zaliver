@@ -42,6 +42,7 @@ from zaliver.api.output_paths import (
     OUTPUT_KIND_SLICING,
     OUTPUT_KIND_UNIQUIFY,
     list_managed_output_dirs,
+    resolve_job_output_dir,
     resolve_managed_output_dir,
 )
 from zaliver.api.schemas import (
@@ -441,6 +442,27 @@ def build_router() -> APIRouter:
         root = st.config.resolved_sources_root()
         return _library_download_response(root, body.paths or [])
 
+    @router.post("/v1/library/output/mkdir", response_model=SourceMkdirResponse)
+    def mkdir_output_folder(
+        body: SourceMkdirRequest, request: Request
+    ) -> SourceMkdirResponse:
+        st = _state(request)
+        root = st.config.resolved_output_root()
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            rel = mkdir_sources(
+                root,
+                parent=str(body.parent or "").strip(),
+                name=str(body.name or "").strip(),
+            )
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
+        return SourceMkdirResponse(path=rel)
+
     @router.get("/v1/library/output", response_model=SourceListResponse)
     def browse_output(
         request: Request,
@@ -761,10 +783,11 @@ def build_router() -> APIRouter:
         st = _state(request)
         try:
             out_dir = str(
-                resolve_managed_output_dir(
+                resolve_job_output_dir(
                     st.config.resolved_output_root(),
                     platform=st.platform,
                     kind=OUTPUT_KIND_UNIQUIFY,
+                    requested=body.output_dir,
                     create=True,
                 )
             )
@@ -781,7 +804,9 @@ def build_router() -> APIRouter:
                 )[0]
         except PathNotAllowedError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-        except (OSError, ValueError) as e:
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except OSError as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
         workers = min(int(body.num_workers), st.config.max_workers_per_job)
@@ -862,10 +887,11 @@ def build_router() -> APIRouter:
             )
         try:
             out_dir = str(
-                resolve_managed_output_dir(
+                resolve_job_output_dir(
                     st.config.resolved_output_root(),
                     platform=st.platform,
                     kind=OUTPUT_KIND_SLICING,
+                    requested=body.output_dir,
                     create=True,
                 )
             )
@@ -880,7 +906,9 @@ def build_router() -> APIRouter:
                 )[0]
         except PathNotAllowedError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-        except (OSError, ValueError) as e:
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except OSError as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
         workers = min(int(body.num_workers), st.config.max_workers_per_job)
@@ -933,10 +961,11 @@ def build_router() -> APIRouter:
             )
         try:
             out_dir = str(
-                resolve_managed_output_dir(
+                resolve_job_output_dir(
                     st.config.resolved_output_root(),
                     platform=st.platform,
                     kind=OUTPUT_KIND_GLUING,
+                    requested=body.output_dir,
                     create=True,
                 )
             )
@@ -952,7 +981,9 @@ def build_router() -> APIRouter:
                 )[0]
         except PathNotAllowedError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-        except (OSError, ValueError) as e:
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except OSError as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
         workers = min(int(body.num_workers), st.config.max_workers_per_job)

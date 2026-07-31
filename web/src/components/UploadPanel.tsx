@@ -3,6 +3,7 @@ import { api, type Profile } from "../api/client";
 import { useJobPoll } from "../hooks/useJobPoll";
 import { usePersistedJobId } from "../hooks/usePersistedJobId";
 import { ProgressBar } from "./ProgressBar";
+import { JobLogBox } from "./JobLogBox";
 import { TitleVariablesHint } from "./TitleVariablesHint";
 
 type Props = {
@@ -209,7 +210,7 @@ export function UploadPanel({
             label={`${job.status} ${job.progress.current}/${job.progress.total}`}
           />
           {job.logs?.length ? (
-            <div className="log-box">{job.logs.slice(-30).join("\n")}</div>
+            <JobLogBox lines={job.logs.slice(-30)} emptyHint="" />
           ) : null}
         </>
       ) : null}

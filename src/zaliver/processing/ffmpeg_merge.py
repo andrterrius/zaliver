@@ -507,13 +507,17 @@ def needs_ffmpeg_install_prompt() -> bool:
 
 _drawtext_available: Optional[bool] = None
 _drawtext_by_exe: dict[str, bool] = {}
+_drawtext_y_align_available: Optional[bool] = None
+_drawtext_y_align_by_exe: dict[str, bool] = {}
 _DRAWTEXT_FILTER_RE = re.compile(r"(?:^|\s|\.)drawtext(?:\s|$|[.:(])", re.MULTILINE)
 
 
 def _reset_ffmpeg_capability_cache() -> None:
-    global _drawtext_available
+    global _drawtext_available, _drawtext_y_align_available
     _drawtext_available = None
     _drawtext_by_exe.clear()
+    _drawtext_y_align_available = None
+    _drawtext_y_align_by_exe.clear()
 
 
 def ffmpeg_binary_has_drawtext(exe: str) -> bool:
@@ -583,6 +587,63 @@ def ffmpeg_has_drawtext() -> bool:
         return False
     _drawtext_available = ffmpeg_binary_has_drawtext(exe)
     return _drawtext_available
+
+
+def ffmpeg_binary_drawtext_has_y_align(exe: str) -> bool:
+    """True if drawtext accepts y_align (FFmpeg ~6.1+; missing on older Ubuntu builds)."""
+    try:
+        key = str(Path(exe).resolve())
+    except OSError:
+        key = exe
+    cached = _drawtext_y_align_by_exe.get(key)
+    if cached is not None:
+        return cached
+    ok = False
+    try:
+        probe = subprocess.run(
+            [
+                key,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=32x32:d=0.01",
+                "-vf",
+                "drawtext=text='t':fontsize=12:x=1:y=1:y_align=font",
+                "-frames:v",
+                "1",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            creationflags=_popen_flags(),
+        )
+        err = f"{probe.stderr or ''}\n{probe.stdout or ''}".lower()
+        ok = probe.returncode == 0 and "option not found" not in err
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    _drawtext_y_align_by_exe[key] = ok
+    return ok
+
+
+def ffmpeg_drawtext_has_y_align() -> bool:
+    """True if resolved ffmpeg drawtext supports y_align=font."""
+    global _drawtext_y_align_available
+    if _drawtext_y_align_available is not None:
+        return _drawtext_y_align_available
+    exe = resolve_ffmpeg_executable()
+    if not exe or not ffmpeg_has_drawtext():
+        _drawtext_y_align_available = False
+        return False
+    _drawtext_y_align_available = ffmpeg_binary_drawtext_has_y_align(exe)
+    return _drawtext_y_align_available
 
 
 FFMPEG_DRAWTEXT_MISSING_MSG = (

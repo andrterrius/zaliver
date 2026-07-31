@@ -25,8 +25,18 @@ from zaliver.api.profile_jobs import (
     start_promote,
     start_warmup,
 )
-from zaliver.api.sources import delete_sources, list_sources, resolve_download_files
-from zaliver.api.sandbox import PathNotAllowedError, resolve_dir, resolve_path_list
+from zaliver.api.sources import (
+    delete_sources,
+    list_sources,
+    mkdir_sources,
+    resolve_download_files,
+)
+from zaliver.api.sandbox import (
+    PathNotAllowedError,
+    resolve_dir,
+    resolve_path_list,
+    resolve_under_roots,
+)
 from zaliver.api.output_paths import (
     OUTPUT_KIND_GLUING,
     OUTPUT_KIND_SLICING,
@@ -60,6 +70,8 @@ from zaliver.api.schemas import (
     SlicingJobRequest,
     SourceListResponse,
     SourceDeleteRequest,
+    SourceMkdirRequest,
+    SourceMkdirResponse,
     SourceUploadResponse,
     StatsRefreshRequest,
     StitchingJobRequest,
@@ -73,6 +85,8 @@ from zaliver.api.schemas import (
     WarmupJobRequest,
 )
 from zaliver.api.settings_policy import (
+    SETTINGS_OPTIONAL_FILE_KEYS,
+    SETTINGS_PATH_LIST_KEYS,
     is_allowed_settings_key,
     public_settings_value,
 )
@@ -230,27 +244,29 @@ def build_router() -> APIRouter:
                 raise HTTPException(
                     status_code=400, detail=f"Settings key not allowlisted: {key}"
                 )
-            if key in {"input_files", "background_music_files"} and isinstance(
-                value, list
-            ):
+            if key in SETTINGS_PATH_LIST_KEYS and isinstance(value, list):
+                # Persist under roots even if a file was deleted (drop escapes).
+                kept: list[str] = []
+                for raw in value:
+                    try:
+                        kept.append(
+                            str(resolve_under_roots(str(raw), st.config.allowed_roots))
+                        )
+                    except PathNotAllowedError:
+                        continue
+                value = kept
+            if key.endswith("output_folder") and value:
                 try:
-                    value = resolve_path_list(
-                        [str(x) for x in value], st.config.allowed_roots
+                    value = str(
+                        resolve_dir(str(value), st.config.allowed_roots, create=True)
                     )
                 except PathNotAllowedError as e:
                     raise HTTPException(status_code=400, detail=str(e)) from e
-            if key in {"output_folder", "text_overlay_font_path"} and value:
+            if key in SETTINGS_OPTIONAL_FILE_KEYS and value:
                 try:
-                    if key == "output_folder":
-                        value = str(
-                            resolve_dir(
-                                str(value), st.config.allowed_roots, create=True
-                            )
-                        )
-                    else:
-                        value = str(
-                            resolve_path_list([str(value)], st.config.allowed_roots)[0]
-                        )
+                    value = str(
+                        resolve_under_roots(str(value), st.config.allowed_roots)
+                    )
                 except PathNotAllowedError as e:
                     raise HTTPException(status_code=400, detail=str(e)) from e
             if key in {"ai/api_key", "youtube/api_key"} and (
@@ -398,6 +414,26 @@ def build_router() -> APIRouter:
         except OSError as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
         return DeleteResult(deleted=int(n))
+
+    @router.post("/v1/library/sources/mkdir", response_model=SourceMkdirResponse)
+    def mkdir_source_folder(
+        body: SourceMkdirRequest, request: Request
+    ) -> SourceMkdirResponse:
+        st = _state(request)
+        root = st.config.resolved_sources_root()
+        try:
+            rel = mkdir_sources(
+                root,
+                parent=str(body.parent or "").strip(),
+                name=str(body.name or "").strip(),
+            )
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
+        return SourceMkdirResponse(path=rel)
 
     @router.post("/v1/library/sources/download")
     def download_sources(body: SourceDeleteRequest, request: Request):
@@ -986,10 +1022,14 @@ def build_router() -> APIRouter:
             raise HTTPException(status_code=400, detail="profile_ids required")
 
         platform = st.platform
-        kind = (body.kind or "local").strip()
-        if kind == "dolphin":
-            kind = "local"
-        base_url = (body.base_url or "").strip()
+        from zaliver.api.antydetect_resolve import (
+            resolve_antidetect_kind,
+            resolve_local_base_url,
+        )
+
+        settings = st.core().settings
+        kind = resolve_antidetect_kind(settings, body.kind)
+        base_url = resolve_local_base_url(settings, body.base_url)
         headless = bool(body.headless)
         max_b = int(body.max_concurrent_browsers)
         cooldown = float(body.cooldown_s)

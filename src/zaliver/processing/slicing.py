@@ -30,7 +30,7 @@ from zaliver.processing.text_overlay import (
     ScaledTextOverlay,
     TextOverlaySettings,
     build_text_overlay_filters,
-    compute_scaled_overlay,
+    compute_scaled_overlay_for_api,
 )
 from zaliver.processing.worker import _filter_complex_argv
 
@@ -2260,9 +2260,10 @@ def generate_video_from_segment(
             fragment['duration'] = scene_durations[i]
             clip_name = os.path.basename(fragment['path'])
             loop_note = " (зациклено)" if fragment['loop'] else ""
-            print(
+            _log(
                 f"    Сцена {i + 1}: {duration:.2f}с — {clip_name} "
-                f"с {fragment['start']:.2f}с{loop_note}"
+                f"с {fragment['start']:.2f}с{loop_note}",
+                log,
             )
 
     output_parent = os.path.dirname(os.path.abspath(output_video)) or "."
@@ -2273,20 +2274,21 @@ def generate_video_from_segment(
     os.makedirs(temp_dir, exist_ok=True)
 
     if not scene_clips:
-        print("    Ошибка: нет сцен")
+        _log("    Ошибка: нет сцен", log)
         return None
 
     selected_paths = list({fragment['path'] for fragment in scene_clips})
     size_info = get_largest_video_dimensions(selected_paths, dimension_cache)
     if size_info is None:
-        print("    Ошибка: не удалось определить размеры выбранных видео")
+        _log("    Ошибка: не удалось определить размеры выбранных видео", log)
         return None
 
     width, height, size_source = size_info
     width, height = ensure_even_dimensions(width, height)
-    print(
+    _log(
         f"    Размер итогового видео: {width}x{height} "
-        f"(как у {os.path.basename(size_source)})"
+        f"(как у {os.path.basename(size_source)})",
+        log,
     )
 
     stitch_transition = str(segment.get("stitch_transition") or "cut").strip().lower()
@@ -2309,7 +2311,10 @@ def generate_video_from_segment(
     scaled_overlay: ScaledTextOverlay | None = None
     if text_overlay_cfg:
         toc = TextOverlaySettings.from_dict(text_overlay_cfg)
-        scaled_overlay = compute_scaled_overlay(toc, video_w=width, video_h=height)
+        # API/headless workers have no Qt GUI — use Pillow metrics (avoid 0xC0000005).
+        scaled_overlay = compute_scaled_overlay_for_api(
+            toc, video_w=width, video_h=height
+        )
         if scaled_overlay is not None and scaled_overlay.lines:
             if bool(getattr(toc, "after_frame_change", False)) and len(scene_durations) >= 2:
                 # Текст с середины визуального перехода (или стыка cut).

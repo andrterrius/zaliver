@@ -1,12 +1,28 @@
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import { useJobPoll } from "../hooks/useJobPoll";
-import { useManagedOutputDir } from "../hooks/useManagedOutputDir";
 import { usePersistedJobId } from "../hooks/usePersistedJobId";
 import { useProcessingDefaults } from "../hooks/useProcessingDefaults";
+import {
+  asBool,
+  asNumber,
+  asRange,
+  asStringList,
+  textOverlayFromSettings,
+  textOverlayToSettings,
+  useDebouncedSettingsPatch,
+} from "../hooks/useServerSettingsPersist";
+import {
+  savePendingUpload,
+  useUploadAfterJob,
+} from "../hooks/useUploadAfterJob";
 import { ProgressBar } from "../components/ProgressBar";
 import { SectionNav } from "../components/SectionNav";
 import { SourcePicker } from "../components/SourcePicker";
+import {
+  UploadAfterDialog,
+  type UploadAfterChoice,
+} from "../components/UploadAfterDialog";
 import {
   TextOverlayFields,
   defaultStitchTextOverlay,
@@ -50,19 +66,18 @@ const TRANSITIONS = [
   },
 ] as const;
 
+type TransitionId = (typeof TRANSITIONS)[number]["id"];
+
 export function StitchingPage() {
   const proc = useProcessingDefaults();
   const [section, setSection] = useState(0);
+  const [hydrated, setHydrated] = useState(false);
   const [part1, setPart1] = useState<string[]>([]);
   const [part2, setPart2] = useState<string[]>([]);
   const [music, setMusic] = useState<string[]>([]);
-  const { path: outputDir } = useManagedOutputDir("gluing");
   const [copies, setCopies] = useState(1);
-  const [transition, setTransition] = useState<(typeof TRANSITIONS)[number]["id"] | "">(
-    "cut",
-  );
-  const [lastTransition, setLastTransition] =
-    useState<(typeof TRANSITIONS)[number]["id"]>("cut");
+  const [transition, setTransition] = useState<TransitionId | "">("cut");
+  const [lastTransition, setLastTransition] = useState<TransitionId>("cut");
   const [transitionRandom, setTransitionRandom] = useState(false);
   const [partDuration, setPartDuration] = useState<RangeValue>({
     lo: 2,
@@ -72,26 +87,118 @@ export function StitchingPage() {
     defaultStitchTextOverlay,
   );
   const [jobId, setJobId] = usePersistedJobId("stitching");
+  const [uploadJobId, setUploadJobId] = usePersistedJobId("upload-after-stitching");
+  const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const { job } = useJobPoll(jobId);
+  const { job: uploadJob } = useJobPoll(uploadJobId);
+  const onUploadErr = useCallback((msg: string) => setError(msg), []);
+  useUploadAfterJob("stitching", job, setUploadJobId, onUploadErr);
   const running =
-    busy || (job != null && ["queued", "running"].includes(job.status));
+    busy ||
+    (job != null && ["queued", "running"].includes(job.status)) ||
+    (uploadJob != null && ["queued", "running"].includes(uploadJob.status));
 
-  const onStart = async () => {
+  useEffect(() => {
+    if (job && ["failed", "cancelled"].includes(job.status)) {
+      savePendingUpload("stitching", null);
+    }
+  }, [job]);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const s = await api.getSettings();
+        const v = s.values;
+        setPart1(asStringList(v["stitch/part1_files"]));
+        setPart2(asStringList(v["stitch/part2_files"]));
+        setMusic(asStringList(v["stitch/music_files"]));
+        setCopies(
+          Math.max(1, Math.round(asNumber(v["stitch/copies_per_track"], 1))),
+        );
+        const random = asBool(v["stitch/transition_random"], false);
+        setTransitionRandom(random);
+        const saved = String(v["stitch/transition"] ?? "cut") as TransitionId;
+        const known = TRANSITIONS.some((t) => t.id === saved) ? saved : "cut";
+        setLastTransition(known);
+        setTransition(random ? "" : known);
+        setPartDuration(
+          asRange(v["stitch/min_part_duration"], v["stitch/max_part_duration"], {
+            lo: 2,
+            hi: 6,
+          }),
+        );
+        setTextOverlay(
+          textOverlayFromSettings(v, "stitch/", defaultStitchTextOverlay()),
+        );
+      } catch {
+        /* keep defaults */
+      } finally {
+        setHydrated(true);
+      }
+    })();
+  }, []);
+
+  const persistValues = useMemo(() => {
+    if (!hydrated) return null;
+    return {
+      "stitch/part1_files": part1,
+      "stitch/part2_files": part2,
+      "stitch/music_files": music,
+      "stitch/copies_per_track": copies,
+      "stitch/transition": transition || lastTransition || "cut",
+      "stitch/transition_random": transitionRandom,
+      "stitch/min_part_duration": partDuration.lo,
+      "stitch/max_part_duration": partDuration.hi,
+      ...textOverlayToSettings(textOverlay, "stitch/"),
+    };
+  }, [
+    hydrated,
+    part1,
+    part2,
+    music,
+    copies,
+    transition,
+    lastTransition,
+    transitionRandom,
+    partDuration,
+    textOverlay,
+  ]);
+
+  useDebouncedSettingsPatch(persistValues);
+
+  const onStart = () => {
     setError("");
+    if (!part1.length) {
+      setError("Добавьте клипы для части 1.");
+      return;
+    }
+    if (!part2.length) {
+      setError("Добавьте клипы для части 2.");
+      return;
+    }
+    if (!music.length) {
+      setError("Добавьте аудиотреки.");
+      return;
+    }
+    setUploadDialogOpen(true);
+  };
+
+  const onUploadDialogConfirm = async (choice: UploadAfterChoice) => {
+    setUploadDialogOpen(false);
     setBusy(true);
+    setError("");
     try {
-      const part1_files = part1;
-      const part2_files = part2;
-      const music_files = music;
-      if (!part1_files.length) throw new Error("Добавьте клипы для части 1.");
-      if (!part2_files.length) throw new Error("Добавьте клипы для части 2.");
-      if (!music_files.length) throw new Error("Добавьте аудиотреки.");
+      if (persistValues) {
+        await api.patchSettings(persistValues);
+      }
+      const willUpload = choice.profileIds.length > 0;
+      savePendingUpload("stitching", willUpload ? choice : null);
       const res = await api.startStitching({
-        part1_files,
-        part2_files,
-        music_files,
+        part1_files: part1,
+        part2_files: part2,
+        music_files: music,
         copies_per_track: copies,
         num_workers: proc.numWorkers,
         use_gpu: proc.useGpu,
@@ -102,9 +209,12 @@ export function StitchingPage() {
         min_part_duration: partDuration.lo,
         max_part_duration: partDuration.hi,
         text_overlay: textOverlayToApi(textOverlay),
+        youtube_upload_after_processing: willUpload,
       });
       setJobId(res.id);
+      setUploadJobId(null);
     } catch (e) {
+      savePendingUpload("stitching", null);
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
@@ -138,6 +248,12 @@ export function StitchingPage() {
       </div>
       <SectionNav sections={SECTIONS} active={section} onChange={setSection} />
       {error ? <div className="error-banner">{error}</div> : null}
+      <UploadAfterDialog
+        open={uploadDialogOpen}
+        mode="stitching"
+        onCancel={() => setUploadDialogOpen(false)}
+        onConfirm={(c) => void onUploadDialogConfirm(c)}
+      />
       <div className="grid-2">
         <div className="stack">
           {section === 0 ? (
@@ -158,9 +274,7 @@ export function StitchingPage() {
                 accept="video/*"
               />
               <p className="hint">
-                Результат сохраняется на сервере:
-                <br />
-                <code>{outputDir || "…"}</code>
+                Результат сохраняется на сервере в папке результатов (склейка).
               </p>
               <label>
                 Количество роликов{" "}
@@ -273,8 +387,24 @@ export function StitchingPage() {
         <section className="group">
           <h3 className="group-title">Лог</h3>
           <div className="log-box">
-            {job?.logs?.length ? job.logs.join("\n") : "Лог склейки…"}
+            {[
+              ...(job?.logs || []),
+              ...(uploadJob?.logs || []).map((l) => `[upload] ${l}`),
+            ].length
+              ? [
+                  ...(job?.logs || []),
+                  ...(uploadJob?.logs || []).map((l) => `[upload] ${l}`),
+                ].join("\n")
+              : "Лог склейки…"}
           </div>
+          {uploadJob ? (
+            <p className="hint" style={{ marginTop: 8 }}>
+              Залив {uploadJob.status}
+              {uploadJob.progress.total
+                ? ` · ${uploadJob.progress.current}/${uploadJob.progress.total}`
+                : ""}
+            </p>
+          ) : null}
         </section>
       </div>
     </div>

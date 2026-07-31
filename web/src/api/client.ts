@@ -174,6 +174,7 @@ export const api = {
         is_dir: boolean;
         size: number | null;
         abs_path: string | null;
+        created_at: string | null;
       }>;
     }>(
       `/v1/library/sources?path=${encodeURIComponent(path)}&kind=${encodeURIComponent(kind)}`,
@@ -189,6 +190,7 @@ export const api = {
         is_dir: boolean;
         size: number | null;
         abs_path: string | null;
+        created_at: string | null;
       }>;
     }>(
       `/v1/library/output?path=${encodeURIComponent(path)}&kind=${encodeURIComponent(kind)}`,
@@ -277,6 +279,11 @@ export const api = {
     request<{ deleted: number }>("/v1/library/sources/delete", {
       method: "POST",
       body: JSON.stringify({ paths }),
+    }),
+  mkdirSources: (parent: string, name: string) =>
+    request<{ path: string }>("/v1/library/sources/mkdir", {
+      method: "POST",
+      body: JSON.stringify({ parent, name }),
     }),
   deleteVideos: (ids: number[]) =>
     request<{ deleted: number }>("/v1/library/videos/delete", {

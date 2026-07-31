@@ -297,6 +297,7 @@ class SourceEntry(BaseModel):
     is_dir: bool
     size: int | None = None
     abs_path: str | None = None
+    created_at: str | None = None
 
 
 class SourceListResponse(BaseModel):
@@ -316,6 +317,18 @@ class SourceDeleteRequest(BaseModel):
         default_factory=list,
         description="Relative paths under sources root to delete",
     )
+
+
+class SourceMkdirRequest(BaseModel):
+    parent: str = Field(
+        default="",
+        description="Relative parent directory under sources root",
+    )
+    name: str = Field(min_length=1, description="New folder name (single segment)")
+
+
+class SourceMkdirResponse(BaseModel):
+    path: str
 
 
 class JobListResponse(BaseModel):

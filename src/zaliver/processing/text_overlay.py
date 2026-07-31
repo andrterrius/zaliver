@@ -49,6 +49,9 @@ class TextOverlaySettings:
     def from_dict(d: Dict[str, Any]) -> "TextOverlaySettings":
         allowed = {f.name for f in fields(TextOverlaySettings)}
         raw = {k: v for k, v in d.items() if k in allowed}
+        # API / web UI send ``orientation``; dataclass field is preview_orientation.
+        if "preview_orientation" not in raw and "orientation" in d:
+            raw["preview_orientation"] = d.get("orientation")
         s = TextOverlaySettings(**raw)
         s.preview_orientation = (
             "horizontal" if str(s.preview_orientation).lower() == "horizontal" else "vertical"
@@ -112,13 +115,22 @@ class ScaledTextOverlay:
         letter_spacing = int(d.get("letter_spacing", 0))
         font_bold = bool(d.get("font_bold", True))
         if not char_lines and lines:
-            char_lines = [
-                layout_line_chars(
-                    ln, font_size, font_path, letter_spacing, bold=font_bold
-                )
-                for ln in lines
-                if ln
-            ]
+            if _qt_metrics_available():
+                char_lines = [
+                    layout_line_chars(
+                        ln, font_size, font_path, letter_spacing, bold=font_bold
+                    )
+                    for ln in lines
+                    if ln
+                ]
+            else:
+                char_lines = [
+                    approx_layout_line_chars(
+                        ln, font_size, letter_spacing, font_path, bold=font_bold
+                    )
+                    for ln in lines
+                    if ln
+                ]
         return ScaledTextOverlay(
             lines=lines,
             x=int(d.get("x", 0)),
@@ -689,6 +701,273 @@ def wave_y_ffmpeg_expr(
 ) -> str:
     phase = f"{char_idx}*{char_phase}+(n+{int(start_frame)})*{frame_speed}"
     return f"{int(base_y)}+{int(amp)}*sin({phase})"
+
+
+def _qt_metrics_available() -> bool:
+    """True when a Qt GUI app already exists (desktop UI). Never create one here."""
+    try:
+        from PyQt6.QtGui import QGuiApplication
+        from PyQt6.QtWidgets import QApplication
+
+        return (
+            QApplication.instance() is not None
+            or QGuiApplication.instance() is not None
+        )
+    except Exception:
+        return False
+
+
+def _pil_font(font_path: str, font_size: int, *, bold: bool = True):
+    """Load a FreeType font via Pillow (no Qt — safe for API workers)."""
+    try:
+        from PIL import ImageFont
+    except Exception:
+        return None
+    px = max(8, int(font_size))
+    path = (font_path or "").strip()
+    if not path:
+        path = effective_font_path("", bold=bold)
+    if not path:
+        try:
+            return ImageFont.load_default()
+        except Exception:
+            return None
+    try:
+        return ImageFont.truetype(path, px)
+    except Exception:
+        try:
+            return ImageFont.load_default()
+        except Exception:
+            return None
+
+
+def _pil_unit_advance(font, unit: str, font_size: int) -> int:
+    if not unit:
+        return 0
+    if font is None:
+        return _crude_unit_advance(unit, font_size)
+    try:
+        return max(0, int(round(float(font.getlength(unit)))))
+    except Exception:
+        try:
+            box = font.getbbox(unit)
+            if box is not None:
+                return max(0, int(box[2] - box[0]))
+        except Exception:
+            pass
+    return _crude_unit_advance(unit, font_size)
+
+
+def _pil_line_height(font, font_size: int) -> int:
+    px = max(8, int(font_size))
+    if font is None:
+        return max(px, int(round(px * 1.25)))
+    try:
+        ascent, descent = font.getmetrics()
+        h = int(ascent) + abs(int(descent))
+        if h > 0:
+            return max(px, h)
+    except Exception:
+        pass
+    try:
+        box = font.getbbox("AgЙ")
+        if box is not None:
+            return max(px, int(box[3] - box[1]))
+    except Exception:
+        pass
+    return max(px, int(round(px * 1.25)))
+
+
+def _crude_unit_advance(unit: str, font_size: int) -> int:
+    """Last-resort estimate when neither Qt nor Pillow fonts work."""
+    px = max(8, int(font_size))
+    if not unit:
+        return 0
+    if is_emoji_unit(unit):
+        return max(8, int(round(px * 1.05)))
+    if unit.isspace():
+        return max(2, int(round(px * 0.33)))
+    if any(ord(ch) > 0x2E80 for ch in unit):
+        return max(8, int(round(px * 1.0)))
+    # Bold neon captions are wider than 0.58em — underestimating causes glued letters.
+    return max(4, int(round(px * 0.72)))
+
+
+def approx_layout_line_chars(
+    line: str,
+    font_size: int,
+    letter_spacing: int = 0,
+    font_path: str = "",
+    *,
+    bold: bool = True,
+) -> List[Tuple[str, int]]:
+    if not line:
+        return []
+    font = _pil_font(font_path, font_size, bold=bold)
+    out: list[tuple[str, int]] = []
+    x = 0
+    units = iter_text_units(line)
+    for i, unit in enumerate(units):
+        out.append((unit, x))
+        x += _pil_unit_advance(font, unit, font_size)
+        if i < len(units) - 1:
+            x += int(letter_spacing)
+    return out
+
+
+def approx_line_pixel_width(
+    line: str,
+    font_size: int,
+    letter_spacing: int = 0,
+    font_path: str = "",
+    *,
+    bold: bool = True,
+) -> int:
+    chars = approx_layout_line_chars(
+        line, font_size, letter_spacing, font_path, bold=bold
+    )
+    if not chars:
+        return 0
+    font = _pil_font(font_path, font_size, bold=bold)
+    last_ch, last_x = chars[-1]
+    return int(last_x + _pil_unit_advance(font, last_ch, font_size))
+
+
+def approx_wrap_text_lines(
+    text: str,
+    font_size: int,
+    max_width_px: int,
+    letter_spacing: int = 0,
+    font_path: str = "",
+    *,
+    bold: bool = True,
+) -> List[str]:
+    raw = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not raw:
+        return []
+    max_w = max(20, int(max_width_px))
+    out: list[str] = []
+    for paragraph in raw.split("\n"):
+        p = paragraph.strip()
+        if not p:
+            out.append("")
+            continue
+        words = p.split()
+        if not words:
+            continue
+        line = words[0]
+        for word in words[1:]:
+            trial = f"{line} {word}"
+            if (
+                approx_line_pixel_width(
+                    trial, font_size, letter_spacing, font_path, bold=bold
+                )
+                <= max_w
+            ):
+                line = trial
+            else:
+                out.append(line)
+                line = word
+        out.append(line)
+    while out and out[-1] == "":
+        out.pop()
+    return out
+
+
+def compute_scaled_overlay_approx(
+    settings: TextOverlaySettings,
+    video_w: int,
+    video_h: int,
+) -> Optional[ScaledTextOverlay]:
+    """Layout text overlay without Qt (Pillow metrics — safe for Windows API)."""
+    if not settings.enabled:
+        return None
+    text = (settings.text or "").strip()
+    if not text:
+        return None
+    vw = max(2, int(video_w))
+    vh = max(2, int(video_h))
+    ref_w, ref_h = settings.reference_size()
+    font_bold = bool(settings.font_bold)
+    font_path = effective_font_path(settings.custom_font_path, bold=font_bold)
+    max_w_ref = max(20, int(round(settings.max_width_frac * ref_w)))
+    lines = approx_wrap_text_lines(
+        text,
+        int(settings.font_size),
+        max_w_ref,
+        int(settings.letter_spacing),
+        font_path,
+        bold=font_bold,
+    )
+    if not lines:
+        return None
+    scale = vh / float(ref_h)
+    font_size = max(8, int(round(settings.font_size * scale)))
+    ref_font = max(1, int(settings.font_size))
+    letter_spacing = int(round(settings.letter_spacing * font_size / ref_font))
+    char_lines = [
+        approx_layout_line_chars(
+            ln, font_size, letter_spacing, font_path, bold=font_bold
+        )
+        for ln in lines
+    ]
+    amp_frac = max(0.0, min(0.35, float(settings.wave_amp_frac)))
+    wave_amp = max(0, int(round(font_size * amp_frac)))
+    font = _pil_font(font_path, font_size, bold=font_bold)
+    line_h = _pil_line_height(font, font_size)
+    width = max(
+        (
+            approx_line_pixel_width(
+                ln, font_size, letter_spacing, font_path, bold=font_bold
+            )
+            for ln in lines
+            if ln
+        ),
+        default=0,
+    )
+    block_h = line_h * max(1, len(lines)) + wave_amp * 2
+    block_w = int(width)
+    cx = settings.anchor_x * vw
+    cy = settings.anchor_y * vh
+    x = int(round(cx - block_w / 2))
+    y = int(round(cy - block_h / 2))
+    x = max(0, min(x, max(0, vw - block_w)))
+    y = max(0, min(y, max(0, vh - block_h)))
+    return ScaledTextOverlay(
+        lines=lines,
+        x=x,
+        y=y,
+        font_size=font_size,
+        line_height=line_h,
+        glow_enabled=bool(settings.glow_enabled),
+        glow_color=settings.glow_color,
+        text_color=settings.text_color,
+        font_path=font_path,
+        letter_spacing=letter_spacing,
+        font_bold=font_bold,
+        char_lines=char_lines,
+        wave_amp=wave_amp,
+        wave_char_phase=float(NEON_WAVE_CHAR_PHASE),
+        wave_frame_speed=float(settings.wave_frame_speed),
+        from_middle=bool(settings.from_middle),
+        enable_after_sec=None,
+    )
+
+
+def compute_scaled_overlay_for_api(
+    settings: TextOverlaySettings,
+    video_w: int,
+    video_h: int,
+) -> Optional[ScaledTextOverlay]:
+    """
+    Prefer precise Qt metrics when a GUI app exists; otherwise Pillow.
+
+    Creating QGuiApplication in CREATE_NO_WINDOW API workers often AVs on Windows
+    (0xC0000005), so headless paths must never touch Qt font APIs.
+    """
+    if _qt_metrics_available():
+        return compute_scaled_overlay(settings, video_w, video_h)
+    return compute_scaled_overlay_approx(settings, video_w, video_h)
 
 
 def compute_scaled_overlay(

@@ -171,7 +171,7 @@ from zaliver.processing.pipeline import (
     random_uniquify_settings,
     sample_range_value,
 )
-from zaliver.processing.text_overlay import TextOverlaySettings, compute_scaled_overlay
+from zaliver.processing.text_overlay import TextOverlaySettings, compute_scaled_overlay_for_api
 from zaliver.processing.worker import init_worker, process_chunk_disk
 
 
@@ -1058,7 +1058,7 @@ class ProcessingService:
                     if not j.text_overlay:
                         return None
                     toc = TextOverlaySettings.from_dict(j.text_overlay)
-                    scaled = compute_scaled_overlay(
+                    scaled = compute_scaled_overlay_for_api(
                         toc, j.info.width, j.info.height
                     )
                     return scaled.to_dict() if scaled else None
@@ -1281,7 +1281,7 @@ class ProcessingService:
                         if not j.text_overlay:
                             return None
                         toc = TextOverlaySettings.from_dict(j.text_overlay)
-                        scaled = compute_scaled_overlay(
+                        scaled = compute_scaled_overlay_for_api(
                             toc, j.info.width, j.info.height
                         )
                         return scaled.to_dict() if scaled else None

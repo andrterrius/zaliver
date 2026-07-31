@@ -50,6 +50,8 @@ def build_app_state(config: ApiConfig) -> AppState:
     config.resolved_output_root().mkdir(parents=True, exist_ok=True)
     config.resolved_sources_root().mkdir(parents=True, exist_ok=True)
     (config.resolved_sources_root() / "uploads").mkdir(parents=True, exist_ok=True)
+    (config.resolved_sources_root() / "video").mkdir(parents=True, exist_ok=True)
+    (config.resolved_sources_root() / "audio").mkdir(parents=True, exist_ok=True)
     settings_path = config.settings_path or (config.data_dir / "settings.json")
     store = JsonFileSettingsStore(settings_path)
     log_store = JobLogStore(

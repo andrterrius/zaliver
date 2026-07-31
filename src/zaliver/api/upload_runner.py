@@ -35,6 +35,12 @@ def run_upload_job(
         sink.on_finished(False, "No video paths.")
         return
 
+    bu = (base_url or "").strip().rstrip("/")
+    if not bu:
+        from zaliver.antydetect.local_antidetect_api import DEFAULT_LOCAL_API_BASE_URL
+
+        bu = DEFAULT_LOCAL_API_BASE_URL
+
     def upload_one(profile_id: str, task: Any, tab_index: int = 0) -> None:
         from zaliver.antydetect.antic_open import (
             open_google_in_local_antidetect_profile,
@@ -68,7 +74,7 @@ def run_upload_job(
             if own:
                 upload_youtube_and_instagram_in_local_antidetect_profile(
                     profile_id,
-                    base_url=(base_url or "").strip(),
+                    base_url=bu,
                     **kw,
                 )
             else:
@@ -91,7 +97,7 @@ def run_upload_job(
             if own:
                 upload_instagram_reel_in_local_antidetect_profile(
                     profile_id,
-                    base_url=(base_url or "").strip(),
+                    base_url=bu,
                     **kw,
                 )
             else:
@@ -112,7 +118,7 @@ def run_upload_job(
         if own:
             open_google_in_local_antidetect_profile(
                 profile_id,
-                base_url=(base_url or "").strip(),
+                base_url=bu,
                 **yt_kw,
             )
         else:

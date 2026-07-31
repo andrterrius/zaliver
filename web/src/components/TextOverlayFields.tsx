@@ -263,6 +263,9 @@ export function TextOverlayFields({
             textColor={value.textColor}
             glowColor={value.glowColor}
             glowEnabled={value.glowEnabled}
+            letterSpacing={value.letterSpacing}
+            fontSize={value.fontSize}
+            fontBold={value.fontBold}
             onChange={(anchorX, anchorY) => patch({ anchorX, anchorY })}
           />
           <p className="hint">

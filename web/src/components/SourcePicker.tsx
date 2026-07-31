@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
+import { usePaintSelectList } from "../hooks/usePaintSelectList";
 
 export type SourceKind = "media" | "video" | "audio" | "all";
 
@@ -9,6 +10,7 @@ type Entry = {
   is_dir: boolean;
   size: number | null;
   abs_path: string | null;
+  created_at: string | null;
 };
 
 type Props = {
@@ -26,11 +28,58 @@ function basename(p: string): string {
   return i >= 0 ? norm.slice(i + 1) : norm;
 }
 
+const VIDEO_EXTS = new Set([
+  ".mp4",
+  ".mov",
+  ".mkv",
+  ".webm",
+  ".avi",
+  ".m4v",
+]);
+const AUDIO_EXTS = new Set([
+  ".mp3",
+  ".wav",
+  ".m4a",
+  ".aac",
+  ".flac",
+  ".ogg",
+  ".wma",
+]);
+
+function fileExt(name: string): string {
+  const i = name.lastIndexOf(".");
+  return i >= 0 ? name.slice(i).toLowerCase() : "";
+}
+
+function uploadSubdirForKind(kind: SourceKind): "video" | "audio" | "uploads" {
+  if (kind === "video") return "video";
+  if (kind === "audio") return "audio";
+  return "uploads";
+}
+
+function classifyUploadSubdir(file: File): "video" | "audio" | "uploads" {
+  const ext = fileExt(file.name);
+  if (VIDEO_EXTS.has(ext) || file.type.startsWith("video/")) return "video";
+  if (AUDIO_EXTS.has(ext) || file.type.startsWith("audio/")) return "audio";
+  return "uploads";
+}
+
 function formatSize(n: number | null): string {
   if (n == null || Number.isNaN(n)) return "";
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatMeta(e: Entry): string {
+  const parts: string[] = [];
+  if (e.is_dir) parts.push("открыть");
+  else {
+    const sz = formatSize(e.size);
+    if (sz) parts.push(sz);
+  }
+  if (e.created_at) parts.push(e.created_at);
+  return parts.join(" · ");
 }
 
 export function SourcePicker({
@@ -46,7 +95,6 @@ export function SourcePicker({
   const [cwd, setCwd] = useState("");
   const [parent, setParent] = useState<string | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
-  const [root, setRoot] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -57,7 +105,6 @@ export function SourcePicker({
       setError("");
       try {
         const res = await api.listSources(path, kind);
-        setRoot(res.root);
         setCwd(res.path);
         setParent(res.parent);
         setEntries(res.entries);
@@ -78,17 +125,28 @@ export function SourcePicker({
 
   const names = useMemo(() => value.map(basename), [value]);
 
-  const toggleFile = (abs: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (!multiple) {
-        return next.has(abs) ? new Set() : new Set([abs]);
-      }
-      if (next.has(abs)) next.delete(abs);
-      else next.add(abs);
-      return next;
-    });
-  };
+  const paint = useCallback(
+    (abs: string, paintSelect: boolean) => {
+      setSelected((prev) => {
+        if (!multiple) {
+          return paintSelect ? new Set([abs]) : new Set();
+        }
+        const has = prev.has(abs);
+        if (paintSelect && has) return prev;
+        if (!paintSelect && !has) return prev;
+        const next = new Set(prev);
+        if (paintSelect) next.add(abs);
+        else next.delete(abs);
+        return next;
+      });
+    },
+    [multiple],
+  );
+
+  const { listRef, onPointerDown } = usePaintSelectList({
+    isSelected: (key) => selected.has(key),
+    paint,
+  });
 
   const confirmServer = () => {
     const paths = [...selected];
@@ -106,11 +164,26 @@ export function SourcePicker({
     setError("");
     try {
       const list = [...files];
-      const res = await api.uploadSources(list);
+      const batches = new Map<"video" | "audio" | "uploads", File[]>();
+      if (kind === "video" || kind === "audio") {
+        batches.set(uploadSubdirForKind(kind), list);
+      } else {
+        for (const f of list) {
+          const sub = classifyUploadSubdir(f);
+          const bucket = batches.get(sub) || [];
+          bucket.push(f);
+          batches.set(sub, bucket);
+        }
+      }
+      const paths: string[] = [];
+      for (const [subdir, batch] of batches) {
+        const res = await api.uploadSources(batch, subdir);
+        paths.push(...res.paths);
+      }
       onChange(
         multiple
-          ? [...new Set([...value, ...res.paths])]
-          : res.paths.slice(0, 1),
+          ? [...new Set([...value, ...paths])]
+          : paths.slice(0, 1),
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -167,7 +240,7 @@ export function SourcePicker({
         <ul className="source-picked-list">
           {names.map((n, i) => (
             <li key={`${value[i]}-${i}`}>
-              <span title={value[i]}>{n}</span>
+              <span>{n}</span>
               <button
                 type="button"
                 className="btn secondary"
@@ -199,10 +272,7 @@ export function SourcePicker({
                 Закрыть
               </button>
             </div>
-            <p className="hint">
-              {root}
-              {cwd ? ` / ${cwd}` : ""}
-            </p>
+            <p className="hint">{cwd ? cwd : "корень исходников"}</p>
             <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
               <button
                 type="button"
@@ -223,7 +293,11 @@ export function SourcePicker({
               <span className="hint">Выбрано: {selected.size}</span>
             </div>
             {error ? <div className="error-banner">{error}</div> : null}
-            <div className="source-browser-list">
+            <div
+              ref={listRef}
+              className="source-browser-list source-browser-list--select"
+              onPointerDown={onPointerDown}
+            >
               {busy && !entries.length ? (
                 <div className="hint">Загрузка…</div>
               ) : null}
@@ -239,25 +313,27 @@ export function SourcePicker({
                     onClick={() => void loadDir(e.path)}
                   >
                     <span>📁 {e.name}</span>
-                    <span className="hint">открыть</span>
+                    <span className="hint">{formatMeta(e)}</span>
                   </button>
-                ) : (
-                  <label
+                ) : e.abs_path ? (
+                  <div
                     key={`f-${e.path}`}
+                    data-entry-path={e.abs_path}
                     className={`source-browser-row file ${
-                      e.abs_path && selected.has(e.abs_path) ? "on" : ""
+                      selected.has(e.abs_path) ? "on" : ""
                     }`}
                   >
                     <input
                       type="checkbox"
-                      checked={!!(e.abs_path && selected.has(e.abs_path))}
-                      disabled={!e.abs_path}
-                      onChange={() => e.abs_path && toggleFile(e.abs_path)}
+                      className="source-browser-check"
+                      checked={selected.has(e.abs_path)}
+                      readOnly
+                      tabIndex={-1}
                     />
                     <span>🎬 {e.name}</span>
-                    <span className="hint">{formatSize(e.size)}</span>
-                  </label>
-                ),
+                    <span className="hint">{formatMeta(e)}</span>
+                  </div>
+                ) : null,
               )}
             </div>
             <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>

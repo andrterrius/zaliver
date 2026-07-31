@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
+import { usePaintSelectList } from "../hooks/usePaintSelectList";
 
 type Entry = {
   name: string;
@@ -7,6 +8,7 @@ type Entry = {
   is_dir: boolean;
   size: number | null;
   abs_path: string | null;
+  created_at: string | null;
 };
 
 type Area = "sources" | "output";
@@ -23,21 +25,48 @@ function formatSize(n: number | null): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function formatMeta(e: Entry): string {
+  const parts: string[] = [];
+  if (e.is_dir) parts.push("папка");
+  else {
+    const sz = formatSize(e.size);
+    if (sz) parts.push(sz);
+  }
+  if (e.created_at) parts.push(e.created_at);
+  return parts.join(" · ");
+}
+
 export function SourcesManagerModal({ open, onClose }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
-  const dragRef = useRef<{
-    active: boolean;
-    paintSelect: boolean;
-  } | null>(null);
+  const mkdirInputRef = useRef<HTMLInputElement>(null);
   const [area, setArea] = useState<Area>("sources");
   const [cwd, setCwd] = useState("");
   const [parent, setParent] = useState<string | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
-  const [root, setRoot] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
+  const [mkdirOpen, setMkdirOpen] = useState(false);
+  const [mkdirName, setMkdirName] = useState("");
+  const [mkdirError, setMkdirError] = useState("");
+
+  const paint = useCallback((rel: string, paintSelect: boolean) => {
+    setSelected((prev) => {
+      const has = prev.has(rel);
+      if (paintSelect && has) return prev;
+      if (!paintSelect && !has) return prev;
+      const next = new Set(prev);
+      if (paintSelect) next.add(rel);
+      else next.delete(rel);
+      return next;
+    });
+  }, []);
+
+  const { listRef, onPointerDown } = usePaintSelectList({
+    isSelected: (key) => selected.has(key),
+    paint,
+  });
 
   const loadDir = useCallback(
     async (path: string, which: Area = area) => {
@@ -48,7 +77,6 @@ export function SourcesManagerModal({ open, onClose }: Props) {
           which === "output"
             ? await api.listOutput(path, "all")
             : await api.listSources(path, "all");
-        setRoot(res.root);
         setCwd(res.path);
         setParent(res.parent);
         setEntries(res.entries);
@@ -65,60 +93,36 @@ export function SourcesManagerModal({ open, onClose }: Props) {
   useEffect(() => {
     if (!open) return;
     setStatus("");
+    setMkdirOpen(false);
+    setMkdirName("");
+    setMkdirError("");
     setArea("sources");
     void loadDir("", "sources");
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    const endDrag = () => {
-      if (dragRef.current) dragRef.current.active = false;
-    };
-    window.addEventListener("pointerup", endDrag);
-    window.addEventListener("pointercancel", endDrag);
-    return () => {
-      window.removeEventListener("pointerup", endDrag);
-      window.removeEventListener("pointercancel", endDrag);
-    };
-  }, []);
-
-  if (!open) return null;
+    if (!mkdirOpen) return;
+    const t = window.setTimeout(() => {
+      mkdirInputRef.current?.focus();
+      mkdirInputRef.current?.select();
+    }, 0);
+    return () => window.clearTimeout(t);
+  }, [mkdirOpen]);
 
   const fileEntries = entries.filter((e) => !e.is_dir);
   const selectedFileCount = fileEntries.filter((e) =>
     selected.has(e.path),
   ).length;
 
+  if (!open) return null;
+
   const switchArea = (next: Area) => {
     if (next === area) return;
     setArea(next);
     setStatus("");
     setError("");
+    setMkdirOpen(false);
     void loadDir("", next);
-  };
-
-  const applyPaint = (rel: string, paintSelect: boolean) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (paintSelect) next.add(rel);
-      else next.delete(rel);
-      return next;
-    });
-  };
-
-  const onRowPointerDown = (rel: string, e: PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
-    // Don't start drag-select from the open-folder button.
-    if ((e.target as HTMLElement).closest(".source-browser-open")) return;
-    const paintSelect = !selected.has(rel);
-    dragRef.current = { active: true, paintSelect };
-    applyPaint(rel, paintSelect);
-    e.preventDefault();
-  };
-
-  const onRowPointerEnter = (rel: string) => {
-    const drag = dragRef.current;
-    if (!drag?.active) return;
-    applyPaint(rel, drag.paintSelect);
   };
 
   const selectAllFiles = () => {
@@ -135,7 +139,8 @@ export function SourcesManagerModal({ open, onClose }: Props) {
     setError("");
     setStatus("");
     try {
-      const subdir = cwd ? `${cwd}/uploads` : "uploads";
+      // Upload into the current folder (root → uploads for convenience).
+      const subdir = cwd || "uploads";
       const res = await api.uploadSources([...files], subdir);
       setStatus(`Загружено: ${res.paths.length}`);
       await loadDir(cwd, "sources");
@@ -147,17 +152,58 @@ export function SourcesManagerModal({ open, onClose }: Props) {
     }
   };
 
+  const openMkdir = () => {
+    if (area !== "sources") return;
+    setMkdirName("");
+    setMkdirError("");
+    setMkdirOpen(true);
+  };
+
+  const closeMkdir = () => {
+    if (busy) return;
+    setMkdirOpen(false);
+    setMkdirName("");
+    setMkdirError("");
+  };
+
+  const submitMkdir = async () => {
+    if (area !== "sources") return;
+    const name = mkdirName.trim();
+    if (!name) {
+      setMkdirError("Укажите имя папки.");
+      return;
+    }
+    setBusy(true);
+    setMkdirError("");
+    setError("");
+    setStatus("");
+    try {
+      const res = await api.mkdirSources(cwd, name);
+      setStatus(`Создана папка: ${res.path}`);
+      setMkdirOpen(false);
+      setMkdirName("");
+      await loadDir(cwd, "sources");
+    } catch (e) {
+      setMkdirError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const onDelete = async () => {
     const paths = [...selected];
     if (!paths.length) {
       setError("Выберите файлы или папки для удаления.");
       return;
     }
-    if (
-      !confirm(
-        `Удалить выбранное (${paths.length}) с сервера? Это необратимо.`,
-      )
-    ) {
+    const dirCount = entries.filter(
+      (e) => e.is_dir && selected.has(e.path),
+    ).length;
+    const msg =
+      dirCount > 0
+        ? `Удалить выбранное (${paths.length}), включая папки с содержимым? Это необратимо.`
+        : `Удалить выбранное (${paths.length}) с сервера? Это необратимо.`;
+    if (!confirm(msg)) {
       return;
     }
     setBusy(true);
@@ -231,8 +277,11 @@ export function SourcesManagerModal({ open, onClose }: Props) {
           </button>
         </div>
         <p className="hint">
-          {root}
-          {cwd ? ` / ${cwd}` : ""}
+          {cwd
+            ? cwd
+            : area === "output"
+              ? "корень результатов"
+              : "корень исходников"}
         </p>
         <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
           <button
@@ -259,6 +308,16 @@ export function SourcesManagerModal({ open, onClose }: Props) {
               onClick={() => fileRef.current?.click()}
             >
               Загрузить…
+            </button>
+          ) : null}
+          {area === "sources" ? (
+            <button
+              type="button"
+              className="btn secondary"
+              disabled={busy}
+              onClick={openMkdir}
+            >
+              Создать папку…
             </button>
           ) : null}
           <button
@@ -304,7 +363,11 @@ export function SourcesManagerModal({ open, onClose }: Props) {
         />
         {error ? <div className="error-banner">{error}</div> : null}
         {status ? <p className="hint">{status}</p> : null}
-        <div className="source-browser-list source-browser-list--select">
+        <div
+          ref={listRef}
+          className="source-browser-list source-browser-list--select"
+          onPointerDown={onPointerDown}
+        >
           {busy && !entries.length ? (
             <div className="hint">Загрузка…</div>
           ) : null}
@@ -315,14 +378,14 @@ export function SourcesManagerModal({ open, onClose }: Props) {
             e.is_dir ? (
               <div
                 key={`d-${e.path}`}
+                data-entry-path={e.path}
                 className={`source-browser-row dir manage ${
                   selected.has(e.path) ? "on" : ""
                 }`}
-                onPointerDown={(ev) => onRowPointerDown(e.path, ev)}
-                onPointerEnter={() => onRowPointerEnter(e.path)}
               >
                 <input
                   type="checkbox"
+                  className="source-browser-check"
                   checked={selected.has(e.path)}
                   readOnly
                   tabIndex={-1}
@@ -334,30 +397,96 @@ export function SourcesManagerModal({ open, onClose }: Props) {
                 >
                   📁 {e.name}
                 </button>
-                <span className="hint">папка</span>
+                <span className="hint">{formatMeta(e)}</span>
               </div>
             ) : (
               <div
                 key={`f-${e.path}`}
+                data-entry-path={e.path}
                 className={`source-browser-row file ${
                   selected.has(e.path) ? "on" : ""
                 }`}
-                onPointerDown={(ev) => onRowPointerDown(e.path, ev)}
-                onPointerEnter={() => onRowPointerEnter(e.path)}
               >
                 <input
                   type="checkbox"
+                  className="source-browser-check"
                   checked={selected.has(e.path)}
                   readOnly
                   tabIndex={-1}
                 />
                 <span>🎬 {e.name}</span>
-                <span className="hint">{formatSize(e.size)}</span>
+                <span className="hint">{formatMeta(e)}</span>
               </div>
             ),
           )}
         </div>
       </div>
+
+      {mkdirOpen ? (
+        <div
+          className="modal-backdrop modal-backdrop--nested"
+          onClick={closeMkdir}
+        >
+          <div
+            className="modal-card stack mkdir-dialog"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mkdir-title"
+          >
+            <h3 id="mkdir-title" className="group-title">
+              Новая папка
+            </h3>
+            <p className="hint">
+              {cwd ? `Внутри: ${cwd}` : "В корне исходников"}
+            </p>
+            <label className="hint" htmlFor="mkdir-name-input">
+              Имя папки
+            </label>
+            <input
+              id="mkdir-name-input"
+              ref={mkdirInputRef}
+              className="field"
+              value={mkdirName}
+              disabled={busy}
+              placeholder="например, clips"
+              autoComplete="off"
+              onChange={(e) => {
+                setMkdirName(e.target.value);
+                if (mkdirError) setMkdirError("");
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void submitMkdir();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  closeMkdir();
+                }
+              }}
+            />
+            {mkdirError ? <div className="error-banner">{mkdirError}</div> : null}
+            <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
+              <button
+                type="button"
+                className="btn secondary"
+                disabled={busy}
+                onClick={closeMkdir}
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={busy || !mkdirName.trim()}
+                onClick={() => void submitMkdir()}
+              >
+                Создать
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -13,19 +13,29 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from zaliver.processing.chunking import probe_video
-from zaliver.processing.ffmpeg_merge import mux_video_audio, resolve_ffmpeg_executable
+from zaliver.processing.ffmpeg_merge import (
+    ffmpeg_drawtext_missing_user_message,
+    ffmpeg_has_drawtext,
+    mux_video_audio,
+    resolve_ffmpeg_executable,
+)
 from zaliver.processing.ffmpeg_probe import estimate_target_video_bps
 from zaliver.processing.pipeline import (
     RandomUniquifyBounds,
     apply_uniquify_effect_enables,
+    materialize_text_overlay_ranges,
     random_uniquify_settings,
 )
 from zaliver.processing.subprocess_flags import (
     popen_creationflags,
     resolve_python_executable,
+)
+from zaliver.processing.text_overlay import (
+    TextOverlaySettings,
+    compute_scaled_overlay_for_api,
 )
 
 LogFn = Callable[[str], None]
@@ -34,6 +44,24 @@ CancelFn = Callable[[], bool]
 
 def _unique_name(stem: str) -> str:
     return f"{stem}_u_{secrets.token_hex(10)}.mp4"
+
+
+def _scaled_text_overlay_for_job(
+    raw: Optional[dict[str, Any]],
+    *,
+    width: int,
+    height: int,
+) -> Optional[dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return None
+    sampled = materialize_text_overlay_ranges(raw)
+    if not isinstance(sampled, dict):
+        return None
+    toc = TextOverlaySettings.from_dict(sampled)
+    if not (toc.enabled and (toc.text or "").strip()):
+        return None
+    scaled = compute_scaled_overlay_for_api(toc, width, height)
+    return scaled.to_dict() if scaled else None
 
 
 def _run_encode_one(task: dict[str, Any], work_dir: Path) -> dict[str, Any]:
@@ -137,7 +165,27 @@ def run_uniquify_lite(
     copies = max(1, int(options.get("copies_per_file", 1) or 1))
     rb = RandomUniquifyBounds.from_options_dict(options.get("random_bounds") or {})
 
+    raw_text_overlay = options.get("text_overlay")
+    text_overlay_enabled = False
+    if isinstance(raw_text_overlay, dict):
+        toc = TextOverlaySettings.from_dict(raw_text_overlay)
+        text_overlay_enabled = bool(toc.enabled and (toc.text or "").strip())
+        if text_overlay_enabled:
+            try:
+                from zaliver.processing.text_overlay import (
+                    prefetch_color_emoji_for_text,
+                )
+
+                prefetch_color_emoji_for_text(toc.text)
+            except Exception:
+                pass
+
+    if text_overlay_enabled and not ffmpeg_has_drawtext():
+        return False, ffmpeg_drawtext_missing_user_message()
+
     log("uniquify_lite: без multiprocessing (стабильный Windows API).")
+    if text_overlay_enabled:
+        log("Наложение текста: включено.")
     if use_gpu:
         log("GPU обработка кадров: включена.")
     else:
@@ -184,6 +232,14 @@ def run_uniquify_lite(
             if tvb:
                 log(f"{tag}: видео ~{tvb / 1_000_000:.2f} Мбит/с")
 
+            job_overlay = None
+            if text_overlay_enabled:
+                job_overlay = _scaled_text_overlay_for_job(
+                    raw_text_overlay if isinstance(raw_text_overlay, dict) else None,
+                    width=int(info.width),
+                    height=int(info.height),
+                )
+
             task = {
                 "video_path": str(src.resolve()),
                 "start_frame": 0,
@@ -197,7 +253,7 @@ def run_uniquify_lite(
                 "fps": float(info.fps),
                 "use_gpu": use_gpu,
                 "target_video_bps": tvb,
-                "text_overlay": None,
+                "text_overlay": job_overlay,
                 "total_frames": int(info.frame_count),
             }
             log(f"{tag}: кодирование (subprocess)…")

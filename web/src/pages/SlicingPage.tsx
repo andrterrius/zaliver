@@ -1,13 +1,29 @@
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import { useJobPoll } from "../hooks/useJobPoll";
-import { useManagedOutputDir } from "../hooks/useManagedOutputDir";
 import { usePersistedJobId } from "../hooks/usePersistedJobId";
 import { useProcessingDefaults } from "../hooks/useProcessingDefaults";
+import {
+  asBool,
+  asNumber,
+  asRange,
+  asStringList,
+  textOverlayFromSettings,
+  textOverlayToSettings,
+  useDebouncedSettingsPatch,
+} from "../hooks/useServerSettingsPersist";
+import {
+  savePendingUpload,
+  useUploadAfterJob,
+} from "../hooks/useUploadAfterJob";
 import { ProgressBar } from "../components/ProgressBar";
 import { SectionNav } from "../components/SectionNav";
 import { SourcePicker } from "../components/SourcePicker";
 import { RangeSlider, type RangeValue } from "../components/RangeSlider";
+import {
+  UploadAfterDialog,
+  type UploadAfterChoice,
+} from "../components/UploadAfterDialog";
 import {
   TextOverlayFields,
   defaultSliceTextOverlay,
@@ -20,9 +36,9 @@ const SECTIONS = ["Исходники", "Сцены", "Текст", "Музык�
 export function SlicingPage() {
   const proc = useProcessingDefaults();
   const [section, setSection] = useState(0);
+  const [hydrated, setHydrated] = useState(false);
   const [clips, setClips] = useState<string[]>([]);
   const [music, setMusic] = useState<string[]>([]);
-  const { path: outputDir } = useManagedOutputDir("slicing");
   const [copies, setCopies] = useState(1);
   const [autoDurations, setAutoDurations] = useState(false);
   const [sceneDuration, setSceneDuration] = useState<RangeValue>({
@@ -34,31 +50,119 @@ export function SlicingPage() {
     defaultSliceTextOverlay,
   );
   const [jobId, setJobId] = usePersistedJobId("slicing");
+  const [uploadJobId, setUploadJobId] = usePersistedJobId("upload-after-slicing");
+  const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const { job } = useJobPoll(jobId);
+  const { job: uploadJob } = useJobPoll(uploadJobId);
+  const onUploadErr = useCallback((msg: string) => setError(msg), []);
+  useUploadAfterJob("slicing", job, setUploadJobId, onUploadErr);
   const running =
-    busy || (job != null && ["queued", "running"].includes(job.status));
+    busy ||
+    (job != null && ["queued", "running"].includes(job.status)) ||
+    (uploadJob != null && ["queued", "running"].includes(uploadJob.status));
 
-  const onStart = async () => {
-    setError("");
-    setBusy(true);
-    try {
-      const clip_files = clips;
-      const music_files = music;
-      if (!clip_files.length) throw new Error("Добавьте клипы.");
-      if (!music_files.length) throw new Error("Добавьте аудиотреки.");
-      if (scenesCount.lo > scenesCount.hi) {
-        throw new Error("Мин. количество сцен не может быть больше максимального.");
-      }
-      if (!autoDurations && sceneDuration.lo > sceneDuration.hi) {
-        throw new Error(
-          "Мин. длительность сцены не может быть больше максимальной.",
+  useEffect(() => {
+    if (job && ["failed", "cancelled"].includes(job.status)) {
+      savePendingUpload("slicing", null);
+    }
+  }, [job]);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const s = await api.getSettings();
+        const v = s.values;
+        setClips(asStringList(v["slice/clip_files"]));
+        setMusic(asStringList(v["slice/music_files"]));
+        setCopies(
+          Math.max(1, Math.round(asNumber(v["slice/copies_per_track"], 1))),
         );
+        setAutoDurations(asBool(v["slice/auto_scene_durations"], false));
+        setSceneDuration(
+          asRange(v["slice/min_scene_duration"], v["slice/max_scene_duration"], {
+            lo: 1.0,
+            hi: 1.3,
+          }),
+        );
+        setScenesCount(
+          asRange(v["slice/min_scenes"], v["slice/max_scenes"], {
+            lo: 12,
+            hi: 23,
+          }),
+        );
+        setTextOverlay(
+          textOverlayFromSettings(v, "slice/", defaultSliceTextOverlay()),
+        );
+      } catch {
+        /* keep defaults */
+      } finally {
+        setHydrated(true);
       }
+    })();
+  }, []);
+
+  const persistValues = useMemo(() => {
+    if (!hydrated) return null;
+    return {
+      "slice/clip_files": clips,
+      "slice/music_files": music,
+      "slice/copies_per_track": copies,
+      "slice/auto_scene_durations": autoDurations,
+      "slice/min_scene_duration": sceneDuration.lo,
+      "slice/max_scene_duration": sceneDuration.hi,
+      "slice/min_scenes": Math.round(scenesCount.lo),
+      "slice/max_scenes": Math.round(scenesCount.hi),
+      ...textOverlayToSettings(textOverlay, "slice/"),
+    };
+  }, [
+    hydrated,
+    clips,
+    music,
+    copies,
+    autoDurations,
+    sceneDuration,
+    scenesCount,
+    textOverlay,
+  ]);
+
+  useDebouncedSettingsPatch(persistValues);
+
+  const onStart = () => {
+    setError("");
+    if (!clips.length) {
+      setError("Добавьте клипы.");
+      return;
+    }
+    if (!music.length) {
+      setError("Добавьте аудиотреки.");
+      return;
+    }
+    if (scenesCount.lo > scenesCount.hi) {
+      setError("Мин. количество сцен не может быть больше максимального.");
+      return;
+    }
+    if (!autoDurations && sceneDuration.lo > sceneDuration.hi) {
+      setError("Мин. длительность сцены не может быть больше максимальной.");
+      return;
+    }
+    setUploadDialogOpen(true);
+  };
+
+  const onUploadDialogConfirm = async (choice: UploadAfterChoice) => {
+    setUploadDialogOpen(false);
+    setBusy(true);
+    setError("");
+    try {
+      if (persistValues) {
+        await api.patchSettings(persistValues);
+      }
+      const willUpload = choice.profileIds.length > 0;
+      savePendingUpload("slicing", willUpload ? choice : null);
       const res = await api.startSlicing({
-        clip_files,
-        music_files,
+        clip_files: clips,
+        music_files: music,
         copies_per_track: copies,
         num_workers: proc.numWorkers,
         use_gpu: proc.useGpu,
@@ -70,9 +174,12 @@ export function SlicingPage() {
         max_scenes: Math.round(scenesCount.hi),
         slice_fps_mode: proc.sliceFpsMode,
         text_overlay: textOverlayToApi(textOverlay),
+        youtube_upload_after_processing: willUpload,
       });
       setJobId(res.id);
+      setUploadJobId(null);
     } catch (e) {
+      savePendingUpload("slicing", null);
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
@@ -106,6 +213,12 @@ export function SlicingPage() {
       </div>
       <SectionNav sections={SECTIONS} active={section} onChange={setSection} />
       {error ? <div className="error-banner">{error}</div> : null}
+      <UploadAfterDialog
+        open={uploadDialogOpen}
+        mode="slicing"
+        onCancel={() => setUploadDialogOpen(false)}
+        onConfirm={(c) => void onUploadDialogConfirm(c)}
+      />
       <div className="grid-2">
         <div className="stack">
           {section === 0 ? (
@@ -119,9 +232,7 @@ export function SlicingPage() {
                 accept="video/*"
               />
               <p className="hint">
-                Результат сохраняется на сервере:
-                <br />
-                <code>{outputDir || "…"}</code>
+                Результат сохраняется на сервере в папке результатов (нарезка).
               </p>
               <label>
                 Копий на трек{" "}
@@ -204,8 +315,24 @@ export function SlicingPage() {
         <section className="group">
           <h3 className="group-title">Лог</h3>
           <div className="log-box">
-            {job?.logs?.length ? job.logs.join("\n") : "Лог нарезки…"}
+            {[
+              ...(job?.logs || []),
+              ...(uploadJob?.logs || []).map((l) => `[upload] ${l}`),
+            ].length
+              ? [
+                  ...(job?.logs || []),
+                  ...(uploadJob?.logs || []).map((l) => `[upload] ${l}`),
+                ].join("\n")
+              : "Лог нарезки…"}
           </div>
+          {uploadJob ? (
+            <p className="hint" style={{ marginTop: 8 }}>
+              Залив {uploadJob.status}
+              {uploadJob.progress.total
+                ? ` · ${uploadJob.progress.current}/${uploadJob.progress.total}`
+                : ""}
+            </p>
+          ) : null}
         </section>
       </div>
     </div>

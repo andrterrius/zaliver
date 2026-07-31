@@ -112,7 +112,6 @@ export function ReadyPage() {
                 <div style={{ fontWeight: 600, color: "var(--title)" }}>
                   {v.path.split(/[/\\]/).pop()}
                 </div>
-                <div className="hint">{v.path}</div>
                 <div className="hint">добавлено {v.added_at}</div>
               </span>
             </label>

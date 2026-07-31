@@ -1087,7 +1087,7 @@ input[type='number'].field {
   transform: translate(-50%, -50%);
   font-weight: 700;
   font-size: 13px;
-  letter-spacing: 0.5px;
+  letter-spacing: 0;
   white-space: pre-wrap;
   text-align: center;
   max-width: 90%;
@@ -1105,6 +1105,12 @@ input[type='number'].field {
   padding: 16px;
 }
 
+.modal-backdrop--nested {
+  z-index: 1100;
+  background: rgba(4, 6, 10, 0.55);
+  backdrop-filter: blur(2px);
+}
+
 .modal-card {
   width: min(560px, 100%);
   max-height: min(85vh, 720px);
@@ -1115,8 +1121,23 @@ input[type='number'].field {
   padding: 18px 20px;
 }
 
+.mkdir-dialog {
+  width: min(400px, 100%);
+  max-height: none;
+}
+
 .source-browser {
   width: min(640px, 100%);
+}
+
+.upload-after-dialog {
+  width: min(720px, 100%);
+  max-height: min(92vh, 900px);
+}
+
+.upload-after-profiles {
+  max-height: min(36vh, 320px);
+  overflow: auto;
 }
 
 .source-browser-list {
@@ -1134,6 +1155,11 @@ input[type='number'].field {
 .source-browser-list--select {
   user-select: none;
   -webkit-user-select: none;
+  touch-action: none;
+}
+
+.source-browser-list--select .source-browser-check {
+  pointer-events: none;
 }
 
 .source-browser-row.dir.on {
@@ -1177,6 +1203,12 @@ input[type='number'].field {
 
 .source-browser-row.file span:nth-child(2) {
   flex: 1;
+}
+
+.source-browser-row > .hint {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .source-picked-list {

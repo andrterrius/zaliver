@@ -7,8 +7,13 @@ type Props = {
   textColor: string;
   glowColor: string;
   glowEnabled: boolean;
+  letterSpacing?: number;
+  fontSize?: number;
+  fontBold?: boolean;
   onChange: (x: number, y: number) => void;
 };
+
+const PREVIEW_FONT_PX = 13;
 
 function clamp01(n: number) {
   return Math.min(1, Math.max(0, n));
@@ -21,6 +26,9 @@ export function TextPositionPreview({
   textColor,
   glowColor,
   glowEnabled,
+  letterSpacing = 0,
+  fontSize = 95,
+  fontBold = true,
   onChange,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
@@ -32,6 +40,10 @@ export function TextPositionPreview({
     if (r.width <= 0 || r.height <= 0) return;
     onChange(clamp01((clientX - r.left) / r.width), clamp01((clientY - r.top) / r.height));
   };
+
+  // Scale spacing from full UI font size to the small preview font.
+  const previewSpacing =
+    (Number(letterSpacing) || 0) * (PREVIEW_FONT_PX / Math.max(8, Number(fontSize) || 95));
 
   return (
     <div
@@ -52,6 +64,8 @@ export function TextPositionPreview({
           left: `${anchorX * 100}%`,
           top: `${anchorY * 100}%`,
           color: textColor,
+          fontWeight: fontBold ? 700 : 400,
+          letterSpacing: `${previewSpacing}px`,
           textShadow: glowEnabled
             ? `0 0 8px ${glowColor}, 0 0 16px ${glowColor}`
             : "0 1px 2px rgba(0,0,0,0.6)",

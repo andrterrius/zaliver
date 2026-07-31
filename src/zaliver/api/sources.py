@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
@@ -30,15 +31,20 @@ def sanitize_filename(name: str) -> str:
     if "\x00" in base:
         raise ValueError("Invalid filename")
     cleaned = _SAFE_NAME.sub("_", base).strip(" ._")
-    if cleaned in {".", ".."} or cleaned.upper() in {
-        "CON",
-        "PRN",
-        "AUX",
-        "NUL",
-        "COM1",
-        "LPT1",
-    }:
-        cleaned = f"file_{cleaned}"
+    if (
+        cleaned in {".", ".."}
+        or cleaned.strip(".") == ""
+        or cleaned.upper()
+        in {
+            "CON",
+            "PRN",
+            "AUX",
+            "NUL",
+            "COM1",
+            "LPT1",
+        }
+    ):
+        cleaned = f"file_{cleaned}" if cleaned.strip(".") else "file_dots"
     return cleaned or "file"
 
 
@@ -60,6 +66,22 @@ def assert_under_root(root: Path, candidate: Path) -> Path:
     return cand_res
 
 
+def _assert_safe_segment(raw: str, *, kind: str = "path segment") -> None:
+    """Reject traversal, all-dots names, trailing dots/spaces, drives, bad chars."""
+    if not raw:
+        raise ValueError(f"Invalid {kind}")
+    if raw in {".", ".."} or raw.strip(".") == "":
+        # ".", "..", "...", "...." — never useful as a real folder/file name here.
+        raise ValueError(f"Invalid {kind}: {raw!r}")
+    if raw.endswith(".") or raw.endswith(" "):
+        # Windows strips trailing dots/spaces; reject to avoid surprising renames.
+        raise ValueError(f"Invalid {kind}: {raw!r}")
+    if raw.startswith("/") or ":" in raw:
+        raise ValueError("Absolute path segments are not allowed")
+    if not _SAFE_SEGMENT.match(raw):
+        raise ValueError(f"Invalid {kind}: {raw!r}")
+
+
 def _validate_rel_segments(rel: str) -> list[str]:
     if "\x00" in (rel or ""):
         raise ValueError("Invalid path")
@@ -74,15 +96,14 @@ def _validate_rel_segments(rel: str) -> list[str]:
         return []
     parts: list[str] = []
     for raw in rel_norm.split("/"):
-        if not raw or raw == ".":
-            continue
+        # Do not skip empty / "." — treat as invalid (blocks a//b and .... tricks).
+        if not raw:
+            raise ValueError("Invalid path segment")
+        if raw == ".":
+            raise ValueError("Invalid path segment: '.'")
         if raw == "..":
             raise ValueError("Path escapes sources root")
-        # Absolute / drive segments (Unix abs, Windows drive, UNC-ish).
-        if raw.startswith("/") or ":" in raw:
-            raise ValueError("Absolute path segments are not allowed")
-        if not _SAFE_SEGMENT.match(raw):
-            raise ValueError(f"Invalid path segment: {raw!r}")
+        _assert_safe_segment(raw)
         parts.append(raw)
     return parts
 
@@ -95,6 +116,29 @@ def resolve_sources_rel(sources_root: Path, rel: str = "") -> Path:
     return assert_under_root(root, candidate)
 
 
+def _entry_created_ts(path: Path) -> float:
+    """Best-effort creation timestamp (birth time / Windows ctime / mtime)."""
+    try:
+        st = path.stat()
+    except OSError:
+        return 0.0
+    birth = getattr(st, "st_birthtime", None)
+    if birth is not None:
+        return float(birth)
+    if os.name == "nt":
+        return float(st.st_ctime)
+    return float(st.st_mtime)
+
+
+def _format_created_at(ts: float) -> str | None:
+    if ts <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def list_sources(
     sources_root: Path,
     *,
@@ -105,6 +149,7 @@ def list_sources(
     List directory entries under sources_root/rel.
 
     kind: "media" | "video" | "audio" | "all"
+    Entries are sorted newest-first (directories before files).
     """
     root = sources_root.resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -126,7 +171,7 @@ def list_sources(
 
     entries: list[dict] = []
     try:
-        children = sorted(cur.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        children = list(cur.iterdir())
     except OSError as e:
         raise OSError(f"Cannot list directory: {e}") from e
 
@@ -149,6 +194,8 @@ def list_sources(
             assert_under_root(root, child)
         except ValueError:
             continue
+        created_ts = _entry_created_ts(child)
+        created_at = _format_created_at(created_ts)
         if is_dir:
             entries.append(
                 {
@@ -157,6 +204,8 @@ def list_sources(
                     "is_dir": True,
                     "size": None,
                     "abs_path": None,
+                    "created_at": created_at,
+                    "_sort_ts": created_ts,
                 }
             )
             continue
@@ -174,8 +223,20 @@ def list_sources(
                 "is_dir": False,
                 "size": size,
                 "abs_path": str(child.resolve()),
+                "created_at": created_at,
+                "_sort_ts": created_ts,
             }
         )
+
+    entries.sort(
+        key=lambda e: (
+            0 if e["is_dir"] else 1,
+            -float(e.get("_sort_ts") or 0),
+            str(e["name"]).lower(),
+        )
+    )
+    for e in entries:
+        e.pop("_sort_ts", None)
 
     cur_rel = "" if cur == root else cur.relative_to(root).as_posix()
     parent = None
@@ -289,6 +350,43 @@ def resolve_download_files(
     if not out:
         raise ValueError("No files to download (select files, not only folders)")
     return out
+
+
+def mkdir_sources(
+    sources_root: Path,
+    *,
+    parent: str = "",
+    name: str,
+) -> str:
+    """
+    Create a directory under sources_root/parent/name.
+    Returns relative posix path of the new directory.
+    """
+    raw_name = (name or "").strip()
+    if not raw_name:
+        raise ValueError("Folder name is required")
+    # Single segment only — no nested paths in the name.
+    if "/" in raw_name or "\\" in raw_name or "\x00" in raw_name:
+        raise ValueError("Invalid folder name")
+    _assert_safe_segment(raw_name, kind="folder name")
+
+    root = sources_root.resolve()
+    parent_dir = resolve_sources_rel(root, parent)
+    if not parent_dir.is_dir():
+        raise FileNotFoundError(f"Parent folder not found: {parent or '/'}")
+    if parent_dir.is_symlink():
+        raise ValueError("Cannot create folder under a symlink")
+
+    dest = assert_under_root(root, parent_dir / raw_name)
+    if dest.exists():
+        raise ValueError(f"Already exists: {raw_name}")
+    try:
+        dest.mkdir(parents=False, exist_ok=False)
+    except FileExistsError as e:
+        raise ValueError(f"Already exists: {raw_name}") from e
+    except OSError as e:
+        raise OSError(f"Cannot create folder: {e}") from e
+    return dest.relative_to(root).as_posix()
 
 
 def delete_sources(sources_root: Path, rels: list[str]) -> int:

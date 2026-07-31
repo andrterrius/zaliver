@@ -1,14 +1,30 @@
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import { useJobPoll } from "../hooks/useJobPoll";
-import { useManagedOutputDir } from "../hooks/useManagedOutputDir";
 import { usePersistedJobId } from "../hooks/usePersistedJobId";
 import { useProcessingDefaults } from "../hooks/useProcessingDefaults";
+import {
+  asBool,
+  asNumber,
+  asRange,
+  asStringList,
+  textOverlayFromSettings,
+  textOverlayToSettings,
+  useDebouncedSettingsPatch,
+} from "../hooks/useServerSettingsPersist";
+import {
+  savePendingUpload,
+  useUploadAfterJob,
+} from "../hooks/useUploadAfterJob";
 import { ProgressBar } from "../components/ProgressBar";
 import { SectionNav } from "../components/SectionNav";
 import { SourcePicker } from "../components/SourcePicker";
 import { ToggleSwitch } from "../components/ToggleSwitch";
 import { RangeSlider, type RangeValue } from "../components/RangeSlider";
+import {
+  UploadAfterDialog,
+  type UploadAfterChoice,
+} from "../components/UploadAfterDialog";
 import {
   TextOverlayFields,
   defaultUniquifyTextOverlay,
@@ -105,14 +121,28 @@ function fxByKey(rows: FxRow[], key: FxKey): FxRow {
   return rows.find((r) => r.key === key)!;
 }
 
+function loadFx(v: Record<string, unknown>): FxRow[] {
+  return DEFAULT_FX.map((row) => {
+    const enKey =
+      row.key === "speed" ? "playback_speed_enabled" : `fx_${row.key}_enabled`;
+    const minKey = row.key === "speed" ? "fx_speed_min" : `fx_${row.key}_min`;
+    const maxKey = row.key === "speed" ? "fx_speed_max" : `fx_${row.key}_max`;
+    return {
+      ...row,
+      enabled: asBool(v[enKey], row.enabled),
+      range: asRange(v[minKey], v[maxKey], row.range),
+    };
+  });
+}
+
 export function UniquifyPage() {
   const proc = useProcessingDefaults();
   const [section, setSection] = useState(0);
+  const [hydrated, setHydrated] = useState(false);
   const [inputFiles, setInputFiles] = useState<string[]>([]);
-  const { path: outputDir } = useManagedOutputDir("uniquify");
   const [copies, setCopies] = useState(1);
   const [oneCopyNoFx, setOneCopyNoFx] = useState(false);
-  const [deleteAfter, setDeleteAfter] = useState(false);
+  const [deleteAfter, setDeleteAfter] = useState(true);
   const [fx, setFx] = useState<FxRow[]>(DEFAULT_FX);
   const [textOverlay, setTextOverlay] = useState<TextOverlayState>(
     defaultUniquifyTextOverlay,
@@ -122,20 +152,127 @@ export function UniquifyPage() {
   const [musicMix, setMusicMix] = useState(false);
   const [musicVol, setMusicVol] = useState<RangeValue>({ lo: 35, hi: 35 });
   const [jobId, setJobId] = usePersistedJobId("uniquify");
+  const [uploadJobId, setUploadJobId] = usePersistedJobId("upload-after-uniquify");
+  const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const { job } = useJobPoll(jobId);
+  const { job: uploadJob } = useJobPoll(uploadJobId);
+  const onUploadErr = useCallback((msg: string) => setError(msg), []);
+  useUploadAfterJob("uniquify", job, setUploadJobId, onUploadErr);
 
   const running =
-    busy || (job != null && ["queued", "running"].includes(job.status));
+    busy ||
+    (job != null && ["queued", "running"].includes(job.status)) ||
+    (uploadJob != null && ["queued", "running"].includes(uploadJob.status));
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const s = await api.getSettings();
+        const v = s.values;
+        setInputFiles(asStringList(v.input_files));
+        setCopies(Math.max(1, Math.round(asNumber(v.copies_per_file, 1))));
+        setOneCopyNoFx(asBool(v.one_copy_no_effects, false));
+        setDeleteAfter(asBool(v.delete_after_upload, true));
+        setFx(loadFx(v));
+        setTextOverlay(textOverlayFromSettings(v, "", defaultUniquifyTextOverlay()));
+        setMusicEnabled(asBool(v.background_music_enabled, false));
+        setMusicFiles(asStringList(v.background_music_files));
+        setMusicMix(asBool(v.background_music_mix_with_source, false));
+        setMusicVol(
+          asRange(
+            v.background_music_volume_pct_min ?? v.background_music_volume_pct,
+            v.background_music_volume_pct_max ?? v.background_music_volume_pct,
+            { lo: 35, hi: 35 },
+          ),
+        );
+      } catch {
+        /* keep defaults */
+      } finally {
+        setHydrated(true);
+      }
+    })();
+  }, []);
+
+  const persistValues = useMemo(() => {
+    if (!hydrated) return null;
+    const br = fxByKey(fx, "brightness");
+    const ct = fxByKey(fx, "contrast");
+    const sat = fxByKey(fx, "saturation");
+    const sc = fxByKey(fx, "scale");
+    const nz = fxByKey(fx, "noise");
+    const sp = fxByKey(fx, "speed");
+    return {
+      input_files: inputFiles,
+      copies_per_file: copies,
+      one_copy_no_effects: oneCopyNoFx,
+      delete_after_upload: deleteAfter,
+      fx_brightness_enabled: br.enabled,
+      fx_brightness_min: br.range.lo,
+      fx_brightness_max: br.range.hi,
+      fx_contrast_enabled: ct.enabled,
+      fx_contrast_min: ct.range.lo,
+      fx_contrast_max: ct.range.hi,
+      fx_saturation_enabled: sat.enabled,
+      fx_saturation_min: sat.range.lo,
+      fx_saturation_max: sat.range.hi,
+      fx_scale_enabled: sc.enabled,
+      fx_scale_min: sc.range.lo,
+      fx_scale_max: sc.range.hi,
+      fx_noise_enabled: nz.enabled,
+      fx_noise_min: nz.range.lo,
+      fx_noise_max: nz.range.hi,
+      playback_speed_enabled: sp.enabled,
+      fx_speed_min: sp.range.lo,
+      fx_speed_max: sp.range.hi,
+      background_music_enabled: musicEnabled,
+      background_music_files: musicFiles,
+      background_music_mix_with_source: musicMix,
+      background_music_volume_pct: Math.round(musicVol.lo),
+      background_music_volume_pct_min: Math.round(musicVol.lo),
+      background_music_volume_pct_max: Math.round(musicVol.hi),
+      ...textOverlayToSettings(textOverlay, ""),
+    };
+  }, [
+    hydrated,
+    inputFiles,
+    copies,
+    oneCopyNoFx,
+    deleteAfter,
+    fx,
+    musicEnabled,
+    musicFiles,
+    musicMix,
+    musicVol,
+    textOverlay,
+  ]);
+
+  useDebouncedSettingsPatch(persistValues);
+
+  useEffect(() => {
+    if (job && ["failed", "cancelled"].includes(job.status)) {
+      savePendingUpload("uniquify", null);
+    }
+  }, [job]);
 
   const updateFx = (key: FxKey, partial: Partial<FxRow>) => {
     setFx((rows) => rows.map((r) => (r.key === key ? { ...r, ...partial } : r)));
   };
 
-  const onStart = async () => {
+  const onStart = () => {
     setError("");
+    if (!inputFiles.length) {
+      setError("Укажите хотя бы один входной файл.");
+      return;
+    }
+    setUploadDialogOpen(true);
+  };
+
+  const onUploadDialogConfirm = async (choice: UploadAfterChoice) => {
+    setUploadDialogOpen(false);
     setBusy(true);
+    setError("");
     try {
       const files = inputFiles;
       if (!files.length) throw new Error("Укажите хотя бы один входной файл.");
@@ -181,7 +318,12 @@ export function UniquifyPage() {
         audio_chorus: false,
       };
 
-      await api.patchSettings({ delete_after_upload: deleteAfter });
+      if (persistValues) {
+        await api.patchSettings(persistValues);
+      }
+
+      const willUpload = choice.profileIds.length > 0;
+      savePendingUpload("uniquify", willUpload ? choice : null);
 
       const res = await api.startUniquify({
         input_files: files,
@@ -206,9 +348,12 @@ export function UniquifyPage() {
         settings,
         random_bounds,
         text_overlay: textOverlayToApi(textOverlay),
+        youtube_upload_after_processing: willUpload,
       });
       setJobId(res.id);
+      setUploadJobId(null);
     } catch (e) {
+      savePendingUpload("uniquify", null);
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
@@ -257,6 +402,13 @@ export function UniquifyPage() {
       </p>
       {error ? <div className="error-banner">{error}</div> : null}
 
+      <UploadAfterDialog
+        open={uploadDialogOpen}
+        mode="uniquify"
+        onCancel={() => setUploadDialogOpen(false)}
+        onConfirm={(c) => void onUploadDialogConfirm(c)}
+      />
+
       <div className="grid-2">
         <div className="stack">
           {section === 0 ? (
@@ -270,9 +422,7 @@ export function UniquifyPage() {
                 accept="video/*"
               />
               <p className="hint">
-                Результат сохраняется на сервере:
-                <br />
-                <code>{outputDir || "…"}</code>
+                Результат сохраняется на сервере в папке результатов (уникализация).
               </p>
               <div className="row">
                 <label>
@@ -395,14 +545,29 @@ export function UniquifyPage() {
         <section className="group">
           <h3 className="group-title">Лог</h3>
           <div className="log-box">
-            {job?.logs?.length
-              ? job.logs.join("\n")
+            {[
+              ...(job?.logs || []),
+              ...(uploadJob?.logs || []).map((l) => `[upload] ${l}`),
+            ].length
+              ? [
+                  ...(job?.logs || []),
+                  ...(uploadJob?.logs || []).map((l) => `[upload] ${l}`),
+                ].join("\n")
               : "Лог появится после старта задачи…"}
           </div>
           {job ? (
             <p className="hint" style={{ marginTop: 8 }}>
               Задача {job.id.slice(0, 8)}… · {job.status}
               {job.message ? ` · ${job.message}` : ""}
+            </p>
+          ) : null}
+          {uploadJob ? (
+            <p className="hint" style={{ marginTop: 4 }}>
+              Залив {uploadJob.id.slice(0, 8)}… · {uploadJob.status}
+              {uploadJob.progress.total
+                ? ` · ${uploadJob.progress.current}/${uploadJob.progress.total}`
+                : ""}
+              {uploadJob.message ? ` · ${uploadJob.message}` : ""}
             </p>
           ) : null}
         </section>

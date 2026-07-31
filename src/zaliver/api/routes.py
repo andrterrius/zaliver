@@ -274,8 +274,15 @@ def build_router() -> APIRouter:
                 value is None or str(value).strip() == "" or "…" in str(value)
             ):
                 continue
+            if key == "antydetect/local_api_token" and (
+                value is not None and "…" in str(value)
+            ):
+                continue
             core.settings.setValue(key, value)
         core.settings.sync()
+        from zaliver.api.antydetect_resolve import apply_local_api_token_from_settings
+
+        apply_local_api_token_from_settings(core.settings)
         return _read_settings(st, None)
 
     @router.get("/v1/library/output-dirs", response_model=OutputDirsResponse)
@@ -1079,6 +1086,9 @@ def build_router() -> APIRouter:
         schedule_warmup_reco = bool(body.schedule_warmup_shorts_recommendations)
         schedule_warmup_q = str(body.schedule_warmup_search_query or "").strip()
         delete_after_upload = bool(body.delete_after_upload)
+        search_oldest_channel = bool(
+            settings.value("youtube/search_oldest_channel", False)
+        )
 
         def runner(sink, register_cancel, job_id: str = "") -> None:
             del job_id
@@ -1103,6 +1113,7 @@ def build_router() -> APIRouter:
                 schedule_warmup_shorts_recommendations=schedule_warmup_reco,
                 schedule_warmup_search_query=schedule_warmup_q,
                 delete_after_upload=delete_after_upload,
+                search_oldest_channel=search_oldest_channel,
             )
 
         try:

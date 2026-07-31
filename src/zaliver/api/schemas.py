@@ -183,7 +183,7 @@ class ProfileJobBaseRequest(BaseModel):
     # profile_id -> antidetect custom_data (credentials)
     profiles_custom_data: dict[str, dict[str, Any]] = Field(default_factory=dict)
     yt_oldest_names: dict[str, str] = Field(default_factory=dict)
-    search_oldest_channel: bool = True
+    search_oldest_channel: bool | None = None
 
 
 class AvailabilityJobRequest(ProfileJobBaseRequest):

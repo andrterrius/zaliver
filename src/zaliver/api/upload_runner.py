@@ -31,6 +31,7 @@ def run_upload_job(
     schedule_warmup_shorts_recommendations: bool = True,
     schedule_warmup_search_query: str = "",
     delete_after_upload: bool = False,
+    search_oldest_channel: bool = False,
 ) -> None:
     from zaliver.youtube_upload.multi_uploader import MultiProfileUploader
     from zaliver.youtube_upload.schedule_publish import parse_msk_datetime
@@ -107,6 +108,7 @@ def run_upload_job(
                 warmup_during_schedule=warmup_on,
                 warmup_shorts_recommendations=warmup_reco,
                 warmup_search_query=warmup_q or None,
+                search_oldest_channel=bool(search_oldest_channel),
             )
             if own:
                 upload_youtube_and_instagram_in_local_antidetect_profile(
@@ -158,6 +160,7 @@ def run_upload_job(
             warmup_during_schedule=warmup_on,
             warmup_shorts_recommendations=warmup_reco,
             warmup_search_query=warmup_q or None,
+            search_oldest_channel=bool(search_oldest_channel),
         )
         if own:
             open_google_in_local_antidetect_profile(

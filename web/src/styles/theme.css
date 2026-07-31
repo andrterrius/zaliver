@@ -1143,13 +1143,33 @@ input[type='number'].field {
 }
 
 .upload-after-dialog {
-  width: min(720px, 100%);
-  max-height: min(92vh, 900px);
+  width: min(1100px, calc(100vw - 24px));
+  height: min(96vh, 980px);
+  max-height: min(96vh, 980px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px;
+}
+
+.upload-after-top {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  gap: 10px;
 }
 
 .upload-after-profiles {
-  max-height: min(36vh, 320px);
+  flex: 1 1 0;
+  min-height: 120px;
+  max-height: none;
   overflow: auto;
+}
+
+.upload-after-footer {
+  flex: 0 0 auto;
+  margin-top: auto;
 }
 
 .source-browser-list {

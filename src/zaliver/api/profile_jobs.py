@@ -69,6 +69,17 @@ def _resolve_token_base(state: AppState, body: ProfileJobBaseRequest) -> tuple[s
     return kind, token, base_url
 
 
+def _resolve_search_oldest_channel(
+    state: AppState, body: ProfileJobBaseRequest
+) -> bool:
+    fields_set = getattr(body, "model_fields_set", None) or set()
+    if "search_oldest_channel" in fields_set and body.search_oldest_channel is not None:
+        return bool(body.search_oldest_channel)
+    return bool(
+        state.core().settings.value("youtube/search_oldest_channel", False)
+    )
+
+
 def _base_request(
     state: AppState,
     body: ProfileJobBaseRequest,
@@ -90,7 +101,7 @@ def _base_request(
         max_concurrent=int(body.max_concurrent),
         profiles_custom_data=dict(body.profiles_custom_data or {}),
         yt_oldest_names=dict(body.yt_oldest_names or {}),
-        search_oldest_channel=bool(body.search_oldest_channel),
+        search_oldest_channel=_resolve_search_oldest_channel(state, body),
     )
 
 

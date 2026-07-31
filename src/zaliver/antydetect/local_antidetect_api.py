@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -11,6 +12,8 @@ from urllib.parse import quote
 # Значение по умолчанию для поля «Базовый URL» до первого сохранения настроек.
 DEFAULT_LOCAL_API_BASE_URL = "http://127.0.0.1:18765"
 DEFAULT_REMOTE_CDP_PORT = 1024
+# Совпадает с дефолтом `antidetect … serve` (ANTIDETECT_API_TOKEN).
+DEFAULT_LOCAL_API_TOKEN = "secret"
 
 PROFILE_PREVIEW_NOT_RUNNING_MSG = (
     "Профиль не запущен.\n\n"
@@ -20,6 +23,29 @@ PROFILE_PREVIEW_CDP_NOT_READY_MSG = (
     "Профиль запущен, но CDP WebSocket ещё недоступен.\n\n"
     "Подождите несколько секунд и повторите."
 )
+
+# Процессный дефолт: выставляется из настроек (веб-API / UI).
+# Пустая строка = не слать Authorization (десктоп Qt-антидетект без auth).
+_default_api_token: str = ""
+
+
+def set_default_local_api_token(token: str | None) -> None:
+    global _default_api_token
+    _default_api_token = (token or "").strip()
+
+
+def get_default_local_api_token() -> str:
+    return _default_api_token
+
+
+def resolve_local_api_token(explicit: str | None = None) -> str:
+    """Явный токен → процессный дефолт → ANTIDETECT_API_TOKEN из env."""
+    tok = (explicit or "").strip()
+    if tok:
+        return tok
+    if _default_api_token:
+        return _default_api_token
+    return (os.environ.get("ANTIDETECT_API_TOKEN") or "").strip()
 
 
 @dataclass(frozen=True)
@@ -46,15 +72,27 @@ class LocalAntidetectHttpAPI:
     """
     Клиент локального HTTP API (OpenAPI «Antidetect — API профилей и сессий»):
     GET /profiles, POST /profiles/{id}/launch, GET /sessions/{id}, POST …/stop.
+
+    Если задан Bearer-токен (явный / дефолт процесса / ANTIDETECT_API_TOKEN) —
+    все запросы кроме публичного /health идут с Authorization.
     """
 
-    def __init__(self, base_url: str, *, timeout_s: float = 30.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        token: str | None = None,
+        timeout_s: float = 30.0,
+    ) -> None:
         u = (base_url or "").strip().rstrip("/")
         if not u:
             raise LocalAntidetectError("Базовый URL локального API пуст.")
         self._base = u
         self._timeout_s = timeout_s
         self._session = requests.Session()
+        tok = resolve_local_api_token(token)
+        if tok:
+            self._session.headers["Authorization"] = f"Bearer {tok}"
 
     def close(self) -> None:
         self._session.close()

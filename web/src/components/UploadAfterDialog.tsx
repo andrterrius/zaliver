@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type Platform, type Profile } from "../api/client";
+import { usePaintSelectList } from "../hooks/usePaintSelectList";
 import { TitleVariablesHint } from "./TitleVariablesHint";
 
 export type UploadAfterChoice = {
@@ -154,14 +155,22 @@ export function UploadAfterDialog({
     );
   }, [profiles, search]);
 
-  const toggle = (id: string) => {
+  const paint = useCallback((id: string, paintSelect: boolean) => {
     setSelected((prev) => {
+      const has = prev.has(id);
+      if (paintSelect && has) return prev;
+      if (!paintSelect && !has) return prev;
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (paintSelect) next.add(id);
+      else next.delete(id);
       return next;
     });
-  };
+  }, []);
+
+  const { listRef, onPointerDown } = usePaintSelectList({
+    isSelected: (key) => selected.has(key),
+    paint,
+  });
 
   const confirm = () => {
     setError("");
@@ -215,11 +224,12 @@ export function UploadAfterDialog({
   return (
     <div className="modal-backdrop" onClick={onCancel}>
       <div
-        className="modal-card stack upload-after-dialog"
+        className="modal-card upload-after-dialog"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
       >
+        <div className="upload-after-top stack">
         <div className="page-header">
           <h3 className="group-title">{dialogTitle(mode, platform)}</h3>
           <button type="button" className="btn secondary" onClick={onCancel}>
@@ -464,8 +474,13 @@ export function UploadAfterDialog({
             {selected.size === 0 ? " — без залива" : ""}
           </span>
         </div>
+        </div>
 
-        <div className="list-panel upload-after-profiles">
+        <div
+          ref={listRef}
+          className="list-panel upload-after-profiles source-browser-list--select"
+          onPointerDown={onPointerDown}
+        >
           {filtered.length === 0 ? (
             <div className="list-item hint">
               {loading
@@ -474,28 +489,31 @@ export function UploadAfterDialog({
             </div>
           ) : (
             filtered.map((p) => (
-              <label
+              <div
                 key={p.id}
+                data-entry-path={p.id}
                 className={`list-item ${selected.has(p.id) ? "active" : ""}`}
                 style={{ display: "flex", gap: 10, cursor: "pointer" }}
               >
                 <input
                   type="checkbox"
+                  className="source-browser-check"
                   checked={selected.has(p.id)}
-                  onChange={() => toggle(p.id)}
+                  readOnly
+                  tabIndex={-1}
                 />
-                <span>
+                <span style={{ flex: 1 }}>
                   <div style={{ fontWeight: 600, color: "var(--title)" }}>
                     {p.name || p.id}
                   </div>
                   <div className="hint">{p.id}</div>
                 </span>
-              </label>
+              </div>
             ))
           )}
         </div>
 
-        <div className="row" style={{ justifyContent: "flex-end" }}>
+        <div className="row upload-after-footer" style={{ justifyContent: "flex-end" }}>
           <button type="button" className="btn danger" onClick={onCancel}>
             Отмена
           </button>

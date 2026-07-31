@@ -2236,6 +2236,16 @@ class MainWindow(QWidget):
         )
         gl.addWidget(QLabel("Базовый URL:"), 0, 0)
         gl.addWidget(self._local_api_base_url, 0, 1)
+        self._local_api_token = QLineEdit()
+        self._local_api_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self._local_api_token.setPlaceholderText("secret (для serve)")
+        self._local_api_token.setToolTip(
+            "Bearer-токен для режима antidetect serve. "
+            "Пусто — без Authorization (десктоп Qt без auth). "
+            "По умолчанию у serve: secret."
+        )
+        gl.addWidget(QLabel("API token:"), 1, 0)
+        gl.addWidget(self._local_api_token, 1, 1)
 
         self._btn_save_antydetect = QPushButton("Сохранить")
         self._btn_save_antydetect.setObjectName("secondary")
@@ -2265,7 +2275,7 @@ class MainWindow(QWidget):
         self._youtube_show_key = QCheckBox("Показать ключ")
         self._youtube_show_key.stateChanged.connect(self._on_youtube_show_key_changed)
         self._youtube_search_oldest = QCheckBox("Искать старый канал")
-        self._youtube_search_oldest.setChecked(True)
+        self._youtube_search_oldest.setChecked(False)
         self._youtube_search_oldest.setToolTip(
             "Если включено — перед заливом и проверкой Studio ищется самый старый канал "
             "или проверяется, что открыт сохранённый yt_oldest_name.\n"
@@ -5003,6 +5013,14 @@ class MainWindow(QWidget):
         else:
             url = DEFAULT_LOCAL_API_BASE_URL
         self._local_api_base_url.setText(url)
+        if hasattr(self, "_local_api_token"):
+            tok = (
+                self._settings.value("antydetect/local_api_token", "", type=str) or ""
+            ).strip()
+            self._local_api_token.setText(tok)
+            from zaliver.antydetect.local_antidetect_api import set_default_local_api_token
+
+            set_default_local_api_token(tok)
         if hasattr(self, "_max_concurrent_browsers_slider"):
             self._max_concurrent_browsers_slider.blockSignals(True)
             self._max_concurrent_browsers_slider.setValue(
@@ -5024,6 +5042,12 @@ class MainWindow(QWidget):
                 "antydetect/local_api_base_url",
                 (self._local_api_base_url.text() or "").strip(),
             )
+        if hasattr(self, "_local_api_token"):
+            tok = (self._local_api_token.text() or "").strip()
+            self._settings.setValue("antydetect/local_api_token", tok)
+            from zaliver.antydetect.local_antidetect_api import set_default_local_api_token
+
+            set_default_local_api_token(tok)
         self._save_max_concurrent_browsers_setting()
         try:
             self._settings.sync()
@@ -5073,7 +5097,7 @@ class MainWindow(QWidget):
             os.environ["YOUTUBE_API_KEY"] = key
         if hasattr(self, "_youtube_search_oldest"):
             search_oldest = yt.value(
-                "youtube/search_oldest_channel", True, type=bool
+                "youtube/search_oldest_channel", False, type=bool
             )
             self._youtube_search_oldest.blockSignals(True)
             self._youtube_search_oldest.setChecked(bool(search_oldest))
@@ -5442,7 +5466,7 @@ class MainWindow(QWidget):
             return bool(self._youtube_search_oldest.isChecked())
         return bool(
             self._settings_for(PLATFORM_YOUTUBE).value(
-                "youtube/search_oldest_channel", True, type=bool
+                "youtube/search_oldest_channel", False, type=bool
             )
         )
 

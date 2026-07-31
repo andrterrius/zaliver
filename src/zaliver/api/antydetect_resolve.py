@@ -6,14 +6,17 @@ from typing import Any
 
 from zaliver.antydetect.local_antidetect_api import (
     DEFAULT_LOCAL_API_BASE_URL,
+    DEFAULT_LOCAL_API_TOKEN,
     LocalAntidetectError,
     LocalAntidetectHttpAPI,
     normalize_local_profile_for_ui,
+    set_default_local_api_token,
 )
 from zaliver.config.platform_settings import PlatformSettings
 
 
 OWN_KINDS = frozenset({"local", "remote"})
+LOCAL_API_TOKEN_SETTINGS_KEY = "antydetect/local_api_token"
 
 
 def is_own_kind(kind: str) -> bool:
@@ -52,6 +55,22 @@ def resolve_local_base_url(
     return DEFAULT_LOCAL_API_BASE_URL
 
 
+def resolve_local_api_token_setting(
+    settings: PlatformSettings, override: str | None = None
+) -> str:
+    tok = (override or "").strip()
+    if tok:
+        return tok
+    return str(settings.value(LOCAL_API_TOKEN_SETTINGS_KEY, "") or "").strip()
+
+
+def apply_local_api_token_from_settings(settings: PlatformSettings) -> str:
+    """Sync process-wide Bearer token used by LocalAntidetectHttpAPI."""
+    tok = resolve_local_api_token_setting(settings)
+    set_default_local_api_token(tok)
+    return tok
+
+
 def ensure_antidetect_defaults(settings: PlatformSettings) -> None:
     """Seed local-antidetect defaults for server deploys (same host)."""
     stored = str(
@@ -67,7 +86,11 @@ def ensure_antidetect_defaults(settings: PlatformSettings) -> None:
         settings.setValue("antydetect/own_base_url", DEFAULT_LOCAL_API_BASE_URL)
     if not settings.contains("antydetect/dolphin_headless"):
         settings.setValue("antydetect/dolphin_headless", True)
+    # Веб-API / `serve`: antidetect по умолчанию ждёт Bearer secret.
+    if not settings.contains(LOCAL_API_TOKEN_SETTINGS_KEY):
+        settings.setValue(LOCAL_API_TOKEN_SETTINGS_KEY, DEFAULT_LOCAL_API_TOKEN)
     settings.sync()
+    apply_local_api_token_from_settings(settings)
 
 
 def list_antidetect_profiles(
@@ -82,13 +105,13 @@ def list_antidetect_profiles(
 
     Always uses local/remote HTTP API (own antidetect). Dolphin is not supported.
     """
-    del token  # kept for call-site compatibility
     k = resolve_antidetect_kind(settings, kind)
     profiles: list[dict[str, Any]] = []
 
     base = resolve_local_base_url(settings, base_url)
+    api_token = resolve_local_api_token_setting(settings, token)
     try:
-        api = LocalAntidetectHttpAPI(base)
+        api = LocalAntidetectHttpAPI(base, token=api_token or None)
         try:
             raw_items = api.list_profiles()
         finally:

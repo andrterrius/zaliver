@@ -138,6 +138,7 @@ SETTINGS_ALLOWLIST: frozenset[str] = frozenset(
         "antydetect/remote_cdp_public_host",
         "antydetect/own_remote_cdp_host",
         "antydetect/own_remote_cdp_port",
+        "antydetect/local_api_token",
         "instagram/tabs_per_profile",
         "instagram/stats_checker_profile_id",
         "upload_pause_hours",
@@ -176,6 +177,7 @@ SECRET_KEYS: frozenset[str] = frozenset(
     {
         "ai/api_key",
         "youtube/api_key",
+        "antydetect/local_api_token",
     }
 )
 

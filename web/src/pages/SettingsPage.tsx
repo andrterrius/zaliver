@@ -11,6 +11,7 @@ function profileLabel(p: Profile): string {
 
 export function SettingsPage({ platform }: Props) {
   const [localBase, setLocalBase] = useState("http://127.0.0.1:18765");
+  const [localToken, setLocalToken] = useState("secret");
   const [remoteBase, setRemoteBase] = useState("");
   const [remoteCdpHost, setRemoteCdpHost] = useState("");
   const [headless, setHeadless] = useState(true);
@@ -26,7 +27,7 @@ export function SettingsPage({ platform }: Props) {
   const [sliceFps, setSliceFps] = useState("30");
   const [statsUsername, setStatsUsername] = useState("");
   const [ytApiKey, setYtApiKey] = useState("");
-  const [searchOldest, setSearchOldest] = useState(true);
+  const [searchOldest, setSearchOldest] = useState(false);
   const [igPauseHours, setIgPauseHours] = useState(3);
   const [igTabs, setIgTabs] = useState(1);
   const [igChecker, setIgChecker] = useState("");
@@ -35,6 +36,7 @@ export function SettingsPage({ platform }: Props) {
   const [error, setError] = useState("");
   const [showYtKey, setShowYtKey] = useState(false);
   const [showAiKey, setShowAiKey] = useState(false);
+  const [showLocalToken, setShowLocalToken] = useState(false);
 
   const showYt = platform === "youtube" || platform === "yt_inst";
   const showIg = platform === "instagram" || platform === "yt_inst";
@@ -59,6 +61,7 @@ export function SettingsPage({ platform }: Props) {
               "http://127.0.0.1:18765",
           ),
         );
+        setLocalToken(String(v["antydetect/local_api_token"] ?? "secret"));
         setRemoteBase(String(v["antydetect/remote_api_base_url"] ?? ""));
         setRemoteCdpHost(
           String(
@@ -89,7 +92,7 @@ export function SettingsPage({ platform }: Props) {
           String(v["stats_server/username"] || v["stats_server_username"] || ""),
         );
         setYtApiKey(String(v["youtube/api_key"] ?? ""));
-        setSearchOldest(Boolean(v["youtube/search_oldest_channel"] ?? true));
+        setSearchOldest(Boolean(v["youtube/search_oldest_channel"] ?? false));
         setIgPauseHours(Number(v["upload_pause_hours"] ?? 3));
         setIgTabs(Number(v["instagram/tabs_per_profile"] ?? 1));
         setIgChecker(String(v["instagram/stats_checker_profile_id"] ?? ""));
@@ -107,6 +110,7 @@ export function SettingsPage({ platform }: Props) {
       const values: Record<string, unknown> = {
         "antydetect/local_api_base_url": base,
         "antydetect/own_base_url": base,
+        "antydetect/local_api_token": localToken,
         "antydetect/remote_api_base_url": remoteBase.trim(),
         "antydetect/remote_cdp_public_host": remoteCdpHost.trim(),
         "antydetect/own_remote_cdp_host": remoteCdpHost.trim(),
@@ -146,7 +150,6 @@ export function SettingsPage({ platform }: Props) {
 
       <section className="group stack">
         <h3 className="group-title">Имя пользователя</h3>
-        <p className="hint">Для сервера статистики загрузок.</p>
         <input
           className="field"
           value={statsUsername}
@@ -200,6 +203,28 @@ export function SettingsPage({ platform }: Props) {
           onChange={(e) => setLocalBase(e.target.value)}
           placeholder="http://127.0.0.1:18765"
         />
+        <label className="hint">Bearer-токен API антидетекта</label>
+        <p className="hint">
+          Нужен для режима <code>serve</code> (по умолчанию <code>secret</code>).
+          Десктоп Qt без токена можно оставить пустым.
+        </p>
+        <div className="row">
+          <input
+            className="field"
+            type={showLocalToken ? "text" : "password"}
+            value={localToken}
+            onChange={(e) => setLocalToken(e.target.value)}
+            placeholder="secret"
+            autoComplete="off"
+          />
+          <button
+            type="button"
+            className="btn secondary"
+            onClick={() => setShowLocalToken((v) => !v)}
+          >
+            {showLocalToken ? "Скрыть" : "Показать"}
+          </button>
+        </div>
         <label className="hint">URL удалённого API (опционально)</label>
         <input
           className="field"

@@ -41,7 +41,7 @@ class ProfileJobRequest:
     profiles_custom_data: dict[str, dict[str, Any]] = field(default_factory=dict)
     # yt oldest channel name per profile (optional)
     yt_oldest_names: dict[str, str] = field(default_factory=dict)
-    search_oldest_channel: bool = True
+    search_oldest_channel: bool = False
     # kind-specific
     warmup_shorts: ShortsWarmupSettings | None = None
     warmup_reels: ReelsWarmupSettings | None = None

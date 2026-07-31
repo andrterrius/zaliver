@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type Profile } from "../api/client";
 import { useJobPoll } from "../hooks/useJobPoll";
 import { usePersistedJobId } from "../hooks/usePersistedJobId";
+import { usePaintSelectList } from "../hooks/usePaintSelectList";
 import { ProgressBar } from "./ProgressBar";
 import { JobLogBox } from "./JobLogBox";
 import { TitleVariablesHint } from "./TitleVariablesHint";
@@ -58,14 +59,22 @@ export function UploadPanel({
     );
   }, [profiles, search]);
 
-  const toggle = (id: string) => {
+  const paint = useCallback((id: string, paintSelect: boolean) => {
     setSelected((prev) => {
+      const has = prev.has(id);
+      if (paintSelect && has) return prev;
+      if (!paintSelect && !has) return prev;
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (paintSelect) next.add(id);
+      else next.delete(id);
       return next;
     });
-  };
+  }, []);
+
+  const { listRef, onPointerDown } = usePaintSelectList({
+    isSelected: (key) => selected.has(key),
+    paint,
+  });
 
   const start = useCallback(async () => {
     setError("");
@@ -176,25 +185,33 @@ export function UploadPanel({
           Снять
         </button>
       </div>
-      <div className="list-panel" style={{ maxHeight: 220, overflow: "auto" }}>
+      <div
+        ref={listRef}
+        className="list-panel source-browser-list--select"
+        style={{ maxHeight: 220, overflow: "auto" }}
+        onPointerDown={onPointerDown}
+      >
         {filtered.map((p) => (
-          <label
+          <div
             key={p.id}
+            data-entry-path={p.id}
             className={`list-item ${selected.has(p.id) ? "active" : ""}`}
             style={{ display: "flex", gap: 10, cursor: "pointer" }}
           >
             <input
               type="checkbox"
+              className="source-browser-check"
               checked={selected.has(p.id)}
-              onChange={() => toggle(p.id)}
+              readOnly
+              tabIndex={-1}
             />
-            <span>
+            <span style={{ flex: 1 }}>
               <div style={{ fontWeight: 600, color: "var(--title)" }}>
                 {p.name || p.id}
               </div>
               <div className="hint">{p.id}</div>
             </span>
-          </label>
+          </div>
         ))}
       </div>
       <div className="row">

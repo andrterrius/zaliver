@@ -15,7 +15,7 @@ set PYTHONPATH=src
 python -m zaliver.api
 ```
 
-Открой http://127.0.0.1 — UI на `/`, API на `/v1` и `/health` (по умолчанию `0.0.0.0:80`).
+Открой http://127.0.0.1:8080 — UI на `/`, API на `/v1` и `/health` (по умолчанию `127.0.0.1:8080`).
 
 Опционально: `ZALIVER_WEB_DIST=C:\path\to\dist` если сборка лежит не в `web/dist`.
 
@@ -40,4 +40,4 @@ cd web
 npm run dev
 ```
 
-http://127.0.0.1:5173 — Vite проксирует `/v1` и `/health` на `:80`.
+http://127.0.0.1:5173 — Vite проксирует `/v1` и `/health` на `:8080`.

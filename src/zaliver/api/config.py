@@ -51,8 +51,8 @@ def _default_data_dir() -> Path:
 class ApiConfig:
     """Fail-closed config: token required unless insecure localhost mode."""
 
-    host: str = "0.0.0.0"
-    port: int = 80
+    host: str = "127.0.0.1"
+    port: int = 8080
     api_token: str = ""
     allow_insecure_no_token: bool = False
     enable_docs: bool = False
@@ -152,8 +152,8 @@ def load_api_config() -> ApiConfig:
         token = "secret"
 
     return ApiConfig(
-        host=(os.environ.get("ZALIVER_API_HOST") or "0.0.0.0").strip() or "0.0.0.0",
-        port=_env_int("ZALIVER_API_PORT", 80),
+        host=(os.environ.get("ZALIVER_API_HOST") or "127.0.0.1").strip() or "127.0.0.1",
+        port=_env_int("ZALIVER_API_PORT", 8080),
         api_token=token,
         allow_insecure_no_token=_env_bool("ZALIVER_API_ALLOW_INSECURE", False),
         enable_docs=_env_bool("ZALIVER_API_DOCS", False),

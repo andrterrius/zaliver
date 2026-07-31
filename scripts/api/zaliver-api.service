@@ -27,8 +27,8 @@ EnvironmentFile=-/etc/zaliver/api.env
 
 Environment=PYTHONPATH=/root/zaliver/src
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=ZALIVER_API_HOST=0.0.0.0
-Environment=ZALIVER_API_PORT=80
+Environment=ZALIVER_API_HOST=127.0.0.1
+Environment=ZALIVER_API_PORT=8080
 
 # Prefer .venv if present; otherwise system python3.
 ExecStart=/bin/bash -lc 'if [ -x /root/zaliver/.venv/bin/python ]; then exec /root/zaliver/.venv/bin/python -m zaliver.api; else exec /usr/bin/python3 -m zaliver.api; fi'

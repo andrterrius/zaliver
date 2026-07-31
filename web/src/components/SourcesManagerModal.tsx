@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import { usePaintSelectList } from "../hooks/usePaintSelectList";
+import { formatDiskUsage } from "../lib/diskUsage";
 
 type Entry = {
   name: string;
@@ -43,6 +44,7 @@ export function SourcesManagerModal({ open, onClose }: Props) {
   const [cwd, setCwd] = useState("");
   const [parent, setParent] = useState<string | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
+  const [diskHint, setDiskHint] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -80,6 +82,7 @@ export function SourcesManagerModal({ open, onClose }: Props) {
         setCwd(res.path);
         setParent(res.parent);
         setEntries(res.entries);
+        setDiskHint(formatDiskUsage(res));
         setSelected(new Set());
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
@@ -283,6 +286,7 @@ export function SourcesManagerModal({ open, onClose }: Props) {
               ? "корень результатов"
               : "корень исходников"}
         </p>
+        {diskHint ? <p className="hint">{diskHint}</p> : null}
         <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
           <button
             type="button"

@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import { usePaintSelectList } from "../hooks/usePaintSelectList";
+import { formatDiskUsage } from "../lib/diskUsage";
 
 export type SourceKind = "media" | "video" | "audio" | "all";
 
@@ -21,12 +22,6 @@ type Props = {
   accept?: string;
   multiple?: boolean;
 };
-
-function basename(p: string): string {
-  const norm = p.replace(/\\/g, "/");
-  const i = norm.lastIndexOf("/");
-  return i >= 0 ? norm.slice(i + 1) : norm;
-}
 
 const VIDEO_EXTS = new Set([
   ".mp4",
@@ -95,6 +90,7 @@ export function SourcePicker({
   const [cwd, setCwd] = useState("");
   const [parent, setParent] = useState<string | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
+  const [diskHint, setDiskHint] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -108,6 +104,7 @@ export function SourcePicker({
         setCwd(res.path);
         setParent(res.parent);
         setEntries(res.entries);
+        setDiskHint(formatDiskUsage(res));
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -122,8 +119,6 @@ export function SourcePicker({
     setSelected(new Set());
     void loadDir("");
   }, [open, loadDir]);
-
-  const names = useMemo(() => value.map(basename), [value]);
 
   const paint = useCallback(
     (abs: string, paintSelect: boolean) => {
@@ -193,10 +188,6 @@ export function SourcePicker({
     }
   };
 
-  const removeAt = (idx: number) => {
-    onChange(value.filter((_, i) => i !== idx));
-  };
-
   return (
     <div className="source-picker stack">
       <label className="hint">{label}</label>
@@ -236,25 +227,11 @@ export function SourcePicker({
         onChange={(e) => void onLocalFiles(e.target.files)}
       />
       {error && !open ? <div className="error-banner">{error}</div> : null}
-      {names.length ? (
-        <ul className="source-picked-list">
-          {names.map((n, i) => (
-            <li key={`${value[i]}-${i}`}>
-              <span>{n}</span>
-              <button
-                type="button"
-                className="btn secondary"
-                style={{ padding: "2px 8px", fontSize: 12 }}
-                onClick={() => removeAt(i)}
-              >
-                ×
-              </button>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="hint">Файлы не выбраны.</p>
-      )}
+      <p className="hint">
+        {value.length
+          ? `Выбрано файлов: ${value.length}`
+          : "Файлы не выбраны."}
+      </p>
 
       {open ? (
         <div className="modal-backdrop" onClick={() => setOpen(false)}>
@@ -273,6 +250,7 @@ export function SourcePicker({
               </button>
             </div>
             <p className="hint">{cwd ? cwd : "корень исходников"}</p>
+            {diskHint ? <p className="hint">{diskHint}</p> : null}
             <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
               <button
                 type="button"

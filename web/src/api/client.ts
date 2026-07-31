@@ -168,6 +168,9 @@ export const api = {
       root: string;
       path: string;
       parent: string | null;
+      disk_total: number | null;
+      disk_used: number | null;
+      disk_free: number | null;
       entries: Array<{
         name: string;
         path: string;
@@ -184,6 +187,9 @@ export const api = {
       root: string;
       path: string;
       parent: string | null;
+      disk_total: number | null;
+      disk_used: number | null;
+      disk_free: number | null;
       entries: Array<{
         name: string;
         path: string;

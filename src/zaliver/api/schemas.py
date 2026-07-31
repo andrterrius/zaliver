@@ -305,6 +305,10 @@ class SourceListResponse(BaseModel):
     path: str
     parent: str | None = None
     entries: list[SourceEntry] = Field(default_factory=list)
+    # Volume stats for the browsed path (bytes); None if unavailable.
+    disk_total: int | None = None
+    disk_used: int | None = None
+    disk_free: int | None = None
 
 
 class SourceUploadResponse(BaseModel):

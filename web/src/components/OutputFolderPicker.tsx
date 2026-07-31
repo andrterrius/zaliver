@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { OutputKind } from "../hooks/useManagedOutputDir";
+import { formatDiskUsage } from "../lib/diskUsage";
 
 type Entry = {
   name: string;
@@ -64,6 +65,7 @@ export function OutputFolderPicker({
   const [parent, setParent] = useState<string | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [cwdAbs, setCwdAbs] = useState("");
+  const [diskHint, setDiskHint] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [mkdirOpen, setMkdirOpen] = useState(false);
@@ -123,6 +125,7 @@ export function OutputFolderPicker({
           setParent(null);
         }
         setEntries(res.entries.filter((e) => e.is_dir));
+        setDiskHint(formatDiskUsage(res));
         const listRoot = (res.root || root).replace(/\\/g, "/").replace(/\/+$/, "");
         setCwdAbs(cur ? `${listRoot}/${cur}` : listRoot);
       } catch (e) {
@@ -241,6 +244,7 @@ export function OutputFolderPicker({
               </button>
             </div>
             <p className="hint">{cwd || baseRel}</p>
+            {diskHint ? <p className="hint">{diskHint}</p> : null}
             {error ? <div className="error-banner">{error}</div> : null}
             <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
               <button

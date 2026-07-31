@@ -244,11 +244,23 @@ def list_sources(
         parent_path = Path(cur_rel).parent
         parent = "" if str(parent_path) == "." else parent_path.as_posix()
 
+    disk_total = disk_used = disk_free = None
+    try:
+        usage = shutil.disk_usage(cur)
+        disk_total = int(usage.total)
+        disk_used = int(usage.used)
+        disk_free = int(usage.free)
+    except OSError:
+        pass
+
     return {
         "root": str(root),
         "path": cur_rel,
         "parent": parent,
         "entries": entries,
+        "disk_total": disk_total,
+        "disk_used": disk_used,
+        "disk_free": disk_free,
     }
 
 

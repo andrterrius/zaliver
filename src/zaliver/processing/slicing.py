@@ -1306,6 +1306,7 @@ def _run_scene_encode(
     fps: int | float,
     prefer_gpu: bool,
     global_hw_args: list[str] | None = None,
+    log: Optional[LogCallback] = None,
 ) -> None:
     enc, enc_args = pick_best_h264_encoder(
         prefer_gpu=bool(prefer_gpu),
@@ -1332,7 +1333,8 @@ def _run_scene_encode(
         *tail,
     ]
     try:
-        run_ffmpeg(cmd_base)
+        out_parent = os.path.dirname(os.path.abspath(output_path)) or "."
+        run_ffmpeg(cmd_base, log=log, progress_dir=out_parent)
     finally:
         if filter_script is not None:
             try:
@@ -1384,6 +1386,21 @@ def _render_with_gpu_fallback(
             )
             if pipeline is not None and log is not None:
                 _log(f"    GPU: {gpu_pipeline_label(pipeline)}", log)
+            fps_f = float(fps) if float(fps) > 1e-6 else 30.0
+            dur_est = (
+                float(total_duration_sec)
+                if total_duration_sec is not None and float(total_duration_sec) > 0
+                else (float(total_frames) / fps_f if total_frames > 0 else 0.0)
+            )
+            if log is not None:
+                where = "GPU" if pipeline is not None else "CPU"
+                _log(
+                    f"    Кодирование ffmpeg ({enc}, {where}, "
+                    f"~{dur_est:.1f}с видео, {total_frames} кадров)… "
+                    f"на слабом CPU может занять несколько минут — "
+                    f"лог будет обновляться, пока идёт encode.",
+                    log,
+                )
             _run_scene_encode(
                 input_args,
                 filter_parts,
@@ -1392,6 +1409,7 @@ def _render_with_gpu_fallback(
                 fps=fps,
                 prefer_gpu=prefer_gpu,
                 global_hw_args=global_hw,
+                log=log,
             )
             return
         except RuntimeError as exc:
@@ -2146,14 +2164,21 @@ def generate_video_from_segment(
     total_video_duration = sum(scene_durations)
     video_end = video_start + total_video_duration
 
-    print(f"\n    Начало: {video_start:.3f}с, конец: {video_end:.3f}с")
-    print(f"    Доступно аудио от начала: {available_audio:.3f}с")
-    print(f"    Пиков: {segment['num_transitions']}, сцен: {len(scene_durations)}")
-    print(f"\n    СЦЕНЫ (смена кадра на каждом пике):")
+    _log(f"\n    Начало: {video_start:.3f}с, конец: {video_end:.3f}с", log)
+    _log(f"    Доступно аудио от начала: {available_audio:.3f}с", log)
+    _log(
+        f"    Пиков: {segment['num_transitions']}, сцен: {len(scene_durations)}",
+        log,
+    )
+    _log("\n    СЦЕНЫ (смена кадра на каждом пике):", log)
     for i, dur in enumerate(scene_durations, 1):
-        print(f"    Сцена {i}: {dur:.3f}с")
+        _log(f"    Сцена {i}: {dur:.3f}с", log)
 
-    print(f"\n    Длительность видео: {total_video_duration:.3f}с, сцен: {len(scene_durations)}")
+    _log(
+        f"\n    Длительность видео: {total_video_duration:.3f}с, "
+        f"сцен: {len(scene_durations)}",
+        log,
+    )
 
     # ====== ВЫБИРАЕМ ФРАГМЕНТЫ ВИДЕО ======
     num_scenes = len(scene_durations)
@@ -2203,8 +2228,9 @@ def generate_video_from_segment(
             rebuilt_durs.append(float(duration))
             rebuilt_frames.append(fc)
             clip_name = os.path.basename(path)
-            print(
-                f"    Часть {i + 1}: {duration:.2f}с — {clip_name} целиком с {start:.2f}с"
+            _log(
+                f"    Часть {i + 1}: {duration:.2f}с — {clip_name} целиком с {start:.2f}с",
+                log,
             )
         if preserve_full:
             scene_durations = rebuilt_durs
@@ -2272,6 +2298,12 @@ def generate_video_from_segment(
         f"temp_clips_{os.path.splitext(os.path.basename(output_video))[0]}",
     )
     os.makedirs(temp_dir, exist_ok=True)
+    _log(f"    Временная папка: {temp_dir}", log)
+    _log(
+        "    (до конца кодирования mp4 в temp может не появиться — "
+        "смотрите encoding_in_progress.txt и лог ffmpeg)",
+        log,
+    )
 
     if not scene_clips:
         _log("    Ошибка: нет сцен", log)

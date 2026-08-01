@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import gc
 from pathlib import Path
@@ -683,26 +684,103 @@ def run_ffmpeg(
     log: LogFn = None,
     *,
     resource_retries: int = _FFMPEG_RESOURCE_RETRIES,
+    heartbeat_sec: float = 15.0,
+    progress_dir: str | Path | None = None,
 ) -> None:
+    """
+    Run ffmpeg and wait for completion.
+
+    Long encodes (CPU libx264 on a VPS) can take minutes with no stdout;
+    when ``log`` is set, emit a heartbeat (and optional ``-progress`` time)
+    so job logs / temp folders do not look frozen.
+    """
     exe = resolve_ffmpeg_executable()
     if not exe:
         raise RuntimeError("ffmpeg не найден")
-    cmd = [exe, "-hide_banner", "-loglevel", "error", "-y", *args]
     max_retries = max(0, int(resource_retries))
     total_attempts = max_retries + 1
     last_err: Optional[BaseException] = None
+    verbose_cmd = (os.environ.get("ZALIVER_FFMPEG_VERBOSE") or "").strip() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    prog_root: Optional[Path] = None
+    if progress_dir is not None:
+        try:
+            prog_root = Path(progress_dir)
+            prog_root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            prog_root = None
+
     for attempt in range(1, total_attempts + 1):
-        if log:
+        progress_path: Optional[Path] = None
+        marker_path: Optional[Path] = None
+        cmd = [exe, "-hide_banner", "-loglevel", "error", "-y"]
+        if prog_root is not None:
+            progress_path = prog_root / f"ffmpeg_progress_{os.getpid()}_{attempt}.txt"
+            marker_path = prog_root / "encoding_in_progress.txt"
+            try:
+                marker_path.write_text(
+                    f"ffmpeg started attempt={attempt}\n", encoding="utf-8"
+                )
+            except OSError:
+                marker_path = None
+            # -progress writes key=value periodically; file appears immediately.
+            cmd.extend(["-progress", str(progress_path), "-nostats"])
+        cmd.extend(args)
+        if log and verbose_cmd:
             log(" ".join(cmd))
         try:
-            p = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=_popen_flags(),
-            )
+            holder: dict[str, object] = {}
+
+            def _run() -> None:
+                holder["p"] = subprocess.run(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    creationflags=_popen_flags(),
+                )
+
+            t = threading.Thread(target=_run, name="zaliver-ffmpeg", daemon=True)
+            started = time.monotonic()
+            t.start()
+            beat = 0
+            last_out_ms = -1
+            while t.is_alive():
+                t.join(timeout=max(1.0, float(heartbeat_sec) or 15.0))
+                if not t.is_alive():
+                    break
+                if log and heartbeat_sec > 0:
+                    beat += 1
+                    elapsed = int(time.monotonic() - started)
+                    out_note = ""
+                    if progress_path is not None and progress_path.is_file():
+                        try:
+                            text = progress_path.read_text(
+                                encoding="utf-8", errors="replace"
+                            )
+                            for line in reversed(text.splitlines()):
+                                if line.startswith("out_time_ms="):
+                                    raw = line.split("=", 1)[1].strip()
+                                    out_ms = int(raw)
+                                    if out_ms != last_out_ms:
+                                        last_out_ms = out_ms
+                                        out_note = f", закодировано ~{out_ms / 1000.0:.1f}с"
+                                    break
+                        except (OSError, ValueError):
+                            pass
+                    log(
+                        f"ffmpeg: кодирование… {elapsed}с{out_note} "
+                        f"(папка temp может быть почти пустой до конца encode — это нормально)"
+                    )
+            p = holder.get("p")
+            if not isinstance(p, subprocess.CompletedProcess):
+                raise RuntimeError("ffmpeg thread finished without a result")
         except OSError as e:
             last_err = e
             if attempt >= total_attempts or not is_resource_exhausted_error(e):
@@ -715,7 +793,18 @@ def run_ffmpeg(
             gc.collect()
             time.sleep(_FFMPEG_RESOURCE_RETRY_DELAY_SEC)
             continue
+        finally:
+            for path in (progress_path, marker_path):
+                if path is None:
+                    continue
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
         if p.returncode == 0:
+            if log and beat > 0:
+                elapsed = int(time.monotonic() - started)
+                log(f"ffmpeg: готово за {elapsed}с")
             return
         err = (p.stderr or p.stdout or "").strip()
         last_err = RuntimeError(err or f"ffmpeg failed with code {p.returncode}")

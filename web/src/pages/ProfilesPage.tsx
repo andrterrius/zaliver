@@ -35,6 +35,30 @@ function tagList(tags: unknown[]): string[] {
     .filter(Boolean);
 }
 
+/** Как в десктопе / antic: ошибка — красный, успех — зелёный. */
+function tagTone(tag: string): "error" | "success" | null {
+  const low = tag.toLocaleLowerCase("ru");
+  if (low.includes("ошибка")) return "error";
+  if (low.includes("успех") || low.startsWith("успеш")) return "success";
+  return null;
+}
+
+function tagPillClass(tag: string): string {
+  const tone = tagTone(tag);
+  if (tone === "error") return "pill pill-error";
+  if (tone === "success") return "pill pill-success";
+  return "pill";
+}
+
+function tagFilterClass(tag: string, active: boolean): string {
+  const tone = tagTone(tag);
+  const parts = ["tag-chip"];
+  if (active) parts.push("active");
+  if (tone === "error") parts.push("tag-chip-error");
+  if (tone === "success") parts.push("tag-chip-success");
+  return parts.join(" ");
+}
+
 export function ProfilesPage({ platform }: Props) {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [kind, setKind] = useState("local");
@@ -72,14 +96,21 @@ export function ProfilesPage({ platform }: Props) {
   const [cookieWatchMin, setCookieWatchMin] = useState(15);
   const [cookieWatchMax, setCookieWatchMax] = useState(45);
   const [customDomains, setCustomDomains] = useState("");
+  const [searchOldestChannel, setSearchOldestChannel] = useState(false);
 
   const refresh = useCallback(async () => {
     setError("");
     try {
-      const res = await api.listProfiles();
+      const [res, settings] = await Promise.all([
+        api.listProfiles(),
+        api.getSettings("youtube/search_oldest_channel"),
+      ]);
       setProfiles(res.profiles);
       if (res.kind) setKind(String(res.kind));
       if (res.base_url) setBaseUrl(String(res.base_url));
+      setSearchOldestChannel(
+        Boolean(settings.values["youtube/search_oldest_channel"] ?? false),
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -123,18 +154,26 @@ export function ProfilesPage({ platform }: Props) {
   const buildBaseBody = () => {
     const ids = [...selected];
     const profiles_custom_data: Record<string, Record<string, unknown>> = {};
+    const yt_oldest_names: Record<string, string> = {};
     for (const p of profiles) {
-      if (ids.includes(p.id) && p.custom_data && Object.keys(p.custom_data).length) {
+      if (!ids.includes(p.id)) continue;
+      if (p.custom_data && Object.keys(p.custom_data).length) {
         profiles_custom_data[p.id] = p.custom_data;
+        const oldest = String(
+          (p.custom_data as Record<string, unknown>).yt_oldest_name || "",
+        ).trim();
+        if (oldest) yt_oldest_names[p.id] = oldest;
       }
     }
     return {
       profile_ids: ids,
       kind,
       headless: true,
+      search_oldest_channel: searchOldestChannel,
       ...(Object.keys(profiles_custom_data).length
         ? { profiles_custom_data }
         : {}),
+      ...(Object.keys(yt_oldest_names).length ? { yt_oldest_names } : {}),
     };
   };
 
@@ -317,7 +356,13 @@ export function ProfilesPage({ platform }: Props) {
                   </div>
                   <div className="hint">{p.id}</div>
                   {tags.length ? (
-                    <div className="hint">{tags.join(", ")}</div>
+                    <div className="row-tags">
+                      {tags.map((t) => (
+                        <span className={tagPillClass(t)} key={t}>
+                          {t}
+                        </span>
+                      ))}
+                    </div>
                   ) : null}
                 </span>
               </label>
@@ -358,23 +403,25 @@ export function ProfilesPage({ platform }: Props) {
                 Сбросить фильтр
               </button>
             </div>
-            {allTags.map((t) => (
-              <label key={t} className="check">
-                <input
-                  type="checkbox"
-                  checked={tagFilter.has(t)}
-                  onChange={() => {
-                    setTagFilter((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(t)) next.delete(t);
-                      else next.add(t);
-                      return next;
-                    });
-                  }}
-                />
+            <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
+              {allTags.map((t) => (
+              <button
+                key={t}
+                type="button"
+                className={tagFilterClass(t, tagFilter.has(t))}
+                onClick={() => {
+                  setTagFilter((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(t)) next.delete(t);
+                    else next.add(t);
+                    return next;
+                  });
+                }}
+              >
                 {t}
-              </label>
+              </button>
             ))}
+            </div>
           </div>
         </div>
       ) : null}

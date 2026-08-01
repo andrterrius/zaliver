@@ -440,6 +440,95 @@ input[type='number'].field {
   color: var(--accent-soft);
 }
 
+.row-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.pill {
+  font-size: 11px;
+  font-weight: 550;
+  padding: 3px 8px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.pill-error {
+  background: rgba(190, 18, 60, 0.18);
+  border-color: #be123c;
+  color: #fda4af;
+}
+
+.pill-success {
+  background: rgba(22, 163, 74, 0.18);
+  border-color: #16a34a;
+  color: #86efac;
+}
+
+.tag-chip {
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.tag-chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.tag-chip.active {
+  border-color: rgba(99, 102, 241, 0.45);
+  background: var(--accent-dim);
+  color: var(--accent-soft);
+}
+
+.tag-chip-error {
+  background: rgba(190, 18, 60, 0.18);
+  border-color: #be123c;
+  color: #fda4af;
+}
+
+.tag-chip-error:hover {
+  border-color: #e11d48;
+  color: #fecdd3;
+}
+
+.tag-chip-error.active {
+  background: rgba(190, 18, 60, 0.28);
+  border-color: #e11d48;
+  color: #fecdd3;
+}
+
+.tag-chip-success {
+  background: rgba(22, 163, 74, 0.18);
+  border-color: #16a34a;
+  color: #86efac;
+}
+
+.tag-chip-success:hover {
+  border-color: #22c55e;
+  color: #bbf7d0;
+}
+
+.tag-chip-success.active {
+  background: rgba(22, 163, 74, 0.28);
+  border-color: #22c55e;
+  color: #bbf7d0;
+}
+
 .error-banner {
   background: rgba(225, 29, 72, 0.12);
   border: 1px solid rgba(225, 29, 72, 0.45);

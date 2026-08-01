@@ -149,8 +149,12 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ platform }),
     }),
-  getSettings: () =>
-    request<{ platform: string; values: Record<string, unknown> }>("/v1/settings"),
+  getSettings: (keys?: string) =>
+    request<{ platform: string; values: Record<string, unknown> }>(
+      keys
+        ? `/v1/settings?keys=${encodeURIComponent(keys)}`
+        : "/v1/settings",
+    ),
   patchSettings: (values: Record<string, unknown>) =>
     request<{ platform: string; values: Record<string, unknown> }>("/v1/settings", {
       method: "PATCH",

@@ -1004,7 +1004,7 @@ def _local_studio_workflow_kwargs(
     *,
     login_credentials=None,
     yt_oldest_name: str | None = None,
-    search_oldest_channel: bool = True,
+    search_oldest_channel: bool = False,
     include_name_change_cooldown: bool = False,
 ) -> dict:
     kw: dict = {

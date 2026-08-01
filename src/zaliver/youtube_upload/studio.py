@@ -2823,7 +2823,7 @@ def _studio_ensure_correct_studio_channel(
     yt_oldest_name: str | None = None,
     login_credentials=None,
     on_oldest_channel_name=None,
-    search_oldest_channel: bool = True,
+    search_oldest_channel: bool = False,
 ) -> str:
     """
     YouTube → выбор самого старого канала → Studio.
@@ -6010,7 +6010,7 @@ def verify_studio_upload_dialog_available(
     login_credentials=None,
     yt_oldest_name: str | None = None,
     on_oldest_channel_name=None,
-    search_oldest_channel: bool = True,
+    search_oldest_channel: bool = False,
     profile_id: str | None = None,
 ) -> str:
     """
@@ -6020,6 +6020,11 @@ def verify_studio_upload_dialog_available(
     При search_oldest_channel=True: обход каналов, выбор самого старого.
     При search_oldest_channel=False: текущий канал без переключения.
     """
+    _log(
+        f"Studio: проверка доступности "
+        f"(search_oldest_channel={bool(search_oldest_channel)}, "
+        f"yt_oldest_name={(yt_oldest_name or '').strip()!r})."
+    )
     saved = (yt_oldest_name or "").strip()
     if search_oldest_channel and saved:
         _log(

@@ -70,9 +70,12 @@ ensure_python_deps() {
   source "$venv_dir/bin/activate"
   PYTHON="$venv_dir/bin/python"
 
-  echo "Установка Python-зависимостей (zaliver[api])…"
+  echo "Установка Python-зависимостей (zaliver[api] + requirements.txt)…"
   "$PYTHON" -m pip install -U pip
   "$PYTHON" -m pip install -e '.[api]'
+  if [[ -f "$ROOT_DIR/requirements.txt" ]]; then
+    "$PYTHON" -m pip install -r "$ROOT_DIR/requirements.txt"
+  fi
   echo "Python-зависимости установлены."
 }
 

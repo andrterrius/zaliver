@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from zaliver.ui.antic_profile_row import _profile_id, _profile_name
-from zaliver.ui.profile_account_data_dialog import YT_2FA_KEY, YT_LOGIN_KEY, YT_PASSWORD_KEY
+from zaliver.core.profiles.account_data import YT_2FA_KEY, YT_LOGIN_KEY, YT_PASSWORD_KEY
 
 _GMAIL_RE = re.compile(r"([\w.+-]+@gmail\.com)", re.I)
 _LINE_NUM_RE = re.compile(r"^\d+\.\s*")

@@ -114,14 +114,15 @@ from zaliver.ui.profile_list_helpers import (
     profile_search_rank,
     profile_search_tokens,
 )
-from zaliver.ui.profile_account_data_dialog import (
+from zaliver.core.profiles.account_data import (
+    GMAIL_LOGIN_KEY,
     INST_LOGIN_KEY,
-    ProfileAccountDataDialog,
     SECTION_GMAIL,
     SECTION_INSTAGRAM,
     SECTION_YOUTUBE,
     YT_LOGIN_KEY,
 )
+from zaliver.ui.profile_account_data_dialog import ProfileAccountDataDialog
 from zaliver.ui.profile_accounts_import_dialog import ProfileAccountsImportDialog
 from zaliver.ui.profile_tags_clear_dialog import (
     ProfileTagsClearDialog,
@@ -8916,8 +8917,6 @@ class MainWindow(QWidget):
         if section == SECTION_INSTAGRAM:
             login_key = INST_LOGIN_KEY
         elif section == SECTION_GMAIL:
-            from zaliver.ui.profile_account_data_dialog import GMAIL_LOGIN_KEY
-
             login_key = GMAIL_LOGIN_KEY
         login = str(payload.get(login_key) or "").strip()
         if login and section == SECTION_YOUTUBE:

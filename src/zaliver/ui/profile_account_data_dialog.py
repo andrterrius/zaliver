@@ -12,67 +12,43 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-SECTION_YOUTUBE = "youtube"
-SECTION_INSTAGRAM = "instagram"
-SECTION_GMAIL = "gmail"
+from zaliver.core.profiles.account_data import (
+    GMAIL_2FA_KEY,
+    GMAIL_LOGIN_KEY,
+    GMAIL_PASSWORD_KEY,
+    INST_2FA_KEY,
+    INST_LOGIN_KEY,
+    INST_PASSWORD_KEY,
+    SECTION_GMAIL,
+    SECTION_INSTAGRAM,
+    SECTION_YOUTUBE,
+    YT_2FA_KEY,
+    YT_LOGIN_KEY,
+    YT_PASSWORD_KEY,
+    build_account_credentials_payload,
+    build_gmail_credentials_payload,
+    build_instagram_credentials_payload,
+)
 
-YT_LOGIN_KEY = "yt_login"
-YT_PASSWORD_KEY = "yt_password"
-YT_2FA_KEY = "yt_2fa"
-INST_LOGIN_KEY = "inst_login"
-INST_PASSWORD_KEY = "inst_password"
-INST_2FA_KEY = "inst_2fa"
-GMAIL_LOGIN_KEY = "gmail_login"
-GMAIL_PASSWORD_KEY = "gmail_password"
-GMAIL_2FA_KEY = "gmail_2fa"
-
-
-def build_account_credentials_payload(
-    *,
-    login: str,
-    password: str,
-    twofa: str,
-    clear_oldest_channel: bool = True,
-) -> dict[str, str]:
-    """Payload для merge custom_data YouTube; при импорте сбрасывает yt_oldest_name."""
-    payload = {
-        YT_LOGIN_KEY: (login or "").strip(),
-        YT_PASSWORD_KEY: password or "",
-        YT_2FA_KEY: (twofa or "").strip(),
-    }
-    if clear_oldest_channel:
-        from zaliver.youtube_upload.google_login import YT_OLDEST_NAME_KEY
-
-        payload[YT_OLDEST_NAME_KEY] = ""
-    return payload
-
-
-def build_instagram_credentials_payload(
-    *,
-    login: str,
-    password: str,
-    twofa: str = "",
-) -> dict[str, str]:
-    """Только Instagram-поля — merge не затирает yt_* / gmail_*."""
-    return {
-        INST_LOGIN_KEY: (login or "").strip(),
-        INST_PASSWORD_KEY: password or "",
-        INST_2FA_KEY: (twofa or "").strip(),
-    }
-
-
-def build_gmail_credentials_payload(
-    *,
-    login: str,
-    password: str,
-    twofa: str = "",
-) -> dict[str, str]:
-    """Все Gmail-поля целиком — merge не затирает yt_* / inst_*."""
-    return {
-        GMAIL_LOGIN_KEY: (login or "").strip(),
-        GMAIL_PASSWORD_KEY: password or "",
-        GMAIL_2FA_KEY: (twofa or "").strip(),
-    }
+# Re-export for older UI imports that still pull keys from this module.
+__all__ = [
+    "GMAIL_2FA_KEY",
+    "GMAIL_LOGIN_KEY",
+    "GMAIL_PASSWORD_KEY",
+    "INST_2FA_KEY",
+    "INST_LOGIN_KEY",
+    "INST_PASSWORD_KEY",
+    "ProfileAccountDataDialog",
+    "SECTION_GMAIL",
+    "SECTION_INSTAGRAM",
+    "SECTION_YOUTUBE",
+    "YT_2FA_KEY",
+    "YT_LOGIN_KEY",
+    "YT_PASSWORD_KEY",
+    "build_account_credentials_payload",
+    "build_gmail_credentials_payload",
+    "build_instagram_credentials_payload",
+]
 
 
 def _custom_data_str(custom_data: dict[str, object] | None, key: str) -> str:

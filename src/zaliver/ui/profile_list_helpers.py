@@ -242,7 +242,7 @@ def _profile_custom_data(profile: dict[str, object]) -> dict[str, object]:
 
 def profile_has_account_data(profile: dict[str, object]) -> bool:
     """В custom_data есть логин, пароль или 2FA YouTube."""
-    from zaliver.ui.profile_account_data_dialog import (
+    from zaliver.core.profiles.account_data import (
         YT_2FA_KEY,
         YT_LOGIN_KEY,
         YT_PASSWORD_KEY,
@@ -257,7 +257,7 @@ def profile_has_account_data(profile: dict[str, object]) -> bool:
 
 def profile_has_instagram_account_data(profile: dict[str, object]) -> bool:
     """В custom_data есть логин/пароль/2FA Instagram."""
-    from zaliver.ui.profile_account_data_dialog import (
+    from zaliver.core.profiles.account_data import (
         INST_2FA_KEY,
         INST_LOGIN_KEY,
         INST_PASSWORD_KEY,

@@ -941,7 +941,7 @@ def _save_yt_oldest_name_to_profile(api, profile_id: str, name: str) -> None:
 
 def _save_instagram_credentials_to_profile(api, profile_id: str, credentials) -> None:
     """Сохранить inst_login / inst_password в custom_data (yt_* и inst_2fa не трогаем)."""
-    from zaliver.ui.profile_account_data_dialog import INST_LOGIN_KEY, INST_PASSWORD_KEY
+    from zaliver.core.profiles.account_data import INST_LOGIN_KEY, INST_PASSWORD_KEY
 
     if credentials is None:
         return
@@ -2799,7 +2799,7 @@ def register_instagram_account_in_local_antidetect_profile(
 
 def _save_instagram_2fa_to_profile(api, profile_id: str, secret: str) -> None:
     """Сохранить inst_2fa в custom_data профиля."""
-    from zaliver.ui.profile_account_data_dialog import INST_2FA_KEY
+    from zaliver.core.profiles.account_data import INST_2FA_KEY
 
     s = (secret or "").strip()
     if not s:

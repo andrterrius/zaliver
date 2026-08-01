@@ -103,7 +103,7 @@ def session_login_from_custom_data(custom_data: dict[str, object] | None) -> str
     """inst_login для классической формы входа (вне регистрации)."""
     if not isinstance(custom_data, dict):
         return ""
-    from zaliver.ui.profile_account_data_dialog import INST_LOGIN_KEY
+    from zaliver.core.profiles.account_data import INST_LOGIN_KEY
 
     return str(custom_data.get(INST_LOGIN_KEY) or "").strip()
 
@@ -112,7 +112,7 @@ def session_password_from_custom_data(custom_data: dict[str, object] | None) -> 
     """inst_password, иначе gmail_password (для re-login вне регистрации)."""
     if not isinstance(custom_data, dict):
         return ""
-    from zaliver.ui.profile_account_data_dialog import (
+    from zaliver.core.profiles.account_data import (
         GMAIL_PASSWORD_KEY,
         INST_PASSWORD_KEY,
     )
@@ -127,7 +127,7 @@ def session_twofa_from_custom_data(custom_data: dict[str, object] | None) -> str
     """inst_2fa для экрана authenticator при re-login."""
     if not isinstance(custom_data, dict):
         return ""
-    from zaliver.ui.profile_account_data_dialog import INST_2FA_KEY
+    from zaliver.core.profiles.account_data import INST_2FA_KEY
 
     return str(custom_data.get(INST_2FA_KEY) or "").strip().replace(" ", "")
 

@@ -6,15 +6,16 @@ import re
 import time
 from dataclasses import dataclass
 
+from zaliver.core.profiles.account_data import (
+    GMAIL_2FA_KEY,
+    GMAIL_LOGIN_KEY,
+    GMAIL_PASSWORD_KEY,
+    YT_2FA_KEY,
+    YT_LOGIN_KEY,
+    YT_OLDEST_NAME_KEY,
+    YT_PASSWORD_KEY,
+)
 from zaliver.youtube_upload.totp import get_totp_token
-
-YT_LOGIN_KEY = "yt_login"
-YT_PASSWORD_KEY = "yt_password"
-YT_2FA_KEY = "yt_2fa"
-YT_OLDEST_NAME_KEY = "yt_oldest_name"
-GMAIL_LOGIN_KEY = "gmail_login"
-GMAIL_PASSWORD_KEY = "gmail_password"
-GMAIL_2FA_KEY = "gmail_2fa"
 
 _IDENTITY_HEADING_RE = re.compile(
     r"подтвердите\s+свою\s+личность|confirm\s+your\s+identity",

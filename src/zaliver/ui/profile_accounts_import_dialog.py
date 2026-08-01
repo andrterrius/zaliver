@@ -27,7 +27,7 @@ from zaliver.ui.account_import_parser import (
     parse_accounts_text,
 )
 from zaliver.ui.platform import PLATFORM_INSTAGRAM, normalize_platform
-from zaliver.ui.profile_account_data_dialog import (
+from zaliver.core.profiles.account_data import (
     GMAIL_2FA_KEY,
     GMAIL_LOGIN_KEY,
     GMAIL_PASSWORD_KEY,

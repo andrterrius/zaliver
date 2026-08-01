@@ -1111,6 +1111,12 @@ def build_router() -> APIRouter:
         search_oldest_channel = bool(
             settings.value("youtube/search_oldest_channel", False)
         )
+        stats_username = str(
+            settings.value("stats_server/username", "")
+            or settings.value("stats_server_username", "")
+            or ""
+        ).strip()
+        upload_store = st.core().uploads
 
         def runner(sink, register_cancel, job_id: str = "") -> None:
             del job_id
@@ -1136,6 +1142,8 @@ def build_router() -> APIRouter:
                 schedule_warmup_search_query=schedule_warmup_q,
                 delete_after_upload=delete_after_upload,
                 search_oldest_channel=search_oldest_channel,
+                upload_store=upload_store,
+                stats_server_username=stats_username,
             )
 
         try:

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api } from "../api/client";
+import { api, type Platform } from "../api/client";
 import { useJobPoll } from "../hooks/useJobPoll";
 import { usePersistedJobId } from "../hooks/usePersistedJobId";
 import { useProcessingDefaults } from "../hooks/useProcessingDefaults";
@@ -35,7 +35,9 @@ import {
 
 const SECTIONS = ["Исходники", "Сцены", "Текст", "Музыка"];
 
-export function SlicingPage() {
+type Props = { platform: Platform };
+
+export function SlicingPage({ platform }: Props) {
   const proc = useProcessingDefaults();
   const [section, setSection] = useState(0);
   const [hydrated, setHydrated] = useState(false);
@@ -60,7 +62,7 @@ export function SlicingPage() {
   const { job } = useJobPoll(jobId);
   const { job: uploadJob } = useJobPoll(uploadJobId);
   const onUploadErr = useCallback((msg: string) => setError(msg), []);
-  useUploadAfterJob("slicing", job, setUploadJobId, onUploadErr);
+  useUploadAfterJob("slicing", job, setUploadJobId, onUploadErr, platform);
   const running =
     busy ||
     (job != null && ["queued", "running"].includes(job.status)) ||
@@ -165,9 +167,14 @@ export function SlicingPage() {
         await api.patchSettings(persistValues);
       }
       const willUpload = choice.profileIds.length > 0;
-      savePendingUpload("slicing", willUpload ? choice : null);
+      try {
+        await api.setPlatform(platform);
+      } catch {
+        /* continue */
+      }
       const res = await api.startSlicing({
         output_dir: outputDir,
+        platform,
         clip_files: clips,
         music_files: music,
         copies_per_track: copies,
@@ -183,6 +190,12 @@ export function SlicingPage() {
         text_overlay: textOverlayToApi(textOverlay),
         youtube_upload_after_processing: willUpload,
       });
+      savePendingUpload(
+        "slicing",
+        willUpload
+          ? { ...choice, processingJobId: res.id, platform }
+          : null,
+      );
       setJobId(res.id);
       setUploadJobId(null);
     } catch (e) {
@@ -223,6 +236,7 @@ export function SlicingPage() {
       <UploadAfterDialog
         open={uploadDialogOpen}
         mode="slicing"
+        platform={platform}
         onCancel={() => setUploadDialogOpen(false)}
         onConfirm={(c) => void onUploadDialogConfirm(c)}
       />
@@ -240,6 +254,7 @@ export function SlicingPage() {
               />
               <OutputFolderPicker
                 kind="slicing"
+                platform={platform}
                 value={outputDir}
                 onChange={setOutputDir}
                 disabled={running}

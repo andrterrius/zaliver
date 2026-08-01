@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api } from "../api/client";
+import { api, type Platform } from "../api/client";
 import { useJobPoll } from "../hooks/useJobPoll";
 import { usePersistedJobId } from "../hooks/usePersistedJobId";
 import { useProcessingDefaults } from "../hooks/useProcessingDefaults";
@@ -137,7 +137,9 @@ function loadFx(v: Record<string, unknown>): FxRow[] {
   });
 }
 
-export function UniquifyPage() {
+type Props = { platform: Platform };
+
+export function UniquifyPage({ platform }: Props) {
   const proc = useProcessingDefaults();
   const [section, setSection] = useState(0);
   const [hydrated, setHydrated] = useState(false);
@@ -162,7 +164,7 @@ export function UniquifyPage() {
   const { job } = useJobPoll(jobId);
   const { job: uploadJob } = useJobPoll(uploadJobId);
   const onUploadErr = useCallback((msg: string) => setError(msg), []);
-  useUploadAfterJob("uniquify", job, setUploadJobId, onUploadErr);
+  useUploadAfterJob("uniquify", job, setUploadJobId, onUploadErr, platform);
 
   const running =
     busy ||
@@ -329,10 +331,15 @@ export function UniquifyPage() {
       }
 
       const willUpload = choice.profileIds.length > 0;
-      savePendingUpload("uniquify", willUpload ? choice : null);
+      try {
+        await api.setPlatform(platform);
+      } catch {
+        /* continue */
+      }
 
       const res = await api.startUniquify({
         output_dir: outputDir,
+        platform,
         input_files: files,
         copies_per_file: copies,
         num_workers: proc.numWorkers,
@@ -357,6 +364,12 @@ export function UniquifyPage() {
         text_overlay: textOverlayToApi(textOverlay),
         youtube_upload_after_processing: willUpload,
       });
+      savePendingUpload(
+        "uniquify",
+        willUpload
+          ? { ...choice, processingJobId: res.id, platform }
+          : null,
+      );
       setJobId(res.id);
       setUploadJobId(null);
     } catch (e) {
@@ -412,6 +425,7 @@ export function UniquifyPage() {
       <UploadAfterDialog
         open={uploadDialogOpen}
         mode="uniquify"
+        platform={platform}
         onCancel={() => setUploadDialogOpen(false)}
         onConfirm={(c) => void onUploadDialogConfirm(c)}
       />
@@ -430,6 +444,7 @@ export function UniquifyPage() {
               />
               <OutputFolderPicker
                 kind="uniquify"
+                platform={platform}
                 value={outputDir}
                 onChange={setOutputDir}
                 disabled={running}

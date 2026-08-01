@@ -41,7 +41,26 @@ class AppState:
 
     def set_platform(self, platform: str) -> str:
         self.platform = normalize_platform(platform)
+        try:
+            self.settings_store.setValue("api/platform", self.platform)
+            self.settings_store.sync()
+        except Exception:
+            pass
         self.core(self.platform)
+        return self.platform
+
+    def refresh_platform_from_store(self) -> str:
+        """Re-read persisted platform (multi-worker / after restart)."""
+        try:
+            saved = str(self.settings_store.value("api/platform", "") or "").strip()
+        except Exception:
+            saved = ""
+        if not saved:
+            return self.platform
+        plat = normalize_platform(saved)
+        if plat != self.platform:
+            self.platform = plat
+            self.core(plat)
         return self.platform
 
 
@@ -64,11 +83,13 @@ def build_app_state(config: ApiConfig) -> AppState:
         max_log_lines=config.max_log_lines,
         log_store=log_store,
     )
+    saved_plat = str(store.value("api/platform", "") or "").strip()
+    platform = normalize_platform(saved_plat or config.platform_default)
     state = AppState(
         config=config,
         settings_store=store,
         jobs=jobs,
-        platform=normalize_platform(config.platform_default),
+        platform=platform,
     )
     state.core(state.platform)
     return state

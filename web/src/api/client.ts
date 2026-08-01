@@ -161,12 +161,16 @@ export const api = {
       body: JSON.stringify({ values }),
     }),
   listVideos: () => request<VideoItem[]>("/v1/library/videos?limit=200"),
-  getOutputDirs: () =>
+  getOutputDirs: (platform?: Platform) =>
     request<{
       root: string;
       platform: string;
       dirs: Record<string, string>;
-    }>("/v1/library/output-dirs"),
+    }>(
+      platform
+        ? `/v1/library/output-dirs?platform=${encodeURIComponent(platform)}`
+        : "/v1/library/output-dirs",
+    ),
   listSources: (path = "", kind: "media" | "video" | "audio" | "all" = "media") =>
     request<{
       root: string;

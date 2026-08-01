@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../api/client";
+import { api, type Platform } from "../api/client";
 import type { OutputKind } from "../hooks/useManagedOutputDir";
 import { formatDiskUsage } from "../lib/diskUsage";
 
@@ -14,6 +14,7 @@ type Entry = {
 
 type Props = {
   kind: OutputKind;
+  platform: Platform;
   value: string;
   onChange: (absPath: string) => void;
   disabled?: boolean;
@@ -53,12 +54,13 @@ const KIND_LABEL: Record<OutputKind, string> = {
 /** Pick an output folder under results/<platform>/<kind>/ (or a subfolder). */
 export function OutputFolderPicker({
   kind,
+  platform: uiPlatform,
   value,
   onChange,
   disabled = false,
 }: Props) {
   const [root, setRoot] = useState("");
-  const [platform, setPlatform] = useState("");
+  const [platform, setPlatform] = useState(uiPlatform);
   const [defaultAbs, setDefaultAbs] = useState("");
   const [open, setOpen] = useState(false);
   const [cwd, setCwd] = useState("");
@@ -82,13 +84,24 @@ export function OutputFolderPicker({
     let alive = true;
     void (async () => {
       try {
-        const res = await api.getOutputDirs();
+        const res = await api.getOutputDirs(uiPlatform);
         if (!alive) return;
         setRoot(res.root || "");
-        setPlatform(res.platform || "");
+        setPlatform((res.platform as Platform) || uiPlatform);
         const abs = res.dirs[kind] || "";
         setDefaultAbs(abs);
-        if (!value && abs) onChange(abs);
+        const cur = (value || "").replace(/\\/g, "/");
+        const want = abs.replace(/\\/g, "/");
+        const underUi =
+          Boolean(uiPlatform) &&
+          (cur === uiPlatform ||
+            cur.startsWith(`${uiPlatform}/`) ||
+            cur.includes(`/${uiPlatform}/`) ||
+            cur.endsWith(`/${uiPlatform}`));
+        // Switch folder when platform changes or value empty / from another platform.
+        if (!cur || (want && !underUi)) {
+          if (abs) onChange(abs);
+        }
       } catch (e) {
         if (!alive) return;
         setError(e instanceof Error ? e.message : String(e));
@@ -97,9 +110,8 @@ export function OutputFolderPicker({
     return () => {
       alive = false;
     };
-    // Only bootstrap once per kind; value/onChange intentionally omitted.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kind]);
+  }, [kind, uiPlatform]);
 
   const loadDir = useCallback(
     async (path: string) => {

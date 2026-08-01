@@ -81,6 +81,8 @@ class TextOverlayModel(BaseModel):
 class UniquifyJobRequest(BaseModel):
     # Optional; must be under managed output/<platform>/uniquify (or empty = that folder).
     output_dir: str = ""
+    # UI platform — overrides in-memory AppState (multi-worker safe).
+    platform: str = ""
     input_files: list[str] = Field(min_length=1)
     num_workers: int = Field(default=2, ge=1, le=32)
     copies_per_file: int = Field(default=1, ge=1)
@@ -112,6 +114,7 @@ class UniquifyJobRequest(BaseModel):
 class SlicingJobRequest(BaseModel):
     # Optional; must be under managed output/<platform>/slicing (or empty = that folder).
     output_dir: str = ""
+    platform: str = ""
     clip_files: list[str] = Field(min_length=1)
     music_files: list[str] = Field(min_length=1)
     num_workers: int = Field(default=2, ge=1, le=32)
@@ -131,6 +134,7 @@ class SlicingJobRequest(BaseModel):
 class StitchingJobRequest(BaseModel):
     # Optional; must be under managed output/<platform>/gluing (or empty = that folder).
     output_dir: str = ""
+    platform: str = ""
     part1_files: list[str] = Field(min_length=1)
     part2_files: list[str] = Field(min_length=1)
     music_files: list[str] = Field(min_length=1)
@@ -155,6 +159,8 @@ class UploadJobRequest(BaseModel):
     video_paths: list[str] = Field(min_length=1)
     title: str = ""
     description: str = ""
+    # If set — override in-memory AppState.platform for this job (UI source of truth).
+    platform: str = ""
     kind: str = "local"
     token: str = ""
     base_url: str = ""

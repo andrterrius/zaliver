@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type Platform, type Profile } from "../api/client";
 import { usePaintSelectList } from "../hooks/usePaintSelectList";
+import {
+  profileHasAccountData,
+  profileHasOldestChannel,
+  profileHasTagError,
+  tagFilterClass,
+  tagList,
+  tagPillClass,
+} from "../lib/profileTags";
 import { TitleVariablesHint } from "./TitleVariablesHint";
 
 export type UploadAfterChoice = {
@@ -25,11 +33,20 @@ type Mode = "uniquify" | "slicing" | "stitching";
 type Props = {
   open: boolean;
   mode: Mode;
+  /** UI platform (source of truth — do not re-fetch from API). */
+  platform: Platform;
   onCancel: () => void;
   onConfirm: (choice: UploadAfterChoice) => void;
 };
 
-function dialogTitle(mode: Mode, platform: Platform | null): string {
+type SelectFilter =
+  | "all"
+  | "no_errors"
+  | "with_errors"
+  | "no_account_data"
+  | "no_oldest_channel";
+
+function dialogTitle(mode: Mode, platform: Platform): string {
   const where =
     platform === "instagram"
       ? "Instagram"
@@ -67,10 +84,10 @@ function localToIsoNaive(local: string): string {
 export function UploadAfterDialog({
   open,
   mode,
+  platform,
   onCancel,
   onConfirm,
 }: Props) {
-  const [platform, setPlatform] = useState<Platform | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [title, setTitle] = useState("");
@@ -90,6 +107,9 @@ export function UploadAfterDialog({
   const [scheduleWarmupSearchQuery, setScheduleWarmupSearchQuery] = useState("");
   const [deleteAfterUpload, setDeleteAfterUpload] = useState(false);
   const [search, setSearch] = useState("");
+  const [tagFilter, setTagFilter] = useState<Set<string>>(new Set());
+  const [showTagModal, setShowTagModal] = useState(false);
+  const [showSelectMenu, setShowSelectMenu] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -100,17 +120,25 @@ export function UploadAfterDialog({
     if (!open) return;
     setError("");
     setSearch("");
+    setTagFilter(new Set());
+    setShowTagModal(false);
+    setShowSelectMenu(false);
+    setSelected(new Set());
     setSchedulePublish(false);
     setScheduleTimes([defaultScheduleLocal()]);
     setLoading(true);
     void (async () => {
       try {
-        const [plat, prof, settings] = await Promise.all([
-          api.getPlatform(),
+        // Keep API platform in sync with UI (survives API restart / multi-worker).
+        try {
+          await api.setPlatform(platform);
+        } catch {
+          /* optional */
+        }
+        const [prof, settings] = await Promise.all([
           api.listProfiles(),
           api.getSettings(),
         ]);
-        setPlatform(plat.platform);
         setProfiles(prof.profiles || []);
         const v = settings.values;
         setHeadless(Boolean(v["antydetect/dolphin_headless"] ?? true));
@@ -140,20 +168,29 @@ export function UploadAfterDialog({
         setLoading(false);
       }
     })();
-  }, [open, mode]);
+  }, [open, mode, platform]);
+
+  const allTags = useMemo(() => {
+    const s = new Set<string>();
+    for (const p of profiles) for (const t of tagList(p.tags)) s.add(t);
+    return [...s].sort();
+  }, [profiles]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return profiles;
-    return profiles.filter(
-      (p) =>
+    return profiles.filter((p) => {
+      const tags = tagList(p.tags);
+      if (tagFilter.size && ![...tagFilter].every((t) => tags.includes(t))) {
+        return false;
+      }
+      if (!q) return true;
+      return (
         p.id.toLowerCase().includes(q) ||
         (p.name || "").toLowerCase().includes(q) ||
-        JSON.stringify(p.tags || [])
-          .toLowerCase()
-          .includes(q),
-    );
-  }, [profiles, search]);
+        tags.some((t) => t.toLowerCase().includes(q))
+      );
+    });
+  }, [profiles, search, tagFilter]);
 
   const paint = useCallback((id: string, paintSelect: boolean) => {
     setSelected((prev) => {
@@ -171,6 +208,36 @@ export function UploadAfterDialog({
     isSelected: (key) => selected.has(key),
     paint,
   });
+
+  const applySelectFilter = (modeFilter: SelectFilter) => {
+    const ids = filtered.map((p) => p.id);
+    let next: Set<string>;
+    if (modeFilter === "all") {
+      next = new Set(ids);
+    } else if (modeFilter === "no_errors") {
+      next = new Set(
+        filtered.filter((p) => !profileHasTagError(p.tags)).map((p) => p.id),
+      );
+    } else if (modeFilter === "with_errors") {
+      next = new Set(
+        filtered.filter((p) => profileHasTagError(p.tags)).map((p) => p.id),
+      );
+    } else if (modeFilter === "no_account_data") {
+      next = new Set(
+        filtered
+          .filter((p) => !profileHasAccountData(p.custom_data, platform))
+          .map((p) => p.id),
+      );
+    } else {
+      next = new Set(
+        filtered
+          .filter((p) => !profileHasOldestChannel(p.custom_data))
+          .map((p) => p.id),
+      );
+    }
+    setSelected(next);
+    setShowSelectMenu(false);
+  };
 
   const confirm = () => {
     setError("");
@@ -230,250 +297,302 @@ export function UploadAfterDialog({
         aria-modal="true"
       >
         <div className="upload-after-top stack">
-        <div className="page-header">
-          <h3 className="group-title">{dialogTitle(mode, platform)}</h3>
-          <button type="button" className="btn secondary" onClick={onCancel}>
-            Отмена
-          </button>
-        </div>
-        <p className="hint">
-          Отметьте профили для залива. Если ничего не выбрать — только обработка
-          без залива.
-        </p>
-        {error ? <div className="error-banner">{error}</div> : null}
-        {loading ? <p className="hint">Загрузка профилей…</p> : null}
+          <div className="page-header">
+            <h3 className="group-title">{dialogTitle(mode, platform)}</h3>
+            <button type="button" className="btn secondary" onClick={onCancel}>
+              Отмена
+            </button>
+          </div>
+          <p className="hint">
+            Отметьте профили для залива. Если ничего не выбрать — только обработка
+            без залива.
+          </p>
+          {error ? <div className="error-banner">{error}</div> : null}
+          {loading ? <p className="hint">Загрузка профилей…</p> : null}
 
-        <label className="hint">
-          {isIg ? "Подпись" : "Название"}{" "}
-          {!keepStudioTitle ? (
-            <TitleVariablesHint onInsert={(tok) => setTitle((v) => v + tok)} />
-          ) : null}
-        </label>
-        <input
-          className="field"
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          disabled={keepStudioTitle}
-          placeholder={
-            keepStudioTitle
-              ? "Название не вводится — из Studio (настройки канала или имя файла)…"
-              : isIg
-                ? "Подпись к Reels (необязательно). {date}, {profile}…"
-                : "Название ({date}, {profile}, {video}, {index}…)"
-          }
-          autoFocus={!keepStudioTitle}
-        />
+          <label className="hint">
+            {isIg ? "Подпись" : "Название"}{" "}
+            {!keepStudioTitle ? (
+              <TitleVariablesHint onInsert={(tok) => setTitle((v) => v + tok)} />
+            ) : null}
+          </label>
+          <input
+            className="field"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            disabled={keepStudioTitle}
+            placeholder={
+              keepStudioTitle
+                ? "Название не вводится — из Studio (настройки канала или имя файла)…"
+                : isIg
+                  ? "Подпись к Reels (необязательно). {date}, {profile}…"
+                  : "Название ({date}, {profile}, {video}, {index}…)"
+            }
+            autoFocus={!keepStudioTitle}
+          />
 
-        {showYtOptions ? (
-          <>
-            <label className="hint">Описание</label>
-            <textarea
-              className="field"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              rows={2}
-              placeholder="Описание (необязательно)…"
-            />
-          </>
-        ) : null}
-
-        <div className="stack" style={{ gap: 8 }}>
           {showYtOptions ? (
             <>
-              <label className="check">
-                <input
-                  type="checkbox"
-                  checked={publishBeforeChecks}
-                  onChange={(e) => setPublishBeforeChecks(e.target.checked)}
-                />
-                Опубликовать до проверок
-              </label>
-              <label className="check">
-                <input
-                  type="checkbox"
-                  checked={keepStudioTitle}
-                  onChange={(e) => setKeepStudioTitle(e.target.checked)}
-                />
-                Название из настроек/названия файлов
-              </label>
+              <label className="hint">Описание</label>
+              <textarea
+                className="field"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                rows={2}
+                placeholder="Описание (необязательно)…"
+              />
             </>
           ) : null}
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={uploadAsReady}
-              onChange={(e) => setUploadAsReady(e.target.checked)}
-            />
-            Заливать по мере готовности
-          </label>
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={deleteAfterUpload}
-              onChange={(e) => setDeleteAfterUpload(e.target.checked)}
-            />
-            Удалять после залива
-          </label>
-          {showYtOptions ? (
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={schedulePublish}
-                onChange={(e) => setSchedulePublish(e.target.checked)}
-              />
-              Опубликовать в отложку
-            </label>
-          ) : null}
-        </div>
 
-        {showYtOptions && schedulePublish ? (
-          <div className="stack" style={{ gap: 8, marginLeft: 8 }}>
-            <p className="hint">
-              Время по Москве. На каждый профиль — по одному видео на каждое
-              время.
-            </p>
-            {scheduleTimes.map((t, i) => (
-              <label key={i} className="hint" style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                Время {i + 1} (МСК)
-                <input
-                  className="field"
-                  type="datetime-local"
-                  value={t}
-                  onChange={(e) => {
-                    const next = [...scheduleTimes];
-                    next[i] = e.target.value;
-                    setScheduleTimes(next);
-                  }}
-                  style={{ flex: 1 }}
-                />
-              </label>
-            ))}
-            <div className="row" style={{ gap: 8 }}>
-              <button
-                type="button"
-                className="btn secondary"
-                onClick={() =>
-                  setScheduleTimes((prev) => [
-                    ...prev,
-                    addHoursLocal(prev[prev.length - 1] || defaultScheduleLocal(), 5),
-                  ])
-                }
-              >
-                Добавить время
-              </button>
-              <button
-                type="button"
-                className="btn secondary"
-                disabled={scheduleTimes.length <= 1}
-                onClick={() =>
-                  setScheduleTimes((prev) =>
-                    prev.length <= 1 ? prev : prev.slice(0, -1),
-                  )
-                }
-              >
-                Убрать время
-              </button>
-            </div>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={scheduleWarmupShorts}
-                onChange={(e) => setScheduleWarmupShorts(e.target.checked)}
-              />
-              Прогрев Shorts во второй вкладке
-            </label>
-            {scheduleWarmupShorts ? (
+          <div className="stack" style={{ gap: 8 }}>
+            {showYtOptions ? (
               <>
-                <label className="check" style={{ marginLeft: 16 }}>
+                <label className="check">
                   <input
                     type="checkbox"
-                    checked={scheduleWarmupRecommendations}
-                    onChange={(e) =>
-                      setScheduleWarmupRecommendations(e.target.checked)
-                    }
+                    checked={publishBeforeChecks}
+                    onChange={(e) => setPublishBeforeChecks(e.target.checked)}
                   />
-                  Рекомендации Shorts
+                  Опубликовать до проверок
                 </label>
-                {!scheduleWarmupRecommendations ? (
-                  <label
-                    className="hint"
-                    style={{
-                      display: "flex",
-                      gap: 8,
-                      alignItems: "center",
-                      marginLeft: 16,
-                    }}
-                  >
-                    Поисковый запрос
-                    <input
-                      className="field"
-                      style={{ flex: 1 }}
-                      value={scheduleWarmupSearchQuery}
-                      onChange={(e) =>
-                        setScheduleWarmupSearchQuery(e.target.value)
-                      }
-                      placeholder="Текст для поиска Shorts"
-                    />
-                  </label>
-                ) : null}
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={keepStudioTitle}
+                    onChange={(e) => setKeepStudioTitle(e.target.checked)}
+                  />
+                  Название из настроек/названия файлов
+                </label>
               </>
             ) : null}
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={uploadAsReady}
+                onChange={(e) => setUploadAsReady(e.target.checked)}
+              />
+              Заливать по мере готовности
+            </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={deleteAfterUpload}
+                onChange={(e) => setDeleteAfterUpload(e.target.checked)}
+              />
+              Удалять после залива
+            </label>
+            {showYtOptions ? (
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={schedulePublish}
+                  onChange={(e) => setSchedulePublish(e.target.checked)}
+                />
+                Опубликовать в отложку
+              </label>
+            ) : null}
           </div>
-        ) : null}
 
-        <div className="row">
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={headless}
-              onChange={(e) => setHeadless(e.target.checked)}
-            />
-            Headless (без окна браузера)
-          </label>
-          <label
-            className="hint"
-            style={{ display: "flex", gap: 8, alignItems: "center" }}
-          >
-            Браузеров
-            <input
-              className="field"
-              style={{ width: 72 }}
-              type="number"
-              min={1}
-              max={10}
-              value={maxBrowsers}
-              onChange={(e) => setMaxBrowsers(Number(e.target.value) || 1)}
-            />
-          </label>
-        </div>
+          {showYtOptions && schedulePublish ? (
+            <div className="stack" style={{ gap: 8, marginLeft: 8 }}>
+              <p className="hint">
+                Время по Москве. На каждый профиль — по одному видео на каждое
+                время.
+              </p>
+              {scheduleTimes.map((t, i) => (
+                <label
+                  key={i}
+                  className="hint"
+                  style={{ display: "flex", gap: 8, alignItems: "center" }}
+                >
+                  Время {i + 1} (МСК)
+                  <input
+                    className="field"
+                    type="datetime-local"
+                    value={t}
+                    onChange={(e) => {
+                      const next = [...scheduleTimes];
+                      next[i] = e.target.value;
+                      setScheduleTimes(next);
+                    }}
+                    style={{ flex: 1 }}
+                  />
+                </label>
+              ))}
+              <div className="row" style={{ gap: 8 }}>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={() =>
+                    setScheduleTimes((prev) => [
+                      ...prev,
+                      addHoursLocal(
+                        prev[prev.length - 1] || defaultScheduleLocal(),
+                        5,
+                      ),
+                    ])
+                  }
+                >
+                  Добавить время
+                </button>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  disabled={scheduleTimes.length <= 1}
+                  onClick={() =>
+                    setScheduleTimes((prev) =>
+                      prev.length <= 1 ? prev : prev.slice(0, -1),
+                    )
+                  }
+                >
+                  Убрать время
+                </button>
+              </div>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={scheduleWarmupShorts}
+                  onChange={(e) => setScheduleWarmupShorts(e.target.checked)}
+                />
+                Прогрев Shorts во второй вкладке
+              </label>
+              {scheduleWarmupShorts ? (
+                <>
+                  <label className="check" style={{ marginLeft: 16 }}>
+                    <input
+                      type="checkbox"
+                      checked={scheduleWarmupRecommendations}
+                      onChange={(e) =>
+                        setScheduleWarmupRecommendations(e.target.checked)
+                      }
+                    />
+                    Рекомендации Shorts
+                  </label>
+                  {!scheduleWarmupRecommendations ? (
+                    <label
+                      className="hint"
+                      style={{
+                        display: "flex",
+                        gap: 8,
+                        alignItems: "center",
+                        marginLeft: 16,
+                      }}
+                    >
+                      Поисковый запрос
+                      <input
+                        className="field"
+                        style={{ flex: 1 }}
+                        value={scheduleWarmupSearchQuery}
+                        onChange={(e) =>
+                          setScheduleWarmupSearchQuery(e.target.value)
+                        }
+                        placeholder="Текст для поиска Shorts"
+                      />
+                    </label>
+                  ) : null}
+                </>
+              ) : null}
+            </div>
+          ) : null}
 
-        <label className="hint">Поиск профилей</label>
-        <input
-          className="field"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="имя / id / тег"
-        />
-        <div className="row">
-          <button
-            type="button"
-            className="btn secondary"
-            onClick={() => setSelected(new Set(filtered.map((p) => p.id)))}
-          >
-            Выделить видимые
-          </button>
-          <button
-            type="button"
-            className="btn secondary"
-            onClick={() => setSelected(new Set())}
-          >
-            Снять
-          </button>
-          <span className="hint">
-            Выбрано: {selected.size}
-            {selected.size === 0 ? " — без залива" : ""}
-          </span>
-        </div>
+          <div className="row">
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={headless}
+                onChange={(e) => setHeadless(e.target.checked)}
+              />
+              Headless (без окна браузера)
+            </label>
+            <label
+              className="hint"
+              style={{ display: "flex", gap: 8, alignItems: "center" }}
+            >
+              Браузеров
+              <input
+                className="field"
+                style={{ width: 72 }}
+                type="number"
+                min={1}
+                max={10}
+                value={maxBrowsers}
+                onChange={(e) => setMaxBrowsers(Number(e.target.value) || 1)}
+              />
+            </label>
+          </div>
+
+          <label className="hint">Поиск профилей</label>
+          <input
+            className="field"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="имя / id / тег"
+          />
+          <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={() => setShowTagModal(true)}
+            >
+              По тэгам{tagFilter.size ? ` (${tagFilter.size})` : ""}
+            </button>
+            <div style={{ position: "relative" }}>
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={() => setShowSelectMenu((v) => !v)}
+              >
+                Выделить…
+              </button>
+              {showSelectMenu ? (
+                <div className="upload-after-select-menu">
+                  <button type="button" onClick={() => applySelectFilter("all")}>
+                    Все видимые
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applySelectFilter("no_errors")}
+                  >
+                    Без ошибок в статусах
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applySelectFilter("with_errors")}
+                  >
+                    С ошибками в статусах
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applySelectFilter("no_account_data")}
+                  >
+                    Без данных в учётке
+                  </button>
+                  {!isIg ? (
+                    <button
+                      type="button"
+                      onClick={() => applySelectFilter("no_oldest_channel")}
+                    >
+                      Без старейшего канала
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={() => setSelected(new Set())}
+            >
+              Снять
+            </button>
+            <span className="hint">
+              Выбрано: {selected.size}
+              {selected.size === 0 ? " — без залива" : ""}
+              {search.trim() || tagFilter.size
+                ? ` · показано ${filtered.length} из ${profiles.length}`
+                : ""}
+            </span>
+          </div>
         </div>
 
         <div
@@ -488,32 +607,47 @@ export function UploadAfterDialog({
                 : "Нет профилей (проверьте антидетект в Настройках)."}
             </div>
           ) : (
-            filtered.map((p) => (
-              <div
-                key={p.id}
-                data-entry-path={p.id}
-                className={`list-item ${selected.has(p.id) ? "active" : ""}`}
-                style={{ display: "flex", gap: 10, cursor: "pointer" }}
-              >
-                <input
-                  type="checkbox"
-                  className="source-browser-check"
-                  checked={selected.has(p.id)}
-                  readOnly
-                  tabIndex={-1}
-                />
-                <span style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 600, color: "var(--title)" }}>
-                    {p.name || p.id}
-                  </div>
-                  <div className="hint">{p.id}</div>
-                </span>
-              </div>
-            ))
+            filtered.map((p) => {
+              const tags = tagList(p.tags);
+              return (
+                <div
+                  key={p.id}
+                  data-entry-path={p.id}
+                  className={`list-item ${selected.has(p.id) ? "active" : ""}`}
+                  style={{ display: "flex", gap: 10, cursor: "pointer" }}
+                >
+                  <input
+                    type="checkbox"
+                    className="source-browser-check"
+                    checked={selected.has(p.id)}
+                    readOnly
+                    tabIndex={-1}
+                  />
+                  <span style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600, color: "var(--title)" }}>
+                      {p.name || p.id}
+                    </div>
+                    <div className="hint">{p.id}</div>
+                    {tags.length ? (
+                      <div className="row-tags">
+                        {tags.map((t) => (
+                          <span className={tagPillClass(t)} key={t}>
+                            {t}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </span>
+                </div>
+              );
+            })
           )}
         </div>
 
-        <div className="row upload-after-footer" style={{ justifyContent: "flex-end" }}>
+        <div
+          className="row upload-after-footer"
+          style={{ justifyContent: "flex-end" }}
+        >
           <button type="button" className="btn danger" onClick={onCancel}>
             Отмена
           </button>
@@ -522,6 +656,65 @@ export function UploadAfterDialog({
           </button>
         </div>
       </div>
+
+      {showTagModal ? (
+        <div
+          className="modal-backdrop"
+          style={{ zIndex: 60 }}
+          onClick={() => setShowTagModal(false)}
+        >
+          <div
+            className="modal-card stack"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="page-header">
+              <h3 className="group-title">Фильтр по тэгам</h3>
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={() => setShowTagModal(false)}
+              >
+                OK
+              </button>
+            </div>
+            <div className="row">
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={() => setTagFilter(new Set(allTags))}
+              >
+                Все
+              </button>
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={() => setTagFilter(new Set())}
+              >
+                Сбросить фильтр
+              </button>
+            </div>
+            <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
+              {allTags.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  className={tagFilterClass(t, tagFilter.has(t))}
+                  onClick={() => {
+                    setTagFilter((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(t)) next.delete(t);
+                      else next.add(t);
+                      return next;
+                    });
+                  }}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

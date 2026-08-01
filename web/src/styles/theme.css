@@ -1261,6 +1261,38 @@ input[type='number'].field {
   margin-top: auto;
 }
 
+.upload-after-select-menu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border-radius: 10px;
+  background: var(--panel, #1a1d24);
+  border: 1px solid var(--border, #2c3340);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+
+.upload-after-select-menu button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text, #e8ecf4);
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.upload-after-select-menu button:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .source-browser-list {
   display: flex;
   flex-direction: column;

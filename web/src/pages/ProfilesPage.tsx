@@ -2,6 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type Platform, type Profile } from "../api/client";
 import { useJobPoll } from "../hooks/useJobPoll";
 import { usePersistedJobId } from "../hooks/usePersistedJobId";
+import {
+  tagFilterClass,
+  tagList,
+  tagPillClass,
+} from "../lib/profileTags";
 import { ProgressBar } from "../components/ProgressBar";
 import { JobLogBox } from "../components/JobLogBox";
 import { ToggleSwitch } from "../components/ToggleSwitch";
@@ -23,41 +28,6 @@ const JOB_BUTTONS: { path: string; label: string; igOnly?: boolean; modal?: JobM
     { path: "promote", label: "Продвижение", modal: "promote" },
     { path: "cookie-farm", label: "Фарм Cookie", modal: "cookie-farm" },
   ];
-
-function tagList(tags: unknown[]): string[] {
-  return (tags || [])
-    .map((t) => {
-      if (typeof t === "string") return t;
-      if (t && typeof t === "object" && "name" in t)
-        return String((t as { name: unknown }).name);
-      return String(t);
-    })
-    .filter(Boolean);
-}
-
-/** Как в десктопе / antic: ошибка — красный, успех — зелёный. */
-function tagTone(tag: string): "error" | "success" | null {
-  const low = tag.toLocaleLowerCase("ru");
-  if (low.includes("ошибка")) return "error";
-  if (low.includes("успех") || low.startsWith("успеш")) return "success";
-  return null;
-}
-
-function tagPillClass(tag: string): string {
-  const tone = tagTone(tag);
-  if (tone === "error") return "pill pill-error";
-  if (tone === "success") return "pill pill-success";
-  return "pill";
-}
-
-function tagFilterClass(tag: string, active: boolean): string {
-  const tone = tagTone(tag);
-  const parts = ["tag-chip"];
-  if (active) parts.push("active");
-  if (tone === "error") parts.push("tag-chip-error");
-  if (tone === "success") parts.push("tag-chip-success");
-  return parts.join(" ");
-}
 
 export function ProfilesPage({ platform }: Props) {
   const [profiles, setProfiles] = useState<Profile[]>([]);

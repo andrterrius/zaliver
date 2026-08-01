@@ -58,9 +58,9 @@ export function AppShell({ platform, onBack }: Props) {
         </button>
       </aside>
       <main className="main-pane">
-        {tab === 0 ? <UniquifyPage /> : null}
-        {tab === 1 ? <SlicingPage /> : null}
-        {tab === 2 ? <StitchingPage /> : null}
+        {tab === 0 ? <UniquifyPage platform={platform} /> : null}
+        {tab === 1 ? <SlicingPage platform={platform} /> : null}
+        {tab === 2 ? <StitchingPage platform={platform} /> : null}
         {tab === 3 ? <ReadyPage /> : null}
         {tab === 4 ? <UploadedPage platform={platform} /> : null}
         {tab === 5 ? <ProfilesPage platform={platform} /> : null}

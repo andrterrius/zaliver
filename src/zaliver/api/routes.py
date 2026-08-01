@@ -106,7 +106,19 @@ from zaliver.title_variables import (
 
 
 def _state(request: Request) -> AppState:
-    return request.app.state.zaliver  # type: ignore[attr-defined]
+    st = request.app.state.zaliver  # type: ignore[attr-defined]
+    try:
+        st.refresh_platform_from_store()
+    except Exception:
+        pass
+    return st
+
+
+def _apply_request_platform(st: AppState, platform: str | None) -> str:
+    raw = (platform or "").strip()
+    if raw:
+        return st.set_platform(raw)
+    return st.platform
 
 
 def _uploaded_item(platform: str, r: Any) -> UploadedVideoItem:
@@ -286,17 +298,24 @@ def build_router() -> APIRouter:
         return _read_settings(st, None)
 
     @router.get("/v1/library/output-dirs", response_model=OutputDirsResponse)
-    def get_output_dirs(request: Request) -> OutputDirsResponse:
+    def get_output_dirs(
+        request: Request,
+        platform: str | None = Query(
+            default=None,
+            description="Override platform (youtube|instagram|yt_inst)",
+        ),
+    ) -> OutputDirsResponse:
         st = _state(request)
+        plat = _apply_request_platform(st, platform)
         root = st.config.resolved_output_root()
         try:
             root.mkdir(parents=True, exist_ok=True)
-            dirs = list_managed_output_dirs(root, platform=st.platform)
+            dirs = list_managed_output_dirs(root, platform=plat)
         except OSError as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
         return OutputDirsResponse(
             root=str(root.resolve()),
-            platform=st.platform,
+            platform=plat,
             dirs=dirs,
         )
 
@@ -788,11 +807,12 @@ def build_router() -> APIRouter:
         body: UniquifyJobRequest, request: Request
     ) -> JobCreatedResponse:
         st = _state(request)
+        plat = _apply_request_platform(st, getattr(body, "platform", None))
         try:
             out_dir = str(
                 resolve_job_output_dir(
                     st.config.resolved_output_root(),
-                    platform=st.platform,
+                    platform=plat,
                     kind=OUTPUT_KIND_UNIQUIFY,
                     requested=body.output_dir,
                     create=True,
@@ -880,6 +900,7 @@ def build_router() -> APIRouter:
     )
     def start_slicing(body: SlicingJobRequest, request: Request) -> JobCreatedResponse:
         st = _state(request)
+        plat = _apply_request_platform(st, getattr(body, "platform", None))
         if body.min_scenes > body.max_scenes:
             raise HTTPException(
                 status_code=400, detail="min_scenes cannot exceed max_scenes"
@@ -896,7 +917,7 @@ def build_router() -> APIRouter:
             out_dir = str(
                 resolve_job_output_dir(
                     st.config.resolved_output_root(),
-                    platform=st.platform,
+                    platform=plat,
                     kind=OUTPUT_KIND_SLICING,
                     requested=body.output_dir,
                     create=True,
@@ -961,6 +982,7 @@ def build_router() -> APIRouter:
         body: StitchingJobRequest, request: Request
     ) -> JobCreatedResponse:
         st = _state(request)
+        plat = _apply_request_platform(st, getattr(body, "platform", None))
         if body.min_part_duration > body.max_part_duration:
             raise HTTPException(
                 status_code=400,
@@ -970,7 +992,7 @@ def build_router() -> APIRouter:
             out_dir = str(
                 resolve_job_output_dir(
                     st.config.resolved_output_root(),
-                    platform=st.platform,
+                    platform=plat,
                     kind=OUTPUT_KIND_GLUING,
                     requested=body.output_dir,
                     create=True,
@@ -1059,7 +1081,7 @@ def build_router() -> APIRouter:
         if not profile_ids:
             raise HTTPException(status_code=400, detail="profile_ids required")
 
-        platform = st.platform
+        platform = _apply_request_platform(st, body.platform)
         from zaliver.api.antydetect_resolve import (
             resolve_antidetect_kind,
             resolve_local_base_url,

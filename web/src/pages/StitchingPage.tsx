@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api } from "../api/client";
+import { api, type Platform } from "../api/client";
 import { useJobPoll } from "../hooks/useJobPoll";
 import { usePersistedJobId } from "../hooks/usePersistedJobId";
 import { useProcessingDefaults } from "../hooks/useProcessingDefaults";
@@ -70,7 +70,9 @@ const TRANSITIONS = [
 
 type TransitionId = (typeof TRANSITIONS)[number]["id"];
 
-export function StitchingPage() {
+type Props = { platform: Platform };
+
+export function StitchingPage({ platform }: Props) {
   const proc = useProcessingDefaults();
   const [section, setSection] = useState(0);
   const [hydrated, setHydrated] = useState(false);
@@ -97,7 +99,7 @@ export function StitchingPage() {
   const { job } = useJobPoll(jobId);
   const { job: uploadJob } = useJobPoll(uploadJobId);
   const onUploadErr = useCallback((msg: string) => setError(msg), []);
-  useUploadAfterJob("stitching", job, setUploadJobId, onUploadErr);
+  useUploadAfterJob("stitching", job, setUploadJobId, onUploadErr, platform);
   const running =
     busy ||
     (job != null && ["queued", "running"].includes(job.status)) ||
@@ -200,9 +202,14 @@ export function StitchingPage() {
         await api.patchSettings(persistValues);
       }
       const willUpload = choice.profileIds.length > 0;
-      savePendingUpload("stitching", willUpload ? choice : null);
+      try {
+        await api.setPlatform(platform);
+      } catch {
+        /* continue */
+      }
       const res = await api.startStitching({
         output_dir: outputDir,
+        platform,
         part1_files: part1,
         part2_files: part2,
         music_files: music,
@@ -218,6 +225,12 @@ export function StitchingPage() {
         text_overlay: textOverlayToApi(textOverlay),
         youtube_upload_after_processing: willUpload,
       });
+      savePendingUpload(
+        "stitching",
+        willUpload
+          ? { ...choice, processingJobId: res.id, platform }
+          : null,
+      );
       setJobId(res.id);
       setUploadJobId(null);
     } catch (e) {
@@ -258,6 +271,7 @@ export function StitchingPage() {
       <UploadAfterDialog
         open={uploadDialogOpen}
         mode="stitching"
+        platform={platform}
         onCancel={() => setUploadDialogOpen(false)}
         onConfirm={(c) => void onUploadDialogConfirm(c)}
       />
@@ -282,6 +296,7 @@ export function StitchingPage() {
               />
               <OutputFolderPicker
                 kind="gluing"
+                platform={platform}
                 value={outputDir}
                 onChange={setOutputDir}
                 disabled={running}

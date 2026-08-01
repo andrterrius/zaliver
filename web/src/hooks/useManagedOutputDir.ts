@@ -3,7 +3,7 @@ import { api } from "../api/client";
 
 export type OutputKind = "uniquify" | "slicing" | "gluing";
 
-export function useManagedOutputDir(kind: OutputKind) {
+export function useManagedOutputDir(kind: OutputKind, platform?: string) {
   const [path, setPath] = useState("");
   const [error, setError] = useState("");
 
@@ -11,7 +11,9 @@ export function useManagedOutputDir(kind: OutputKind) {
     let alive = true;
     void (async () => {
       try {
-        const res = await api.getOutputDirs();
+        const res = await api.getOutputDirs(
+          platform as "youtube" | "instagram" | "yt_inst" | undefined,
+        );
         if (!alive) return;
         setPath(res.dirs[kind] || "");
         setError("");
@@ -23,7 +25,7 @@ export function useManagedOutputDir(kind: OutputKind) {
     return () => {
       alive = false;
     };
-  }, [kind]);
+  }, [kind, platform]);
 
   return { path, error };
 }

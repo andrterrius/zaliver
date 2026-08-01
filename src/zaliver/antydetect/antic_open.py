@@ -1213,7 +1213,7 @@ def check_studio_availability_in_profile(
     headless: bool = True,
     login_credentials=None,
     yt_oldest_name: str | None = None,
-    search_oldest_channel: bool = True,
+    search_oldest_channel: bool = False,
 ) -> None:
     """
     Запуск профиля Dolphin → Studio → ожидание URL канала или channel-appeal.
@@ -1339,7 +1339,7 @@ def check_studio_availability_in_local_antidetect_profile(
     headless: bool = True,
     login_credentials=None,
     yt_oldest_name: str | None = None,
-    search_oldest_channel: bool = True,
+    search_oldest_channel: bool = False,
     remote_cdp=None,
 ) -> None:
     """Локальный антидетект → Studio → ожидание URL канала или channel-appeal."""

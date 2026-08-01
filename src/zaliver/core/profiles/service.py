@@ -178,12 +178,16 @@ class ProfileJobsService:
                     )
                 return
             creds = login_creds(pid)
+            yt_oldest = (req.yt_oldest_names.get(pid) or "").strip() or None
+            search_oldest = bool(req.search_oldest_channel)
             if is_own_antidetect_kind(kind_s):
                 check_studio_availability_in_local_antidetect_profile(
                     pid,
                     base_url=self._require_own_base(kind_s, req.base_url),
                     headless=req.headless,
                     login_credentials=creds,
+                    yt_oldest_name=yt_oldest,
+                    search_oldest_channel=search_oldest,
                     remote_cdp=req.remote_cdp,
                 )
             else:
@@ -192,6 +196,8 @@ class ProfileJobsService:
                     local_token=req.token or None,
                     headless=req.headless,
                     login_credentials=creds,
+                    yt_oldest_name=yt_oldest,
+                    search_oldest_channel=search_oldest,
                 )
 
         ok_tag = (

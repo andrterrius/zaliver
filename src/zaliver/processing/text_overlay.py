@@ -703,8 +703,20 @@ def wave_y_ffmpeg_expr(
     return f"{int(base_y)}+{int(amp)}*sin({phase})"
 
 
+def _api_server_mode() -> bool:
+    """True in FastAPI / job workers — must never import PyQt (old CPUs abort)."""
+    v = (os.environ.get("ZALIVER_API_SERVER") or "").strip().lower()
+    if v in {"1", "true", "yes", "on"}:
+        return True
+    v = (os.environ.get("ZALIVER_DISABLE_QT") or "").strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
+
 def _qt_metrics_available() -> bool:
     """True when a Qt GUI app already exists (desktop UI). Never create one here."""
+    # Importing PyQt6 alone prints/aborts on CPUs without ssse3/sse4 (many VPS).
+    if _api_server_mode():
+        return False
     try:
         from PyQt6.QtGui import QGuiApplication
         from PyQt6.QtWidgets import QApplication
@@ -964,7 +976,10 @@ def compute_scaled_overlay_for_api(
 
     Creating QGuiApplication in CREATE_NO_WINDOW API workers often AVs on Windows
     (0xC0000005), so headless paths must never touch Qt font APIs.
+    On API servers we never import PyQt at all (Incompatible processor on old CPUs).
     """
+    if _api_server_mode():
+        return compute_scaled_overlay_approx(settings, video_w, video_h)
     if _qt_metrics_available():
         return compute_scaled_overlay(settings, video_w, video_h)
     return compute_scaled_overlay_approx(settings, video_w, video_h)
@@ -1189,6 +1204,8 @@ _COLOR_EMOJI_RASTER_PX = 160
 
 def _qt_gui_ready_for_emoji() -> bool:
     """Use an existing Qt app only — never create one in spawn workers."""
+    if _api_server_mode():
+        return False
     try:
         from PyQt6.QtGui import QGuiApplication
         from PyQt6.QtWidgets import QApplication

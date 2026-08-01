@@ -356,6 +356,19 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  enqueueUpload: (
+    jobId: string,
+    body: { video_paths: string[]; title?: string; description?: string },
+  ) =>
+    request<{ enqueued: number; job_id: string }>(
+      `/v1/jobs/upload/${encodeURIComponent(jobId)}/enqueue`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  uploadProducerDone: (jobId: string) =>
+    request<{ ok: boolean; job_id: string }>(
+      `/v1/jobs/upload/${encodeURIComponent(jobId)}/producer-done`,
+      { method: "POST", body: "{}" },
+    ),
   listProfiles: () =>
     request<{
       kind?: string;

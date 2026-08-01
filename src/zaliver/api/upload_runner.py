@@ -4,17 +4,104 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from zaliver.antydetect.browser_concurrency import (
+    clamp_max_concurrent_browsers,
+    compute_instagram_tabs_per_profile,
+    instagram_tabs_per_profile_from_settings,
+)
 from zaliver.config.platform_settings import (
     PLATFORM_INSTAGRAM,
     PLATFORM_YOUTUBE,
     PLATFORM_YT_INST,
 )
 from zaliver.core.sinks import JobProgressSink
+from zaliver.db.upload_store import resolve_upload_pause
 from zaliver.stats_server_client import notify_uploaded_video
+
+
+@dataclass
+class _StreamingUploadSlot:
+    mgr: Any
+    title: str
+    description: str
+    producer_done: threading.Event = field(default_factory=threading.Event)
+    enqueued_paths: set[str] = field(default_factory=set)
+
+
+_STREAMING_LOCK = threading.Lock()
+_STREAMING: dict[str, _StreamingUploadSlot] = {}
+
+
+def upload_pause_from_settings(settings: Any) -> timedelta:
+    """Пауза между заливами Instagram из настроек (минуты или legacy часы)."""
+    try:
+        if settings is not None and settings.contains("upload_pause_minutes"):
+            mins = int(settings.value("upload_pause_minutes", 180) or 0)
+            return resolve_upload_pause(timedelta(minutes=max(0, mins)))
+    except Exception:
+        pass
+    try:
+        hours = int(
+            (settings.value("upload_pause_hours", 3) if settings is not None else 3)
+            or 0
+        )
+        return resolve_upload_pause(timedelta(hours=max(0, hours)))
+    except Exception:
+        return resolve_upload_pause(None)
+
+
+def enqueue_streaming_upload(
+    job_id: str,
+    *,
+    video_paths: list[str],
+    title: str | None = None,
+    description: str | None = None,
+) -> int:
+    """Добавить видео в уже запущенный upload job (await_more_videos)."""
+    jid = (job_id or "").strip()
+    paths = [p for p in (video_paths or []) if (p or "").strip()]
+    if not jid or not paths:
+        return 0
+    with _STREAMING_LOCK:
+        slot = _STREAMING.get(jid)
+    if slot is None:
+        raise RuntimeError(f"Upload job {jid!r} is not accepting more videos.")
+    if slot.producer_done.is_set():
+        raise RuntimeError(f"Upload job {jid!r} producer is already done.")
+    fresh: list[str] = []
+    with _STREAMING_LOCK:
+        for p in paths:
+            if p in slot.enqueued_paths:
+                continue
+            slot.enqueued_paths.add(p)
+            fresh.append(p)
+    if not fresh:
+        return 0
+    slot.mgr.enqueue_videos(
+        video_paths=fresh,
+        title=(title if title is not None else slot.title) or "",
+        description=(description if description is not None else slot.description)
+        or "",
+    )
+    return len(fresh)
+
+
+def mark_streaming_producer_done(job_id: str) -> bool:
+    """Сигнал: обработка больше не добавит видео."""
+    jid = (job_id or "").strip()
+    if not jid:
+        return False
+    with _STREAMING_LOCK:
+        slot = _STREAMING.get(jid)
+    if slot is None:
+        return False
+    slot.producer_done.set()
+    return True
 
 
 def _canonical_watch_url(video_id: str) -> str:
@@ -124,6 +211,10 @@ def run_upload_job(
     search_oldest_channel: bool = False,
     upload_store: Any | None = None,
     stats_server_username: str = "",
+    settings: Any | None = None,
+    await_more_videos: bool = False,
+    planned_videos: int = 0,
+    job_id: str = "",
 ) -> None:
     from zaliver.youtube_upload.multi_uploader import MultiProfileUploader
     from zaliver.youtube_upload.schedule_publish import parse_msk_datetime
@@ -136,8 +227,8 @@ def run_upload_job(
         "yt+inst",
     }
     paths = [p for p in video_paths if (p or "").strip()]
-    total = len(paths)
-    if total <= 0:
+    streaming = bool(await_more_videos)
+    if not paths and not streaming:
         sink.on_finished(False, "No video paths.")
         return
 
@@ -169,15 +260,56 @@ def run_upload_job(
         PLATFORM_INSTAGRAM if is_instagram else PLATFORM_YOUTUBE
     )
 
+    pause_td = upload_pause_from_settings(settings)
+    ig_keep_browser_open = (is_instagram or is_yt_inst) and (
+        pause_td.total_seconds() <= 0
+    )
+    max_browsers = clamp_max_concurrent_browsers(max_concurrent)
+    ig_tabs_n = (
+        instagram_tabs_per_profile_from_settings(settings)
+        if (is_instagram or is_yt_inst)
+        else 1
+    )
+    ig_tabs_per_profile: dict[str, int] | None = None
+    if (
+        is_instagram
+        and ig_keep_browser_open
+        and ig_tabs_n > 1
+        and len(profile_ids) <= max_browsers
+    ):
+        ig_tabs_per_profile = compute_instagram_tabs_per_profile(
+            profile_ids,
+            ig_tabs_n,
+            max_concurrent_browsers=max_browsers,
+        )
+        if max(ig_tabs_per_profile.values(), default=1) <= 1:
+            ig_tabs_per_profile = None
+        else:
+            tabs_fmt = ", ".join(
+                f"{pid}×{n}" for pid, n in ig_tabs_per_profile.items()
+            )
+            sink.on_log(
+                "Instagram Reels: multi-tab — пауза 0, "
+                f"вкладок на профиль={ig_tabs_n}, "
+                f"профилей ≤ лимита окон ({max_browsers}). "
+                f"Вкладки: {tabs_fmt}."
+            )
+    elif is_instagram or is_yt_inst:
+        sink.on_log(
+            f"[upload] Instagram keep_browser_open={ig_keep_browser_open} "
+            f"(pause={pause_td}, tabs={ig_tabs_n})"
+        )
+
+    planned = max(int(planned_videos or 0), len(paths), 1)
     upload_session = None
     if upload_store is not None:
         try:
             upload_session = upload_store.start_session(
-                planned_videos=total, platform=session_plat
+                planned_videos=planned, platform=session_plat
             )
             sink.on_log(
                 f"[upload] сессия залитых #{upload_session.id} "
-                f"(planned={total}, platform={session_plat})"
+                f"(planned={planned}, platform={session_plat})"
             )
         except Exception as e:
             sink.on_log(f"[upload] не удалось создать сессию залитых: {e!r}")
@@ -186,6 +318,7 @@ def run_upload_job(
     success_paths: set[str] = set()
     success_lock = threading.Lock()
     record_lock = threading.Lock()
+    mgr_holder: dict[str, Any] = {"mgr": None}
 
     def _record_one(
         *,
@@ -274,6 +407,38 @@ def run_upload_job(
         with success_lock:
             success_paths.add(video_path)
 
+    def _close_kept_upload_browser(pid: str) -> None:
+        pid = (pid or "").strip()
+        if not pid:
+            return
+        try:
+            from zaliver.antydetect.antic_open import close_instagram_keep_open_hub
+
+            close_instagram_keep_open_hub(pid)
+        except Exception:
+            pass
+        kind_l = (kind or "local").strip().lower()
+        own = kind_l in {
+            "own",
+            "local",
+            "remote",
+            "own_antidetect",
+            "local_antidetect",
+            "dolphin",
+        }
+        if own or kind_l == "dolphin":
+            try:
+                from zaliver.antydetect.local_active_sessions import (
+                    stop_registered_local_session_sync,
+                )
+
+                for line in stop_registered_local_session_sync(pid):
+                    sink.on_log(line)
+            except Exception as e:
+                sink.on_log(
+                    f"[upload] [STOP] local keep-open close profile={pid!r} err={e!r}"
+                )
+
     def upload_one(profile_id: str, task: Any, tab_index: int = 0) -> None:
         from zaliver.antydetect.antic_open import (
             open_google_in_local_antidetect_profile,
@@ -301,10 +466,19 @@ def run_upload_job(
         sched_batch = getattr(task, "scheduled_batch", None)
         task_title = task.title or title
         task_desc = task.description or description
+        mgr_now = mgr_holder.get("mgr")
 
         if is_yt_inst:
+            keep_open = bool(ig_keep_browser_open) and (
+                mgr_now.should_keep_browser_open(profile_id)
+                if mgr_now is not None
+                else True
+            )
+
             def _on_yt(one_res: dict) -> None:
-                batch = one_res.get("batch_results") if isinstance(one_res, dict) else None
+                batch = (
+                    one_res.get("batch_results") if isinstance(one_res, dict) else None
+                )
                 if isinstance(batch, list) and sched_batch:
                     for item, item_res in zip(sched_batch, batch):
                         _record_one(
@@ -352,6 +526,7 @@ def run_upload_job(
                 warmup_search_query=warmup_q or None,
                 search_oldest_channel=bool(search_oldest_channel),
                 stats_server_username=guser or None,
+                keep_browser_open=keep_open,
                 on_youtube_success=_on_yt,
                 on_instagram_success=_on_ig,
             )
@@ -370,13 +545,35 @@ def run_upload_job(
             return
 
         if is_instagram:
+            multi_tab = bool(ig_tabs_per_profile)
+            if multi_tab:
+                keep_open = True
+                dedicated_tab = int(tab_index) > 0
+                top_reels_scan = 5
+                tabs_n = int(
+                    mgr_now.tabs_for_profile(profile_id)
+                    if mgr_now is not None
+                    else ig_tabs_n
+                )
+            else:
+                keep_open = bool(ig_keep_browser_open) and (
+                    mgr_now.should_keep_browser_open(profile_id)
+                    if mgr_now is not None
+                    else True
+                )
+                dedicated_tab = False
+                top_reels_scan = 1
+                tabs_n = 1
             kw = dict(
                 video_path=task.video_path,
                 title=task_title,
                 description=task_desc,
                 headless=headless,
-                keep_browser_open=False,
+                keep_browser_open=keep_open,
+                dedicated_tab=dedicated_tab,
+                top_reels_scan=top_reels_scan,
                 tab_index=int(tab_index),
+                tabs_per_profile=max(1, tabs_n),
             )
             if own:
                 res = upload_instagram_reel_in_local_antidetect_profile(
@@ -406,7 +603,7 @@ def run_upload_job(
             title=task_title,
             description=task_desc,
             headless=headless,
-            upload_latest_zaliver_video=False,
+            upload_latest_zaliver_video=True,
             publish_before_checks=pub_before,
             keep_studio_title=keep_title,
             schedule_publish_at=sched_at,
@@ -458,28 +655,91 @@ def run_upload_job(
                 record_platform=PLATFORM_YOUTUBE,
             )
 
+    # Короткая пауза между попытками одного профиля (как на десктопе).
+    effective_cooldown = float(cooldown_s)
+    if effective_cooldown <= 0:
+        effective_cooldown = 10.0
+
     mgr = MultiProfileUploader(
         profile_ids=list(profile_ids),
-        cooldown_s=float(cooldown_s),
-        max_concurrent_uploads=int(max_concurrent),
+        cooldown_s=effective_cooldown,
+        max_concurrent_uploads=int(max_browsers),
+        profile_upload_pause_remaining_s=(
+            (
+                lambda pid: upload_store.profile_upload_pause_remaining_seconds(
+                    pid,
+                    platform=session_plat,
+                    pause=pause_td,
+                )
+            )
+            if upload_store is not None
+            else None
+        ),
+        recent_batch_wait_s=float(pause_td.total_seconds()),
+        keep_browser_open=ig_keep_browser_open,
+        close_kept_browser=(
+            _close_kept_upload_browser if ig_keep_browser_open else None
+        ),
         log_sink=sink.on_log,
         upload_one=upload_one,
         schedule_batch_size=schedule_batch,
         schedule_times=parsed_times if schedule_batch else None,
+        await_more_videos=streaming,
+        tabs_per_profile=ig_tabs_per_profile,
     )
-    register_cancel(lambda: mgr.stop(reason="api_cancel"))
+    mgr_holder["mgr"] = mgr
 
-    sink.on_progress(0, total, "upload starting")
-    try:
-        mgr.enqueue_videos(
-            video_paths=paths,
-            title=title,
-            description=description,
+    jid = (job_id or "").strip()
+    slot: _StreamingUploadSlot | None = None
+    if streaming and jid:
+        slot = _StreamingUploadSlot(
+            mgr=mgr,
+            title=title or "",
+            description=description or "",
+            enqueued_paths=set(paths),
         )
-        mgr.mark_producer_done()
+        with _STREAMING_LOCK:
+            _STREAMING[jid] = slot
+
+    def _cancel() -> None:
+        mgr.stop(reason="api_cancel")
+        if slot is not None:
+            slot.producer_done.set()
+
+    register_cancel(_cancel)
+
+    sink.on_progress(0, max(planned, len(paths), 1), "upload starting")
+    try:
+        if paths:
+            mgr.enqueue_videos(
+                video_paths=paths,
+                title=title,
+                description=description,
+            )
         mgr.start()
+        if streaming:
+            if slot is not None:
+                sink.on_log(
+                    "[upload] залив по мере готовности: ждём новые видео "
+                    f"(job={jid})"
+                )
+                while not slot.producer_done.wait(timeout=0.5):
+                    if getattr(mgr, "_stop", threading.Event()).is_set():
+                        break
+            mgr.mark_producer_done()
+        else:
+            mgr.mark_producer_done()
         mgr.join()
     finally:
+        if jid:
+            with _STREAMING_LOCK:
+                _STREAMING.pop(jid, None)
+        if ig_keep_browser_open:
+            for pid in profile_ids:
+                try:
+                    _close_kept_upload_browser(pid)
+                except Exception:
+                    pass
         if upload_store is not None and upload_session is not None:
             failed_n = int(mgr.done_failed)
             ok_n = int(mgr.done_ok) if hasattr(mgr, "done_ok") else 0
@@ -492,7 +752,8 @@ def run_upload_job(
                 sink.on_log(f"[upload] finish_session: {e!r}")
 
     failed = int(mgr.done_failed)
-    ok_n = int(mgr.done_ok) if hasattr(mgr, "done_ok") else max(0, total - failed)
+    ok_n = int(mgr.done_ok) if hasattr(mgr, "done_ok") else 0
+    total_done = ok_n + failed
 
     if delete_after_upload and ok_n > 0:
         to_delete = list(success_paths) if success_paths else []
@@ -513,11 +774,11 @@ def run_upload_job(
 
     for p in paths:
         sink.on_output_saved(p, False)
-    sink.on_progress(total, total, "upload done")
+    sink.on_progress(total_done, max(total_done, 1), "upload done")
     if failed and ok_n <= 0:
         sink.on_finished(False, f"Upload failed ({failed} failed).")
     else:
         sink.on_finished(
             True,
-            f"Upload finished: ok={ok_n}, failed={failed}, total={total}.",
+            f"Upload finished: ok={ok_n}, failed={failed}, total={total_done}.",
         )

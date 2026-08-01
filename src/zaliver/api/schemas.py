@@ -175,6 +175,17 @@ class UploadJobRequest(BaseModel):
     schedule_warmup_shorts_recommendations: bool = True
     schedule_warmup_search_query: str = ""
     delete_after_upload: bool = False
+    # Streaming: keep accepting enqueue until producer-done (upload-as-ready).
+    await_more_videos: bool = False
+    planned_videos: int = Field(default=0, ge=0, le=100_000)
+
+
+class UploadEnqueueRequest(BaseModel):
+    """Add more videos to a streaming upload job."""
+
+    video_paths: list[str] = Field(min_length=1)
+    title: str = ""
+    description: str = ""
 
 
 class ProfileJobBaseRequest(BaseModel):

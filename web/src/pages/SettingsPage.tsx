@@ -132,6 +132,7 @@ export function SettingsPage({ platform }: Props) {
       }
       if (showIg) {
         values.upload_pause_hours = igPauseHours;
+        values.upload_pause_minutes = Math.max(0, Math.floor(igPauseHours) * 60);
         values["instagram/tabs_per_profile"] = igTabs;
         values["instagram/stats_checker_profile_id"] = igChecker;
       }

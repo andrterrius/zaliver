@@ -142,6 +142,7 @@ SETTINGS_ALLOWLIST: frozenset[str] = frozenset(
         "instagram/tabs_per_profile",
         "instagram/stats_checker_profile_id",
         "upload_pause_hours",
+        "upload_pause_minutes",
         "ai/base_url",
         "ai/api_key",
         "ai/model",

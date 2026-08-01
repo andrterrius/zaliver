@@ -80,6 +80,7 @@ from zaliver.api.schemas import (
     TitleVariablesResponse,
     UniquifyJobRequest,
     UploadJobRequest,
+    UploadEnqueueRequest,
     UploadSessionItem,
     UploadedVideoItem,
     VideoItem,
@@ -1108,6 +1109,8 @@ def build_router() -> APIRouter:
         schedule_warmup_reco = bool(body.schedule_warmup_shorts_recommendations)
         schedule_warmup_q = str(body.schedule_warmup_search_query or "").strip()
         delete_after_upload = bool(body.delete_after_upload)
+        await_more = bool(body.await_more_videos)
+        planned_videos = int(body.planned_videos or 0)
         search_oldest_channel = bool(
             settings.value("youtube/search_oldest_channel", False)
         )
@@ -1119,7 +1122,6 @@ def build_router() -> APIRouter:
         upload_store = st.core().uploads
 
         def runner(sink, register_cancel, job_id: str = "") -> None:
-            del job_id
             run_upload_job(
                 platform=platform,
                 profile_ids=profile_ids,
@@ -1144,6 +1146,10 @@ def build_router() -> APIRouter:
                 search_oldest_channel=search_oldest_channel,
                 upload_store=upload_store,
                 stats_server_username=stats_username,
+                settings=settings,
+                await_more_videos=await_more,
+                planned_videos=planned_videos,
+                job_id=job_id,
             )
 
         try:
@@ -1153,6 +1159,41 @@ def build_router() -> APIRouter:
         return JobCreatedResponse(
             id=job.id, kind=job.kind.value, status=job.status.value
         )
+
+    @router.post("/v1/jobs/upload/{job_id}/enqueue")
+    def enqueue_upload_videos(
+        job_id: str, body: UploadEnqueueRequest, request: Request
+    ) -> dict[str, Any]:
+        from zaliver.api.upload_runner import enqueue_streaming_upload
+
+        st = _state(request)
+        try:
+            paths = resolve_path_list(body.video_paths, st.config.allowed_roots)
+        except PathNotAllowedError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        try:
+            n = enqueue_streaming_upload(
+                job_id,
+                video_paths=paths,
+                title=body.title or None,
+                description=body.description or None,
+            )
+        except RuntimeError as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        return {"enqueued": int(n), "job_id": job_id}
+
+    @router.post("/v1/jobs/upload/{job_id}/producer-done")
+    def upload_producer_done(job_id: str, request: Request) -> dict[str, Any]:
+        del request
+        from zaliver.api.upload_runner import mark_streaming_producer_done
+
+        ok = mark_streaming_producer_done(job_id)
+        if not ok:
+            raise HTTPException(
+                status_code=404,
+                detail="Upload job is not streaming or already finished.",
+            )
+        return {"ok": True, "job_id": job_id}
 
     def _profile_job_response(job) -> JobCreatedResponse:
         return JobCreatedResponse(

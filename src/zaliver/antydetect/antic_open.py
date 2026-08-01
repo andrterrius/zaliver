@@ -2077,6 +2077,93 @@ def upload_instagram_reel_in_profile(
             api.close()
 
 
+def _local_launch_or_reuse_instagram_session(
+    api,
+    *,
+    profile_id: str,
+    base_url: str,
+    headless: bool,
+    remote_cdp=None,
+) -> tuple[str, str]:
+    """
+    launch_profile; при 409 (профиль уже запущен) — переиспользовать CDP
+    или stop + повторный launch.
+    """
+    from zaliver.antydetect.local_antidetect_api import LocalAntidetectError
+    from zaliver.antydetect.local_active_sessions import register_local_session
+
+    bu = (base_url or "").strip() or "http://127.0.0.1:18765"
+
+    def _register(sid: str, ws: str) -> tuple[str, str]:
+        register_local_session(profile_id=profile_id, base_url=bu, session_id=sid)
+        _log(f"Local antidetect: cdp_ws_url={ws!r}")
+        return sid, ws
+
+    def _from_running() -> tuple[str, str] | None:
+        ws_existing, sid_existing, _msg = (
+            api.resolve_running_cdp_ws_url_for_profile(profile_id)
+        )
+        if (
+            isinstance(ws_existing, str)
+            and ws_existing.strip()
+            and isinstance(sid_existing, str)
+            and sid_existing.strip()
+        ):
+            sid = sid_existing.strip()
+            ws = ws_existing.strip()
+            _log(
+                "Local antidetect: переиспользуем уже запущенную сессию "
+                f"session_id={sid!r}, cdp_ws_url={ws!r}"
+            )
+            return _register(sid, ws)
+        return None
+
+    try:
+        acc = api.launch_profile(
+            profile_id,
+            headless=headless,
+            expose_cdp=True,
+            remote_cdp=remote_cdp,
+            start_url="https://www.instagram.com/",
+        )
+    except LocalAntidetectError as e:
+        err = str(e)
+        if "409" not in err and "already running" not in err.lower():
+            raise
+        _log(
+            "Local antidetect: launch 409 (профиль уже запущен) — "
+            f"ищем живую сессию: {e!r}"
+        )
+        reused = _from_running()
+        if reused is not None:
+            return reused
+        sid_stop = api.find_running_session_id_for_profile(profile_id)
+        if sid_stop:
+            try:
+                api.stop_session(sid_stop)
+                _log(
+                    "Local antidetect: stop_session перед повторным launch "
+                    f"session_id={sid_stop!r}"
+                )
+            except Exception as stop_e:
+                _log(f"Local antidetect: stop_session после 409: {stop_e!r}")
+            time.sleep(0.9)
+        acc = api.launch_profile(
+            profile_id,
+            headless=headless,
+            expose_cdp=True,
+            remote_cdp=remote_cdp,
+            start_url="https://www.instagram.com/",
+        )
+
+    sid = acc.get("session_id")
+    if not isinstance(sid, str) or not sid.strip():
+        raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
+    session_id = sid.strip()
+    ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+    return _register(session_id, ws_url)
+
+
 @with_log_profile
 def upload_instagram_reel_in_local_antidetect_profile(
     profile_id: str,
@@ -2145,22 +2232,13 @@ def upload_instagram_reel_in_local_antidetect_profile(
 
         if not keep_open:
             with _profile_launch_lock(profile_id):
-                acc = api.launch_profile(
-                    profile_id,
+                session_id, ws_url = _local_launch_or_reuse_instagram_session(
+                    api,
+                    profile_id=profile_id,
+                    base_url=bu,
                     headless=headless,
-                    expose_cdp=True,
                     remote_cdp=remote_cdp,
-                    start_url="https://www.instagram.com/",
                 )
-                sid = acc.get("session_id")
-                if not isinstance(sid, str) or not sid.strip():
-                    raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
-                session_id = sid.strip()
-                register_local_session(
-                    profile_id=profile_id, base_url=bu, session_id=session_id
-                )
-                ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
-                _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
             with sync_playwright() as p:
                 browser, context, page = _playwright_page_from_local_session_cdp(
                     p, api, session_id, ws_url

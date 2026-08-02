@@ -89,11 +89,8 @@ def build_upload_runner(
     search_oldest_channel = bool(
         settings.value("youtube/search_oldest_channel", False)
     )
-    stats_username = str(
-        settings.value("stats_server/username", "")
-        or settings.value("stats_server_username", "")
-        or ""
-    ).strip()
+    # Web: stats notifications use the account login (job owner) as username.
+    stats_username = str(cfg.get("owner") or "").strip()
     upload_store = st.core().uploads
     paths = list(video_paths)
     planned = max(0, int(planned_videos or 0))

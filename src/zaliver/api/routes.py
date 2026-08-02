@@ -1298,11 +1298,8 @@ def build_router() -> APIRouter:
         search_oldest_channel = bool(
             settings.value("youtube/search_oldest_channel", False)
         )
-        stats_username = str(
-            settings.value("stats_server/username", "")
-            or settings.value("stats_server_username", "")
-            or ""
-        ).strip()
+        # Web: stats notifications use the account login as username.
+        stats_username = (username or "").strip()
         upload_store = st.core().uploads
         from zaliver.api.recent_values import remember_upload_title
 

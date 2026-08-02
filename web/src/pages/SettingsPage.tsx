@@ -43,7 +43,6 @@ export function SettingsPage({
   const [useGpu, setUseGpu] = useState(false);
   const [useGpuFinalize, setUseGpuFinalize] = useState(false);
   const [sliceFps, setSliceFps] = useState("30");
-  const [statsUsername, setStatsUsername] = useState("");
   const [ytApiKey, setYtApiKey] = useState("");
   const [searchOldest, setSearchOldest] = useState(false);
   const [igPauseHours, setIgPauseHours] = useState(3);
@@ -106,9 +105,6 @@ export function SettingsPage({
         setUseGpuFinalize(Boolean(v["use_gpu_finalize_enabled"] ?? false));
         const fps = String(v["slice/fps_mode"] ?? "30") || "30";
         setSliceFps(fps === "60" ? "60" : "30");
-        setStatsUsername(
-          String(v["stats_server/username"] || v["stats_server_username"] || ""),
-        );
         setYtApiKey(String(v["youtube/api_key"] ?? ""));
         setSearchOldest(Boolean(v["youtube/search_oldest_channel"] ?? false));
         setIgPauseHours(Number(v["upload_pause_hours"] ?? 3));
@@ -147,8 +143,6 @@ export function SettingsPage({
         use_gpu_enabled: useGpu,
         use_gpu_finalize_enabled: useGpuFinalize,
         "slice/fps_mode": sliceFps,
-        "stats_server/username": statsUsername,
-        stats_server_username: statsUsername,
         "ui/locale": locale,
       };
       if (showYt) {
@@ -257,16 +251,6 @@ export function SettingsPage({
           </div>
         </section>
       ) : null}
-
-      <section className="group stack">
-        <h3 className="group-title">Имя пользователя</h3>
-        <input
-          className="field"
-          value={statsUsername}
-          onChange={(e) => setStatsUsername(e.target.value)}
-          placeholder="username"
-        />
-      </section>
 
       <section className="group stack">
         <h3 className="group-title">{t("processing", locale)}</h3>

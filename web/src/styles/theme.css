@@ -1433,6 +1433,88 @@ input[type='number'].field {
   flex-wrap: wrap;
 }
 
+.field-with-recent {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.field-with-recent-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.recent-values-picker {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.recent-values-btn {
+  width: 34px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--hint);
+  cursor: pointer;
+  padding: 0;
+  margin-top: 6px;
+}
+
+.recent-values-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--title);
+}
+
+.recent-values-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.recent-values-btn-icon {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.recent-values-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 40;
+  min-width: 220px;
+  max-width: min(420px, 80vw);
+  max-height: 240px;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  padding: 4px 0;
+}
+
+.recent-values-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: var(--title);
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.recent-values-item:hover {
+  background: var(--input-bg);
+}
+
 @media (max-width: 720px) {
   .fx-row {
     grid-template-columns: 28px 1fr;
@@ -1453,6 +1535,31 @@ input[type='number'].field {
   .token-bar {
     flex-wrap: wrap;
   }
+}
+
+.login-page {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(99, 102, 241, 0.22), transparent),
+    radial-gradient(900px 500px at 90% 10%, rgba(124, 58, 237, 0.16), transparent),
+    var(--bg);
+}
+
+.login-card {
+  width: min(420px, 100%);
+  padding: 28px 24px;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+}
+
+.login-brand {
+  font-size: 22px;
+  font-weight: 700;
 }
 
 @media (prefers-reduced-motion: reduce) {

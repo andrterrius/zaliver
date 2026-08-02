@@ -10,7 +10,7 @@ export type ProcessingDefaults = {
 };
 
 const DEFAULTS: ProcessingDefaults = {
-  numWorkers: Math.max(1, Math.min(32, (navigator.hardwareConcurrency || 2) >> 0 || 2)),
+  numWorkers: 1,
   useGpu: false,
   useGpuFinalize: false,
   sliceFpsMode: "30",
@@ -26,10 +26,7 @@ export function useProcessingDefaults() {
         const s = await api.getSettings();
         const v = s.values;
         setState({
-          numWorkers: Math.max(
-            1,
-            Math.min(32, Number(v["num_workers"] ?? DEFAULTS.numWorkers) || DEFAULTS.numWorkers),
-          ),
+          numWorkers: 1,
           useGpu: Boolean(v["use_gpu_enabled"] ?? false),
           useGpuFinalize: Boolean(v["use_gpu_finalize_enabled"] ?? false),
           sliceFpsMode: String(v["slice/fps_mode"] ?? "30") || "30",

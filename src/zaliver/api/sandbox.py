@@ -4,9 +4,34 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# Absolute paths that must never be reachable via library / job path APIs.
+_DENIED_ROOTS: list[Path] = []
+
 
 class PathNotAllowedError(ValueError):
     pass
+
+
+def register_denied_root(path: Path) -> None:
+    """Mark a directory (e.g. private credentials) as unreachable via sandbox."""
+    try:
+        resolved = Path(path).expanduser().resolve(strict=False)
+    except OSError:
+        resolved = Path(path).expanduser()
+    if resolved not in _DENIED_ROOTS:
+        _DENIED_ROOTS.append(resolved)
+
+
+def _is_denied(resolved: Path) -> bool:
+    for denied in _DENIED_ROOTS:
+        try:
+            resolved.relative_to(denied)
+            return True
+        except ValueError:
+            continue
+        except OSError:
+            continue
+    return False
 
 
 def resolve_under_roots(path: str | Path, roots: list[Path]) -> Path:
@@ -16,6 +41,9 @@ def resolve_under_roots(path: str | Path, roots: list[Path]) -> Path:
         resolved = raw.resolve(strict=False)
     except OSError as e:
         raise PathNotAllowedError(f"Invalid path: {path}") from e
+
+    if _is_denied(resolved):
+        raise PathNotAllowedError("Path is in a protected private directory")
 
     if not roots:
         raise PathNotAllowedError("No allowed roots configured (ZALIVER_ALLOWED_ROOTS).")

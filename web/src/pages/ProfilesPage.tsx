@@ -10,6 +10,8 @@ import {
 import { ProgressBar } from "../components/ProgressBar";
 import { JobLogBox } from "../components/JobLogBox";
 import { ToggleSwitch } from "../components/ToggleSwitch";
+import { FieldWithRecent } from "../components/RecentValuesField";
+import { useRecentValues } from "../hooks/useRecentValues";
 
 type Props = { platform: Platform };
 
@@ -38,6 +40,10 @@ export function ProfilesPage({ platform }: Props) {
   const [tagFilter, setTagFilter] = useState<Set<string>>(new Set());
   const [showTagModal, setShowTagModal] = useState(false);
   const [modal, setModal] = useState<JobModal>(null);
+  const { recent, refresh: refreshRecent } = useRecentValues(
+    platform,
+    modal === "promote",
+  );
   const [error, setError] = useState("");
   const [jobId, setJobId] = usePersistedJobId("profiles");
   const { job } = useJobPoll(jobId);
@@ -211,7 +217,10 @@ export function ProfilesPage({ platform }: Props) {
             .split("\n")
             .map((s) => s.trim())
             .filter(Boolean),
+          comments_field: promoCommentText,
         },
+      }).then(() => {
+        void refreshRecent();
       });
     } else if (modal === "cookie-farm") {
       void startJob("cookie-farm", {
@@ -518,12 +527,17 @@ export function ProfilesPage({ platform }: Props) {
                       }
                     />
                     <label className="hint">Комментарии (по строке)</label>
-                    <textarea
-                      className="field"
-                      rows={4}
-                      value={promoCommentText}
-                      onChange={(e) => setPromoCommentText(e.target.value)}
-                    />
+                    <FieldWithRecent
+                      recent={recent.promote_comment_fields}
+                      onSelect={setPromoCommentText}
+                    >
+                      <textarea
+                        className="field"
+                        rows={4}
+                        value={promoCommentText}
+                        onChange={(e) => setPromoCommentText(e.target.value)}
+                      />
+                    </FieldWithRecent>
                   </>
                 ) : null}
               </>

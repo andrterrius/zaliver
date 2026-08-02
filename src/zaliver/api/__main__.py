@@ -30,16 +30,6 @@ def main() -> None:
     except Exception:
         pass
 
-    # Allow generating a one-shot token for local insecure bootstrap messaging.
-    if not (os.environ.get("ZALIVER_API_TOKEN") or "").strip():
-        # Dev default matches load_api_config() → "secret"
-        os.environ.setdefault("ZALIVER_API_TOKEN", "secret")
-        print(
-            "Using default ZALIVER_API_TOKEN=secret "
-            "(override with env for production).",
-            file=sys.stderr,
-        )
-
     cfg = load_api_config()
     try:
         cfg.validate_startup()
@@ -53,6 +43,15 @@ def main() -> None:
         f"browser_jobs={'on' if cfg.allow_browser_jobs else 'off'})",
         file=sys.stderr,
     )
+    print(
+        f"Auth: login/password (private dir: {cfg.resolved_private_dir()})",
+        file=sys.stderr,
+    )
+    if cfg.api_token:
+        print(
+            "Legacy ZALIVER_API_TOKEN is set (automation Bearer still accepted).",
+            file=sys.stderr,
+        )
     from zaliver.api.static_ui import resolve_web_dist
 
     dist = resolve_web_dist()

@@ -1,22 +1,26 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, type Profile } from "../api/client";
+import { api, type Platform, type Profile } from "../api/client";
 import { useJobPoll } from "../hooks/useJobPoll";
 import { usePersistedJobId } from "../hooks/usePersistedJobId";
 import { usePaintSelectList } from "../hooks/usePaintSelectList";
+import { useRecentValues } from "../hooks/useRecentValues";
 import { ProgressBar } from "./ProgressBar";
 import { JobLogBox } from "./JobLogBox";
 import { TitleVariablesHint } from "./TitleVariablesHint";
+import { FieldWithRecent } from "./RecentValuesField";
 
 type Props = {
   videoPaths: string[];
   onClose?: () => void;
   defaultOpen?: boolean;
+  platform?: Platform;
 };
 
 export function UploadPanel({
   videoPaths,
   onClose,
   defaultOpen = true,
+  platform = "youtube",
 }: Props) {
   const [open, setOpen] = useState(defaultOpen);
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -24,11 +28,12 @@ export function UploadPanel({
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [headless, setHeadless] = useState(true);
-  const [maxBrowsers, setMaxBrowsers] = useState(3);
+  const [maxBrowsers, setMaxBrowsers] = useState(5);
   const [search, setSearch] = useState("");
   const [error, setError] = useState("");
   const [jobId, setJobId] = usePersistedJobId("upload");
   const { job } = useJobPoll(jobId);
+  const { recent, refresh: refreshRecent } = useRecentValues(platform, open);
 
   useEffect(() => {
     void (async () => {
@@ -98,10 +103,11 @@ export function UploadPanel({
         kind: "local",
       });
       setJobId(res.id);
+      void refreshRecent();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [selected, videoPaths, title, description, headless, maxBrowsers]);
+  }, [selected, videoPaths, title, description, headless, maxBrowsers, refreshRecent]);
 
   if (!open) {
     return (
@@ -131,12 +137,14 @@ export function UploadPanel({
       <label className="hint">
         Название <TitleVariablesHint onInsert={(t) => setTitle((v) => v + t)} />
       </label>
-      <input
-        className="field"
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-        placeholder="Название ({date}, {index}…)"
-      />
+      <FieldWithRecent recent={recent.upload_titles} onSelect={setTitle}>
+        <input
+          className="field"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          placeholder="Название ({date}, {index}…)"
+        />
+      </FieldWithRecent>
       <label className="hint">Описание</label>
       <textarea
         className="field"
@@ -158,9 +166,11 @@ export function UploadPanel({
         style={{ maxWidth: 100 }}
         type="number"
         min={1}
-        max={10}
+        max={5}
         value={maxBrowsers}
-        onChange={(e) => setMaxBrowsers(Number(e.target.value) || 1)}
+        onChange={(e) =>
+          setMaxBrowsers(Math.max(1, Math.min(5, Number(e.target.value) || 1)))
+        }
       />
       <label className="hint">Поиск профилей</label>
       <input

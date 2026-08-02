@@ -11,7 +11,7 @@ from typing import Any, Callable
 from zaliver.api.jobs_registry import JobKind, JobRecord, JobRegistry
 
 
-STREAMING_UPLOAD_WORKERS = 2
+STREAMING_UPLOAD_WORKERS = 1
 
 
 def compute_min_ready(*, profile_count: int, planned: int) -> int:
@@ -40,7 +40,11 @@ def build_upload_runner(
     )
     from zaliver.api.upload_runner import run_upload_job
 
-    settings = st.core().settings
+    settings = (
+        st.user_settings(str(cfg.get("owner") or ""))
+        if cfg.get("owner")
+        else st.core().settings
+    )
     platform = str(cfg.get("platform") or st.platform or "").strip()
     if platform:
         from zaliver.config.platform_settings import normalize_platform
@@ -63,7 +67,9 @@ def build_upload_runner(
     title = str(cfg.get("title") or "")
     description = str(cfg.get("description") or "")
     headless = bool(cfg.get("headless", True))
-    max_b = int(cfg.get("max_concurrent_browsers") or 3)
+    from zaliver.api.user_limits import clamp_browsers_per_user
+
+    max_b = clamp_browsers_per_user(cfg.get("max_concurrent_browsers") or 5)
     publish_before_checks = bool(cfg.get("publish_before_checks", True))
     keep_studio_title = bool(cfg.get("keep_studio_title", False))
     schedule_times_raw = [
@@ -275,6 +281,12 @@ class UploadFollowup:
                 kind=JobKind.UPLOAD,
                 runner=runner,
                 bypass_limit=True,
+                owner=str(job.owner or self._cfg.get("owner") or ""),
+                browser_slots=int(
+                    self._cfg.get("max_concurrent_browsers")
+                    or job.browser_slots
+                    or 0
+                ),
             )
         except Exception as e:
             job.append_log(f"[upload] Не удалось стартовать залив: {e!r}", max_lines=2000)
@@ -321,6 +333,12 @@ class UploadFollowup:
                     kind=JobKind.UPLOAD,
                     runner=runner,
                     bypass_limit=True,
+                    owner=str(job.owner or self._cfg.get("owner") or ""),
+                    browser_slots=int(
+                        self._cfg.get("max_concurrent_browsers")
+                        or job.browser_slots
+                        or 0
+                    ),
                 )
             except Exception as e:
                 job.append_log(

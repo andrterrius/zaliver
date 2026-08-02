@@ -1,13 +1,16 @@
 import { useEffect, useState } from "react";
 import {
   api,
+  clearToken,
   getToken,
-  setToken,
+  type AuthUser,
   type Platform,
 } from "./api/client";
 import { PlatformSelect } from "./components/PlatformSelect";
 import { AppShell } from "./components/AppShell";
 import { SourcesManagerModal } from "./components/SourcesManagerModal";
+import { LoginPage } from "./pages/LoginPage";
+import { getStoredLocale, setStoredLocale, t, type Locale } from "./i18n";
 
 function platformLabel(platform: Platform): string {
   if (platform === "instagram") return "Instagram";
@@ -16,22 +19,44 @@ function platformLabel(platform: Platform): string {
 }
 
 export default function App() {
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
   const [platform, setPlatform] = useState<Platform | null>(null);
-  const [token, setTok] = useState(getToken() || "secret");
   const [healthMsg, setHealthMsg] = useState("");
   const [error, setError] = useState("");
   const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [locale, setLocale] = useState<Locale>(getStoredLocale());
 
   useEffect(() => {
     void api
       .health()
       .then((h) => setHealthMsg(`API ${h.version} · ${h.status}`))
       .catch((e) => setHealthMsg(e instanceof Error ? e.message : String(e)));
-  }, [token]);
+  }, [user]);
+
+  useEffect(() => {
+    const token = getToken();
+    if (!token) {
+      setAuthChecked(true);
+      return;
+    }
+    void api
+      .me()
+      .then((u) => {
+        setUser(u);
+        const loc = (u.locale === "en" ? "en" : "ru") as Locale;
+        setStoredLocale(loc);
+        setLocale(loc);
+      })
+      .catch(() => {
+        clearToken();
+        setUser(null);
+      })
+      .finally(() => setAuthChecked(true));
+  }, []);
 
   const onChoose = async (p: Platform) => {
     setError("");
-    setToken(token);
     try {
       await api.setPlatform(p);
       setPlatform(p);
@@ -40,25 +65,45 @@ export default function App() {
     }
   };
 
+  const onLogout = async () => {
+    try {
+      await api.logout();
+    } catch {
+      /* ignore */
+    }
+    clearToken();
+    setUser(null);
+    setPlatform(null);
+  };
+
+  if (!authChecked) {
+    return <div className="app-root" />;
+  }
+
+  if (!user) {
+    return (
+      <LoginPage
+        onSuccess={(u) => {
+          setUser(u);
+          const loc = (u.locale === "en" ? "en" : "ru") as Locale;
+          setLocale(loc);
+        }}
+      />
+    );
+  }
+
   return (
     <div className="app-root">
       <div className="token-bar">
         <span className="brand-chip">
           Zaliver<span>.</span>
         </span>
-        <input
-          className="field"
-          style={{ maxWidth: 260 }}
-          value={token}
-          onChange={(e) => setTok(e.target.value)}
-          onBlur={() => setToken(token)}
-          placeholder="API Bearer token"
-        />
+        <span className="badge">{user.username}</span>
         <button
           type="button"
           className="icon-btn"
-          title="Файлы на сервере (исходники и результаты)"
-          aria-label="Файлы на сервере"
+          title={t("files", locale)}
+          aria-label={t("files", locale)}
           onClick={() => setSourcesOpen(true)}
         >
           <svg
@@ -76,6 +121,9 @@ export default function App() {
             />
           </svg>
         </button>
+        <button type="button" className="btn secondary" onClick={onLogout}>
+          {t("signOut", locale)}
+        </button>
         <span className="hint" style={{ marginLeft: "auto" }}>
           {healthMsg}
         </span>
@@ -91,7 +139,13 @@ export default function App() {
       {platform == null ? (
         <PlatformSelect onChoose={onChoose} />
       ) : (
-        <AppShell platform={platform} onBack={() => setPlatform(null)} />
+        <AppShell
+          platform={platform}
+          onBack={() => setPlatform(null)}
+          locale={locale}
+          onLocaleChange={setLocale}
+          user={user}
+        />
       )}
       <SourcesManagerModal
         open={sourcesOpen}

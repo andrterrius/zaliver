@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type VideoItem } from "../api/client";
+import { api, type Platform, type VideoItem } from "../api/client";
 import { UploadPanel } from "../components/UploadPanel";
 
-export function ReadyPage() {
+type Props = { platform: Platform };
+
+export function ReadyPage({ platform }: Props) {
   const [items, setItems] = useState<VideoItem[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [error, setError] = useState("");
@@ -90,6 +92,7 @@ export function ReadyPage() {
       {showUpload && uploadPaths.length ? (
         <UploadPanel
           videoPaths={uploadPaths}
+          platform={platform}
           onClose={() => setShowUpload(false)}
         />
       ) : null}

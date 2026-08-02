@@ -69,6 +69,8 @@ class JobRecord:
     linked_upload_job_id: str = ""
     upload_followup_active: bool = False
     upload_followup_min_ready: int = 0
+    owner: str = ""
+    browser_slots: int = 0
     _cancel: Callable[[], None] | None = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _finished_signaled: bool = field(default=False, repr=False)
@@ -102,6 +104,8 @@ class JobRecord:
                 "linked_upload_job_id": self.linked_upload_job_id or "",
                 "upload_followup_active": bool(self.upload_followup_active),
                 "upload_followup_min_ready": int(self.upload_followup_min_ready or 0),
+                "owner": self.owner or "",
+                "browser_slots": int(self.browser_slots or 0),
             }
 
     def snapshot(
@@ -183,6 +187,8 @@ class JobRecord:
             message=str(meta.get("message") or ""),
             outputs=[str(x) for x in outputs] if isinstance(outputs, list) else [],
             error=str(meta.get("error") or ""),
+            owner=str(meta.get("owner") or ""),
+            browser_slots=int(meta.get("browser_slots") or 0),
             _from_disk=True,
         )
 
@@ -197,12 +203,13 @@ class JobRegistry:
     def __init__(
         self,
         *,
-        max_concurrent: int = 2,
+        max_concurrent: int = 0,
         max_log_lines: int = 2000,
         log_store: JobLogStore | None = None,
         cleanup_interval_sec: int = 3600,
     ) -> None:
-        self._max_concurrent = max(1, int(max_concurrent))
+        # 0 = unlimited global concurrent jobs (per-user limits enforced elsewhere).
+        self._max_concurrent = max(0, int(max_concurrent))
         self._max_log_lines = max(100, int(max_log_lines))
         self._store = log_store
         self._jobs: dict[str, JobRecord] = {}
@@ -377,15 +384,26 @@ class JobRegistry:
         runner: JobRunner,
         bypass_limit: bool = False,
         prepare: Callable[[JobRecord], None] | None = None,
+        owner: str = "",
+        browser_slots: int = 0,
     ) -> JobRecord:
         with self._lock:
-            if not bypass_limit and self._active_count() >= self._max_concurrent:
+            if (
+                not bypass_limit
+                and self._max_concurrent > 0
+                and self._active_count() >= self._max_concurrent
+            ):
                 raise RuntimeError(
                     f"Too many concurrent jobs (max={self._max_concurrent}). "
                     "Cancel or wait for an active job."
                 )
             job_id = uuid.uuid4().hex
-            job = JobRecord(id=job_id, kind=kind)
+            job = JobRecord(
+                id=job_id,
+                kind=kind,
+                owner=(owner or "").strip(),
+                browser_slots=max(0, int(browser_slots or 0)),
+            )
             self._jobs[job_id] = job
 
         if prepare is not None:

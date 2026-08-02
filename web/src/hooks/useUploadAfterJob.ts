@@ -10,8 +10,8 @@ export type PendingUpload = UploadAfterChoice & {
   plannedVideos?: number;
 };
 
-/** Match desktop: streaming upload forces 2 processing workers. */
-export const STREAMING_UPLOAD_WORKERS = 2;
+/** Match server: processing is always 1 thread per user. */
+export const STREAMING_UPLOAD_WORKERS = 1;
 
 const pendingKey = (kind: string) => `zaliver:pendingUpload:${kind}`;
 
@@ -41,13 +41,10 @@ export function loadPendingUpload(kind: string): PendingUpload | null {
 }
 
 export function workersForUploadChoice(
-  choice: UploadAfterChoice,
-  fallback: number,
+  _choice: UploadAfterChoice,
+  _fallback: number,
 ): number {
-  if (choice.uploadAsReady && choice.profileIds.length > 0) {
-    return STREAMING_UPLOAD_WORKERS;
-  }
-  return fallback;
+  return 1;
 }
 
 /** Payload for server-driven upload-after / upload-as-ready. */

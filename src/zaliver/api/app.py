@@ -86,7 +86,8 @@ def create_app(config: ApiConfig | None = None) -> FastAPI:
         title="Zaliver API",
         description=(
             "Safe headless control plane for Zaliver. "
-            "Requires Bearer token; file paths are sandboxed to ZALIVER_ALLOWED_ROOTS; "
+            "Requires login (session Bearer); file paths are sandboxed to "
+            "ZALIVER_ALLOWED_ROOTS; credentials live in a private directory; "
             "browser/upload jobs require ZALIVER_API_ALLOW_BROWSER_JOBS=1."
         ),
         version=__version__,
@@ -102,7 +103,7 @@ def create_app(config: ApiConfig | None = None) -> FastAPI:
             CORSMiddleware,
             allow_origins=list(cfg.cors_origins),
             allow_credentials=False,
-            allow_methods=["GET", "POST", "PUT", "PATCH"],
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
             allow_headers=["Authorization", "Content-Type"],
         )
 
@@ -116,6 +117,9 @@ def create_app(config: ApiConfig | None = None) -> FastAPI:
             docs_enabled=state.config.enable_docs,
         )
 
+    from zaliver.api.auth_routes import build_auth_router
+
+    app.include_router(build_auth_router(state))
     app.include_router(build_router(), dependencies=[Depends(auth)])
 
     if web_dist is not None:

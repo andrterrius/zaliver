@@ -3,12 +3,27 @@ export type Platform = "youtube" | "instagram" | "yt_inst";
 const TOKEN_KEY = "zaliver_api_token";
 const BASE_KEY = "zaliver_api_base";
 
+export type AuthUser = {
+  username: string;
+  locale: string;
+  is_admin?: boolean;
+};
+
 export function getToken(): string {
-  return localStorage.getItem(TOKEN_KEY) || "secret";
+  return localStorage.getItem(TOKEN_KEY) || "";
 }
 
 export function setToken(token: string): void {
-  localStorage.setItem(TOKEN_KEY, token.trim());
+  const t = token.trim();
+  if (!t) {
+    localStorage.removeItem(TOKEN_KEY);
+    return;
+  }
+  localStorage.setItem(TOKEN_KEY, t);
+}
+
+export function clearToken(): void {
+  localStorage.removeItem(TOKEN_KEY);
 }
 
 /** Always same-origin; custom API base UI removed. */
@@ -58,6 +73,9 @@ async function request<T>(
           : JSON.stringify(data.detail);
     } catch {
       /* ignore */
+    }
+    if (res.status === 401 && auth) {
+      clearToken();
     }
     throw new ApiError(res.status, detail || `HTTP ${res.status}`);
   }
@@ -137,6 +155,17 @@ export type TitleVariable = {
   description: string;
 };
 
+export type RecentValues = {
+  platform: string;
+  upload_titles: string[];
+  channel_name_fields: string[];
+  channel_descriptions: string[];
+  channel_link_titles: string[];
+  channel_link_urls: string[];
+  video_default_title_fields: string[];
+  promote_comment_fields: string[];
+};
+
 export type Profile = {
   id: string;
   name: string;
@@ -146,6 +175,33 @@ export type Profile = {
 
 export const api = {
   health: () => request<Health>("/health", {}, { auth: false }),
+  login: (username: string, password: string) =>
+    request<{ token: string; user: AuthUser }>(
+      "/v1/auth/login",
+      {
+        method: "POST",
+        body: JSON.stringify({ username, password }),
+      },
+      { auth: false },
+    ),
+  logout: () => request<{ ok: boolean }>("/v1/auth/logout", { method: "POST" }),
+  me: () => request<AuthUser>("/v1/auth/me"),
+  patchMe: (body: { locale?: string; password?: string }) =>
+    request<AuthUser>("/v1/auth/me", {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  listUsers: () => request<AuthUser[]>("/v1/auth/users"),
+  createUser: (body: {
+    username: string;
+    password: string;
+    locale?: string;
+    is_admin?: boolean;
+  }) =>
+    request<AuthUser>("/v1/auth/users", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   getPlatform: () => request<{ platform: Platform }>("/v1/platform"),
   setPlatform: (platform: Platform) =>
     request<{ platform: Platform }>("/v1/platform", {
@@ -418,4 +474,5 @@ export const api = {
       example: string;
       max_youtube_title_length: number;
     }>("/v1/title-variables"),
+  listRecentValues: () => request<RecentValues>("/v1/recent-values"),
 };

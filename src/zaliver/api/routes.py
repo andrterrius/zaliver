@@ -15,6 +15,7 @@ from zaliver.api.ai_service import (
     list_prompts,
     put_prompts,
 )
+from zaliver.api.auth import auth_from_request
 from zaliver.api.jobs_registry import JobKind
 from zaliver.api.profile_jobs import (
     start_availability,
@@ -24,6 +25,12 @@ from zaliver.api.profile_jobs import (
     start_instagram_register,
     start_promote,
     start_warmup,
+)
+from zaliver.api.user_limits import (
+    PROCESSING_WORKERS_PER_USER,
+    assert_browser_budget,
+    assert_can_start_processing,
+    clamp_browsers_per_user,
 )
 from zaliver.api.sources import (
     delete_sources,
@@ -83,6 +90,7 @@ from zaliver.api.schemas import (
     UploadEnqueueRequest,
     UploadSessionItem,
     UploadedVideoItem,
+    RecentValuesResponse,
     VideoItem,
     WarmupJobRequest,
 )
@@ -95,7 +103,6 @@ from zaliver.api.settings_policy import (
 from zaliver.api.state import AppState
 from zaliver.api.upload_runner import run_upload_job
 from zaliver.api.upload_followup import (
-    STREAMING_UPLOAD_WORKERS,
     attach_upload_followup,
 )
 from zaliver.api.isolated_runner import (
@@ -119,11 +126,24 @@ def _state(request: Request) -> AppState:
     return st
 
 
-def _apply_request_platform(st: AppState, platform: str | None) -> str:
+def _bearer(request: Request) -> str:
+    return auth_from_request(request).token
+
+
+def _username(request: Request) -> str:
+    return auth_from_request(request).user.username
+
+
+def _user_settings(request: Request):
+    st = _state(request)
+    return st.user_settings(_username(request))
+
+
+def _apply_request_platform(st: AppState, platform: str | None, *, username: str) -> str:
     raw = (platform or "").strip()
     if raw:
-        return st.set_platform(raw)
-    return st.platform
+        return st.set_platform(raw, username=username)
+    return st.platform_for_user(username)
 
 
 def _upload_after_cfg(body: Any, *, platform: str, planned: int) -> dict[str, Any] | None:
@@ -138,6 +158,20 @@ def _upload_after_cfg(body: Any, *, platform: str, planned: int) -> dict[str, An
     return data
 
 
+def _remember_upload_after_title(st: AppState, upload_after: dict[str, Any] | None) -> None:
+    if not upload_after:
+        return
+    from zaliver.api.recent_values import remember_upload_title
+
+    plat = str(upload_after.get("platform") or st.platform or "youtube")
+    remember_upload_title(
+        st.core().uploads,
+        title=str(upload_after.get("title") or ""),
+        platform=plat,
+        keep_studio_title=bool(upload_after.get("keep_studio_title")),
+    )
+
+
 def _start_processing_job(
     st: AppState,
     *,
@@ -145,14 +179,31 @@ def _start_processing_job(
     runner,
     upload_after: dict[str, Any] | None,
     planned_videos: int,
+    owner: str,
+    session_token: str = "",
 ):
+    assert_can_start_processing(st.jobs, owner)
+
     def prepare(job) -> None:
         if upload_after:
+            # Follow-up upload shares the processing owner's browser budget later.
             attach_upload_followup(
                 st, job, upload_after, planned_videos=planned_videos
             )
 
-    return st.jobs.start(kind=kind, runner=runner, prepare=prepare)
+    _remember_upload_after_title(st, upload_after)
+    if upload_after is not None:
+        upload_after = dict(upload_after)
+        upload_after["owner"] = owner
+        if not str(upload_after.get("token") or "").strip() and session_token:
+            upload_after["token"] = session_token
+    return st.jobs.start(
+        kind=kind,
+        runner=runner,
+        prepare=prepare,
+        owner=owner,
+        browser_slots=0,
+    )
 
 
 def _uploaded_item(platform: str, r: Any) -> UploadedVideoItem:
@@ -244,11 +295,14 @@ def build_router() -> APIRouter:
 
     @router.get("/v1/platform", response_model=PlatformResponse)
     def get_platform(request: Request) -> PlatformResponse:
-        return PlatformResponse(platform=_state(request).platform)
+        st = _state(request)
+        return PlatformResponse(platform=st.platform_for_user(_username(request)))
 
     @router.put("/v1/platform", response_model=PlatformResponse)
     def set_platform(body: PlatformUpdate, request: Request) -> PlatformResponse:
-        plat = _state(request).set_platform(body.platform)
+        plat = _state(request).set_platform(
+            body.platform, username=_username(request)
+        )
         return PlatformResponse(platform=plat)
 
     @router.get("/v1/settings", response_model=SettingsGetResponse)
@@ -259,10 +313,13 @@ def build_router() -> APIRouter:
             description="Comma-separated allowlisted keys; default = all allowlisted present",
         ),
     ) -> SettingsGetResponse:
-        return _read_settings(_state(request), keys)
+        return _read_settings(request, keys)
 
-    def _read_settings(st: AppState, keys: str | None) -> SettingsGetResponse:
-        core = st.core()
+    def _read_settings(request: Request, keys: str | None) -> SettingsGetResponse:
+        st = _state(request)
+        username = _username(request)
+        settings = st.user_settings(username)
+        plat = st.platform_for_user(username)
         if keys:
             wanted = [k.strip() for k in keys.split(",") if k.strip()]
         else:
@@ -275,22 +332,25 @@ def build_router() -> APIRouter:
                 raise HTTPException(
                     status_code=400, detail=f"Settings key not allowlisted: {key}"
                 )
-            if not core.settings.contains(key):
+            if not settings.contains(key):
                 continue
-            values[key] = public_settings_value(key, core.settings.value(key))
-        return SettingsGetResponse(platform=st.platform, values=values)
+            values[key] = public_settings_value(key, settings.value(key))
+        return SettingsGetResponse(platform=plat, values=values)
 
     @router.patch("/v1/settings", response_model=SettingsGetResponse)
     def patch_settings(
         body: SettingsPatchRequest, request: Request
     ) -> SettingsGetResponse:
         st = _state(request)
-        core = st.core()
+        username = _username(request)
+        settings = st.user_settings(username)
         for key, value in body.values.items():
             if not is_allowed_settings_key(key):
                 raise HTTPException(
                     status_code=400, detail=f"Settings key not allowlisted: {key}"
                 )
+            if key == "num_workers":
+                continue
             if key in SETTINGS_PATH_LIST_KEYS and isinstance(value, list):
                 # Persist under roots even if a file was deleted (drop escapes).
                 kept: list[str] = []
@@ -324,12 +384,14 @@ def build_router() -> APIRouter:
                 value is not None and "…" in str(value)
             ):
                 continue
-            core.settings.setValue(key, value)
-        core.settings.sync()
+            if key == "antydetect/max_concurrent_browsers":
+                value = clamp_browsers_per_user(value)
+            settings.setValue(key, value)
+        settings.sync()
         from zaliver.api.antydetect_resolve import apply_local_api_token_from_settings
 
-        apply_local_api_token_from_settings(core.settings)
-        return _read_settings(st, None)
+        apply_local_api_token_from_settings(settings)
+        return _read_settings(request, None)
 
     @router.get("/v1/library/output-dirs", response_model=OutputDirsResponse)
     def get_output_dirs(
@@ -340,7 +402,7 @@ def build_router() -> APIRouter:
         ),
     ) -> OutputDirsResponse:
         st = _state(request)
-        plat = _apply_request_platform(st, platform)
+        plat = _apply_request_platform(st, platform, username=_username(request))
         root = st.config.resolved_output_root()
         try:
             root.mkdir(parents=True, exist_ok=True)
@@ -657,9 +719,10 @@ def build_router() -> APIRouter:
         body: StatsRefreshRequest, request: Request
     ) -> JobCreatedResponse:
         st = _state(request)
+        username = _username(request)
         store = st.core().uploads
-        settings = st.core().settings
-        platform = st.platform
+        settings = st.user_settings(username)
+        platform = st.platform_for_user(username)
         vids = [v.strip() for v in body.video_ids if (v or "").strip()]
         if not vids:
             sid = int(body.session_id or 0)
@@ -716,7 +779,11 @@ def build_router() -> APIRouter:
                 )
 
         try:
-            job = st.jobs.start(kind=JobKind.STATS_REFRESH, runner=runner)
+            job = st.jobs.start(
+                kind=JobKind.STATS_REFRESH,
+                runner=runner,
+                owner=username,
+            )
         except RuntimeError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
         return JobCreatedResponse(
@@ -736,10 +803,22 @@ def build_router() -> APIRouter:
             max_youtube_title_length=MAX_YOUTUBE_TITLE_LENGTH,
         )
 
+    @router.get("/v1/recent-values", response_model=RecentValuesResponse)
+    def recent_values(request: Request) -> RecentValuesResponse:
+        from zaliver.api.recent_values import list_recent_values
+
+        st = _state(request)
+        username = _username(request)
+        plat = st.platform_for_user(username)
+        return list_recent_values(st.core().uploads, platform=plat)
+
     @router.get("/v1/ai/prompts", response_model=AiPromptsResponse)
     def get_ai_prompts(request: Request) -> AiPromptsResponse:
         st = _state(request)
-        items = list_prompts(st.core().settings, platform=st.platform)
+        username = _username(request)
+        settings = st.user_settings(username)
+        plat = st.platform_for_user(username)
+        items = list_prompts(settings, platform=plat)
         return AiPromptsResponse(
             prompts=[
                 AiPromptItem(id=p.id, title=p.title, text=p.text, builtin=p.builtin)
@@ -752,9 +831,12 @@ def build_router() -> APIRouter:
         body: AiPromptsPutRequest, request: Request
     ) -> AiPromptsResponse:
         st = _state(request)
+        username = _username(request)
+        settings = st.user_settings(username)
+        plat = st.platform_for_user(username)
         items = put_prompts(
-            st.core().settings,
-            platform=st.platform,
+            settings,
+            platform=plat,
             prompts=[p.model_dump() for p in body.prompts],
         )
         return AiPromptsResponse(
@@ -769,9 +851,12 @@ def build_router() -> APIRouter:
         body: AiPromptCreateRequest, request: Request
     ) -> AiPromptItem:
         st = _state(request)
+        username = _username(request)
+        settings = st.user_settings(username)
+        plat = st.platform_for_user(username)
         p = add_prompt(
-            st.core().settings,
-            platform=st.platform,
+            settings,
+            platform=plat,
             title=body.title,
             text=body.text,
         )
@@ -780,8 +865,11 @@ def build_router() -> APIRouter:
     @router.delete("/v1/ai/prompts/{prompt_id}", response_model=DeleteResult)
     def remove_ai_prompt(prompt_id: str, request: Request) -> DeleteResult:
         st = _state(request)
+        username = _username(request)
+        settings = st.user_settings(username)
+        plat = st.platform_for_user(username)
         ok = delete_prompt(
-            st.core().settings, platform=st.platform, prompt_id=prompt_id
+            settings, platform=plat, prompt_id=prompt_id
         )
         if not ok:
             raise HTTPException(
@@ -793,10 +881,13 @@ def build_router() -> APIRouter:
     @router.post("/v1/ai/generate", response_model=AiGenerateResponse)
     def ai_generate(body: AiGenerateRequest, request: Request) -> AiGenerateResponse:
         st = _state(request)
+        username = _username(request)
+        settings = st.user_settings(username)
+        plat = st.platform_for_user(username)
         try:
             text = generate_text(
-                st.core().settings,
-                platform=st.platform,
+                settings,
+                platform=plat,
                 prompt_id=body.prompt_id,
                 prompt_text=body.prompt_text,
                 reply_lines=body.reply_lines,
@@ -841,7 +932,8 @@ def build_router() -> APIRouter:
         body: UniquifyJobRequest, request: Request
     ) -> JobCreatedResponse:
         st = _state(request)
-        plat = _apply_request_platform(st, getattr(body, "platform", None))
+        username = _username(request)
+        plat = _apply_request_platform(st, getattr(body, "platform", None), username=username)
         try:
             out_dir = str(
                 resolve_job_output_dir(
@@ -872,9 +964,11 @@ def build_router() -> APIRouter:
 
         planned = len(inputs) * max(1, int(body.copies_per_file or 1))
         upload_after = _upload_after_cfg(body, platform=plat, planned=planned)
-        workers = min(int(body.num_workers), st.config.max_workers_per_job)
-        if upload_after and upload_after.get("upload_as_ready"):
-            workers = min(STREAMING_UPLOAD_WORKERS, st.config.max_workers_per_job)
+        if upload_after:
+            upload_after["max_concurrent_browsers"] = clamp_browsers_per_user(
+                upload_after.get("max_concurrent_browsers")
+            )
+        workers = PROCESSING_WORKERS_PER_USER
         options: dict[str, Any] = {
             "input_dir": "",
             "output_dir": out_dir,
@@ -926,6 +1020,8 @@ def build_router() -> APIRouter:
                 runner=uniquify_runner(options),
                 upload_after=upload_after,
                 planned_videos=planned,
+                owner=username,
+                session_token=_bearer(request),
             )
         except RuntimeError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
@@ -943,7 +1039,10 @@ def build_router() -> APIRouter:
     )
     def start_slicing(body: SlicingJobRequest, request: Request) -> JobCreatedResponse:
         st = _state(request)
-        plat = _apply_request_platform(st, getattr(body, "platform", None))
+        username = _username(request)
+        plat = _apply_request_platform(
+            st, getattr(body, "platform", None), username=username
+        )
         if body.min_scenes > body.max_scenes:
             raise HTTPException(
                 status_code=400, detail="min_scenes cannot exceed max_scenes"
@@ -984,9 +1083,11 @@ def build_router() -> APIRouter:
 
         planned = len(music) * max(1, int(body.copies_per_track or 1))
         upload_after = _upload_after_cfg(body, platform=plat, planned=planned)
-        workers = min(int(body.num_workers), st.config.max_workers_per_job)
-        if upload_after and upload_after.get("upload_as_ready"):
-            workers = min(STREAMING_UPLOAD_WORKERS, st.config.max_workers_per_job)
+        if upload_after:
+            upload_after["max_concurrent_browsers"] = clamp_browsers_per_user(
+                upload_after.get("max_concurrent_browsers")
+            )
+        workers = PROCESSING_WORKERS_PER_USER
         options: dict[str, Any] = {
             "output_dir": out_dir,
             "clip_files": clips,
@@ -1015,6 +1116,8 @@ def build_router() -> APIRouter:
                 runner=slicing_runner(options),
                 upload_after=upload_after,
                 planned_videos=planned,
+                owner=username,
+                session_token=_bearer(request),
             )
         except RuntimeError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
@@ -1034,7 +1137,10 @@ def build_router() -> APIRouter:
         body: StitchingJobRequest, request: Request
     ) -> JobCreatedResponse:
         st = _state(request)
-        plat = _apply_request_platform(st, getattr(body, "platform", None))
+        username = _username(request)
+        plat = _apply_request_platform(
+            st, getattr(body, "platform", None), username=username
+        )
         if body.min_part_duration > body.max_part_duration:
             raise HTTPException(
                 status_code=400,
@@ -1069,9 +1175,11 @@ def build_router() -> APIRouter:
 
         planned = len(music) * max(1, int(body.copies_per_track or 1))
         upload_after = _upload_after_cfg(body, platform=plat, planned=planned)
-        workers = min(int(body.num_workers), st.config.max_workers_per_job)
-        if upload_after and upload_after.get("upload_as_ready"):
-            workers = min(STREAMING_UPLOAD_WORKERS, st.config.max_workers_per_job)
+        if upload_after:
+            upload_after["max_concurrent_browsers"] = clamp_browsers_per_user(
+                upload_after.get("max_concurrent_browsers")
+            )
+        workers = PROCESSING_WORKERS_PER_USER
         options: dict[str, Any] = {
             "output_dir": out_dir,
             "part1_files": part1,
@@ -1101,6 +1209,8 @@ def build_router() -> APIRouter:
                 runner=stitching_runner(options),
                 upload_after=upload_after,
                 planned_videos=planned,
+                owner=username,
+                session_token=_bearer(request),
             )
         except RuntimeError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
@@ -1118,6 +1228,7 @@ def build_router() -> APIRouter:
     )
     def start_upload(body: UploadJobRequest, request: Request) -> JobCreatedResponse:
         st = _state(request)
+        username = _username(request)
         if not st.config.allow_browser_jobs:
             raise HTTPException(
                 status_code=403,
@@ -1131,12 +1242,13 @@ def build_router() -> APIRouter:
         except PathNotAllowedError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
+        settings = st.user_settings(username)
         token = (body.token or "").strip()
         if not token:
+            token = _bearer(request)
+        if not token:
             token = (
-                str(
-                    st.core().settings.value("antydetect/dolphin_token", "") or ""
-                ).strip()
+                str(settings.value("antydetect/dolphin_token", "") or "").strip()
             )
         profile_ids = [p.strip() for p in body.profile_ids if (p or "").strip()]
         if not profile_ids:
@@ -1148,17 +1260,23 @@ def build_router() -> APIRouter:
                 detail="video_paths required (or await_more_videos for streaming)",
             )
 
-        platform = _apply_request_platform(st, body.platform)
+        platform = _apply_request_platform(st, body.platform, username=username)
         from zaliver.api.antydetect_resolve import (
             resolve_antidetect_kind,
             resolve_local_base_url,
         )
 
-        settings = st.core().settings
         kind = resolve_antidetect_kind(settings, body.kind)
         base_url = resolve_local_base_url(settings, body.base_url)
         headless = bool(body.headless)
-        max_b = int(body.max_concurrent_browsers)
+        try:
+            max_b = assert_browser_budget(
+                st.jobs,
+                username,
+                requested_slots=int(body.max_concurrent_browsers),
+            )
+        except RuntimeError as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
         cooldown = float(body.cooldown_s)
         title = body.title
         description = body.description
@@ -1186,6 +1304,14 @@ def build_router() -> APIRouter:
             or ""
         ).strip()
         upload_store = st.core().uploads
+        from zaliver.api.recent_values import remember_upload_title
+
+        remember_upload_title(
+            upload_store,
+            title=title,
+            platform=platform,
+            keep_studio_title=keep_studio_title,
+        )
 
         def runner(sink, register_cancel, job_id: str = "") -> None:
             run_upload_job(
@@ -1219,7 +1345,12 @@ def build_router() -> APIRouter:
             )
 
         try:
-            job = st.jobs.start(kind=JobKind.UPLOAD, runner=runner)
+            job = st.jobs.start(
+                kind=JobKind.UPLOAD,
+                runner=runner,
+                owner=username,
+                browser_slots=max_b,
+            )
         except RuntimeError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
         return JobCreatedResponse(
@@ -1274,7 +1405,14 @@ def build_router() -> APIRouter:
     def job_availability(
         body: AvailabilityJobRequest, request: Request
     ) -> JobCreatedResponse:
-        return _profile_job_response(start_availability(_state(request), body))
+        return _profile_job_response(
+            start_availability(
+                _state(request),
+                body,
+                username=_username(request),
+                session_token=_bearer(request),
+            )
+        )
 
     @router.post(
         "/v1/jobs/profiles/instagram-register",
@@ -1284,7 +1422,14 @@ def build_router() -> APIRouter:
     def job_ig_register(
         body: InstagramRegisterJobRequest, request: Request
     ) -> JobCreatedResponse:
-        return _profile_job_response(start_instagram_register(_state(request), body))
+        return _profile_job_response(
+            start_instagram_register(
+                _state(request),
+                body,
+                username=_username(request),
+                session_token=_bearer(request),
+            )
+        )
 
     @router.post(
         "/v1/jobs/profiles/instagram-2fa",
@@ -1294,7 +1439,14 @@ def build_router() -> APIRouter:
     def job_ig_2fa(
         body: Instagram2FAJobRequest, request: Request
     ) -> JobCreatedResponse:
-        return _profile_job_response(start_instagram_2fa(_state(request), body))
+        return _profile_job_response(
+            start_instagram_2fa(
+                _state(request),
+                body,
+                username=_username(request),
+                session_token=_bearer(request),
+            )
+        )
 
     @router.post(
         "/v1/jobs/profiles/channel-setup",
@@ -1304,7 +1456,14 @@ def build_router() -> APIRouter:
     def job_channel_setup(
         body: ChannelSetupJobRequest, request: Request
     ) -> JobCreatedResponse:
-        return _profile_job_response(start_channel_setup(_state(request), body))
+        return _profile_job_response(
+            start_channel_setup(
+                _state(request),
+                body,
+                username=_username(request),
+                session_token=_bearer(request),
+            )
+        )
 
     @router.post(
         "/v1/jobs/profiles/warmup",
@@ -1312,7 +1471,14 @@ def build_router() -> APIRouter:
         status_code=status.HTTP_202_ACCEPTED,
     )
     def job_warmup(body: WarmupJobRequest, request: Request) -> JobCreatedResponse:
-        return _profile_job_response(start_warmup(_state(request), body))
+        return _profile_job_response(
+            start_warmup(
+                _state(request),
+                body,
+                username=_username(request),
+                session_token=_bearer(request),
+            )
+        )
 
     @router.post(
         "/v1/jobs/profiles/promote",
@@ -1320,7 +1486,14 @@ def build_router() -> APIRouter:
         status_code=status.HTTP_202_ACCEPTED,
     )
     def job_promote(body: PromoteJobRequest, request: Request) -> JobCreatedResponse:
-        return _profile_job_response(start_promote(_state(request), body))
+        return _profile_job_response(
+            start_promote(
+                _state(request),
+                body,
+                username=_username(request),
+                session_token=_bearer(request),
+            )
+        )
 
     @router.post(
         "/v1/jobs/profiles/cookie-farm",
@@ -1330,7 +1503,14 @@ def build_router() -> APIRouter:
     def job_cookie_farm(
         body: CookieFarmJobRequest, request: Request
     ) -> JobCreatedResponse:
-        return _profile_job_response(start_cookie_farm(_state(request), body))
+        return _profile_job_response(
+            start_cookie_farm(
+                _state(request),
+                body,
+                username=_username(request),
+                session_token=_bearer(request),
+            )
+        )
 
     @router.get("/v1/antidetect/profiles")
     def list_profiles(
@@ -1351,7 +1531,11 @@ def build_router() -> APIRouter:
         from zaliver.api.antydetect_resolve import list_antidetect_profiles
 
         try:
-            return list_antidetect_profiles(st.core().settings, kind=kind)
+            return list_antidetect_profiles(
+                st.user_settings(_username(request)),
+                kind=kind,
+                session_token=_bearer(request),
+            )
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e)) from e
 

@@ -99,17 +99,22 @@ def list_antidetect_profiles(
     kind: str | None = None,
     token: str | None = None,
     base_url: str | None = None,
+    session_token: str | None = None,
 ) -> dict[str, Any]:
     """
     Return {kind, base_url, count, profiles}.
 
     Always uses local/remote HTTP API (own antidetect). Dolphin is not supported.
+    Prefer Zaliver session Bearer (accepted by antidetect serve) over local_api_token.
     """
     k = resolve_antidetect_kind(settings, kind)
     profiles: list[dict[str, Any]] = []
 
     base = resolve_local_base_url(settings, base_url)
-    api_token = resolve_local_api_token_setting(settings, token)
+    api_token = (
+        (session_token or "").strip()
+        or resolve_local_api_token_setting(settings, token)
+    )
     try:
         api = LocalAntidetectHttpAPI(base, token=api_token or None)
         try:

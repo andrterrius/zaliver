@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { Platform } from "../api/client";
+import type { AuthUser, Platform } from "../api/client";
 import { UniquifyPage } from "../pages/UniquifyPage";
 import { SlicingPage } from "../pages/SlicingPage";
 import { StitchingPage } from "../pages/StitchingPage";
@@ -9,30 +9,39 @@ import { ProfilesPage } from "../pages/ProfilesPage";
 import { ChannelEditPage } from "../pages/ChannelEditPage";
 import { AiPage } from "../pages/AiPage";
 import { SettingsPage } from "../pages/SettingsPage";
-
-const NAV = [
-  { id: 0, label: "Уникализация" },
-  { id: 1, label: "Нарезка" },
-  { id: 2, label: "Склейка" },
-  { id: 3, label: "Готовые видео" },
-  { id: 4, label: "Залитые видео" },
-  { id: 5, label: "Профили" },
-  { id: 6, label: "Редактирование каналов" },
-  { id: 7, label: "ИИ" },
-  { id: 8, label: "Настройки" },
-] as const;
+import { t, type Locale } from "../i18n";
 
 type Props = {
   platform: Platform;
   onBack: () => void;
+  locale: Locale;
+  onLocaleChange: (locale: Locale) => void;
+  user: AuthUser;
 };
 
-export function AppShell({ platform, onBack }: Props) {
+export function AppShell({
+  platform,
+  onBack,
+  locale,
+  onLocaleChange,
+  user,
+}: Props) {
   const [tab, setTab] = useState(0);
+  const nav = [
+    { id: 0, label: t("navUniquify", locale) },
+    { id: 1, label: t("navSlicing", locale) },
+    { id: 2, label: t("navStitching", locale) },
+    { id: 3, label: t("navReady", locale) },
+    { id: 4, label: t("navUploaded", locale) },
+    { id: 5, label: t("navProfiles", locale) },
+    { id: 6, label: t("navChannels", locale) },
+    { id: 7, label: t("navAi", locale) },
+    { id: 8, label: t("navSettings", locale) },
+  ] as const;
   const navItems =
     platform === "yt_inst"
-      ? NAV.filter((n) => n.id === 0 || n.id === 1 || n.id === 2 || n.id === 8)
-      : NAV;
+      ? nav.filter((n) => n.id === 0 || n.id === 1 || n.id === 2 || n.id === 8)
+      : nav;
 
   return (
     <div className="shell">
@@ -42,7 +51,7 @@ export function AppShell({ platform, onBack }: Props) {
         </div>
         <ul className="side-nav-list">
           {navItems.map(({ id, label }) => (
-            <li key={label}>
+            <li key={id}>
               <button
                 type="button"
                 className={tab === id ? "active" : ""}
@@ -54,19 +63,26 @@ export function AppShell({ platform, onBack }: Props) {
           ))}
         </ul>
         <button type="button" className="side-nav-back" onClick={onBack}>
-          ← Выбор платформы
+          {t("backPlatform", locale)}
         </button>
       </aside>
       <main className="main-pane">
         {tab === 0 ? <UniquifyPage platform={platform} /> : null}
         {tab === 1 ? <SlicingPage platform={platform} /> : null}
         {tab === 2 ? <StitchingPage platform={platform} /> : null}
-        {tab === 3 ? <ReadyPage /> : null}
+        {tab === 3 ? <ReadyPage platform={platform} /> : null}
         {tab === 4 ? <UploadedPage platform={platform} /> : null}
         {tab === 5 ? <ProfilesPage platform={platform} /> : null}
         {tab === 6 ? <ChannelEditPage platform={platform} /> : null}
         {tab === 7 ? <AiPage platform={platform} /> : null}
-        {tab === 8 ? <SettingsPage platform={platform} /> : null}
+        {tab === 8 ? (
+          <SettingsPage
+            platform={platform}
+            locale={locale}
+            onLocaleChange={onLocaleChange}
+            user={user}
+          />
+        ) : null}
       </main>
     </div>
   );

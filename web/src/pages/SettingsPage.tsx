@@ -1,15 +1,36 @@
 import { useEffect, useState } from "react";
-import { api, type Platform, type Profile } from "../api/client";
+import {
+  api,
+  type AuthUser,
+  type Platform,
+  type Profile,
+} from "../api/client";
 import { ToggleSwitch } from "../components/ToggleSwitch";
+import {
+  getStoredLocale,
+  setStoredLocale,
+  t,
+  type Locale,
+} from "../i18n";
 
-type Props = { platform: Platform };
+type Props = {
+  platform: Platform;
+  locale: Locale;
+  onLocaleChange: (locale: Locale) => void;
+  user: AuthUser;
+};
 
 function profileLabel(p: Profile): string {
   const name = (p.name || "").trim();
   return name ? `${name}  (${p.id})` : p.id;
 }
 
-export function SettingsPage({ platform }: Props) {
+export function SettingsPage({
+  platform,
+  locale,
+  onLocaleChange,
+  user,
+}: Props) {
   const [localBase, setLocalBase] = useState("http://127.0.0.1:18765");
   const [localToken, setLocalToken] = useState("secret");
   const [remoteBase, setRemoteBase] = useState("");
@@ -21,9 +42,6 @@ export function SettingsPage({ platform }: Props) {
   const [aiModel, setAiModel] = useState("");
   const [useGpu, setUseGpu] = useState(false);
   const [useGpuFinalize, setUseGpuFinalize] = useState(false);
-  const [workers, setWorkers] = useState(
-    Math.max(1, Math.min(32, navigator.hardwareConcurrency || 2)),
-  );
   const [sliceFps, setSliceFps] = useState("30");
   const [statsUsername, setStatsUsername] = useState("");
   const [ytApiKey, setYtApiKey] = useState("");
@@ -37,6 +55,10 @@ export function SettingsPage({ platform }: Props) {
   const [showYtKey, setShowYtKey] = useState(false);
   const [showAiKey, setShowAiKey] = useState(false);
   const [showLocalToken, setShowLocalToken] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
+  const [newUserName, setNewUserName] = useState("");
+  const [newUserPass, setNewUserPass] = useState("");
+  const [users, setUsers] = useState<AuthUser[]>([]);
 
   const showYt = platform === "youtube" || platform === "yt_inst";
   const showIg = platform === "instagram" || platform === "yt_inst";
@@ -71,21 +93,17 @@ export function SettingsPage({ platform }: Props) {
           ),
         );
         setHeadless(Boolean(v["antydetect/dolphin_headless"] ?? true));
-        setMaxBrowsers(Number(v["antydetect/max_concurrent_browsers"] ?? 5));
+        setMaxBrowsers(
+          Math.max(
+            1,
+            Math.min(5, Number(v["antydetect/max_concurrent_browsers"] ?? 5) || 5),
+          ),
+        );
         setAiBase(String(v["ai/base_url"] ?? ""));
         setAiKey(String(v["ai/api_key"] ?? ""));
         setAiModel(String(v["ai/model"] ?? ""));
         setUseGpu(Boolean(v["use_gpu_enabled"] ?? false));
         setUseGpuFinalize(Boolean(v["use_gpu_finalize_enabled"] ?? false));
-        setWorkers(
-          Math.max(
-            1,
-            Math.min(
-              32,
-              Number(v["num_workers"] ?? navigator.hardwareConcurrency ?? 2) || 2,
-            ),
-          ),
-        );
         const fps = String(v["slice/fps_mode"] ?? "30") || "30";
         setSliceFps(fps === "60" ? "60" : "30");
         setStatsUsername(
@@ -96,11 +114,18 @@ export function SettingsPage({ platform }: Props) {
         setIgPauseHours(Number(v["upload_pause_hours"] ?? 3));
         setIgTabs(Number(v["instagram/tabs_per_profile"] ?? 1));
         setIgChecker(String(v["instagram/stats_checker_profile_id"] ?? ""));
+        if (user.is_admin) {
+          try {
+            setUsers(await api.listUsers());
+          } catch {
+            /* ignore */
+          }
+        }
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
     })();
-  }, [platform]);
+  }, [platform, user.is_admin]);
 
   const save = async () => {
     setError("");
@@ -115,16 +140,16 @@ export function SettingsPage({ platform }: Props) {
         "antydetect/remote_cdp_public_host": remoteCdpHost.trim(),
         "antydetect/own_remote_cdp_host": remoteCdpHost.trim(),
         "antydetect/dolphin_headless": headless,
-        "antydetect/max_concurrent_browsers": maxBrowsers,
+        "antydetect/max_concurrent_browsers": Math.max(1, Math.min(5, maxBrowsers)),
         "ai/base_url": aiBase,
         "ai/api_key": aiKey,
         "ai/model": aiModel,
         use_gpu_enabled: useGpu,
         use_gpu_finalize_enabled: useGpuFinalize,
-        num_workers: workers,
         "slice/fps_mode": sliceFps,
         "stats_server/username": statsUsername,
         stats_server_username: statsUsername,
+        "ui/locale": locale,
       };
       if (showYt) {
         values["youtube/api_key"] = ytApiKey;
@@ -137,7 +162,32 @@ export function SettingsPage({ platform }: Props) {
         values["instagram/stats_checker_profile_id"] = igChecker;
       }
       await api.patchSettings(values);
-      setStatus("Настройки сохранены.");
+      const mePatch: { locale: string; password?: string } = { locale };
+      if (newPassword.trim()) {
+        mePatch.password = newPassword.trim();
+      }
+      await api.patchMe(mePatch);
+      setNewPassword("");
+      setStoredLocale(locale);
+      onLocaleChange(locale);
+      setStatus(t("saved", locale));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const createUser = async () => {
+    setError("");
+    try {
+      await api.createUser({
+        username: newUserName.trim(),
+        password: newUserPass,
+        locale: getStoredLocale(),
+      });
+      setNewUserName("");
+      setNewUserPass("");
+      setUsers(await api.listUsers());
+      setStatus(t("saved", locale));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -145,9 +195,68 @@ export function SettingsPage({ platform }: Props) {
 
   return (
     <div className="stack">
-      <h1 className="title">Настройки</h1>
+      <h1 className="title">{t("settings", locale)}</h1>
       {error ? <div className="error-banner">{error}</div> : null}
       {status ? <p className="hint">{status}</p> : null}
+
+      <section className="group stack">
+        <h3 className="group-title">{t("account", locale)}</h3>
+        <p className="hint">{user.username}</p>
+        <label className="hint">{t("language", locale)}</label>
+        <select
+          className="field"
+          style={{ maxWidth: 200 }}
+          value={locale}
+          onChange={(e) =>
+            onLocaleChange(e.target.value === "en" ? "en" : "ru")
+          }
+        >
+          <option value="ru">{t("localeRu", locale)}</option>
+          <option value="en">{t("localeEn", locale)}</option>
+        </select>
+        <label className="hint">{t("newPassword", locale)}</label>
+        <input
+          className="field"
+          type="password"
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+          autoComplete="new-password"
+          placeholder="••••••••"
+        />
+      </section>
+
+      {user.is_admin ? (
+        <section className="group stack">
+          <h3 className="group-title">{t("users", locale)}</h3>
+          <ul className="hint">
+            {users.map((u) => (
+              <li key={u.username}>
+                {u.username}
+                {u.is_admin ? " (admin)" : ""}
+              </li>
+            ))}
+          </ul>
+          <label className="hint">{t("createUser", locale)}</label>
+          <div className="row">
+            <input
+              className="field"
+              value={newUserName}
+              onChange={(e) => setNewUserName(e.target.value)}
+              placeholder={t("username", locale)}
+            />
+            <input
+              className="field"
+              type="password"
+              value={newUserPass}
+              onChange={(e) => setNewUserPass(e.target.value)}
+              placeholder={t("password", locale)}
+            />
+            <button type="button" className="btn secondary" onClick={createUser}>
+              {t("createUser", locale)}
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       <section className="group stack">
         <h3 className="group-title">Имя пользователя</h3>
@@ -160,7 +269,8 @@ export function SettingsPage({ platform }: Props) {
       </section>
 
       <section className="group stack">
-        <h3 className="group-title">Обработка видео</h3>
+        <h3 className="group-title">{t("processing", locale)}</h3>
+        <p className="hint">{t("processingHint", locale)}</p>
         <ToggleSwitch
           label="GPU при обработке кадров (декод, фильтры, кодирование)"
           checked={useGpu}
@@ -170,18 +280,6 @@ export function SettingsPage({ platform }: Props) {
           label="GPU при склейке и mux звука (concat, ускорение, фон/текст)"
           checked={useGpuFinalize}
           onChange={setUseGpuFinalize}
-        />
-        <label className="hint">Потоков процессов</label>
-        <input
-          className="field"
-          style={{ maxWidth: 120 }}
-          type="number"
-          min={1}
-          max={32}
-          value={workers}
-          onChange={(e) =>
-            setWorkers(Math.max(1, Math.min(32, Number(e.target.value) || 1)))
-          }
         />
         <label className="hint">FPS нарезки</label>
         <select
@@ -246,15 +344,18 @@ export function SettingsPage({ platform }: Props) {
           />
           Headless
         </label>
-        <label className="hint">Макс. параллельных браузеров</label>
+        <label className="hint">{t("maxBrowsers", locale)}</label>
+        <p className="hint">{t("browsersHint", locale)}</p>
         <input
           className="field"
           style={{ maxWidth: 120 }}
           type="number"
           min={1}
-          max={10}
+          max={5}
           value={maxBrowsers}
-          onChange={(e) => setMaxBrowsers(Number(e.target.value) || 1)}
+          onChange={(e) =>
+            setMaxBrowsers(Math.max(1, Math.min(5, Number(e.target.value) || 1)))
+          }
         />
       </section>
 
@@ -380,7 +481,7 @@ export function SettingsPage({ platform }: Props) {
 
       <div className="row">
         <button type="button" className="btn" onClick={save}>
-          Сохранить
+          {t("save", locale)}
         </button>
       </div>
     </div>

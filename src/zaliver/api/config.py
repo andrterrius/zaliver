@@ -47,28 +47,52 @@ def _default_data_dir() -> Path:
     return Path.home() / ".zaliver" / "api"
 
 
+def _default_private_dir(data_dir: Path) -> Path:
+    """Credentials live outside managed sources/output trees when possible."""
+    if sys.platform == "win32":
+        root = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or ""
+        if root:
+            return Path(root) / "Zaliver" / "private"
+    # Sibling of ~/.zaliver/api → ~/.zaliver/private
+    try:
+        parent = data_dir.resolve().parent
+        if parent.name.lower() in {"zaliver", ".zaliver"} or (
+            parent / "api"
+        ).exists():
+            return parent / "private"
+    except OSError:
+        pass
+    return data_dir / "private"
+
+
 @dataclass
 class ApiConfig:
-    """Fail-closed config: token required unless insecure localhost mode."""
+    """Fail-closed config: login required; optional legacy API token."""
 
     host: str = "127.0.0.1"
     port: int = 8080
-    api_token: str = ""
+    api_token: str = ""  # optional legacy Bearer for automation
     allow_insecure_no_token: bool = False
     enable_docs: bool = False
     cors_origins: list[str] = field(default_factory=list)
     allowed_roots: list[Path] = field(default_factory=list)
     data_dir: Path = field(default_factory=_default_data_dir)
+    private_dir: Path | None = None
     output_root: Path | None = None
     sources_root: Path | None = None
     settings_path: Path | None = None
-    max_concurrent_jobs: int = 2
-    max_workers_per_job: int = 8
+    # Global job cap disabled (0 = unlimited). Per-user limits apply instead.
+    max_concurrent_jobs: int = 0
+    max_workers_per_job: int = 1
+    max_browsers_per_user: int = 5
     max_log_lines: int = 2000
     job_log_retention_days: int = 14
     job_log_max_jobs: int = 500
     allow_browser_jobs: bool = True
     platform_default: str = "youtube"
+    session_ttl_seconds: int = 60 * 60 * 24 * 14
+    bootstrap_admin_username: str = "admin"
+    bootstrap_admin_password: str = ""
 
     def resolved_output_root(self) -> Path:
         root = self.output_root if self.output_root is not None else (
@@ -82,29 +106,35 @@ class ApiConfig:
         )
         return Path(root).expanduser()
 
-
-    @property
-    def token_required(self) -> bool:
-        if self.api_token:
-            return True
-        return not self.allow_insecure_no_token
+    def resolved_private_dir(self) -> Path:
+        root = self.private_dir if self.private_dir is not None else (
+            _default_private_dir(self.data_dir)
+        )
+        return Path(root).expanduser()
 
     def validate_startup(self) -> None:
-        if self.api_token:
-            return
-        if self.allow_insecure_no_token and self.host in {"127.0.0.1", "localhost", "::1"}:
-            return
-        raise RuntimeError(
-            "ZALIVER_API_TOKEN is required. "
-            "For local-only testing set ZALIVER_API_ALLOW_INSECURE=1 "
-            "and bind to 127.0.0.1."
-        )
+        # Login/password auth is always on; legacy token is optional.
+        if self.allow_insecure_no_token and self.host not in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+        }:
+            raise RuntimeError(
+                "ZALIVER_API_ALLOW_INSECURE=1 is only allowed when binding "
+                "to 127.0.0.1 / localhost."
+            )
 
 
 def load_api_config() -> ApiConfig:
     data_dir = Path(
         os.environ.get("ZALIVER_API_DATA_DIR") or str(_default_data_dir())
     ).expanduser()
+    private_raw = (os.environ.get("ZALIVER_API_PRIVATE_DIR") or "").strip()
+    private_dir = (
+        Path(private_raw).expanduser()
+        if private_raw
+        else _default_private_dir(data_dir)
+    )
     settings_raw = (os.environ.get("ZALIVER_API_SETTINGS_PATH") or "").strip()
     settings_path = (
         Path(settings_raw).expanduser()
@@ -146,10 +176,19 @@ def load_api_config() -> ApiConfig:
             "http://localhost:5173",
         ]
 
+    # Legacy automation token only — no default "secret".
     token = (os.environ.get("ZALIVER_API_TOKEN") or "").strip()
-    # Temporary default for local/dev until real auth is configured.
-    if not token:
-        token = "secret"
+    admin_user = (
+        os.environ.get("ZALIVER_ADMIN_USERNAME") or "admin"
+    ).strip() or "admin"
+    admin_pass = (os.environ.get("ZALIVER_ADMIN_PASSWORD") or "").strip()
+
+    # 0 = unlimited global jobs (per-user limits still apply).
+    max_jobs_raw = (os.environ.get("ZALIVER_API_MAX_JOBS") or "").strip()
+    if max_jobs_raw == "" or max_jobs_raw == "0":
+        max_jobs = 0
+    else:
+        max_jobs = max(0, _env_int("ZALIVER_API_MAX_JOBS", 0))
 
     return ApiConfig(
         host=(os.environ.get("ZALIVER_API_HOST") or "127.0.0.1").strip() or "127.0.0.1",
@@ -160,11 +199,15 @@ def load_api_config() -> ApiConfig:
         cors_origins=cors,
         allowed_roots=roots,
         data_dir=data_dir,
+        private_dir=private_dir,
         output_root=output_root,
         sources_root=sources_root,
         settings_path=settings_path,
-        max_concurrent_jobs=max(1, min(8, _env_int("ZALIVER_API_MAX_JOBS", 2))),
-        max_workers_per_job=max(1, min(32, _env_int("ZALIVER_API_MAX_WORKERS", 8))),
+        max_concurrent_jobs=max_jobs,
+        max_workers_per_job=1,
+        max_browsers_per_user=max(
+            1, min(5, _env_int("ZALIVER_API_MAX_BROWSERS_PER_USER", 5))
+        ),
         max_log_lines=max(100, min(50_000, _env_int("ZALIVER_API_MAX_LOG_LINES", 2000))),
         job_log_retention_days=max(
             1, min(365, _env_int("ZALIVER_API_JOB_LOG_RETENTION_DAYS", 14))
@@ -177,6 +220,11 @@ def load_api_config() -> ApiConfig:
             os.environ.get("ZALIVER_API_PLATFORM") or "youtube"
         ).strip().lower()
         or "youtube",
+        session_ttl_seconds=max(
+            3600, _env_int("ZALIVER_API_SESSION_TTL_SECONDS", 60 * 60 * 24 * 14)
+        ),
+        bootstrap_admin_username=admin_user,
+        bootstrap_admin_password=admin_pass,
     )
 
 
@@ -189,7 +237,6 @@ def _is_same_or_under(path: Path, root: Path) -> bool:
             return path == root.resolve()
         except OSError:
             return path == root
-
 
 
 def generate_dev_token() -> str:

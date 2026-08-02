@@ -9,9 +9,11 @@ import {
 import { api, type Platform, type Profile } from "../api/client";
 import { useJobPoll } from "../hooks/useJobPoll";
 import { usePersistedJobId } from "../hooks/usePersistedJobId";
+import { useRecentValues } from "../hooks/useRecentValues";
 import { ProgressBar } from "../components/ProgressBar";
 import { JobLogBox } from "../components/JobLogBox";
 import { TitleVariablesHint } from "../components/TitleVariablesHint";
+import { FieldWithRecent } from "../components/RecentValuesField";
 import { ToggleSwitch } from "../components/ToggleSwitch";
 
 type Props = { platform: Platform };
@@ -91,6 +93,7 @@ export function ChannelEditPage({ platform }: Props) {
   const [status, setStatus] = useState("");
   const [jobId, setJobId] = usePersistedJobId("channel_setup");
   const { job } = useJobPoll(jobId);
+  const { recent, refresh: refreshRecent } = useRecentValues(platform);
 
   const [aiOpen, setAiOpen] = useState(false);
   const [aiTarget, setAiTarget] = useState<
@@ -263,6 +266,11 @@ export function ChannelEditPage({ platform }: Props) {
       assignments,
       change_language: changeLanguage,
       headless: false,
+      names_field: enableNames ? namesText : "",
+      description_field: enableDesc ? descText : "",
+      video_titles_field: !isIg && enableVideoTitle ? videoTitles : "",
+      link_titles_field: !isIg && enableLink ? linkTitles : "",
+      link_urls_field: !isIg && enableLink ? linkUrls : "",
       ...(Object.keys(profiles_custom_data).length
         ? { profiles_custom_data }
         : {}),
@@ -289,6 +297,7 @@ export function ChannelEditPage({ platform }: Props) {
         buildPayload(ids),
       );
       setJobId(res.id);
+      void refreshRecent();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setStatus("");
@@ -481,19 +490,25 @@ export function ChannelEditPage({ platform }: Props) {
           }
         />
         {enableNames ? (
-          <textarea
-            ref={namesRef}
-            className="field"
-            rows={4}
+          <FieldWithRecent
+            recent={recent.channel_name_fields}
+            onSelect={setNamesText}
             disabled={running}
-            value={namesText}
-            onChange={(e) => setNamesText(e.target.value)}
-            placeholder={
-              isIg
-                ? "Юзернейм — по одному на строку…"
-                : "Название канала — по одному на строку…"
-            }
-          />
+          >
+            <textarea
+              ref={namesRef}
+              className="field"
+              rows={4}
+              disabled={running}
+              value={namesText}
+              onChange={(e) => setNamesText(e.target.value)}
+              placeholder={
+                isIg
+                  ? "Юзернейм — по одному на строку…"
+                  : "Название канала — по одному на строку…"
+              }
+            />
+          </FieldWithRecent>
         ) : null}
       </section>
 
@@ -533,15 +548,21 @@ export function ChannelEditPage({ platform }: Props) {
             }
           />
           {enableVideoTitle ? (
-            <textarea
-              ref={videoRef}
-              className="field"
-              rows={4}
+            <FieldWithRecent
+              recent={recent.video_default_title_fields}
+              onSelect={setVideoTitles}
               disabled={running}
-              value={videoTitles}
-              onChange={(e) => setVideoTitles(e.target.value)}
-              placeholder="Название видео — по одному на строку. Переменные: {date}, {profile}, {video}, {index}…"
-            />
+            >
+              <textarea
+                ref={videoRef}
+                className="field"
+                rows={4}
+                disabled={running}
+                value={videoTitles}
+                onChange={(e) => setVideoTitles(e.target.value)}
+                placeholder="Название видео — по одному на строку. Переменные: {date}, {profile}, {video}, {index}…"
+              />
+            </FieldWithRecent>
           ) : null}
         </section>
       ) : null}
@@ -579,15 +600,21 @@ export function ChannelEditPage({ platform }: Props) {
           }
         />
         {enableDesc ? (
-          <textarea
-            ref={descRef}
-            className="field"
-            rows={4}
+          <FieldWithRecent
+            recent={recent.channel_descriptions}
+            onSelect={setDescText}
             disabled={running}
-            value={descText}
-            onChange={(e) => setDescText(e.target.value)}
-            placeholder="Описание — по одному на строку (строка = профиль)…"
-          />
+          >
+            <textarea
+              ref={descRef}
+              className="field"
+              rows={4}
+              disabled={running}
+              value={descText}
+              onChange={(e) => setDescText(e.target.value)}
+              placeholder="Описание — по одному на строку (строка = профиль)…"
+            />
+          </FieldWithRecent>
         ) : null}
       </section>
 
@@ -613,26 +640,38 @@ export function ChannelEditPage({ platform }: Props) {
             <div className="grid-2">
               <div className="stack">
                 <label className="hint">Название ссылки</label>
-                <textarea
-                  ref={linkTitleRef}
-                  className="field"
-                  rows={4}
+                <FieldWithRecent
+                  recent={recent.channel_link_titles}
+                  onSelect={setLinkTitles}
                   disabled={running}
-                  value={linkTitles}
-                  onChange={(e) => setLinkTitles(e.target.value)}
-                  placeholder="Название ссылки — по одному на строку (строка = профиль)…"
-                />
+                >
+                  <textarea
+                    ref={linkTitleRef}
+                    className="field"
+                    rows={4}
+                    disabled={running}
+                    value={linkTitles}
+                    onChange={(e) => setLinkTitles(e.target.value)}
+                    placeholder="Название ссылки — по одному на строку (строка = профиль)…"
+                  />
+                </FieldWithRecent>
               </div>
               <div className="stack">
                 <label className="hint">URL</label>
-                <textarea
-                  className="field"
-                  rows={4}
+                <FieldWithRecent
+                  recent={recent.channel_link_urls}
+                  onSelect={setLinkUrls}
                   disabled={running}
-                  value={linkUrls}
-                  onChange={(e) => setLinkUrls(e.target.value)}
-                  placeholder="https://… — по одному URL на строку (строка = профиль)"
-                />
+                >
+                  <textarea
+                    className="field"
+                    rows={4}
+                    disabled={running}
+                    value={linkUrls}
+                    onChange={(e) => setLinkUrls(e.target.value)}
+                    placeholder="https://… — по одному URL на строку (строка = профиль)"
+                  />
+                </FieldWithRecent>
               </div>
             </div>
           ) : null}

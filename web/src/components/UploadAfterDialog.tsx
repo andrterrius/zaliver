@@ -10,6 +10,8 @@ import {
   tagPillClass,
 } from "../lib/profileTags";
 import { TitleVariablesHint } from "./TitleVariablesHint";
+import { FieldWithRecent } from "./RecentValuesField";
+import { useRecentValues } from "../hooks/useRecentValues";
 
 export type UploadAfterChoice = {
   profileIds: string[];
@@ -93,7 +95,7 @@ export function UploadAfterDialog({
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [headless, setHeadless] = useState(true);
-  const [maxBrowsers, setMaxBrowsers] = useState(3);
+  const [maxBrowsers, setMaxBrowsers] = useState(5);
   const [publishBeforeChecks, setPublishBeforeChecks] = useState(true);
   const [keepStudioTitle, setKeepStudioTitle] = useState(false);
   const [uploadAsReady, setUploadAsReady] = useState(false);
@@ -106,6 +108,7 @@ export function UploadAfterDialog({
     useState(true);
   const [scheduleWarmupSearchQuery, setScheduleWarmupSearchQuery] = useState("");
   const [deleteAfterUpload, setDeleteAfterUpload] = useState(false);
+  const { recent } = useRecentValues(platform, open);
   const [search, setSearch] = useState("");
   const [tagFilter, setTagFilter] = useState<Set<string>>(new Set());
   const [showTagModal, setShowTagModal] = useState(false);
@@ -316,20 +319,26 @@ export function UploadAfterDialog({
               <TitleVariablesHint onInsert={(tok) => setTitle((v) => v + tok)} />
             ) : null}
           </label>
-          <input
-            className="field"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
+          <FieldWithRecent
+            recent={recent.upload_titles}
+            onSelect={setTitle}
             disabled={keepStudioTitle}
-            placeholder={
-              keepStudioTitle
-                ? "Название не вводится — из Studio (настройки канала или имя файла)…"
-                : isIg
-                  ? "Подпись к Reels (необязательно). {date}, {profile}…"
-                  : "Название ({date}, {profile}, {video}, {index}…)"
-            }
-            autoFocus={!keepStudioTitle}
-          />
+          >
+            <input
+              className="field"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              disabled={keepStudioTitle}
+              placeholder={
+                keepStudioTitle
+                  ? "Название не вводится — из Studio (настройки канала или имя файла)…"
+                  : isIg
+                    ? "Подпись к Reels (необязательно). {date}, {profile}…"
+                    : "Название ({date}, {profile}, {video}, {index}…)"
+              }
+              autoFocus={!keepStudioTitle}
+            />
+          </FieldWithRecent>
 
           {showYtOptions ? (
             <>
@@ -523,9 +532,13 @@ export function UploadAfterDialog({
                 style={{ width: 72 }}
                 type="number"
                 min={1}
-                max={10}
+                max={5}
                 value={maxBrowsers}
-                onChange={(e) => setMaxBrowsers(Number(e.target.value) || 1)}
+                onChange={(e) =>
+                  setMaxBrowsers(
+                    Math.max(1, Math.min(5, Number(e.target.value) || 1)),
+                  )
+                }
               />
             </label>
           </div>

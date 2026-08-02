@@ -87,7 +87,7 @@ class UploadAfterFollowup(BaseModel):
     platform: str = ""
     kind: str = "local"
     headless: bool = True
-    max_concurrent_browsers: int = Field(default=3, ge=1, le=10)
+    max_concurrent_browsers: int = Field(default=5, ge=1, le=5)
     publish_before_checks: bool = True
     keep_studio_title: bool = False
     schedule_publish: bool = False
@@ -106,7 +106,7 @@ class UniquifyJobRequest(BaseModel):
     # UI platform — overrides in-memory AppState (multi-worker safe).
     platform: str = ""
     input_files: list[str] = Field(min_length=1)
-    num_workers: int = Field(default=2, ge=1, le=32)
+    num_workers: int = Field(default=1, ge=1, le=1)
     copies_per_file: int = Field(default=1, ge=1)
     use_gpu: bool = False
     use_gpu_finalize: bool = False
@@ -140,7 +140,7 @@ class SlicingJobRequest(BaseModel):
     platform: str = ""
     clip_files: list[str] = Field(min_length=1)
     music_files: list[str] = Field(min_length=1)
-    num_workers: int = Field(default=2, ge=1, le=32)
+    num_workers: int = Field(default=1, ge=1, le=1)
     copies_per_track: int = Field(default=1, ge=1)
     use_gpu: bool = False
     use_gpu_finalize: bool = False
@@ -162,7 +162,7 @@ class StitchingJobRequest(BaseModel):
     part1_files: list[str] = Field(min_length=1)
     part2_files: list[str] = Field(min_length=1)
     music_files: list[str] = Field(min_length=1)
-    num_workers: int = Field(default=2, ge=1, le=32)
+    num_workers: int = Field(default=1, ge=1, le=1)
     copies_per_track: int = Field(default=1, ge=1)
     use_gpu: bool = False
     use_gpu_finalize: bool = False
@@ -190,7 +190,7 @@ class UploadJobRequest(BaseModel):
     token: str = ""
     base_url: str = ""
     headless: bool = True
-    max_concurrent_browsers: int = Field(default=3, ge=1, le=10)
+    max_concurrent_browsers: int = Field(default=5, ge=1, le=5)
     cooldown_s: float = Field(default=0.0, ge=0.0, le=86400.0)
     publish_before_checks: bool = True
     keep_studio_title: bool = False
@@ -221,7 +221,7 @@ class ProfileJobBaseRequest(BaseModel):
     token: str = ""
     base_url: str = ""
     headless: bool = True
-    max_concurrent: int = Field(default=3, ge=1, le=10)
+    max_concurrent: int = Field(default=5, ge=1, le=5)
     # profile_id -> antidetect custom_data (credentials)
     profiles_custom_data: dict[str, dict[str, Any]] = Field(default_factory=dict)
     yt_oldest_names: dict[str, str] = Field(default_factory=dict)
@@ -280,6 +280,8 @@ class PromoteSettingsModel(BaseModel):
     enable_comments: bool = False
     comments: list[str] = Field(default_factory=list)
     comment_probability_pct: float = Field(default=50.0, ge=0.0, le=100.0)
+    # Full textarea contents for recent-value history (web UI).
+    comments_field: str = ""
 
 
 class PromoteVideoModel(BaseModel):
@@ -326,6 +328,12 @@ class ChannelSetupJobRequest(ProfileJobBaseRequest):
     assignments: list[ChannelAssignmentModel] = Field(default_factory=list)
     change_language: bool = False
     headless: bool = False
+    # Full textarea contents for recent-value history (web UI).
+    names_field: str = ""
+    description_field: str = ""
+    video_titles_field: str = ""
+    link_titles_field: str = ""
+    link_urls_field: str = ""
 
 
 class JobCreatedResponse(BaseModel):
@@ -492,6 +500,19 @@ class TitleVariablesResponse(BaseModel):
     variables: list[TitleVariableItem]
     example: str
     max_youtube_title_length: int
+
+
+class RecentValuesResponse(BaseModel):
+    """Recent text values for web dropdown pickers (per current platform)."""
+
+    platform: str
+    upload_titles: list[str] = Field(default_factory=list)
+    channel_name_fields: list[str] = Field(default_factory=list)
+    channel_descriptions: list[str] = Field(default_factory=list)
+    channel_link_titles: list[str] = Field(default_factory=list)
+    channel_link_urls: list[str] = Field(default_factory=list)
+    video_default_title_fields: list[str] = Field(default_factory=list)
+    promote_comment_fields: list[str] = Field(default_factory=list)
 
 
 class ErrorResponse(BaseModel):

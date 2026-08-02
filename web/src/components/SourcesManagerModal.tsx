@@ -40,6 +40,7 @@ function formatMeta(e: Entry): string {
 export function SourcesManagerModal({ open, onClose }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const mkdirInputRef = useRef<HTMLInputElement>(null);
+  const selectNInputRef = useRef<HTMLInputElement>(null);
   const [area, setArea] = useState<Area>("sources");
   const [cwd, setCwd] = useState("");
   const [parent, setParent] = useState<string | null>(null);
@@ -52,6 +53,9 @@ export function SourcesManagerModal({ open, onClose }: Props) {
   const [mkdirOpen, setMkdirOpen] = useState(false);
   const [mkdirName, setMkdirName] = useState("");
   const [mkdirError, setMkdirError] = useState("");
+  const [selectNOpen, setSelectNOpen] = useState(false);
+  const [selectNValue, setSelectNValue] = useState("1");
+  const [selectNError, setSelectNError] = useState("");
 
   const paint = useCallback((rel: string, paintSelect: boolean) => {
     setSelected((prev) => {
@@ -99,6 +103,8 @@ export function SourcesManagerModal({ open, onClose }: Props) {
     setMkdirOpen(false);
     setMkdirName("");
     setMkdirError("");
+    setSelectNOpen(false);
+    setSelectNError("");
     setArea("sources");
     void loadDir("", "sources");
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -111,6 +117,12 @@ export function SourcesManagerModal({ open, onClose }: Props) {
     }, 0);
     return () => window.clearTimeout(t);
   }, [mkdirOpen]);
+
+  useEffect(() => {
+    if (!selectNOpen) return;
+    const t = window.setTimeout(() => selectNInputRef.current?.focus(), 0);
+    return () => window.clearTimeout(t);
+  }, [selectNOpen]);
 
   const fileEntries = entries.filter((e) => !e.is_dir);
   const selectedFileCount = fileEntries.filter((e) =>
@@ -125,6 +137,7 @@ export function SourcesManagerModal({ open, onClose }: Props) {
     setStatus("");
     setError("");
     setMkdirOpen(false);
+    setSelectNOpen(false);
     void loadDir("", next);
   };
 
@@ -134,6 +147,30 @@ export function SourcesManagerModal({ open, onClose }: Props) {
 
   const clearSelection = () => {
     setSelected(new Set());
+  };
+
+  const openSelectN = () => {
+    setSelectNValue("1");
+    setSelectNError("");
+    setSelectNOpen(true);
+  };
+
+  const closeSelectN = () => {
+    setSelectNOpen(false);
+    setSelectNError("");
+  };
+
+  const submitSelectN = () => {
+    const raw = selectNValue.trim();
+    const n = Number.parseInt(raw, 10);
+    if (!raw || !Number.isFinite(n) || n < 1) {
+      setSelectNError("Введите целое число не меньше 1.");
+      return;
+    }
+    const take = Math.min(n, fileEntries.length);
+    setSelected(new Set(fileEntries.slice(0, take).map((e) => e.path)));
+    setSelectNOpen(false);
+    setSelectNError("");
   };
 
   const onUpload = async (files: FileList | null) => {
@@ -220,7 +257,26 @@ export function SourcesManagerModal({ open, onClose }: Props) {
       setStatus(`Удалено: ${res.deleted}`);
       await loadDir(cwd, area);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const errMsg = e instanceof Error ? e.message : String(e);
+      setError(errMsg);
+      const match = /Too many paths \(max (\d+)\)/i.exec(errMsg);
+      if (match) {
+        const max = Number.parseInt(match[1], 10);
+        if (Number.isFinite(max) && max > 0) {
+          setSelected((prev) => {
+            if (prev.size <= max) return prev;
+            const ordered = [
+              ...entries
+                .filter((entry) => prev.has(entry.path))
+                .map((entry) => entry.path),
+              ...[...prev].filter(
+                (p) => !entries.some((entry) => entry.path === p),
+              ),
+            ];
+            return new Set(ordered.slice(0, max));
+          });
+        }
+      }
     } finally {
       setBusy(false);
     }
@@ -331,6 +387,14 @@ export function SourcesManagerModal({ open, onClose }: Props) {
             onClick={selectAllFiles}
           >
             Выделить все
+          </button>
+          <button
+            type="button"
+            className="btn secondary"
+            disabled={busy || fileEntries.length === 0}
+            onClick={openSelectN}
+          >
+            Выбрать N…
           </button>
           <button
             type="button"
@@ -486,6 +550,71 @@ export function SourcesManagerModal({ open, onClose }: Props) {
                 onClick={() => void submitMkdir()}
               >
                 Создать
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {selectNOpen ? (
+        <div
+          className="modal-backdrop modal-backdrop--nested"
+          onClick={closeSelectN}
+        >
+          <div
+            className="modal-card stack mkdir-dialog"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mgr-select-n-title"
+          >
+            <h3 id="mgr-select-n-title" className="group-title">
+              Выбрать N файлов
+            </h3>
+            <p className="hint">
+              В этой папке файлов: {fileEntries.length}. Если N больше — будут
+              выбраны все.
+            </p>
+            <label className="hint" htmlFor="mgr-select-n-input">
+              Количество
+            </label>
+            <input
+              id="mgr-select-n-input"
+              ref={selectNInputRef}
+              className="field"
+              type="number"
+              min={1}
+              step={1}
+              value={selectNValue}
+              placeholder="например, 10"
+              autoComplete="off"
+              onChange={(e) => {
+                setSelectNValue(e.target.value);
+                if (selectNError) setSelectNError("");
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  submitSelectN();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  closeSelectN();
+                }
+              }}
+            />
+            {selectNError ? (
+              <div className="error-banner">{selectNError}</div>
+            ) : null}
+            <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={closeSelectN}
+              >
+                Отмена
+              </button>
+              <button type="button" className="btn" onClick={submitSelectN}>
+                Выбрать
               </button>
             </div>
           </div>

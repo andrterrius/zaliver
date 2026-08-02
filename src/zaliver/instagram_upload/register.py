@@ -144,6 +144,14 @@ _SAVE_INFO_RE = re.compile(
     re.IGNORECASE,
 )
 _NOT_NOW_RE = re.compile(r"^не\s+сейчас$|^not\s+now$", re.IGNORECASE)
+_CLOSE_BTN_RE = re.compile(r"^(Close|Закрыть)$", re.I)
+_SCRAPING_WARNING_RE = re.compile(
+    r"автоматизированн\w*\s+действи|"
+    r"automated\s+behaviou?r|"
+    r"suspected\s+automated|"
+    r"we\s+suspect\s+automated",
+    re.I,
+)
 _SAVE_LOGIN_INFO_HEADING_RE = re.compile(
     r"save\s+your\s+login\s+info|"
     r"сохраните\s+пароль|"
@@ -516,6 +524,65 @@ def _is_accounts_suspended(page) -> bool:
     return "/accounts/suspended" in url
 
 
+def _is_scraping_warning_url(url: str = "", page=None) -> bool:
+    """URL /accounts/scraping_warning — предупреждение об автоматизации."""
+    u = (url or "").lower()
+    if not u and page is not None:
+        try:
+            u = (page.url or "").lower()
+        except Exception:
+            u = ""
+    return "/accounts/scraping_warning" in u
+
+
+def _scraping_warning_visible(page) -> bool:
+    """Экран «We suspected automated actions» / RU-аналог."""
+    if _is_scraping_warning_url(page=page):
+        return True
+    try:
+        loc = page.get_by_text(_SCRAPING_WARNING_RE).first
+        return loc.count() > 0 and loc.is_visible(timeout=400)
+    except Exception:
+        return False
+
+
+def dismiss_instagram_scraping_warning_if_present(page) -> bool:
+    """
+    После входа: /accounts/scraping_warning → «Закрыть» / Close.
+    True если нажали.
+    """
+    if not _scraping_warning_visible(page):
+        return False
+    _log(
+        "Instagram: предупреждение об автоматизации "
+        f"(URL={_page_url(page)!r}) — жмём «Закрыть»…"
+    )
+    try:
+        btn = page.get_by_role("button", name=_CLOSE_BTN_RE).first
+        if btn.count() > 0 and btn.is_visible(timeout=800):
+            btn.click(timeout=8000)
+            _log("Instagram: scraping_warning — нажали «Закрыть».")
+            page.wait_for_timeout(1000)
+            return True
+    except Exception:
+        pass
+    try:
+        btn = page.locator("button").filter(has_text=_CLOSE_BTN_RE).first
+        if btn.count() > 0 and btn.is_visible(timeout=500):
+            btn.click(timeout=8000, force=True)
+            _log("Instagram: scraping_warning — нажали «Закрыть» (button).")
+            page.wait_for_timeout(1000)
+            return True
+    except Exception:
+        pass
+    if _click_by_text(page, _CLOSE_BTN_RE, prefer_link=False):
+        _log("Instagram: scraping_warning — нажали «Закрыть» (текст).")
+        page.wait_for_timeout(1000)
+        return True
+    _log("Instagram: scraping_warning виден, но «Закрыть» не нажалась.")
+    return False
+
+
 def _human_confirm_mentions_account(text: str) -> bool:
     t = (text or "").lower()
     return "account" in t or "аккаунт" in t
@@ -810,6 +877,7 @@ def _instagram_already_logged_in(page) -> bool:
             "/accounts/signup",
             "/accounts/login",
             "/accounts/suspended",
+            "/accounts/scraping_warning",
             "chrome-error://",
         )
     ):
@@ -1493,6 +1561,8 @@ def try_instagram_saved_profile_login(page, password: str) -> str | None:
     # Save your login info? → Save
     save_deadline = time.monotonic() + 25.0
     while time.monotonic() < save_deadline:
+        if dismiss_instagram_scraping_warning_if_present(page):
+            continue
         if _is_save_login_info_screen(page):
             if _click_save_login_info(page):
                 _log("Instagram: «Сохраните пароль» — нажали «Не сейчас».")
@@ -1504,6 +1574,8 @@ def try_instagram_saved_profile_login(page, password: str) -> str | None:
 
     home_deadline = time.monotonic() + 45.0
     while time.monotonic() < home_deadline:
+        if dismiss_instagram_scraping_warning_if_present(page):
+            continue
         if _is_save_login_info_screen(page):
             if _click_save_login_info(page):
                 _log("Instagram: «Сохраните пароль» — нажали «Не сейчас».")
@@ -1742,6 +1814,8 @@ def ensure_instagram_session_relogin(
                 continue
         except Exception as e_skip:
             _log(f"Instagram: skip new password: {e_skip!r}")
+        if dismiss_instagram_scraping_warning_if_present(page):
+            continue
         if _is_save_login_info_screen(page):
             if _click_save_login_info(page):
                 _log("Instagram: «Сохраните пароль» — нажали «Не сейчас».")
@@ -3168,6 +3242,7 @@ def handle_instagram_human_confirmation(
     image captcha — сразу SMS-ошибка (Continue не жмём).
     """
     accept_instagram_cookie_consent_if_present(page, appear_seconds=2.0)
+    dismiss_instagram_scraping_warning_if_present(page)
     if _instagram_home_ready(page, username):
         return
 
@@ -3177,6 +3252,7 @@ def handle_instagram_human_confirmation(
     deadline = time.monotonic() + max(0.0, float(appear_timeout_s))
     while time.monotonic() < deadline:
         accept_instagram_cookie_consent_if_present(page)
+        dismiss_instagram_scraping_warning_if_present(page)
         if _instagram_home_ready(page, username):
             return
         abort_if_instagram_sms_image_captcha(page)
@@ -3208,6 +3284,7 @@ def wait_instagram_home_with_username(
     while time.monotonic() < deadline:
         # После кода часто редирект на /consent/?flow=user_cookie_choice_v2.
         accept_instagram_cookie_consent_if_present(page)
+        dismiss_instagram_scraping_warning_if_present(page)
         abort_if_instagram_sms_image_captcha(page)
         try:
             link = page.locator(f'a[href="/{username}/"], a[href="/{username}"]').first

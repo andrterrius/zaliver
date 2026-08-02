@@ -13,6 +13,7 @@ from zaliver.instagram_upload.register import (
     _navigate_page_to,
     _page_url,
     accept_instagram_cookie_consent_if_present,
+    dismiss_instagram_scraping_warning_if_present,
 )
 from zaliver.youtube_upload.totp import get_totp_token
 
@@ -870,11 +871,13 @@ def _guard_step(
 ) -> bool:
     """
     Общие прерывания на любом шаге:
-    suspended / login → ошибка; окно почты Meta → ввод кода;
-    «Создайте новый пароль» → Пропустить.
-    Returns True если обработали почту / skip.
+    suspended / login → ошибка; scraping_warning → Закрыть;
+    окно почты Meta → ввод кода; «Создайте новый пароль» → Пропустить.
+    Returns True если обработали почту / skip / warning.
     """
     _raise_if_instagram_suspended(page)
+    if dismiss_instagram_scraping_warning_if_present(page):
+        return True
     if dismiss_new_password_screen_if_present(page):
         return True
     handled = _handle_email_verification_if_needed(
@@ -884,6 +887,7 @@ def _guard_step(
     )
     if handled:
         _raise_if_instagram_suspended(page)
+        dismiss_instagram_scraping_warning_if_present(page)
         dismiss_new_password_screen_if_present(page)
     return handled
 

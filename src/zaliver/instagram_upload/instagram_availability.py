@@ -8,6 +8,7 @@ from zaliver.instagram_upload.logutil import emit_instagram_log, instagram_entry
 from zaliver.instagram_upload.register import (
     INSTAGRAM_URL,
     accept_instagram_cookie_consent_if_present,
+    dismiss_instagram_scraping_warning_if_present,
     ensure_instagram_session_relogin,
     _extract_logged_in_username,
     _instagram_already_logged_in,
@@ -207,6 +208,7 @@ def verify_instagram_home_available(
 
     _raise_if_accounts_suspended(page)
     accept_instagram_cookie_consent_if_present(page, appear_seconds=2.0)
+    dismiss_instagram_scraping_warning_if_present(page)
     _raise_if_accounts_suspended(page)
 
     deadline = time.monotonic() + max(5.0, float(max_seconds))
@@ -216,6 +218,9 @@ def verify_instagram_home_available(
     while time.monotonic() < deadline:
         last_url = _page_url(page)
         _raise_if_accounts_suspended(page)
+        if dismiss_instagram_scraping_warning_if_present(page):
+            page.wait_for_timeout(400)
+            continue
         if not relogin_tried and _needs_session_relogin(page):
             relogin_tried = True
             uname = ensure_instagram_session_relogin(
@@ -228,9 +233,13 @@ def verify_instagram_home_available(
             )
             if uname:
                 _raise_if_accounts_suspended(page)
+                dismiss_instagram_scraping_warning_if_present(page)
                 # После re-login UI может ещё не успеть отрисоваться.
                 nav_deadline = min(deadline, time.monotonic() + 20.0)
                 while time.monotonic() < nav_deadline:
+                    if dismiss_instagram_scraping_warning_if_present(page):
+                        page.wait_for_timeout(400)
+                        continue
                     if _instagram_logged_in_nav_visible(page):
                         break
                     page.wait_for_timeout(400)
@@ -270,6 +279,7 @@ def verify_instagram_home_available(
             return username
         # Cookie / промежуточный редирект — ещё раз принять cookies.
         accept_instagram_cookie_consent_if_present(page, appear_seconds=1.5)
+        dismiss_instagram_scraping_warning_if_present(page)
         page.wait_for_timeout(400)
 
     raise RuntimeError(

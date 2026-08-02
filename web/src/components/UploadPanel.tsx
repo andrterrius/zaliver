@@ -27,7 +27,6 @@ export function UploadPanel({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [headless, setHeadless] = useState(true);
   const [maxBrowsers, setMaxBrowsers] = useState(5);
   const [search, setSearch] = useState("");
   const [error, setError] = useState("");
@@ -41,7 +40,6 @@ export function UploadPanel({
         const res = await api.listProfiles();
         setProfiles(res.profiles || []);
         const s = await api.getSettings();
-        setHeadless(Boolean(s.values["antydetect/dolphin_headless"] ?? true));
         setMaxBrowsers(
           Number(s.values["antydetect/max_concurrent_browsers"] ?? 3) || 3,
         );
@@ -98,7 +96,7 @@ export function UploadPanel({
         video_paths: videoPaths,
         title,
         description,
-        headless,
+        headless: true,
         max_concurrent_browsers: maxBrowsers,
         kind: "local",
       });
@@ -107,7 +105,7 @@ export function UploadPanel({
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [selected, videoPaths, title, description, headless, maxBrowsers, refreshRecent]);
+  }, [selected, videoPaths, title, description, maxBrowsers, refreshRecent]);
 
   if (!open) {
     return (
@@ -152,14 +150,6 @@ export function UploadPanel({
         onChange={(e) => setDescription(e.target.value)}
         rows={3}
       />
-      <label className="check">
-        <input
-          type="checkbox"
-          checked={headless}
-          onChange={(e) => setHeadless(e.target.checked)}
-        />
-        Headless
-      </label>
       <label className="hint">Параллельных браузеров</label>
       <input
         className="field"

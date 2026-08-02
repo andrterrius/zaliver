@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   api,
+  clearToken,
   type AuthUser,
   type Platform,
   type Profile,
@@ -35,7 +36,6 @@ export function SettingsPage({
   const [localToken, setLocalToken] = useState("secret");
   const [remoteBase, setRemoteBase] = useState("");
   const [remoteCdpHost, setRemoteCdpHost] = useState("");
-  const [headless, setHeadless] = useState(true);
   const [maxBrowsers, setMaxBrowsers] = useState(5);
   const [aiBase, setAiBase] = useState("");
   const [aiKey, setAiKey] = useState("");
@@ -91,7 +91,6 @@ export function SettingsPage({
               "",
           ),
         );
-        setHeadless(Boolean(v["antydetect/dolphin_headless"] ?? true));
         setMaxBrowsers(
           Math.max(
             1,
@@ -135,7 +134,7 @@ export function SettingsPage({
         "antydetect/remote_api_base_url": remoteBase.trim(),
         "antydetect/remote_cdp_public_host": remoteCdpHost.trim(),
         "antydetect/own_remote_cdp_host": remoteCdpHost.trim(),
-        "antydetect/dolphin_headless": headless,
+        "antydetect/dolphin_headless": true,
         "antydetect/max_concurrent_browsers": Math.max(1, Math.min(5, maxBrowsers)),
         "ai/base_url": aiBase,
         "ai/api_key": aiKey,
@@ -187,6 +186,30 @@ export function SettingsPage({
     }
   };
 
+  const deleteUser = async (username: string) => {
+    if (
+      !window.confirm(
+        `${t("deleteUserConfirm", locale)} «${username}»?`,
+      )
+    ) {
+      return;
+    }
+    setError("");
+    setStatus("");
+    try {
+      await api.deleteUser(username);
+      if (username === user.username) {
+        clearToken();
+        window.location.reload();
+        return;
+      }
+      setUsers(await api.listUsers());
+      setStatus(t("saved", locale));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   return (
     <div className="stack">
       <h1 className="title">{t("settings", locale)}</h1>
@@ -222,11 +245,24 @@ export function SettingsPage({
       {user.is_admin ? (
         <section className="group stack">
           <h3 className="group-title">{t("users", locale)}</h3>
-          <ul className="hint">
+          <ul className="hint" style={{ listStyle: "none", padding: 0, margin: 0 }}>
             {users.map((u) => (
-              <li key={u.username}>
-                {u.username}
-                {u.is_admin ? " (admin)" : ""}
+              <li
+                key={u.username}
+                className="row"
+                style={{ alignItems: "center", marginBottom: 8 }}
+              >
+                <span style={{ flex: 1 }}>
+                  {u.username}
+                  {u.is_admin ? " (admin)" : ""}
+                </span>
+                <button
+                  type="button"
+                  className="btn danger"
+                  onClick={() => void deleteUser(u.username)}
+                >
+                  {t("deleteUser", locale)}
+                </button>
               </li>
             ))}
           </ul>
@@ -320,14 +356,6 @@ export function SettingsPage({
           value={remoteCdpHost}
           onChange={(e) => setRemoteCdpHost(e.target.value)}
         />
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={headless}
-            onChange={(e) => setHeadless(e.target.checked)}
-          />
-          Headless
-        </label>
         <label className="hint">{t("maxBrowsers", locale)}</label>
         <p className="hint">{t("browsersHint", locale)}</p>
         <input

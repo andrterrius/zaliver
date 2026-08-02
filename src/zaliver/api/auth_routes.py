@@ -149,4 +149,20 @@ def build_auth_router(state: AppState) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return UserPublic(**user.public_dict())
 
+    @router.delete("/v1/auth/users/{username}", response_model=UserPublic)
+    def delete_user(
+        username: str,
+        request: Request,
+        _auth: AuthContext = Depends(require_auth),
+    ) -> UserPublic:
+        ctx = auth_from_request(request)
+        if not ctx.user.is_admin:
+            raise HTTPException(status_code=403, detail="Только для администратора")
+        try:
+            user = state.users.delete_user(username)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        state.sessions.revoke_user(user.username)
+        return UserPublic(**user.public_dict())
+
     return router

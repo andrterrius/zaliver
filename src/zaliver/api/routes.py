@@ -1268,7 +1268,7 @@ def build_router() -> APIRouter:
 
         kind = resolve_antidetect_kind(settings, body.kind)
         base_url = resolve_local_base_url(settings, body.base_url)
-        headless = bool(body.headless)
+        headless = True
         try:
             max_b = assert_browser_budget(
                 st.jobs,

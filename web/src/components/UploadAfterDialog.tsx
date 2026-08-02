@@ -17,7 +17,6 @@ export type UploadAfterChoice = {
   profileIds: string[];
   title: string;
   description: string;
-  headless: boolean;
   maxBrowsers: number;
   publishBeforeChecks: boolean;
   keepStudioTitle: boolean;
@@ -94,7 +93,6 @@ export function UploadAfterDialog({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [headless, setHeadless] = useState(true);
   const [maxBrowsers, setMaxBrowsers] = useState(5);
   const [publishBeforeChecks, setPublishBeforeChecks] = useState(true);
   const [keepStudioTitle, setKeepStudioTitle] = useState(false);
@@ -144,7 +142,6 @@ export function UploadAfterDialog({
         ]);
         setProfiles(prof.profiles || []);
         const v = settings.values;
-        setHeadless(Boolean(v["antydetect/dolphin_headless"] ?? true));
         setMaxBrowsers(
           Number(v["antydetect/max_concurrent_browsers"] ?? 3) || 3,
         );
@@ -274,7 +271,6 @@ export function UploadAfterDialog({
       profileIds: ids,
       title: keepStudioTitle ? "" : t,
       description: isIg ? "" : description.trim(),
-      headless,
       maxBrowsers,
       publishBeforeChecks: isIg ? true : publishBeforeChecks,
       keepStudioTitle: isIg ? false : keepStudioTitle,
@@ -514,14 +510,6 @@ export function UploadAfterDialog({
           ) : null}
 
           <div className="row">
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={headless}
-                onChange={(e) => setHeadless(e.target.checked)}
-              />
-              Headless (без окна браузера)
-            </label>
             <label
               className="hint"
               style={{ display: "flex", gap: 8, alignItems: "center" }}

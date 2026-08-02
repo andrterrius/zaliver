@@ -265,7 +265,7 @@ export function ChannelEditPage({ platform }: Props) {
       channel_links,
       assignments,
       change_language: changeLanguage,
-      headless: false,
+      headless: true,
       names_field: enableNames ? namesText : "",
       description_field: enableDesc ? descText : "",
       video_titles_field: !isIg && enableVideoTitle ? videoTitles : "",

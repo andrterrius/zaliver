@@ -66,7 +66,7 @@ def build_upload_runner(
     ]
     title = str(cfg.get("title") or "")
     description = str(cfg.get("description") or "")
-    headless = bool(cfg.get("headless", True))
+    headless = True
     from zaliver.api.user_limits import clamp_browsers_per_user
 
     max_b = clamp_browsers_per_user(cfg.get("max_concurrent_browsers") or 5)

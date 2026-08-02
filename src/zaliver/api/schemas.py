@@ -327,7 +327,7 @@ class ChannelSetupJobRequest(ProfileJobBaseRequest):
     channel_links: list[list[str]] = Field(default_factory=list)
     assignments: list[ChannelAssignmentModel] = Field(default_factory=list)
     change_language: bool = False
-    headless: bool = False
+    headless: bool = True
     # Full textarea contents for recent-value history (web UI).
     names_field: str = ""
     description_field: str = ""

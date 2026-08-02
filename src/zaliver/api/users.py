@@ -295,6 +295,21 @@ class UsersStore:
             self._dump()
             return updated
 
+    def delete_user(self, username: str) -> UserRecord:
+        key = normalize_username(username).lower()
+        with self._lock:
+            self.ensure_fresh()
+            user = self._users.get(key)
+            if user is None:
+                raise ValueError("User not found")
+            if user.is_admin:
+                admins = [u for u in self._users.values() if u.is_admin]
+                if len(admins) <= 1:
+                    raise ValueError("Нельзя удалить последнего администратора")
+            del self._users[key]
+            self._dump()
+            return user
+
     def ensure_bootstrap_admin(
         self, *, username: str = "admin", password: str
     ) -> UserRecord | None:

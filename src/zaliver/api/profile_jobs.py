@@ -139,7 +139,7 @@ def _base_request(
         antidetect_kind=antidetect_kind,
         token=token,
         base_url=base_url,
-        headless=bool(body.headless),
+        headless=True,
         max_concurrent=max_c,
         profiles_custom_data=dict(body.profiles_custom_data or {}),
         yt_oldest_names=dict(body.yt_oldest_names or {}),
@@ -264,7 +264,6 @@ def start_channel_setup(
     req = _base_request(
         state, body, kind="channel_setup", username=username, session_token=session_token
     )
-    req.headless = False
     req.channel_description = body.description
     req.channel_description_lines = list(body.description_lines or [])
     req.link_title = body.link_title

@@ -202,6 +202,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  deleteUser: (username: string) =>
+    request<AuthUser>(`/v1/auth/users/${encodeURIComponent(username)}`, {
+      method: "DELETE",
+    }),
   getPlatform: () => request<{ platform: Platform }>("/v1/platform"),
   setPlatform: (platform: Platform) =>
     request<{ platform: Platform }>("/v1/platform", {

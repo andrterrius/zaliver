@@ -84,8 +84,7 @@ def ensure_antidetect_defaults(settings: PlatformSettings) -> None:
         )
     if not settings.contains("antydetect/own_base_url"):
         settings.setValue("antydetect/own_base_url", DEFAULT_LOCAL_API_BASE_URL)
-    if not settings.contains("antydetect/dolphin_headless"):
-        settings.setValue("antydetect/dolphin_headless", True)
+    settings.setValue("antydetect/dolphin_headless", True)
     # Веб-API / `serve`: antidetect по умолчанию ждёт Bearer secret.
     if not settings.contains(LOCAL_API_TOKEN_SETTINGS_KEY):
         settings.setValue(LOCAL_API_TOKEN_SETTINGS_KEY, DEFAULT_LOCAL_API_TOKEN)

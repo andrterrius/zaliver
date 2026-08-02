@@ -60,7 +60,7 @@ export function uploadAfterPayload(
     description: choice.description,
     platform,
     kind: "local",
-    headless: choice.headless,
+    headless: true,
     max_concurrent_browsers: choice.maxBrowsers,
     publish_before_checks: choice.publishBeforeChecks,
     keep_studio_title: choice.keepStudioTitle,
@@ -88,7 +88,7 @@ async function persistUploadSettings(
         : "delete_after_upload";
   try {
     await api.patchSettings({
-      "antydetect/dolphin_headless": pending.headless,
+      "antydetect/dolphin_headless": true,
       "antydetect/max_concurrent_browsers": pending.maxBrowsers,
       upload_title: pending.title,
       upload_description: pending.description,
@@ -193,7 +193,7 @@ export function useUploadAfterJob(
           title: pending.title,
           description: pending.description,
           ...(plat ? { platform: plat } : {}),
-          headless: pending.headless,
+          headless: true,
           max_concurrent_browsers: pending.maxBrowsers,
           kind: "local",
           publish_before_checks: pending.publishBeforeChecks,

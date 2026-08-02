@@ -64,9 +64,15 @@ def make_auth_dependency(state: AppState):
                 detail="Сессия недействительна или истекла",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+        # Pick up users.json edits (delete/rename) without restarting the API.
+        for gone in state.users.ensure_fresh():
+            state.sessions.revoke_user(gone)
+        state.sessions.revoke_unknown_users(
+            {u.username for u in state.users.list_users()}
+        )
         user = state.users.get(session.username)
         if user is None:
-            state.sessions.revoke(provided)
+            state.sessions.revoke_user(session.username)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Пользователь не найден",

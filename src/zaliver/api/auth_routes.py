@@ -50,6 +50,11 @@ def build_auth_router(state: AppState) -> APIRouter:
 
     @router.post("/v1/auth/login", response_model=LoginResponse)
     def login(body: LoginRequest) -> LoginResponse:
+        for gone in state.users.ensure_fresh():
+            state.sessions.revoke_user(gone)
+        state.sessions.revoke_unknown_users(
+            {u.username for u in state.users.list_users()}
+        )
         user = state.users.authenticate(body.username, body.password)
         if user is None:
             raise HTTPException(

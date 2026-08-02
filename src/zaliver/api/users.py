@@ -131,21 +131,34 @@ class UsersStore:
         self._lock = threading.RLock()
         _secure_mkdir(self._path.parent)
         self._users: dict[str, UserRecord] = {}
+        self._mtime: float = -2.0
         self._load()
+        self._mtime = self._stat_mtime()
 
     @property
     def path(self) -> Path:
         return self._path
 
+    def _stat_mtime(self) -> float:
+        try:
+            if self._path.is_file():
+                return float(self._path.stat().st_mtime)
+        except OSError:
+            pass
+        return -1.0
+
     def _load(self) -> None:
         if not self._path.is_file():
+            self._users = {}
             return
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeError):
+            self._users = {}
             return
         items = raw.get("users") if isinstance(raw, dict) else None
         if not isinstance(items, list):
+            self._users = {}
             return
         loaded: dict[str, UserRecord] = {}
         for item in items:
@@ -168,6 +181,21 @@ class UsersStore:
             )
         self._users = loaded
 
+    def ensure_fresh(self) -> frozenset[str]:
+        """Reload users.json when the file changes.
+
+        Returns lowercased usernames that disappeared since the last in-memory
+        snapshot (so callers can revoke their sessions).
+        """
+        with self._lock:
+            mtime = self._stat_mtime()
+            if mtime == self._mtime:
+                return frozenset()
+            previous = set(self._users.keys())
+            self._load()
+            self._mtime = mtime
+            return frozenset(previous - set(self._users.keys()))
+
     def _dump(self) -> None:
         payload = {
             "users": [
@@ -182,14 +210,17 @@ class UsersStore:
             ]
         }
         _secure_write_json(self._path, payload)
+        self._mtime = self._stat_mtime()
 
     def list_users(self) -> list[UserRecord]:
         with self._lock:
+            self.ensure_fresh()
             return sorted(self._users.values(), key=lambda u: u.username.lower())
 
     def get(self, username: str) -> UserRecord | None:
         key = normalize_username(username).lower()
         with self._lock:
+            self.ensure_fresh()
             return self._users.get(key)
 
     def authenticate(self, username: str, password: str) -> UserRecord | None:
@@ -214,6 +245,7 @@ class UsersStore:
         pw = validate_password(password)
         loc = validate_locale(locale)
         with self._lock:
+            self.ensure_fresh()
             if name.lower() in self._users:
                 raise ValueError("User already exists")
             user = UserRecord(
@@ -230,6 +262,7 @@ class UsersStore:
     def set_locale(self, username: str, locale: str) -> UserRecord:
         loc = validate_locale(locale)
         with self._lock:
+            self.ensure_fresh()
             user = self._users.get(normalize_username(username).lower())
             if user is None:
                 raise ValueError("User not found")
@@ -247,6 +280,7 @@ class UsersStore:
     def set_password(self, username: str, password: str) -> UserRecord:
         pw = validate_password(password)
         with self._lock:
+            self.ensure_fresh()
             user = self._users.get(normalize_username(username).lower())
             if user is None:
                 raise ValueError("User not found")
@@ -266,6 +300,7 @@ class UsersStore:
     ) -> UserRecord | None:
         """Create the first admin if the store is empty. Returns created user or None."""
         with self._lock:
+            self.ensure_fresh()
             if self._users:
                 return None
         return self.create_user(username, password, locale="ru", is_admin=True)
@@ -374,6 +409,21 @@ class SessionStore:
         key = normalize_username(username).lower()
         with self._lock:
             drop = [t for t, s in self._sessions.items() if s.username.lower() == key]
+            if not drop:
+                return
+            for t in drop:
+                self._sessions.pop(t, None)
+            self._dump()
+
+    def revoke_unknown_users(self, valid_usernames: set[str] | frozenset[str]) -> None:
+        """Drop sessions whose username is not in the current users set."""
+        valid = {normalize_username(u).lower() for u in valid_usernames if u}
+        with self._lock:
+            drop = [
+                t
+                for t, s in self._sessions.items()
+                if s.username.lower() not in valid
+            ]
             if not drop:
                 return
             for t in drop:

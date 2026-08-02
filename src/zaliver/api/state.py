@@ -150,6 +150,7 @@ def build_app_state(config: ApiConfig) -> AppState:
         private_dir / "sessions.json",
         ttl_seconds=config.session_ttl_seconds,
     )
+    sessions.revoke_unknown_users({u.username for u in users.list_users()})
 
     bootstrap_pw = (config.bootstrap_admin_password or "").strip()
     if not users.list_users():

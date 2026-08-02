@@ -86,6 +86,7 @@ export function SourcePicker({
   multiple = true,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
+  const selectNInputRef = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
   const [cwd, setCwd] = useState("");
   const [parent, setParent] = useState<string | null>(null);
@@ -94,6 +95,9 @@ export function SourcePicker({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [selectNOpen, setSelectNOpen] = useState(false);
+  const [selectNValue, setSelectNValue] = useState("1");
+  const [selectNError, setSelectNError] = useState("");
 
   const loadDir = useCallback(
     async (path: string) => {
@@ -117,8 +121,20 @@ export function SourcePicker({
   useEffect(() => {
     if (!open) return;
     setSelected(new Set());
+    setSelectNOpen(false);
+    setSelectNError("");
     void loadDir("");
   }, [open, loadDir]);
+
+  const fileEntries = entries.filter(
+    (e): e is Entry & { abs_path: string } => !e.is_dir && !!e.abs_path,
+  );
+
+  useEffect(() => {
+    if (!selectNOpen) return;
+    const id = window.setTimeout(() => selectNInputRef.current?.focus(), 0);
+    return () => window.clearTimeout(id);
+  }, [selectNOpen]);
 
   const paint = useCallback(
     (abs: string, paintSelect: boolean) => {
@@ -142,6 +158,46 @@ export function SourcePicker({
     isSelected: (key) => selected.has(key),
     paint,
   });
+
+  const selectFiles = (paths: string[]) => {
+    if (!multiple) {
+      setSelected(paths.length ? new Set([paths[0]]) : new Set());
+      return;
+    }
+    setSelected(new Set(paths));
+  };
+
+  const selectAllFiles = () => {
+    selectFiles(fileEntries.map((e) => e.abs_path));
+  };
+
+  const clearSelection = () => {
+    setSelected(new Set());
+  };
+
+  const openSelectN = () => {
+    setSelectNValue("1");
+    setSelectNError("");
+    setSelectNOpen(true);
+  };
+
+  const closeSelectN = () => {
+    setSelectNOpen(false);
+    setSelectNError("");
+  };
+
+  const submitSelectN = () => {
+    const raw = selectNValue.trim();
+    const n = Number.parseInt(raw, 10);
+    if (!raw || !Number.isFinite(n) || n < 1) {
+      setSelectNError("Введите целое число не меньше 1.");
+      return;
+    }
+    const take = Math.min(n, fileEntries.length);
+    selectFiles(fileEntries.slice(0, take).map((e) => e.abs_path));
+    setSelectNOpen(false);
+    setSelectNError("");
+  };
 
   const confirmServer = () => {
     const paths = [...selected];
@@ -268,6 +324,30 @@ export function SourcePicker({
               >
                 Обновить
               </button>
+              <button
+                type="button"
+                className="btn secondary"
+                disabled={busy || fileEntries.length === 0}
+                onClick={selectAllFiles}
+              >
+                Выделить все
+              </button>
+              <button
+                type="button"
+                className="btn secondary"
+                disabled={busy || fileEntries.length === 0}
+                onClick={openSelectN}
+              >
+                Выбрать N…
+              </button>
+              <button
+                type="button"
+                className="btn secondary"
+                disabled={busy || selected.size === 0}
+                onClick={clearSelection}
+              >
+                Снять выделение
+              </button>
               <span className="hint">Выбрано: {selected.size}</span>
             </div>
             {error ? <div className="error-banner">{error}</div> : null}
@@ -326,6 +406,78 @@ export function SourcePicker({
                 Выбрать
               </button>
             </div>
+
+            {selectNOpen ? (
+              <div
+                className="modal-backdrop modal-backdrop--nested"
+                onClick={closeSelectN}
+              >
+                <div
+                  className="modal-card stack mkdir-dialog"
+                  onClick={(e) => e.stopPropagation()}
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="select-n-title"
+                >
+                  <h3 id="select-n-title" className="group-title">
+                    Выбрать N файлов
+                  </h3>
+                  <p className="hint">
+                    В этой папке файлов: {fileEntries.length}. Если N больше —
+                    будут выбраны все.
+                  </p>
+                  <label className="hint" htmlFor="select-n-input">
+                    Количество
+                  </label>
+                  <input
+                    id="select-n-input"
+                    ref={selectNInputRef}
+                    className="field"
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={selectNValue}
+                    placeholder="например, 10"
+                    autoComplete="off"
+                    onChange={(e) => {
+                      setSelectNValue(e.target.value);
+                      if (selectNError) setSelectNError("");
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        submitSelectN();
+                      } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        closeSelectN();
+                      }
+                    }}
+                  />
+                  {selectNError ? (
+                    <div className="error-banner">{selectNError}</div>
+                  ) : null}
+                  <div
+                    className="row"
+                    style={{ justifyContent: "flex-end", gap: 8 }}
+                  >
+                    <button
+                      type="button"
+                      className="btn secondary"
+                      onClick={closeSelectN}
+                    >
+                      Отмена
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={submitSelectN}
+                    >
+                      Выбрать
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}

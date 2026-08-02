@@ -16,6 +16,7 @@ from zaliver.instagram_upload.register import (
     _is_accounts_suspended,
     _is_classic_login_form_visible,
     _is_instagram_url,
+    _is_mobile_logged_out_landing,
     _is_saved_profile_chooser_screen,
     _navigate_page_to,
     _onetap_password_visible,
@@ -137,6 +138,7 @@ def _needs_session_relogin(page) -> bool:
         _is_saved_profile_chooser_screen(page)
         or _onetap_password_visible(page)
         or _is_classic_login_form_visible(page)
+        or _is_mobile_logged_out_landing(page)
     )
 
 
@@ -149,6 +151,7 @@ def verify_instagram_home_available(
     session_password: str = "",
     session_twofa: str = "",
     profile_id: str | None = None,
+    login_credentials=None,
 ) -> str:
     """
     Открыть главную Instagram и убедиться, что сессия уже залогинена.
@@ -194,6 +197,14 @@ def verify_instagram_home_available(
             )
             _navigate_page_to(page, INSTAGRAM_URL)
 
+    # Через 1.5 с переоткрываем домен Instagram (mobile splash / cold start).
+    _log("Instagram: ждём 1.5 с и переоткрываем главную…")
+    try:
+        page.wait_for_timeout(1500)
+    except Exception:
+        time.sleep(1.5)
+    _navigate_page_to(page, INSTAGRAM_URL)
+
     _raise_if_accounts_suspended(page)
     accept_instagram_cookie_consent_if_present(page, appear_seconds=2.0)
     _raise_if_accounts_suspended(page)
@@ -213,6 +224,7 @@ def verify_instagram_home_available(
                 password=session_password,
                 twofa_secret=session_twofa,
                 max_seconds=min(90.0, max(20.0, deadline - time.monotonic())),
+                login_credentials=login_credentials,
             )
             if uname:
                 _raise_if_accounts_suspended(page)

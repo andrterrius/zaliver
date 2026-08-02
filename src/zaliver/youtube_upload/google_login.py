@@ -231,21 +231,25 @@ def gmail_or_yt_credentials_from_custom_data(
     custom_data: dict[str, object] | None,
 ) -> GoogleLoginCredentials | None:
     """
-    Для входа в Gmail: если в custom_data есть gmail_* — только они,
-    иначе yt_login / yt_password / yt_2fa.
+    Для входа в Gmail: поля gmail_* приоритетнее, пустые добираем из yt_*.
     """
     if not isinstance(custom_data, dict):
         return None
-    email = str(custom_data.get(GMAIL_LOGIN_KEY) or "").strip()
-    password = str(custom_data.get(GMAIL_PASSWORD_KEY) or "")
-    twofa = str(custom_data.get(GMAIL_2FA_KEY) or "").strip()
-    if email or password or twofa:
-        return GoogleLoginCredentials(
-            email=email,
-            password=password,
-            twofa_token=twofa,
-        )
-    return credentials_from_custom_data(custom_data)
+    email = (
+        str(custom_data.get(GMAIL_LOGIN_KEY) or "").strip()
+        or str(custom_data.get(YT_LOGIN_KEY) or "").strip()
+    )
+    password = (
+        str(custom_data.get(GMAIL_PASSWORD_KEY) or "").strip()
+        or str(custom_data.get(YT_PASSWORD_KEY) or "").strip()
+    )
+    twofa = (
+        str(custom_data.get(GMAIL_2FA_KEY) or "").strip()
+        or str(custom_data.get(YT_2FA_KEY) or "").strip()
+    )
+    if not email and not password and not twofa:
+        return None
+    return GoogleLoginCredentials(email=email, password=password, twofa_token=twofa)
 
 
 def oldest_name_from_custom_data(custom_data: dict[str, object] | None) -> str:
@@ -355,13 +359,25 @@ def google_auth_interaction_visible(page) -> bool:
 
 def _account_chooser_step_visible(page) -> bool:
     """Экран «Выберите аккаунт» перед шагом ввода email."""
+    # После «другой аккаунт» URL часто остаётся с flowEntry=AccountChooser,
+    # но path уже /signin/identifier — не путать с chooser.
+    if _identifier_step_visible(page) or _password_step_visible(page):
+        return False
     for scope in _google_auth_scopes(page):
         url = _scope_url_lower(scope)
-        if "accountchooser" in url:
+        path = url.split("?", 1)[0]
+        if "accountchooser" in path:
             return True
         try:
             if scope.locator('[data-p*="identity-signin-account-chooser"]').count() > 0:
                 return True
+        except Exception:
+            pass
+        try:
+            # Список сохранённых аккаунтов (Signed out / Выполнен выход).
+            if scope.locator('[jsname="MBVUVe"][data-identifier]').count() > 0:
+                if scope.locator('[jsname="rwl3qc"]').count() > 0:
+                    return True
         except Exception:
             pass
         try:
@@ -476,8 +492,17 @@ def _click_use_another_account(page) -> None:
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
         if _identifier_step_visible(page):
+            _log("Google: после «другой аккаунт» — экран email.")
+            return
+        # Иногда сразу пароль для сохранённого аккаунта — тоже ок.
+        if _password_step_visible(page):
+            _log("Google: после «другой аккаунт» — экран пароля.")
             return
         page.wait_for_timeout(250)
+    raise RuntimeError(
+        "Google: после «Использовать другой аккаунт» не появился "
+        f"экран email/пароля. URL={page.url!r}"
+    )
 
 
 def _use_another_account_present_js(scope) -> bool:
@@ -1780,6 +1805,18 @@ def attempt_google_login_for_studio(
             _log("Google: вход завершён (без выбора канала YouTube).")
             return True
 
+        if _identifier_step_visible(page):
+            email = (credentials.email or "").strip()
+            if not email:
+                raise GoogleLoginCredentialsMissingError(
+                    "YouTube Studio: для входа нужен логин (yt_login) в данных учётки "
+                    "локального профиля — email не задан."
+                )
+            steps += 1
+            _log(f"Google: ввод email ({email}) и «Далее» (шаг {steps})…")
+            _fill_identifier_and_continue(page, email)
+            continue
+
         if _account_chooser_step_visible(page):
             steps += 1
             idle_rounds = 0
@@ -1838,18 +1875,6 @@ def attempt_google_login_for_studio(
             steps += 1
             _log(f"Google: ввод пароля и «Далее» (шаг {steps})…")
             _fill_input_and_click_next(page, page.locator('input[name="Passwd"]'), pwd)
-            continue
-
-        if _identifier_step_visible(page):
-            email = (credentials.email or "").strip()
-            if not email:
-                raise GoogleLoginCredentialsMissingError(
-                    "YouTube Studio: для входа нужен логин (yt_login) в данных учётки "
-                    "локального профиля — email не задан."
-                )
-            steps += 1
-            _log(f"Google: ввод email ({email}) и «Далее» (шаг {steps})…")
-            _fill_identifier_and_continue(page, email)
             continue
 
         if _passkey_enrollment_visible(page):

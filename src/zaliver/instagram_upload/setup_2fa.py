@@ -33,6 +33,12 @@ _TWO_FACTOR_RE = re.compile(
     re.I,
 )
 _CONTINUE_RE = re.compile(r"^(Continue|Next|Продолжить|Далее)$", re.I)
+_SKIP_RE = re.compile(r"^(Skip|Пропустить)$", re.I)
+_NEW_PASSWORD_HEADING_RE = re.compile(
+    r"создайте\s+новый\s+пароль|"
+    r"create\s+(a\s+)?new\s+password",
+    re.I,
+)
 _ENTER_CODE_BTN_RE = re.compile(
     r"^(Enter\s+code|Ввести\s+код)$",
     re.I,
@@ -88,12 +94,17 @@ _EMAIL_CHECK_RE = re.compile(
     r"Check\s+your\s+email|"
     r"Enter\s+the\s+code\s+we\s+sent|"
     r"Two\s+Step\s+Verification|"
+    r"Проверьте\s+электронную\s+почту|"
     r"Проверьте\s+(свою\s+)?почту|"
     r"Введите\s+код,\s+который\s+мы\s+отправили|"
+    r"Мы\s+отправили\s+код\s+сюда|"
     r"Двухэтапн\w*\s+проверк",
     re.I,
 )
-_EMAIL_CODE_LABEL_RE = re.compile(r"^(Code|Код)$", re.I)
+_EMAIL_CODE_LABEL_RE = re.compile(
+    r"^(Code|Код|Введите\s+код|Enter\s+(the\s+)?code)$",
+    re.I,
+)
 _CODE_SCREEN_RE = re.compile(
     r"Get\s+your\s+code\s+from\s+your\s+authentication\s+app|"
     r"Enter\s+the\s+6[- ]digit\s+code|"
@@ -535,14 +546,109 @@ def _email_check_screen_visible(page) -> bool:
     except Exception:
         pass
     try:
-        # «Check your email» + поле Code
+        # Bloks: <h2 aria-label="Проверьте электронную почту">
         if page.get_by_role(
-            "heading", name=re.compile(r"Check\s+your\s+email", re.I)
+            "heading",
+            name=re.compile(
+                r"Check\s+your\s+email|Проверьте\s+электронную\s+почту|"
+                r"Проверьте\s+(свою\s+)?почту",
+                re.I,
+            ),
         ).first.is_visible(timeout=250):
             return True
     except Exception:
         pass
+    try:
+        heading = page.locator(
+            'h2[aria-label*="Проверьте электронную почту" i], '
+            'h2[aria-label*="Check your email" i]'
+        ).first
+        code_inp = page.locator(
+            'input[aria-label="Введите код" i], '
+            'input[aria-label="Enter code" i], '
+            'input[inputmode="numeric"]'
+        ).first
+        if heading.count() > 0 and code_inp.count() > 0:
+            return True
+    except Exception:
+        pass
     return False
+
+
+def _new_password_screen_visible(page) -> bool:
+    """Экран «Создайте новый пароль» после кода из почты (Skip / Пропустить)."""
+    try:
+        h = page.locator(
+            'h3[aria-label*="новый пароль" i], '
+            'h3[aria-label*="new password" i], '
+            'h2[aria-label*="новый пароль" i], '
+            'h2[aria-label*="new password" i]'
+        ).first
+        if h.count() > 0 and h.is_visible(timeout=300):
+            return True
+    except Exception:
+        pass
+    try:
+        if page.get_by_role(
+            "heading", name=_NEW_PASSWORD_HEADING_RE
+        ).first.is_visible(timeout=300):
+            return True
+    except Exception:
+        pass
+    try:
+        pwd = page.locator(
+            'input[type="password"][aria-label*="Новый пароль" i], '
+            'input[type="password"][aria-label*="New password" i]'
+        ).first
+        skip = page.locator(
+            '[role="button"][aria-label="Пропустить" i], '
+            '[role="button"][aria-label="Skip" i]'
+        ).first
+        if (
+            pwd.count() > 0
+            and pwd.is_visible(timeout=250)
+            and skip.count() > 0
+            and skip.is_visible(timeout=250)
+        ):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _click_skip_new_password(page) -> bool:
+    for sel in (
+        '[role="button"][aria-label="Пропустить" i]',
+        '[role="button"][aria-label="Skip" i]',
+    ):
+        try:
+            btn = page.locator(sel).first
+            if btn.count() > 0 and btn.is_visible(timeout=400):
+                btn.click(timeout=8000)
+                _log("Instagram: «Создайте новый пароль» — нажали «Пропустить».")
+                return True
+        except Exception:
+            continue
+    try:
+        btn = page.get_by_role("button", name=_SKIP_RE).first
+        if btn.count() > 0 and btn.is_visible(timeout=400):
+            btn.click(timeout=8000)
+            _log("Instagram: «Создайте новый пароль» — нажали «Пропустить».")
+            return True
+    except Exception:
+        pass
+    # Bloks: клик по тексту «Пропустить».
+    if _click_by_text(page, _SKIP_RE, timeout_ms=2500):
+        _log("Instagram: «Создайте новый пароль» — нажали «Пропустить» (текст).")
+        return True
+    return False
+
+
+def dismiss_new_password_screen_if_present(page) -> bool:
+    """Если экран нового пароля — Skip. True если нажали."""
+    if not _new_password_screen_visible(page):
+        return False
+    return _click_skip_new_password(page)
 
 
 def _fill_meta_email_code(page, code: str) -> bool:
@@ -551,9 +657,20 @@ def _fill_meta_email_code(page, code: str) -> bool:
         return False
     targets = []
     try:
+        targets.append(
+            page.locator(
+                'input[aria-label="Введите код" i], '
+                'input[aria-label="Enter code" i], '
+                'input[aria-label*="Введите код" i]'
+            ).first
+        )
+    except Exception:
+        pass
+    try:
         targets.append(page.get_by_label(_EMAIL_CODE_LABEL_RE).first)
     except Exception:
         pass
+    targets.append(page.locator('input[inputmode="numeric"]').first)
     targets.append(page.locator('input[type="text"]').first)
     targets.append(page.locator(_CODE_INPUT_SEL).first)
     for target in targets:
@@ -579,6 +696,20 @@ def _fill_meta_email_code(page, code: str) -> bool:
 def _click_continue_enabled(page, *, deadline: float) -> bool:
     while time.monotonic() < deadline:
         try:
+            btn = page.locator(
+                '[role="button"][aria-label="Продолжить" i], '
+                '[role="button"][aria-label="Continue" i]'
+            ).first
+            if btn.count() > 0:
+                disabled = (btn.get_attribute("aria-disabled") or "").strip().lower()
+                if disabled not in ("true", "1"):
+                    btn.click(timeout=10_000, force=True)
+                    _log("Instagram: нажали «Продолжить» (aria-label).")
+                    page.wait_for_timeout(900)
+                    return True
+        except Exception:
+            pass
+        try:
             btn = page.get_by_role("button", name=_CONTINUE_RE).first
             if _visible(btn, timeout=600):
                 disabled = (btn.get_attribute("aria-disabled") or "").strip().lower()
@@ -596,13 +727,18 @@ def _click_continue_enabled(page, *, deadline: float) -> bool:
 
 
 def _open_gmail_tab(accounts_page, login_credentials=None):
-    from zaliver.instagram_upload.gmail_availability import verify_gmail_inbox_available
+    from zaliver.instagram_upload.gmail_availability import (
+        force_desktop_emulation_for_page,
+        verify_gmail_inbox_available,
+    )
 
     context = accounts_page.context
     gmail = None
     try:
         gmail = context.new_page()
-        _log("Instagram 2FA: открыли вкладку Gmail…")
+        _log("Instagram: открыли вкладку Gmail (desktop emulation)…")
+        # Контекст может быть iPhone 12 Pro — без этого Gmail mobile ломает селекторы.
+        force_desktop_emulation_for_page(gmail)
         verify_gmail_inbox_available(gmail, login_credentials=login_credentials)
         return gmail
     except Exception:
@@ -630,11 +766,12 @@ def _handle_email_verification_if_needed(
         return False
 
     from zaliver.instagram_upload.gmail_confirmation_code import (
+        fetch_instagram_confirmation_code_from_gmail,
         fetch_meta_authenticate_code_from_gmail,
     )
 
     _log(
-        "Instagram 2FA: нужен код из почты Meta — "
+        "Instagram: экран «Проверьте электронную почту» — "
         "ждём 3 с, затем открываем Gmail…"
     )
     page.wait_for_timeout(3000)
@@ -643,11 +780,25 @@ def _handle_email_verification_if_needed(
     used: set[str] = set()
     try:
         for attempt in range(1, 4):
-            code = fetch_meta_authenticate_code_from_gmail(
-                gmail,
-                max_seconds=min(120.0, max(30.0, deadline - time.monotonic())),
-                exclude_codes=used,
-            )
+            wait_s = min(120.0, max(30.0, deadline - time.monotonic()))
+            meta_wait = min(40.0, wait_s)
+            code = ""
+            try:
+                code = fetch_meta_authenticate_code_from_gmail(
+                    gmail,
+                    max_seconds=meta_wait,
+                    exclude_codes=used,
+                )
+            except Exception as e_meta:
+                _log(
+                    f"Instagram: письмо Meta не найдено ({e_meta!r}) — "
+                    "пробуем код Instagram (6 цифр)…"
+                )
+                code = fetch_instagram_confirmation_code_from_gmail(
+                    gmail,
+                    max_seconds=wait_s,
+                    exclude_codes=used,
+                )
             used.add(code)
             try:
                 page.bring_to_front()
@@ -655,50 +806,58 @@ def _handle_email_verification_if_needed(
                 pass
             page.wait_for_timeout(500)
             if not _email_check_screen_visible(page):
-                _log("Instagram 2FA: экран почты уже сменился.")
+                _log("Instagram: экран почты уже сменился.")
                 return True
             if not _fill_meta_email_code(page, code):
                 raise RuntimeError(
-                    "Instagram 2FA: не удалось ввести код из письма Meta "
+                    "Instagram: не удалось ввести код из письма "
                     f"(URL={_page_url(page)!r})."
                 )
             if not _click_continue_enabled(
                 page, deadline=min(deadline, time.monotonic() + 15.0)
             ):
                 raise RuntimeError(
-                    "Instagram 2FA: не удалось нажать Continue после кода почты "
+                    "Instagram: не удалось нажать «Продолжить» после кода почты "
                     f"(URL={_page_url(page)!r})."
                 )
             settle = min(deadline, time.monotonic() + 20.0)
             while time.monotonic() < settle:
                 if not _email_check_screen_visible(page):
-                    _log("Instagram 2FA: код почты принят.")
+                    _log("Instagram: код почты принят.")
+                    dismiss_new_password_screen_if_present(page)
                     return True
                 if _wrong_code_visible(page):
                     _log(
-                        f"Instagram 2FA: код почты {code} отклонён "
+                        f"Instagram: код почты {code} отклонён "
                         f"(попытка {attempt}) — ждём новое письмо…"
                     )
                     break
                 page.wait_for_timeout(400)
             else:
                 if not _email_check_screen_visible(page):
+                    dismiss_new_password_screen_if_present(page)
                     return True
             if not _email_check_screen_visible(page):
+                dismiss_new_password_screen_if_present(page)
                 return True
         raise RuntimeError(
-            "Instagram 2FA: код из письма Meta не принят "
+            "Instagram: код из письма не принят "
             f"(URL={_page_url(page)!r})."
         )
     finally:
         try:
             if gmail is not None and not gmail.is_closed():
                 gmail.close()
-                _log("Instagram 2FA: вкладка Gmail закрыта.")
+                _log("Instagram: вкладка Gmail закрыта.")
         except Exception:
             pass
         try:
             page.bring_to_front()
+        except Exception:
+            pass
+        # После закрытия Gmail экран нового пароля мог уже открыться.
+        try:
+            dismiss_new_password_screen_if_present(page)
         except Exception:
             pass
 
@@ -711,10 +870,13 @@ def _guard_step(
 ) -> bool:
     """
     Общие прерывания на любом шаге:
-    suspended / login → ошибка; окно почты Meta → ввод кода.
-    Returns True если обработали почту.
+    suspended / login → ошибка; окно почты Meta → ввод кода;
+    «Создайте новый пароль» → Пропустить.
+    Returns True если обработали почту / skip.
     """
     _raise_if_instagram_suspended(page)
+    if dismiss_new_password_screen_if_present(page):
+        return True
     handled = _handle_email_verification_if_needed(
         page,
         login_credentials=login_credentials,
@@ -722,6 +884,7 @@ def _guard_step(
     )
     if handled:
         _raise_if_instagram_suspended(page)
+        dismiss_new_password_screen_if_present(page)
     return handled
 
 

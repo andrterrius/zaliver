@@ -193,6 +193,7 @@ class LocalAntidetectHttpAPI:
         expose_cdp: bool = True,
         start_url: str = "https://studio.youtube.com/",
         remote_cdp: RemoteCdpLaunchOptions | None = None,
+        device_preset: str | None = None,
     ) -> dict[str, Any]:
         url = f"{self._base}/profiles/{profile_id}/launch"
         body: dict[str, Any] = {
@@ -200,6 +201,9 @@ class LocalAntidetectHttpAPI:
             "expose_cdp": bool(expose_cdp),
             "start_url": start_url,
         }
+        preset = (device_preset or "").strip()
+        if preset:
+            body["device_preset"] = preset
         if remote_cdp is not None:
             host = (remote_cdp.cdp_public_host or "").strip()
             if not host:

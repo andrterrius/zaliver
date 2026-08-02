@@ -23,7 +23,6 @@ def make_auth_dependency(state: AppState):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Missing Bearer token",
-                headers={"WWW-Authenticate": "Bearer"},
             )
         expected = cfg.api_token
         provided = credentials.credentials or ""

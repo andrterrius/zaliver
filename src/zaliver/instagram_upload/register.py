@@ -143,8 +143,11 @@ _SAVE_INFO_RE = re.compile(
     r"^save(\s*info)?$|^сохранить(\s+данные)?$|^сохранить\s+информацию$",
     re.IGNORECASE,
 )
+_NOT_NOW_RE = re.compile(r"^не\s+сейчас$|^not\s+now$", re.IGNORECASE)
 _SAVE_LOGIN_INFO_HEADING_RE = re.compile(
     r"save\s+your\s+login\s+info|"
+    r"сохраните\s+пароль|"
+    r"сохранить\s+данные\s+для\s+входа|"
     r"сохранить\s+(данные\s+для\s+)?входа|"
     r"сохранить\s+информацию\s+для\s+входа",
     re.IGNORECASE,
@@ -237,6 +240,10 @@ _COOKIE_NON_ACTION_RE = re.compile(
 # («Enter the code from the image»).
 _CONFIRM_CODE_HEADING_RE = re.compile(
     r"введите\s+код\s+подтверждения|"
+    r"проверьте\s+электронную\s+почту|"
+    r"проверьте\s+(свою\s+)?почту|"
+    r"check\s+your\s+email|"
+    r"мы\s+отправили\s+код\s+сюда|"
     r"enter\s+(the\s+)?confirmation\s+code|"
     r"enter\s+(the\s+)?security\s+code|"
     r"confirmation\s+code",
@@ -614,13 +621,30 @@ def _extract_logged_in_username(page) -> str:
     return ""
 
 
+_SIGN_UP_BTN_RE = re.compile(
+    r"^зарегистрироваться$|^sign\s*up$|^create\s+new\s+account$|"
+    r"^создать\s+новый\s+аккаунт$",
+    re.IGNORECASE,
+)
+_OPEN_IG_APP_RE = re.compile(
+    r"^открыть\s+instagram$|^open\s+(the\s+)?instagram(\s+app)?$",
+    re.IGNORECASE,
+)
+
+
 def _instagram_login_form_visible(page) -> bool:
     """Экран входа (ещё не залогинены)."""
+    if _is_classic_login_form_visible(page):
+        return True
+    if _is_mobile_logged_out_landing(page):
+        return True
     try:
         if page.get_by_text(
             re.compile(
-                r"^войти$|^log\s*in$|phone\s+number,\s+username,\s+or\s+email|"
-                r"номер\s+телефона,\s+имя\s+пользователя\s+или\s+эл",
+                r"phone\s+number,\s+username,\s+or\s+email|"
+                r"номер\s+телефона,\s+имя\s+пользователя\s+или\s+эл|"
+                r"имя\s+пользователя,\s+эл\.?\s*адрес|"
+                r"username,\s+email\s+or\s+mobile",
                 re.I,
             )
         ).first.is_visible(timeout=300):
@@ -633,6 +657,66 @@ def _instagram_login_form_visible(page) -> bool:
     except Exception:
         url = ""
     return "/accounts/login" in url
+
+
+def _is_mobile_logged_out_landing(page) -> bool:
+    """
+    Mobile splash без сохранённого профиля:
+    «Войти» + «зарегистрироваться» (+ часто «Открыть Instagram»).
+    """
+    if _is_classic_login_form_visible(page) or _is_saved_profile_chooser_screen(page):
+        return False
+    try:
+        login_btn = page.locator("button").filter(has_text=_LOG_IN_RE).first
+        signup_btn = page.locator("button").filter(has_text=_SIGN_UP_BTN_RE).first
+        if login_btn.count() > 0 and signup_btn.count() > 0:
+            return True
+    except Exception:
+        pass
+    try:
+        login_btn = page.get_by_role("button", name=_LOG_IN_RE).first
+        signup_btn = page.get_by_role("button", name=_SIGN_UP_BTN_RE).first
+        if login_btn.count() > 0 and signup_btn.count() > 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _click_mobile_landing_log_in(page) -> bool:
+    """На splash нажать «Войти» (не «Открыть Instagram»)."""
+    try:
+        buttons = page.locator("button")
+        n = int(buttons.count())
+        for i in range(min(n, 12)):
+            target = buttons.nth(i)
+            try:
+                text = (target.inner_text(timeout=300) or "").strip()
+            except Exception:
+                continue
+            if not text or _OPEN_IG_APP_RE.search(text):
+                continue
+            if not _LOG_IN_RE.fullmatch(text):
+                continue
+            try:
+                target.click(timeout=8000)
+                return True
+            except Exception:
+                try:
+                    target.click(timeout=8000, force=True)
+                    return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    try:
+        btn = page.get_by_role("button", name=_LOG_IN_RE).first
+        if btn.count() > 0:
+            btn.click(timeout=8000, force=True)
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _instagram_session_cookie_present(page) -> bool:
@@ -753,33 +837,68 @@ def _raise_if_already_logged_in(page) -> None:
     raise InstagramAlreadyLoggedInError(username=username, detail=f"URL={url!r}")
 
 
+_SAVED_PROFILE_ALT_BTN = (
+    '[role="button"][aria-label*="Использовать другой профиль" i], '
+    '[role="button"][aria-label*="Use another profile" i], '
+    '[role="button"][aria-label*="Создать новый аккаунт" i], '
+    '[role="button"][aria-label*="Create new account" i], '
+    '[role="button"][aria-label*="Create new account"], '
+    'a[aria-label*="Create new account" i], '
+    'a[href*="emailsignup"]'
+)
+_SAVED_PROFILE_CONTINUE_EXACT = (
+    '[role="button"][aria-label="Продолжить" i], '
+    '[role="button"][aria-label="Continue" i]'
+)
+_SAVED_PROFILE_CONTINUE_WITH_USER = (
+    '[role="button"][aria-label^="Continue " i], '
+    '[role="button"][aria-label^="Продолжить " i]'
+)
+_SAVED_PROFILE_AVATAR_RE = re.compile(
+    r"^([A-Za-z0-9._]{2,30})\s*,\s*(фото\s+профиля|profile\s+photo)\s*$",
+    re.IGNORECASE,
+)
+
+
 def _is_saved_profile_chooser_screen(page) -> bool:
     """
-    Экран «Continue <username>» / сохранённый профиль в браузере
-    (рядом часто Create new account / Use another profile).
+    Экран сохранённого профиля:
+    - desktop: «Continue <username>» / «Продолжить <username>»;
+    - mobile Bloks: aria-label=\"Продолжить\" + аватар / «другой профиль».
     """
     try:
-        btn = page.locator(
-            '[role="button"][aria-label^="Continue " i], '
-            '[role="button"][aria-label^="Продолжить " i]'
-        ).first
+        btn = page.locator(_SAVED_PROFILE_CONTINUE_WITH_USER).first
         if btn.count() > 0 and btn.is_visible(timeout=400):
+            return True
+    except Exception:
+        pass
+    # Mobile Bloks: точное «Продолжить» рядом с «другой профиль» / «создать аккаунт».
+    try:
+        cont = page.locator(_SAVED_PROFILE_CONTINUE_EXACT).first
+        alt = page.locator(_SAVED_PROFILE_ALT_BTN).first
+        if cont.count() > 0 and alt.count() > 0:
             return True
     except Exception:
         pass
     try:
         cont = page.locator('[role="button"]').filter(has_text=_CONTINUE_RE).first
-        create = page.locator(
-            'a[aria-label*="Create new account" i], '
-            'a[aria-label*="Create new account"], '
-            'a[href*="emailsignup"]'
-        ).first
+        alt = page.locator(_SAVED_PROFILE_ALT_BTN).first
         if (
             cont.count() > 0
             and cont.is_visible(timeout=300)
-            and create.count() > 0
-            and create.is_visible(timeout=300)
+            and alt.count() > 0
         ):
+            return True
+    except Exception:
+        pass
+    # Аватар «username, фото профиля» + кнопка Продолжить (mobile).
+    try:
+        avatar = page.locator(
+            '[role="button"][aria-label*=", фото профиля" i], '
+            '[role="button"][aria-label*=", profile photo" i]'
+        ).first
+        cont = page.locator(_SAVED_PROFILE_CONTINUE_EXACT).first
+        if avatar.count() > 0 and cont.count() > 0:
             return True
     except Exception:
         pass
@@ -787,12 +906,9 @@ def _is_saved_profile_chooser_screen(page) -> bool:
 
 
 def _extract_saved_profile_username(page) -> str:
-    """Ник с экрана сохранённого профиля (Continue <user> / текст под аватаром)."""
+    """Ник с экрана сохранённого профиля (Continue <user> / аватар / заголовок)."""
     try:
-        btn = page.locator(
-            '[role="button"][aria-label^="Continue " i], '
-            '[role="button"][aria-label^="Продолжить " i]'
-        ).first
+        btn = page.locator(_SAVED_PROFILE_CONTINUE_WITH_USER).first
         if btn.count() > 0:
             label = (btn.get_attribute("aria-label") or "").strip()
             for prefix in ("Continue ", "Продолжить "):
@@ -802,22 +918,56 @@ def _extract_saved_profile_username(page) -> str:
                         return name
     except Exception:
         pass
+    # Mobile Bloks: aria-label="james…, фото профиля"
+    try:
+        avatar = page.locator(
+            '[role="button"][aria-label*=", фото профиля" i], '
+            '[role="button"][aria-label*=", profile photo" i]'
+        ).first
+        if avatar.count() > 0:
+            label = (avatar.get_attribute("aria-label") or "").strip()
+            m = _SAVED_PROFILE_AVATAR_RE.match(label)
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+    # Mobile Bloks: крупный ник в h2 / heading.
+    try:
+        heading = page.locator('h2 [role="heading"], h2 span, [role="heading"]').first
+        if heading.count() > 0:
+            text = (heading.inner_text(timeout=500) or "").strip().lstrip("@")
+            if text and re.fullmatch(r"[A-Za-z0-9._]{2,30}", text):
+                return text
+    except Exception:
+        pass
     return ""
 
 
 def _click_saved_profile_continue(page) -> bool:
-    """Нажать Continue на экране сохранённого профиля."""
+    """Нажать Continue / Продолжить на экране сохранённого профиля."""
     try:
-        btn = page.locator(
-            '[role="button"][aria-label^="Continue " i], '
-            '[role="button"][aria-label^="Продолжить " i]'
-        ).first
+        btn = page.locator(_SAVED_PROFILE_CONTINUE_WITH_USER).first
         if btn.count() > 0 and btn.is_visible(timeout=800):
             btn.click(timeout=8000)
             return True
     except Exception:
         pass
-    # Точный Continue рядом с аватаром профиля (не intro «Confirm you're human»).
+    # Mobile Bloks: aria-label ровно «Продолжить» / «Continue».
+    try:
+        btn = page.locator(_SAVED_PROFILE_CONTINUE_EXACT).first
+        if btn.count() > 0:
+            try:
+                visible = btn.is_visible(timeout=500)
+            except Exception:
+                visible = True
+            if visible or btn.count() > 0:
+                disabled = (btn.get_attribute("aria-disabled") or "").lower() == "true"
+                if not disabled:
+                    btn.click(timeout=8000, force=True)
+                    return True
+    except Exception:
+        pass
+    # Continue с текстом внутри (не intro «Confirm you're human»).
     try:
         btn = page.locator(
             '[role="button"][aria-label*="Continue" i], '
@@ -832,7 +982,7 @@ def _click_saved_profile_continue(page) -> bool:
 
 
 def _is_classic_login_form_visible(page) -> bool:
-    """Форма Log in to Instagram: form#login_form (username/email + password)."""
+    """Форма входа: desktop form#login_form или mobile Bloks username+password."""
     try:
         form = page.locator("form#login_form").first
         if form.count() > 0 and form.is_visible(timeout=500):
@@ -847,13 +997,29 @@ def _is_classic_login_form_visible(page) -> bool:
                 return True
     except Exception:
         pass
+    # Mobile Bloks: input[name=username] + input[name=password] + Войти
+    try:
+        user = page.locator('input[name="username"]').first
+        pwd = page.locator(
+            'input[name="password"][type="password"], '
+            'input[aria-label="Пароль" i][type="password"]'
+        ).first
+        if user.count() > 0 and pwd.count() > 0:
+            return True
+    except Exception:
+        pass
     try:
         heading = page.get_by_text(
             re.compile(r"^log\s+in\s+to\s+instagram$|^вход\s+в\s+instagram$", re.I)
         ).first
         if heading.count() > 0 and heading.is_visible(timeout=400):
-            email = page.locator('input[name="email"]').first
-            pwd = page.locator('input[name="pass"][type="password"]').first
+            email = page.locator(
+                'input[name="email"], input[name="username"]'
+            ).first
+            pwd = page.locator(
+                'input[name="pass"][type="password"], '
+                'input[name="password"][type="password"]'
+            ).first
             if (
                 email.count() > 0
                 and pwd.count() > 0
@@ -870,6 +1036,13 @@ def _onetap_password_visible(page) -> bool:
     """Только пароль сохранённого профиля (не классическая login_form)."""
     if _is_classic_login_form_visible(page):
         return False
+    # Полная форма с username — не onetap.
+    try:
+        user = page.locator('input[name="username"]').first
+        if user.count() > 0:
+            return False
+    except Exception:
+        pass
     try:
         inp = page.locator(
             "form#aymh_password_entry_view input[type='password'][name='pass']"
@@ -908,27 +1081,42 @@ def _fill_classic_login_form(page, login: str, password: str) -> None:
         )
     form = page.locator("form#login_form").first
     email_candidates = (
+        page.locator('input[name="username"]').first,
         form.locator('input[name="email"]').first,
         page.locator('input[name="email"]').first,
+        page.locator(
+            'input[aria-label*="имя пользователя" i], '
+            'input[aria-label*="эл. адрес" i], '
+            'input[aria-label*="username" i]'
+        ).first,
         page.get_by_label(
             re.compile(
                 r"mobile\s+number|username|email|номер\s+телефона|"
-                r"имя\s+пользователя|эл\.?\s*почт",
+                r"имя\s+пользователя|эл\.?\s*почт|эл\.\s*адрес",
                 re.I,
             )
         ).first,
     )
     pwd_candidates = (
+        page.locator('input[name="password"][type="password"]').first,
         form.locator('input[name="pass"][type="password"]').first,
         page.locator('input[name="pass"][type="password"]').first,
+        page.locator('input[aria-label="Пароль" i][type="password"]').first,
         page.get_by_label(re.compile(r"^password$|^пароль$", re.I)).first,
     )
     filled_login = False
     last_err: Exception | None = None
     for inp in email_candidates:
         try:
-            if inp.count() <= 0 or not inp.is_visible(timeout=500):
+            if inp.count() <= 0:
                 continue
+            try:
+                visible = inp.is_visible(timeout=500)
+            except Exception:
+                visible = True
+            if not visible and inp.count() <= 0:
+                continue
+            inp.click(timeout=4000)
             inp.fill(login, timeout=10_000)
             filled_login = True
             break
@@ -943,8 +1131,15 @@ def _fill_classic_login_form(page, login: str, password: str) -> None:
     filled_pwd = False
     for inp in pwd_candidates:
         try:
-            if inp.count() <= 0 or not inp.is_visible(timeout=500):
+            if inp.count() <= 0:
                 continue
+            try:
+                visible = inp.is_visible(timeout=500)
+            except Exception:
+                visible = True
+            if not visible and inp.count() <= 0:
+                continue
+            inp.click(timeout=4000)
             inp.fill(password, timeout=10_000)
             filled_pwd = True
             break
@@ -962,12 +1157,14 @@ def _click_classic_log_in(page) -> bool:
     try:
         btn = page.locator(
             'form#login_form [role="button"][aria-label="Log in" i], '
-            'form#login_form [role="button"][aria-label="Войти" i]'
+            'form#login_form [role="button"][aria-label="Войти" i], '
+            '[role="button"][aria-label="Войти" i], '
+            '[role="button"][aria-label="Log in" i]'
         ).first
-        if btn.count() > 0 and btn.is_visible(timeout=800):
+        if btn.count() > 0:
             disabled = (btn.get_attribute("aria-disabled") or "").lower() == "true"
             if not disabled:
-                btn.click(timeout=8000)
+                btn.click(timeout=8000, force=True)
                 return True
     except Exception:
         pass
@@ -1004,6 +1201,19 @@ def _fill_onetap_password(page, password: str) -> None:
 
 
 def _click_onetap_log_in(page) -> bool:
+    try:
+        btn = page.locator(
+            '[role="button"][aria-label="Войти" i], '
+            '[role="button"][aria-label="Log in" i], '
+            '[role="button"][aria-label="Log In" i]'
+        ).first
+        if btn.count() > 0:
+            disabled = (btn.get_attribute("aria-disabled") or "").lower() == "true"
+            if not disabled:
+                btn.click(timeout=8000, force=True)
+                return True
+    except Exception:
+        pass
     try:
         btn = page.locator('[role="button"]').filter(has_text=_LOG_IN_RE).first
         if btn.count() > 0 and btn.is_visible(timeout=800):
@@ -1132,9 +1342,29 @@ def _handle_login_2fa_challenge(page, twofa_secret: str, *, max_seconds: float =
 
 
 def _is_save_login_info_screen(page) -> bool:
+    """«Save your login info?» / mobile «Сохраните пароль» / «Сохранить данные для входа»."""
+    try:
+        dlg = page.locator(
+            '[role="dialog"][aria-label*="Сохраните пароль" i], '
+            '[role="dialog"][aria-label*="Save your password" i], '
+            '[role="dialog"][aria-label*="Save your login" i], '
+            '[role="dialog"][aria-label*="login info" i]'
+        ).first
+        if dlg.count() > 0:
+            return True
+    except Exception:
+        pass
     try:
         heading = page.get_by_text(_SAVE_LOGIN_INFO_HEADING_RE).first
         if heading.count() > 0 and heading.is_visible(timeout=400):
+            return True
+    except Exception:
+        pass
+    try:
+        # Есть и «Сохранить», и «Не сейчас».
+        save_btn = page.get_by_role("button", name=_SAVE_INFO_RE).first
+        not_now = page.get_by_role("button", name=_NOT_NOW_RE).first
+        if save_btn.count() > 0 and not_now.count() > 0:
             return True
     except Exception:
         pass
@@ -1147,19 +1377,66 @@ def _is_save_login_info_screen(page) -> bool:
     return False
 
 
+def _click_save_login_info_not_now(page) -> bool:
+    """На экране сохранения пароля нажать «Не сейчас» / Not now."""
+    # В mobile-диалоге бывают скрытые/disabled дубликаты — берём активную.
+    try:
+        dlg = page.locator(
+            '[role="dialog"][aria-label*="Сохраните пароль" i], '
+            '[role="dialog"][aria-label*="Save your password" i], '
+            '[role="dialog"][aria-label*="Save your login" i], '
+            '[role="dialog"]'
+        ).first
+        scope = dlg if dlg.count() > 0 else page
+        candidates = (
+            scope.get_by_role("button", name=_NOT_NOW_RE),
+            scope.locator('[role="button"]').filter(has_text=_NOT_NOW_RE),
+            page.get_by_role("button", name=_NOT_NOW_RE),
+            page.locator('[role="button"]').filter(has_text=_NOT_NOW_RE),
+        )
+        for loc in candidates:
+            try:
+                n = int(loc.count())
+            except Exception:
+                n = 0
+            for i in range(min(n, 4)):
+                btn = loc.nth(i)
+                try:
+                    disabled = (btn.get_attribute("aria-disabled") or "").lower()
+                    if disabled in ("true", "1"):
+                        continue
+                    tabindex = (btn.get_attribute("tabindex") or "").strip()
+                    if tabindex == "-1":
+                        continue
+                    btn.click(timeout=8000, force=True)
+                    return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return _click_by_text(page, _NOT_NOW_RE, prefer_link=False)
+
+
 def _click_save_login_info(page) -> bool:
-    """На экране «Save your login info?» нажать Save info."""
+    """
+    Закрыть экран «Save your login info?» / «Сохраните пароль».
+    Предпочтительно «Не сейчас» (mobile), иначе Save.
+    """
+    if _click_save_login_info_not_now(page):
+        return True
     try:
         btn = page.get_by_role("button", name=_SAVE_INFO_RE).first
         if btn.count() > 0 and btn.is_visible(timeout=800):
-            btn.click(timeout=8000)
-            return True
+            disabled = (btn.get_attribute("aria-disabled") or "").lower()
+            if disabled not in ("true", "1"):
+                btn.click(timeout=8000)
+                return True
     except Exception:
         pass
     try:
-        btn = page.locator("button").filter(has_text=_SAVE_INFO_RE).first
+        btn = page.locator('[role="button"]').filter(has_text=_SAVE_INFO_RE).first
         if btn.count() > 0 and btn.is_visible(timeout=500):
-            btn.click(timeout=8000)
+            btn.click(timeout=8000, force=True)
             return True
     except Exception:
         pass
@@ -1218,7 +1495,7 @@ def try_instagram_saved_profile_login(page, password: str) -> str | None:
     while time.monotonic() < save_deadline:
         if _is_save_login_info_screen(page):
             if _click_save_login_info(page):
-                _log("Instagram: Save your login info — нажали Save.")
+                _log("Instagram: «Сохраните пароль» — нажали «Не сейчас».")
                 page.wait_for_timeout(1000)
             break
         if _instagram_already_logged_in(page):
@@ -1228,7 +1505,8 @@ def try_instagram_saved_profile_login(page, password: str) -> str | None:
     home_deadline = time.monotonic() + 45.0
     while time.monotonic() < home_deadline:
         if _is_save_login_info_screen(page):
-            _click_save_login_info(page)
+            if _click_save_login_info(page):
+                _log("Instagram: «Сохраните пароль» — нажали «Не сейчас».")
             page.wait_for_timeout(800)
             continue
         if _instagram_already_logged_in(page):
@@ -1252,13 +1530,15 @@ def ensure_instagram_session_relogin(
     twofa_secret: str = "",
     login: str = "",
     max_seconds: float = 90.0,
+    login_credentials=None,
 ) -> str | None:
     """
     Re-login (все алгоритмы кроме регистрации).
 
     Варианты:
-    1) Сохранённый профиль: Continue → пароль → Log in
-    2) Классическая form#login_form: логин + пароль → Log in
+    1) Mobile splash без профиля: Войти → форма username/password
+    2) Сохранённый профиль: Continue → пароль → Log in
+    3) Классическая / Bloks форма: логин + пароль → Log in
 
     Далее: (опц. 2FA + trust device) → Save → главная.
 
@@ -1267,10 +1547,11 @@ def ensure_instagram_session_relogin(
     Raises:
         RuntimeError при неверном пароле / отсутствии данных / сбое входа.
     """
+    landing = _is_mobile_logged_out_landing(page)
     classic = _is_classic_login_form_visible(page)
     chooser = _is_saved_profile_chooser_screen(page)
     onetap = _onetap_password_visible(page)
-    if not (classic or chooser or onetap):
+    if not (landing or classic or chooser or onetap):
         return None
 
     pwd = (password or "").strip()
@@ -1283,13 +1564,45 @@ def ensure_instagram_session_relogin(
 
     username = _extract_saved_profile_username(page) or user_login
 
+    if landing and not classic:
+        if not user_login:
+            raise RuntimeError(
+                "Instagram: экран «Войти», но нет inst_login в данных учётки."
+            )
+        _log("Instagram: разлогин — mobile splash без профиля, жмём «Войти»…")
+        if not _click_mobile_landing_log_in(page):
+            raise RuntimeError(
+                "Instagram: не удалось нажать «Войти» на стартовом экране."
+            )
+        page.wait_for_timeout(800)
+        form_deadline = time.monotonic() + min(25.0, max(10.0, float(max_seconds)))
+        while time.monotonic() < form_deadline:
+            if _is_classic_login_form_visible(page):
+                classic = True
+                break
+            if _is_saved_profile_chooser_screen(page):
+                return ensure_instagram_session_relogin(
+                    page,
+                    password=pwd,
+                    twofa_secret=twofa_secret,
+                    login=user_login,
+                    max_seconds=max(20.0, form_deadline - time.monotonic()),
+                    login_credentials=login_credentials,
+                )
+            page.wait_for_timeout(350)
+        if not classic:
+            raise RuntimeError(
+                "Instagram: после «Войти» на splash не появилась форма логина "
+                f"(URL={(page.url or '')!r})."
+            )
+
     if classic:
         if not user_login:
             raise RuntimeError(
                 "Instagram: форма входа, но нет inst_login в данных учётки."
             )
         _log(
-            "Instagram: разлогин — классическая форма входа "
+            "Instagram: разлогин — форма входа "
             f"(login={user_login!r})…"
         )
         _fill_classic_login_form(page, user_login, pwd)
@@ -1340,10 +1653,21 @@ def ensure_instagram_session_relogin(
                 return uname
             if _is_login_2fa_challenge_screen(page):
                 break
+            if _is_confirmation_code_screen(page):
+                break
+            try:
+                from zaliver.instagram_upload.setup_2fa import (
+                    _email_check_screen_visible as _email_scr,
+                )
+
+                if _email_scr(page):
+                    break
+            except Exception:
+                pass
             page.wait_for_timeout(400)
         else:
             raise RuntimeError(
-                "Instagram: после «Продолжить» не появилось поле пароля / 2FA."
+                "Instagram: после «Продолжить» не появилось поле пароля / 2FA / код почты."
             )
 
         if _onetap_password_visible(page):
@@ -1362,7 +1686,7 @@ def ensure_instagram_session_relogin(
             _log("Instagram: нажали «Войти».")
             page.wait_for_timeout(1000)
 
-    # После пароля: ошибка / 2FA / Save / лента
+    # После пароля: ошибка / 2FA / код почты / Save / лента
     settle_deadline = time.monotonic() + max(20.0, float(max_seconds))
     while time.monotonic() < settle_deadline:
         if _wrong_login_credentials_visible(page):
@@ -1378,9 +1702,49 @@ def ensure_instagram_session_relogin(
             )
             page.wait_for_timeout(1000)
             continue
+        # Mobile Bloks: «Проверьте электронную почту» → код из Gmail → Продолжить.
+        email_scr = _is_confirmation_code_screen(page)
+        email_handler = None
+        try:
+            from zaliver.instagram_upload.setup_2fa import (
+                _email_check_screen_visible,
+                _handle_email_verification_if_needed,
+            )
+
+            email_scr = email_scr or _email_check_screen_visible(page)
+            email_handler = _handle_email_verification_if_needed
+        except Exception as e_imp:
+            _log(f"Instagram: import email handler: {e_imp!r}")
+        if email_scr:
+            if email_handler is None:
+                raise RuntimeError(
+                    "Instagram: экран кода из почты, но обработчик недоступен "
+                    f"(URL={(page.url or '')!r})."
+                )
+            # Gmail + ожидание письма могут занять до ~2 мин.
+            email_deadline = max(settle_deadline, time.monotonic() + 150.0)
+            settle_deadline = max(settle_deadline, email_deadline)
+            email_handler(
+                page,
+                login_credentials=login_credentials,
+                deadline=email_deadline,
+            )
+            page.wait_for_timeout(1000)
+            continue
+        # После кода почты: «Создайте новый пароль» → Пропустить.
+        try:
+            from zaliver.instagram_upload.setup_2fa import (
+                dismiss_new_password_screen_if_present,
+            )
+
+            if dismiss_new_password_screen_if_present(page):
+                page.wait_for_timeout(1000)
+                continue
+        except Exception as e_skip:
+            _log(f"Instagram: skip new password: {e_skip!r}")
         if _is_save_login_info_screen(page):
             if _click_save_login_info(page):
-                _log("Instagram: Save your login info — нажали Save.")
+                _log("Instagram: «Сохраните пароль» — нажали «Не сейчас».")
                 page.wait_for_timeout(1000)
             continue
         if _instagram_already_logged_in(page):
@@ -1441,10 +1805,33 @@ def _is_confirmation_code_screen(page) -> bool:
     except Exception:
         pass
     try:
-        # Код из почты — input; image captcha — textarea.
-        field = page.locator('input[maxlength="6"]').first
-        if field.count() > 0 and field.is_visible(timeout=300):
+        # Mobile Bloks: h2 aria-label="Проверьте электронную почту"
+        heading = page.get_by_role(
+            "heading",
+            name=re.compile(
+                r"проверьте\s+электронную\s+почту|check\s+your\s+email",
+                re.I,
+            ),
+        ).first
+        if heading.count() > 0 and heading.is_visible(timeout=300):
             return True
+    except Exception:
+        pass
+    try:
+        # Код из почты — input; image captcha — textarea.
+        field = page.locator(
+            'input[maxlength="6"], '
+            'input[aria-label="Введите код" i], '
+            'input[aria-label="Enter code" i]'
+        ).first
+        if field.count() > 0 and field.is_visible(timeout=300):
+            # Без заголовка «код/почта» не считаем экраном (избежать ложных срабатываний).
+            if page.get_by_text(_CONFIRM_CODE_HEADING_RE).count() > 0:
+                return True
+            if page.locator(
+                'h2[aria-label*="почт" i], h2[aria-label*="email" i]'
+            ).count() > 0:
+                return True
     except Exception:
         pass
     return False
@@ -2513,16 +2900,22 @@ def wait_instagram_confirmation_code_screen(
 
 
 def fill_instagram_confirmation_code(page, code: str) -> None:
-    """Ввести 6-значный код в поле «Код подтверждения»."""
+    """Ввести код в поле «Код подтверждения» / Bloks «Введите код»."""
     code = (code or "").strip()
-    if not re.fullmatch(r"\d{6}", code):
-        raise RuntimeError(f"Instagram: ожидался 6-значный код, получили {code!r}")
+    if not re.fullmatch(r"\d{6,8}", code):
+        raise RuntimeError(f"Instagram: ожидался 6–8-значный код, получили {code!r}")
 
     filled = False
     try:
         _fill_labeled_input(
             page,
-            ["Код подтверждения", "Confirmation code", "Security code"],
+            [
+                "Код подтверждения",
+                "Confirmation code",
+                "Security code",
+                "Введите код",
+                "Enter code",
+            ],
             code,
         )
         filled = True
@@ -2531,8 +2924,15 @@ def fill_instagram_confirmation_code(page, code: str) -> None:
 
     if not filled:
         try:
-            inp = page.locator('input[maxlength="6"]').first
+            inp = page.locator(
+                'input[aria-label="Введите код" i], '
+                'input[aria-label="Enter code" i], '
+                'input[maxlength="6"], '
+                'input[maxlength="8"], '
+                'input[inputmode="numeric"]'
+            ).first
             if inp.count() > 0 and inp.is_visible(timeout=2000):
+                inp.click(timeout=4000)
                 inp.fill(code, timeout=10_000)
                 filled = True
         except Exception as e:

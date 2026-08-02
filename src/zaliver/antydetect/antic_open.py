@@ -38,6 +38,48 @@ def _log(message: str) -> None:
     _studio._log(f"[antic_open] {message}")
 
 
+def _try_enlarge_browser_os_window(page) -> None:
+    """
+    Обычное desktop-окно Chromium (не на весь экран), viewport страницы не трогаем.
+
+    Для Instagram check с iPhone preset: мобильный viewport остаётся,
+    окно — как у Gmail/YouTube (~1280×900).
+    """
+    cdp = None
+    width, height = 1280, 900
+    try:
+        cdp = page.context.new_cdp_session(page)
+        info = cdp.send("Browser.getWindowForTarget")
+        win_id = info.get("windowId") if isinstance(info, dict) else None
+        if not win_id:
+            return
+        cdp.send(
+            "Browser.setWindowBounds",
+            {"windowId": win_id, "bounds": {"windowState": "normal"}},
+        )
+        cdp.send(
+            "Browser.setWindowBounds",
+            {
+                "windowId": win_id,
+                "bounds": {
+                    "left": 0,
+                    "top": 0,
+                    "width": width,
+                    "height": height,
+                },
+            },
+        )
+        _log(f"OS-окно браузера: {width}x{height} (viewport не меняли).")
+    except Exception as e:
+        _log(f"Не удалось увеличить OS-окно браузера: {e!r}")
+    finally:
+        if cdp is not None:
+            try:
+                cdp.detach()
+            except Exception:
+                pass
+
+
 def _close_playwright_browser(
     browser, *, timeout_s: float = 8.0, shared_cdp: bool = False
 ) -> None:
@@ -1529,6 +1571,7 @@ def check_instagram_availability_in_profile(
     session_login: str = "",
     session_password: str = "",
     session_twofa: str = "",
+    login_credentials=None,
 ) -> None:
     """Dolphin → instagram.com → проверка входа в аккаунт → закрытие профиля."""
     from zaliver.instagram_upload.instagram_availability import (
@@ -1562,6 +1605,7 @@ def check_instagram_availability_in_profile(
                     session_password=session_password,
                     session_twofa=session_twofa,
                     profile_id=profile_id,
+                    login_credentials=login_credentials,
                 )
             finally:
                 try:
@@ -1589,6 +1633,7 @@ def check_instagram_availability_in_local_antidetect_profile(
     session_login: str = "",
     session_password: str = "",
     session_twofa: str = "",
+    login_credentials=None,
 ) -> None:
     """Локальный антидетект → instagram.com → проверка входа → закрытие профиля."""
     from zaliver.instagram_upload.instagram_availability import (
@@ -1602,6 +1647,10 @@ def check_instagram_availability_in_local_antidetect_profile(
         register_local_session,
         unregister_local_session,
     )
+    from zaliver.youtube_upload.google_login import (
+        gmail_or_yt_credentials_from_custom_data,
+        has_login_credentials,
+    )
 
     _log(
         "Local antidetect: проверка доступности Instagram. "
@@ -1614,7 +1663,8 @@ def check_instagram_availability_in_local_antidetect_profile(
         login = (session_login or "").strip()
         pwd = (session_password or "").strip()
         twofa = (session_twofa or "").strip()
-        if not pwd or not login:
+        google_creds = login_credentials
+        if not pwd or not login or not has_login_credentials(google_creds):
             try:
                 prof = api.get_profile(profile_id)
                 loaded_login, loaded_pwd, loaded_twofa = (
@@ -1626,15 +1676,22 @@ def check_instagram_availability_in_local_antidetect_profile(
                     pwd = loaded_pwd
                 if not twofa:
                     twofa = loaded_twofa
+                if not has_login_credentials(google_creds):
+                    cd = prof.get("custom_data") if isinstance(prof, dict) else None
+                    google_creds = gmail_or_yt_credentials_from_custom_data(cd)
             except Exception as e:
                 _log(f"Local antidetect: не удалось прочитать custom_data: {e!r}")
 
-        # Без start_url Instagram: ссылку откроем сами после CDP.
+        # device_preset на launch: Playwright is_mobile + мобильный UA/Client Hints.
+        # start_url=Instagram — первый HTML сразу под мобильный контекст.
+        _log("Local antidetect: launch Instagram check с device_preset=iPhone 12 Pro")
         acc = api.launch_profile(
             profile_id,
             headless=headless,
             expose_cdp=True,
             remote_cdp=remote_cdp,
+            device_preset="iPhone 12 Pro",
+            start_url="https://www.instagram.com/",
         )
         sid = acc.get("session_id")
         if not isinstance(sid, str) or not sid.strip():
@@ -1650,12 +1707,15 @@ def check_instagram_availability_in_local_antidetect_profile(
                 p, api, session_id, ws_url
             )
             try:
+                # Mobile preset даёт маленький viewport; OS-окно — как у desktop.
+                _try_enlarge_browser_os_window(page)
                 verify_instagram_home_available(
                     page,
                     session_login=login,
                     session_password=pwd,
                     session_twofa=twofa,
                     profile_id=profile_id,
+                    login_credentials=google_creds,
                 )
             finally:
                 try:

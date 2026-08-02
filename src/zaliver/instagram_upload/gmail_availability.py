@@ -14,9 +14,45 @@ from zaliver.youtube_upload.google_login import (
 
 GMAIL_WORKSPACE_URL = "https://workspace.google.com/intl/ru/gmail/#inbox"
 GMAIL_INBOX_URL = "https://mail.google.com/mail/u/0/#inbox/"
+# Прямой вход Google → Gmail (без landing workspace «Войти», который часто
+# зависает на AccountChooser без перехода в пайплайн логина).
+GMAIL_GOOGLE_SIGNIN_URL = (
+    "https://accounts.google.com/AccountChooser"
+    "?service=mail"
+    "&continue=https%3A%2F%2Fmail.google.com%2Fmail%2Fu%2F0%2F"
+    "&flowName=GlifWebSignIn"
+    "&flowEntry=AccountChooser"
+)
 
 # Временно для тестов: не останавливать профиль антидетекта после проверки Gmail.
 KEEP_PROFILE_OPEN_AFTER_GMAIL_CHECK = True
+
+# При Instagram mobile-preset весь Playwright-контекст is_mobile=True —
+# Gmail иначе отдаёт мобильный UI, а наши селекторы заточены под desktop.
+_DESKTOP_VIEWPORT = {"width": 1280, "height": 900}
+_DESKTOP_CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+_DESKTOP_UA_METADATA = {
+    "brands": [
+        {"brand": "Chromium", "version": "131"},
+        {"brand": "Google Chrome", "version": "131"},
+        {"brand": "Not;A=Brand", "version": "99"},
+    ],
+    "fullVersionList": [
+        {"brand": "Chromium", "version": "131.0.6778.0"},
+        {"brand": "Google Chrome", "version": "131.0.6778.0"},
+        {"brand": "Not;A=Brand", "version": "10.0.1.4"},
+    ],
+    "platform": "Windows",
+    "platformVersion": "15.0.0",
+    "architecture": "x86",
+    "model": "",
+    "mobile": False,
+    "bitness": "64",
+    "wow64": False,
+}
 
 _SIGN_IN_RE = re.compile(
     r"войти(\s+в\s+gmail)?|sign\s*in(\s+to\s+gmail)?",
@@ -50,6 +86,110 @@ def _page_url_lower(page) -> str:
         return ""
 
 
+def _restore_os_window_for_desktop(page, cdp=None) -> None:
+    """
+    Вернуть OS-окно к обычному desktop-размеру (не mobile).
+    Playwright new_page() в mobile-контексте часто сжимает окно под viewport iPhone.
+    """
+    own_cdp = cdp is None
+    sess = cdp
+    try:
+        if sess is None:
+            sess = page.context.new_cdp_session(page)
+        info = sess.send("Browser.getWindowForTarget")
+        win_id = info.get("windowId") if isinstance(info, dict) else None
+        if not win_id:
+            return
+        w = int(_DESKTOP_VIEWPORT["width"])
+        h = int(_DESKTOP_VIEWPORT["height"])
+        sess.send(
+            "Browser.setWindowBounds",
+            {"windowId": win_id, "bounds": {"windowState": "normal"}},
+        )
+        sess.send(
+            "Browser.setWindowBounds",
+            {
+                "windowId": win_id,
+                "bounds": {"left": 0, "top": 0, "width": w, "height": h},
+            },
+        )
+        _log(f"Gmail: OS-окно восстановлено {w}x{h}.")
+    except Exception as e:
+        _log(f"Gmail: не удалось восстановить OS-окно: {e!r}")
+    finally:
+        if own_cdp and sess is not None:
+            try:
+                sess.detach()
+            except Exception:
+                pass
+
+
+def force_desktop_emulation_for_page(page) -> bool:
+    """
+    На одной вкладке снять mobile Device Mode и выставить desktop UA/Client Hints.
+    Нужно, когда профиль запущен с iPhone/Pixel preset, а Gmail читаем десктопными
+    селекторами. На Instagram-вкладку не влияет (CDP target-scoped).
+
+    Также восстанавливает размер OS-окна: new_page() в mobile-контексте иначе
+    сжимает Chromium до размера iPhone.
+    """
+    cdp = None
+    try:
+        cdp = page.context.new_cdp_session(page)
+        try:
+            cdp.send("Network.enable")
+        except Exception:
+            pass
+        w = int(_DESKTOP_VIEWPORT["width"])
+        h = int(_DESKTOP_VIEWPORT["height"])
+        cdp.send(
+            "Emulation.setDeviceMetricsOverride",
+            {
+                "width": w,
+                "height": h,
+                "deviceScaleFactor": 1,
+                "mobile": False,
+                "screenWidth": w,
+                "screenHeight": h,
+            },
+        )
+        try:
+            cdp.send("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        except Exception:
+            pass
+        ua_params = {
+            "userAgent": _DESKTOP_CHROME_UA,
+            "acceptLanguage": "en-US,en;q=0.9",
+            "platform": "Win32",
+            "userAgentMetadata": _DESKTOP_UA_METADATA,
+        }
+        for domain in ("Emulation", "Network"):
+            try:
+                cdp.send(f"{domain}.setUserAgentOverride", ua_params)
+            except Exception as e:
+                _log(f"Gmail: {domain}.setUserAgentOverride: {e!r}")
+        try:
+            page.set_viewport_size(dict(_DESKTOP_VIEWPORT))
+        except Exception:
+            pass
+        # После new_page / set_viewport_size окно могло сжаться — вернуть.
+        _restore_os_window_for_desktop(page, cdp)
+        _log(
+            "Gmail: desktop emulation на вкладке "
+            f"({w}x{h}, mobile=false)."
+        )
+        return True
+    except Exception as e:
+        _log(f"Gmail: не удалось включить desktop emulation: {e!r}")
+        return False
+    finally:
+        if cdp is not None:
+            try:
+                cdp.detach()
+            except Exception:
+                pass
+
+
 def _is_mail_google_url(url: str) -> bool:
     u = (url or "").strip().lower()
     return "mail.google.com" in u
@@ -71,8 +211,13 @@ def _gmail_shell_ready_js(page) -> bool:
                     const compose =
                         document.querySelector('div[gh="cm"]') ||
                         document.querySelector('[role="button"][gh="cm"]') ||
-                        document.querySelector('div.T-I.T-I-KE.L3');
+                        document.querySelector('div.T-I.T-I-KE.L3') ||
+                        document.querySelector('[aria-label="Compose"][role="button"]') ||
+                        document.querySelector('[data-control-type^="tlacmp"]');
                     if (visible(compose)) return true;
+                    // Mobile Gmail inbox (#tl_ thread list / #views shell).
+                    const mobileList = document.querySelector('#tl_ [role="listitem"], #views #tl_');
+                    if (visible(mobileList) || visible(document.querySelector('#tl_'))) return true;
                     const inboxLink = document.querySelector('a[href*="#inbox"]');
                     if (visible(inboxLink)) return true;
                     const nav = document.querySelector('div[role="navigation"]');
@@ -90,6 +235,8 @@ def _gmail_compose_visible(page) -> bool:
         'div[gh="cm"]',
         'div.T-I.T-I-KE.L3',
         '[role="button"][gh="cm"]',
+        '[aria-label="Compose"][role="button"]',
+        '[data-control-type^="tlacmp"]',
     )
     for sel in selectors:
         try:
@@ -126,6 +273,14 @@ def _gmail_inbox_nav_visible(page) -> bool:
             return True
     except Exception:
         pass
+    # Mobile Gmail shell
+    for sel in ("#tl_", "#views #tltbt", '[aria-label="Menu"][role="button"]'):
+        try:
+            loc = page.locator(sel).first
+            if loc.count() > 0 and loc.is_visible(timeout=150):
+                return True
+        except Exception:
+            pass
     return False
 
 
@@ -508,11 +663,31 @@ def _click_gmail_sign_in(page) -> bool:
             except Exception:
                 pass
             _log("Gmail: клик «Войти»…")
-            target.click(timeout=5000)
+            # no_wait_after: иначе click ждёт навигацию и может зависнуть
+            # на AccountChooser / долгом редиректе accounts.google.com.
+            try:
+                target.click(timeout=5000, no_wait_after=True)
+            except TypeError:
+                target.click(timeout=5000)
             return True
         except Exception:
             continue
     return False
+
+
+def _goto_google_signin_for_gmail(page) -> None:
+    """Открыть Google AccountChooser с continue на Gmail (desktop)."""
+    force_desktop_emulation_for_page(page)
+    _log(f"Gmail: открываем Google вход напрямую ({GMAIL_GOOGLE_SIGNIN_URL})…")
+    try:
+        page.goto(GMAIL_GOOGLE_SIGNIN_URL, wait_until="domcontentloaded", timeout=90_000)
+    except Exception as e:
+        _log(f"Gmail: goto Google sign-in: {e!r}")
+    page.wait_for_timeout(800)
+    try:
+        _log(f"Gmail: после Google sign-in URL={page.url!r}")
+    except Exception:
+        pass
 
 
 def _click_gmail_sign_in_maybe_popup(page, *, wait_popup_s: float = 8.0):
@@ -537,6 +712,7 @@ def _click_gmail_sign_in_maybe_popup(page, *, wait_popup_s: float = 8.0):
             except Exception:
                 continue
             try:
+                force_desktop_emulation_for_page(pg)
                 _log(f"Gmail: открылось окно входа Google: {pg.url!r}")
             except Exception:
                 _log("Gmail: открылось окно входа Google.")
@@ -547,19 +723,43 @@ def _click_gmail_sign_in_maybe_popup(page, *, wait_popup_s: float = 8.0):
         )
         if auth is not None and auth is not page:
             try:
+                force_desktop_emulation_for_page(auth)
                 _log(f"Gmail: найдено окно входа Google: {auth.url!r}")
             except Exception:
                 _log("Gmail: найдено окно входа Google.")
             return auth, True
 
-        # Логин в той же вкладке.
-        if google_auth_interaction_visible(page) or "accounts.google.com" in _page_url_lower(
-            page
-        ):
+        # Логин в той же вкладке (AccountChooser / identifier / …).
+        url = _page_url_lower(page)
+        if "accounts.google.com" in url or google_auth_interaction_visible(page):
+            try:
+                _log(f"Gmail: вход Google на той же вкладке (URL={page.url!r}).")
+            except Exception:
+                _log("Gmail: вход Google на той же вкладке.")
             return None, True
 
-        page.wait_for_timeout(300)
+        page.wait_for_timeout(250)
 
+    # После клика могли остаться на accounts — не теряем цель логина.
+    url = _page_url_lower(page)
+    if "accounts.google.com" in url or google_auth_interaction_visible(page):
+        try:
+            _log(f"Gmail: после ожидания всё ещё accounts (URL={page.url!r}).")
+        except Exception:
+            pass
+        return None, True
+    auth = _find_google_auth_page(context, base_page=page, before_pages=before_pages)
+    if auth is not None:
+        try:
+            force_desktop_emulation_for_page(auth)
+            _log(f"Gmail: auth-вкладка после таймаута: {auth.url!r}")
+        except Exception:
+            pass
+        return (auth if auth is not page else None), True
+    try:
+        _log(f"Gmail: после «Войти» auth UI не найден (URL={page.url!r}).")
+    except Exception:
+        pass
     return None, True
 
 
@@ -647,19 +847,16 @@ def _wait_until_auth_or_signed_in(
     while time.monotonic() < deadline:
         if _page_looks_signed_in(page):
             return "signed_in"
-        if google_auth_interaction_visible(page) or "accounts.google.com" in _page_url_lower(
-            page
-        ):
+        url = _page_url_lower(page)
+        on_accounts = "accounts.google.com" in url
+        if on_accounts or google_auth_interaction_visible(page):
             # Даём сессии шанс авто-редиректнуть в почту, если cookie уже есть.
-            page.wait_for_timeout(800)
+            page.wait_for_timeout(600)
             if _page_looks_signed_in(page):
                 return "signed_in"
-            if google_auth_interaction_visible(page):
-                return "auth"
-            if "accounts.google.com" in _page_url_lower(page):
-                # Ещё на accounts, но без явного UI — подождём чуть-чуть.
-                page.wait_for_timeout(500)
-                continue
+            # AccountChooser / identifier / challenge — сразу в пайплайн входа,
+            # не крутимся 8+ с на accounts без явного UI.
+            return "auth"
         page.wait_for_timeout(300)
     if _page_looks_signed_in(page):
         return "signed_in"
@@ -727,6 +924,8 @@ def verify_gmail_inbox_available(
     дождаться Inbox/Входящие → закрыть лишнюю вкладку входа.
     Если сессия уже есть — пайплайн входа пропускаем.
     """
+    # До первого запроса к Gmail — иначе при iPhone-preset придёт mobile UI.
+    force_desktop_emulation_for_page(page)
     _log(f"Gmail: открываем {GMAIL_INBOX_URL}")
     page.goto(GMAIL_INBOX_URL, wait_until="domcontentloaded", timeout=90_000)
     # Даём шанс редиректу на accounts (confirmidentifier / identifier) или UI Inbox.
@@ -758,29 +957,40 @@ def verify_gmail_inbox_available(
         _log(f"Gmail: нужна авторизация Google (URL={page.url!r}).")
         auth_page = page
     elif not _is_mail_google_url(url):
-        # Редирект не на mail и не на accounts — запасной путь через workspace «Войти».
-        _log(f"Gmail: не inbox/accounts ({page.url!r}) — пробуем workspace «Войти».")
-        try:
-            page.goto(GMAIL_WORKSPACE_URL, wait_until="domcontentloaded", timeout=90_000)
-            page.wait_for_timeout(1500)
-        except Exception as e:
-            _log(f"Gmail: goto workspace: {e!r}")
-        auth_page, clicked = _click_gmail_sign_in_maybe_popup(page)
-        if not clicked:
-            page.wait_for_timeout(2000)
-            if gmail_inbox_ready(page) or _page_looks_signed_in(page):
-                _log("Gmail: уже в аккаунте после ожидания — проверяем Inbox.")
-                if not _inbox_or_incoming_visible(page):
-                    _goto_gmail_inbox(page)
-                _wait_gmail_inbox_ready(page, max_seconds=max_seconds)
-                return
+        # Редирект на workspace/landing вместо mail/accounts — сразу Google sign-in.
+        # Раньше кликали «Войти» на workspace и зависали на AccountChooser без логов.
+        _log(
+            f"Gmail: не inbox/accounts ({page.url!r}) — "
+            "открываем Google AccountChooser напрямую."
+        )
+        _goto_google_signin_for_gmail(page)
+        auth_page = page
+        if not (
+            _on_google_accounts_url(page) or google_auth_interaction_visible(page)
+        ):
+            # Запасной путь через landing workspace «Войти».
+            _log("Gmail: AccountChooser не открылся — пробуем workspace «Войти».")
+            try:
+                page.goto(GMAIL_WORKSPACE_URL, wait_until="domcontentloaded", timeout=90_000)
+                page.wait_for_timeout(1500)
+            except Exception as e:
+                _log(f"Gmail: goto workspace: {e!r}")
             auth_page, clicked = _click_gmail_sign_in_maybe_popup(page)
             if not clicked:
-                raise RuntimeError(
-                    "Gmail: не найдена кнопка «Войти» на "
-                    f"{GMAIL_WORKSPACE_URL} (URL={page.url!r})."
-                )
-        page.wait_for_timeout(800)
+                page.wait_for_timeout(2000)
+                if gmail_inbox_ready(page) or _page_looks_signed_in(page):
+                    _log("Gmail: уже в аккаунте после ожидания — проверяем Inbox.")
+                    if not _inbox_or_incoming_visible(page):
+                        _goto_gmail_inbox(page)
+                    _wait_gmail_inbox_ready(page, max_seconds=max_seconds)
+                    return
+                auth_page, clicked = _click_gmail_sign_in_maybe_popup(page)
+                if not clicked:
+                    raise RuntimeError(
+                        "Gmail: не удалось открыть вход Google "
+                        f"(URL={page.url!r})."
+                    )
+            page.wait_for_timeout(500)
 
     # После «Войти» сессия могла уже быть — не гоняем пайплайн входа зря.
     check_targets = []
@@ -790,7 +1000,12 @@ def verify_gmail_inbox_available(
         check_targets.append(page)
     early_auth = False
     for target in check_targets:
+        try:
+            _log(f"Gmail: ждём auth/signed_in (URL={target.url!r})…")
+        except Exception:
+            _log("Gmail: ждём auth/signed_in…")
         state = _wait_until_auth_or_signed_in(target, max_seconds=8.0)
+        _log(f"Gmail: состояние после ожидания: {state}")
         if state == "signed_in":
             _log("Gmail: сессия уже активна — пайплайн входа не нужен, открываем Inbox.")
             if auth_page is not None and auth_page is not page:

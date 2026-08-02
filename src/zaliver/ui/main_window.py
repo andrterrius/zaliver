@@ -6207,6 +6207,7 @@ class MainWindow(QWidget):
                 sess_login, sess_pwd, sess_2fa = self._instagram_session_credentials(
                     pid
                 )
+                creds = self._profile_login_credentials(pid)
                 if _is_own_antidetect_kind(kind_s):
                     u = (base_url or "").strip()
                     if not u:
@@ -6221,6 +6222,7 @@ class MainWindow(QWidget):
                         session_login=sess_login,
                         session_password=sess_pwd,
                         session_twofa=sess_2fa,
+                        login_credentials=creds,
                     )
                 else:
                     check_instagram_availability_in_profile(
@@ -6230,6 +6232,7 @@ class MainWindow(QWidget):
                         session_login=sess_login,
                         session_password=sess_pwd,
                         session_twofa=sess_2fa,
+                        login_credentials=creds,
                     )
                 return
 

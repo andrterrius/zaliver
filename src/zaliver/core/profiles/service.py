@@ -159,11 +159,13 @@ class ProfileJobsService:
         def _check_one(pid: str) -> None:
             if is_ig:
                 login, password, twofa = ig_sess(pid)
+                creds = login_creds(pid)
                 kw = dict(
                     headless=req.headless,
                     session_login=login,
                     session_password=password,
                     session_twofa=twofa,
+                    login_credentials=creds,
                 )
                 if is_own_antidetect_kind(kind_s):
                     check_instagram_availability_in_local_antidetect_profile(

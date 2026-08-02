@@ -78,9 +78,15 @@ def build_auth_router(state: AppState) -> APIRouter:
         request: Request,
         _auth: AuthContext = Depends(require_auth),
     ) -> UserPublic:
-        user = auth_from_request(request).user
-        # Refresh from store in case locale changed.
-        fresh = state.users.get(user.username) or user
+        ctx = auth_from_request(request)
+        # Refresh from store in case locale changed / user was removed from file.
+        fresh = state.users.get(ctx.user.username)
+        if fresh is None:
+            state.sessions.revoke(ctx.token)
+            raise HTTPException(
+                status_code=401,
+                detail="Пользователь удалён или сессия недействительна",
+            )
         return UserPublic(**fresh.public_dict())
 
     @router.patch("/v1/auth/me", response_model=UserPublic)

@@ -152,8 +152,12 @@ def build_app_state(config: ApiConfig) -> AppState:
     )
     sessions.revoke_unknown_users({u.username for u in users.list_users()})
 
+    # Bootstrap only on first install (users.json never existed). If the file
+    # exists but is empty / has no admin, do not recreate admin/admin — the
+    # operator removed accounts on purpose.
+    users_path = private_dir / "users.json"
     bootstrap_pw = (config.bootstrap_admin_password or "").strip()
-    if not users.list_users():
+    if not users_path.is_file() and not users.list_users():
         if not bootstrap_pw:
             bootstrap_pw = "admin"
             print(

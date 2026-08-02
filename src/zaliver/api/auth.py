@@ -40,7 +40,15 @@ def make_auth_dependency(state: AppState):
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
+        # Pick up users.json edits before any auth path.
+        for gone in state.users.ensure_fresh():
+            state.sessions.revoke_user(gone)
+        state.sessions.revoke_unknown_users(
+            {u.username for u in state.users.list_users()}
+        )
+
         # Optional legacy single-token mode for automation (env ZALIVER_API_TOKEN).
+        # Does not recreate admin/admin in users.json when the store is empty.
         legacy = (state.config.api_token or "").strip()
         if legacy and secrets.compare_digest(provided, legacy):
             admin = state.users.get("admin") or next(
@@ -48,10 +56,12 @@ def make_auth_dependency(state: AppState):
                 None,
             )
             if admin is None:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid API token",
-                    headers={"WWW-Authenticate": "Bearer"},
+                admin = UserRecord(
+                    username="admin",
+                    password_hash="",
+                    locale="ru",
+                    is_admin=True,
+                    created_at=0.0,
                 )
             ctx = AuthContext(user=admin, token=provided)
             request.state.zaliver_auth = ctx  # type: ignore[attr-defined]
@@ -64,12 +74,6 @@ def make_auth_dependency(state: AppState):
                 detail="Сессия недействительна или истекла",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        # Pick up users.json edits (delete/rename) without restarting the API.
-        for gone in state.users.ensure_fresh():
-            state.sessions.revoke_user(gone)
-        state.sessions.revoke_unknown_users(
-            {u.username for u in state.users.list_users()}
-        )
         user = state.users.get(session.username)
         if user is None:
             state.sessions.revoke_user(session.username)

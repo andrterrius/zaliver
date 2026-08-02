@@ -82,6 +82,9 @@ export type Job = {
   outputs: string[];
   error: string;
   logs: string[];
+  linked_upload_job_id?: string;
+  upload_followup_active?: boolean;
+  upload_followup_min_ready?: number;
 };
 
 export type VideoItem = {

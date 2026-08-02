@@ -14,6 +14,7 @@ import {
 } from "../hooks/useServerSettingsPersist";
 import {
   savePendingUpload,
+  uploadAfterPayload,
   useUploadAfterJob,
   workersForUploadChoice,
 } from "../hooks/useUploadAfterJob";
@@ -209,6 +210,7 @@ export function StitchingPage({ platform }: Props) {
         /* continue */
       }
       const plannedVideos = music.length * copies;
+      const uploadAfter = uploadAfterPayload(choice, platform, plannedVideos);
       const res = await api.startStitching({
         output_dir: outputDir,
         platform,
@@ -226,6 +228,7 @@ export function StitchingPage({ platform }: Props) {
         max_part_duration: partDuration.hi,
         text_overlay: textOverlayToApi(textOverlay),
         youtube_upload_after_processing: willUpload,
+        ...(uploadAfter ? { upload_after: uploadAfter } : {}),
       });
       savePendingUpload(
         "stitching",

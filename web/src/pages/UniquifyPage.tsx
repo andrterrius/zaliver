@@ -14,6 +14,7 @@ import {
 } from "../hooks/useServerSettingsPersist";
 import {
   savePendingUpload,
+  uploadAfterPayload,
   useUploadAfterJob,
   workersForUploadChoice,
 } from "../hooks/useUploadAfterJob";
@@ -339,6 +340,7 @@ export function UniquifyPage({ platform }: Props) {
       }
 
       const plannedVideos = files.length * copies;
+      const uploadAfter = uploadAfterPayload(choice, platform, plannedVideos);
       const res = await api.startUniquify({
         output_dir: outputDir,
         platform,
@@ -365,6 +367,7 @@ export function UniquifyPage({ platform }: Props) {
         random_bounds,
         text_overlay: textOverlayToApi(textOverlay),
         youtube_upload_after_processing: willUpload,
+        ...(uploadAfter ? { upload_after: uploadAfter } : {}),
       });
       savePendingUpload(
         "uniquify",

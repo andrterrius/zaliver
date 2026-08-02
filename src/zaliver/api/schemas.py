@@ -78,6 +78,28 @@ class TextOverlayModel(BaseModel):
     wave_frame_speed_max: float | None = None
 
 
+class UploadAfterFollowup(BaseModel):
+    """Attach upload to a processing job (server-driven; supports upload-as-ready)."""
+
+    profile_ids: list[str] = Field(min_length=1)
+    title: str = ""
+    description: str = ""
+    platform: str = ""
+    kind: str = "local"
+    headless: bool = True
+    max_concurrent_browsers: int = Field(default=3, ge=1, le=10)
+    publish_before_checks: bool = True
+    keep_studio_title: bool = False
+    schedule_publish: bool = False
+    schedule_times_iso: list[str] = Field(default_factory=list)
+    schedule_warmup_shorts: bool = False
+    schedule_warmup_shorts_recommendations: bool = True
+    schedule_warmup_search_query: str = ""
+    delete_after_upload: bool = False
+    upload_as_ready: bool = False
+    planned_videos: int = Field(default=0, ge=0, le=100_000)
+
+
 class UniquifyJobRequest(BaseModel):
     # Optional; must be under managed output/<platform>/uniquify (or empty = that folder).
     output_dir: str = ""
@@ -109,6 +131,7 @@ class UniquifyJobRequest(BaseModel):
     random_bounds: dict[str, Any] = Field(default_factory=dict)
     text_overlay: TextOverlayModel = Field(default_factory=TextOverlayModel)
     youtube_upload_after_processing: bool = False
+    upload_after: UploadAfterFollowup | None = None
 
 
 class SlicingJobRequest(BaseModel):
@@ -129,6 +152,7 @@ class SlicingJobRequest(BaseModel):
     slice_fps_mode: str = "auto"
     text_overlay: TextOverlayModel = Field(default_factory=TextOverlayModel)
     youtube_upload_after_processing: bool = False
+    upload_after: UploadAfterFollowup | None = None
 
 
 class StitchingJobRequest(BaseModel):
@@ -150,13 +174,14 @@ class StitchingJobRequest(BaseModel):
     transition_random: bool = False
     text_overlay: TextOverlayModel = Field(default_factory=TextOverlayModel)
     youtube_upload_after_processing: bool = False
+    upload_after: UploadAfterFollowup | None = None
 
 
 class UploadJobRequest(BaseModel):
     """Gated browser upload (requires ZALIVER_API_ALLOW_BROWSER_JOBS=1)."""
 
     profile_ids: list[str] = Field(min_length=1)
-    video_paths: list[str] = Field(min_length=1)
+    video_paths: list[str] = Field(default_factory=list)
     title: str = ""
     description: str = ""
     # If set — override in-memory AppState.platform for this job (UI source of truth).

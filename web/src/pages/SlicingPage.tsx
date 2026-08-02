@@ -14,6 +14,7 @@ import {
 } from "../hooks/useServerSettingsPersist";
 import {
   savePendingUpload,
+  uploadAfterPayload,
   useUploadAfterJob,
   workersForUploadChoice,
 } from "../hooks/useUploadAfterJob";
@@ -174,6 +175,7 @@ export function SlicingPage({ platform }: Props) {
         /* continue */
       }
       const plannedVideos = music.length * copies;
+      const uploadAfter = uploadAfterPayload(choice, platform, plannedVideos);
       const res = await api.startSlicing({
         output_dir: outputDir,
         platform,
@@ -191,6 +193,7 @@ export function SlicingPage({ platform }: Props) {
         slice_fps_mode: proc.sliceFpsMode,
         text_overlay: textOverlayToApi(textOverlay),
         youtube_upload_after_processing: willUpload,
+        ...(uploadAfter ? { upload_after: uploadAfter } : {}),
       });
       savePendingUpload(
         "slicing",

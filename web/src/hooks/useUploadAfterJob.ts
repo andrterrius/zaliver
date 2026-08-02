@@ -50,31 +50,33 @@ export function workersForUploadChoice(
   return fallback;
 }
 
-async function outputsForJob(job: Job): Promise<string[]> {
-  let outputs = (job.outputs || []).filter(Boolean);
-  if (outputs.length) return outputs;
-  try {
-    const fresh = await api.getJob(job.id);
-    outputs = (fresh.outputs || []).filter(Boolean);
-  } catch {
-    /* keep empty */
-  }
-  return outputs;
-}
-
-/** Запас перед стартом: профили×2, но не больше запланированных видео. */
-function minReadyFor(pending: PendingUpload, plannedHint: number): number {
-  const nProf = Math.max(1, pending.profileIds.length);
-  const target = nProf * 2;
-  if (plannedHint > 0) return Math.max(1, Math.min(target, plannedHint));
-  return Math.max(1, target);
-}
-
-function plannedForJob(pending: PendingUpload, job: Job): number {
-  const fromPending = Math.max(0, Number(pending.plannedVideos) || 0);
-  if (fromPending > 0) return fromPending;
-  const fromProgress = Math.max(0, Number(job.progress?.total) || 0);
-  return fromProgress;
+/** Payload for server-driven upload-after / upload-as-ready. */
+export function uploadAfterPayload(
+  choice: UploadAfterChoice,
+  platform: Platform,
+  plannedVideos: number,
+) {
+  if (!choice.profileIds.length) return undefined;
+  return {
+    profile_ids: choice.profileIds,
+    title: choice.title,
+    description: choice.description,
+    platform,
+    kind: "local",
+    headless: choice.headless,
+    max_concurrent_browsers: choice.maxBrowsers,
+    publish_before_checks: choice.publishBeforeChecks,
+    keep_studio_title: choice.keepStudioTitle,
+    schedule_publish: choice.schedulePublish,
+    schedule_times_iso: choice.scheduleTimesIso || [],
+    schedule_warmup_shorts: choice.scheduleWarmupShorts,
+    schedule_warmup_shorts_recommendations:
+      choice.scheduleWarmupRecommendations,
+    schedule_warmup_search_query: choice.scheduleWarmupSearchQuery || "",
+    delete_after_upload: choice.deleteAfterUpload,
+    upload_as_ready: choice.uploadAsReady,
+    planned_videos: Math.max(0, plannedVideos),
+  };
 }
 
 async function persistUploadSettings(
@@ -101,35 +103,10 @@ async function persistUploadSettings(
   }
 }
 
-function uploadBody(
-  pending: PendingUpload,
-  outputs: string[],
-  plat: Platform | undefined,
-  extra: Record<string, unknown> = {},
-) {
-  return {
-    profile_ids: pending.profileIds,
-    video_paths: outputs,
-    title: pending.title,
-    description: pending.description,
-    ...(plat ? { platform: plat } : {}),
-    headless: pending.headless,
-    max_concurrent_browsers: pending.maxBrowsers,
-    kind: "local",
-    publish_before_checks: pending.publishBeforeChecks,
-    keep_studio_title: pending.keepStudioTitle,
-    schedule_publish: pending.schedulePublish,
-    schedule_times_iso: pending.scheduleTimesIso || [],
-    schedule_warmup_shorts: pending.scheduleWarmupShorts,
-    schedule_warmup_shorts_recommendations:
-      pending.scheduleWarmupRecommendations,
-    schedule_warmup_search_query: pending.scheduleWarmupSearchQuery || "",
-    delete_after_upload: pending.deleteAfterUpload,
-    ...extra,
-  };
-}
-
-/** After processing job succeeds (or streams), start upload from pending + outputs. */
+/**
+ * Track server-driven upload followup via processing job.linked_upload_job_id.
+ * Fallback for old API: start upload once after processing succeeds.
+ */
 export function useUploadAfterJob(
   kind: string,
   job: Job | null,
@@ -138,11 +115,9 @@ export function useUploadAfterJob(
   platform?: Platform | null,
 ) {
   const boundJobId = useRef<string | null>(null);
-  const starting = useRef(false);
-  const uploadJobIdRef = useRef<string | null>(null);
-  const enqueuedRef = useRef<Set<string>>(new Set());
-  const producerDoneRef = useRef(false);
-  const batchDoneRef = useRef(false);
+  const linkedSet = useRef(false);
+  const fallbackDone = useRef(false);
+  const settingsSaved = useRef(false);
 
   useEffect(() => {
     if (!job) return;
@@ -154,15 +129,11 @@ export function useUploadAfterJob(
 
     if (boundJobId.current !== job.id) {
       boundJobId.current = job.id;
-      uploadJobIdRef.current = null;
-      enqueuedRef.current = new Set();
-      producerDoneRef.current = false;
-      batchDoneRef.current = false;
-      starting.current = false;
+      linkedSet.current = false;
+      fallbackDone.current = false;
+      settingsSaved.current = false;
     }
 
-    const plat = pending.platform || platform || undefined;
-    const streaming = Boolean(pending.uploadAsReady);
     const finished =
       job.status === "succeeded" ||
       job.status === "failed" ||
@@ -170,6 +141,34 @@ export function useUploadAfterJob(
 
     void (async () => {
       try {
+        if (!settingsSaved.current) {
+          settingsSaved.current = true;
+          await persistUploadSettings(kind, pending);
+        }
+
+        const linked = String(job.linked_upload_job_id || "").trim();
+        if (linked && !linkedSet.current) {
+          linkedSet.current = true;
+          setUploadJobId(linked);
+        }
+
+        // Server owns upload-as-ready / upload-after when followup is attached.
+        if (job.upload_followup_active || linkedSet.current) {
+          if (finished) savePendingUpload(kind, null);
+          return;
+        }
+
+        if (!finished) return;
+        if (job.status !== "succeeded" || fallbackDone.current) {
+          if (job.status !== "succeeded") {
+            savePendingUpload(kind, null);
+            fallbackDone.current = true;
+          }
+          return;
+        }
+
+        fallbackDone.current = true;
+        const plat = pending.platform || platform || undefined;
         if (plat) {
           try {
             await api.setPlatform(plat);
@@ -177,124 +176,44 @@ export function useUploadAfterJob(
             /* continue */
           }
         }
-
-        if (!streaming) {
-          if (job.status !== "succeeded" || batchDoneRef.current || starting.current) {
-            return;
-          }
-          starting.current = true;
+        let outputs = (job.outputs || []).filter(Boolean);
+        if (!outputs.length) {
           try {
-            const all = await outputsForJob(job);
-            if (!all.length) {
-              savePendingUpload(kind, null);
-              batchDoneRef.current = true;
-              onError?.(
-                "Обработка завершена, но нет путей к видео для залива.",
-              );
-              return;
-            }
-            await persistUploadSettings(kind, pending);
-            const res = await api.startUpload(uploadBody(pending, all, plat));
-            batchDoneRef.current = true;
-            savePendingUpload(kind, null);
-            setUploadJobId(res.id);
-          } finally {
-            starting.current = false;
+            const fresh = await api.getJob(job.id);
+            outputs = (fresh.outputs || []).filter(Boolean);
+          } catch {
+            /* keep empty */
           }
+        }
+        if (!outputs.length) {
+          savePendingUpload(kind, null);
+          onError?.("Обработка завершена, но нет путей к видео для залива.");
           return;
         }
-
-        // --- upload-as-ready (streaming) ---
-        const outputs = (job.outputs || []).filter(Boolean);
-        const planned = plannedForJob(pending, job);
-        const minReady = minReadyFor(pending, planned);
-
-        if (
-          !uploadJobIdRef.current &&
-          !starting.current &&
-          outputs.length >= minReady &&
-          (job.status === "running" || job.status === "succeeded")
-        ) {
-          starting.current = true;
-          try {
-            await persistUploadSettings(kind, pending);
-            const res = await api.startUpload(
-              uploadBody(pending, outputs, plat, {
-                await_more_videos: true,
-                planned_videos: Math.max(planned, outputs.length, minReady),
-              }),
-            );
-            uploadJobIdRef.current = res.id;
-            for (const p of outputs) enqueuedRef.current.add(p);
-            setUploadJobId(res.id);
-          } finally {
-            starting.current = false;
-          }
-        }
-
-        const liveUploadId = uploadJobIdRef.current;
-        if (liveUploadId && outputs.length) {
-          const fresh = outputs.filter((p) => !enqueuedRef.current.has(p));
-          if (fresh.length) {
-            try {
-              await api.enqueueUpload(liveUploadId, {
-                video_paths: fresh,
-                title: pending.title,
-                description: pending.description,
-              });
-              for (const p of fresh) enqueuedRef.current.add(p);
-            } catch (e) {
-              onError?.(e instanceof Error ? e.message : String(e));
-            }
-          }
-        }
-
-        if (!finished || producerDoneRef.current || batchDoneRef.current) {
-          return;
-        }
-
-        // Processing ended before buffer filled — one-shot upload.
-        if (!uploadJobIdRef.current) {
-          if (job.status !== "succeeded" || starting.current) {
-            if (job.status !== "succeeded") {
-              savePendingUpload(kind, null);
-              batchDoneRef.current = true;
-            }
-            return;
-          }
-          starting.current = true;
-          try {
-            const all = await outputsForJob(job);
-            if (!all.length) {
-              savePendingUpload(kind, null);
-              batchDoneRef.current = true;
-              onError?.(
-                "Обработка завершена, но нет путей к видео для залива.",
-              );
-              return;
-            }
-            await persistUploadSettings(kind, pending);
-            const res = await api.startUpload(uploadBody(pending, all, plat));
-            batchDoneRef.current = true;
-            savePendingUpload(kind, null);
-            setUploadJobId(res.id);
-          } finally {
-            starting.current = false;
-          }
-          return;
-        }
-
-        producerDoneRef.current = true;
-        try {
-          await api.uploadProducerDone(uploadJobIdRef.current);
-        } catch {
-          /* already draining */
-        }
+        const res = await api.startUpload({
+          profile_ids: pending.profileIds,
+          video_paths: outputs,
+          title: pending.title,
+          description: pending.description,
+          ...(plat ? { platform: plat } : {}),
+          headless: pending.headless,
+          max_concurrent_browsers: pending.maxBrowsers,
+          kind: "local",
+          publish_before_checks: pending.publishBeforeChecks,
+          keep_studio_title: pending.keepStudioTitle,
+          schedule_publish: pending.schedulePublish,
+          schedule_times_iso: pending.scheduleTimesIso || [],
+          schedule_warmup_shorts: pending.scheduleWarmupShorts,
+          schedule_warmup_shorts_recommendations:
+            pending.scheduleWarmupRecommendations,
+          schedule_warmup_search_query: pending.scheduleWarmupSearchQuery || "",
+          delete_after_upload: pending.deleteAfterUpload,
+        });
         savePendingUpload(kind, null);
-        batchDoneRef.current = true;
+        setUploadJobId(res.id);
       } catch (e) {
         onError?.(e instanceof Error ? e.message : String(e));
-        starting.current = false;
+        fallbackDone.current = false;
       }
     })();
   }, [job, kind, setUploadJobId, onError, platform]);

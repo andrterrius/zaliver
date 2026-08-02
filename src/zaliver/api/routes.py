@@ -94,6 +94,10 @@ from zaliver.api.settings_policy import (
 )
 from zaliver.api.state import AppState
 from zaliver.api.upload_runner import run_upload_job
+from zaliver.api.upload_followup import (
+    STREAMING_UPLOAD_WORKERS,
+    attach_upload_followup,
+)
 from zaliver.api.isolated_runner import (
     slicing_runner,
     stitching_runner,
@@ -120,6 +124,35 @@ def _apply_request_platform(st: AppState, platform: str | None) -> str:
     if raw:
         return st.set_platform(raw)
     return st.platform
+
+
+def _upload_after_cfg(body: Any, *, platform: str, planned: int) -> dict[str, Any] | None:
+    ua = getattr(body, "upload_after", None)
+    if ua is None:
+        return None
+    data = ua.model_dump() if hasattr(ua, "model_dump") else dict(ua)
+    if not data.get("platform"):
+        data["platform"] = platform
+    if int(data.get("planned_videos") or 0) <= 0 and planned > 0:
+        data["planned_videos"] = int(planned)
+    return data
+
+
+def _start_processing_job(
+    st: AppState,
+    *,
+    kind: JobKind,
+    runner,
+    upload_after: dict[str, Any] | None,
+    planned_videos: int,
+):
+    def prepare(job) -> None:
+        if upload_after:
+            attach_upload_followup(
+                st, job, upload_after, planned_videos=planned_videos
+            )
+
+    return st.jobs.start(kind=kind, runner=runner, prepare=prepare)
 
 
 def _uploaded_item(platform: str, r: Any) -> UploadedVideoItem:
@@ -837,7 +870,11 @@ def build_router() -> APIRouter:
         except OSError as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
+        planned = len(inputs) * max(1, int(body.copies_per_file or 1))
+        upload_after = _upload_after_cfg(body, platform=plat, planned=planned)
         workers = min(int(body.num_workers), st.config.max_workers_per_job)
+        if upload_after and upload_after.get("upload_as_ready"):
+            workers = min(STREAMING_UPLOAD_WORKERS, st.config.max_workers_per_job)
         options: dict[str, Any] = {
             "input_dir": "",
             "output_dir": out_dir,
@@ -878,12 +915,17 @@ def build_router() -> APIRouter:
             "text_overlay": overlay,
             "youtube_upload_after_processing": bool(
                 body.youtube_upload_after_processing
+                or bool(upload_after)
             ),
         }
 
         try:
-            job = st.jobs.start(
-                kind=JobKind.UNIQUIFY, runner=uniquify_runner(options)
+            job = _start_processing_job(
+                st,
+                kind=JobKind.UNIQUIFY,
+                runner=uniquify_runner(options),
+                upload_after=upload_after,
+                planned_videos=planned,
             )
         except RuntimeError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
@@ -940,7 +982,11 @@ def build_router() -> APIRouter:
         except OSError as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
+        planned = len(music) * max(1, int(body.copies_per_track or 1))
+        upload_after = _upload_after_cfg(body, platform=plat, planned=planned)
         workers = min(int(body.num_workers), st.config.max_workers_per_job)
+        if upload_after and upload_after.get("upload_as_ready"):
+            workers = min(STREAMING_UPLOAD_WORKERS, st.config.max_workers_per_job)
         options: dict[str, Any] = {
             "output_dir": out_dir,
             "clip_files": clips,
@@ -958,12 +1004,17 @@ def build_router() -> APIRouter:
             "slice_fps_mode": str(body.slice_fps_mode or "auto"),
             "youtube_upload_after_processing": bool(
                 body.youtube_upload_after_processing
+                or bool(upload_after)
             ),
         }
 
         try:
-            job = st.jobs.start(
-                kind=JobKind.SLICING, runner=slicing_runner(options)
+            job = _start_processing_job(
+                st,
+                kind=JobKind.SLICING,
+                runner=slicing_runner(options),
+                upload_after=upload_after,
+                planned_videos=planned,
             )
         except RuntimeError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
@@ -1016,7 +1067,11 @@ def build_router() -> APIRouter:
         except OSError as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
+        planned = len(music) * max(1, int(body.copies_per_track or 1))
+        upload_after = _upload_after_cfg(body, platform=plat, planned=planned)
         workers = min(int(body.num_workers), st.config.max_workers_per_job)
+        if upload_after and upload_after.get("upload_as_ready"):
+            workers = min(STREAMING_UPLOAD_WORKERS, st.config.max_workers_per_job)
         options: dict[str, Any] = {
             "output_dir": out_dir,
             "part1_files": part1,
@@ -1035,12 +1090,17 @@ def build_router() -> APIRouter:
             "transition_random": bool(body.transition_random),
             "youtube_upload_after_processing": bool(
                 body.youtube_upload_after_processing
+                or bool(upload_after)
             ),
         }
 
         try:
-            job = st.jobs.start(
-                kind=JobKind.STITCHING, runner=stitching_runner(options)
+            job = _start_processing_job(
+                st,
+                kind=JobKind.STITCHING,
+                runner=stitching_runner(options),
+                upload_after=upload_after,
+                planned_videos=planned,
             )
         except RuntimeError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
@@ -1067,7 +1127,7 @@ def build_router() -> APIRouter:
                 ),
             )
         try:
-            videos = resolve_path_list(body.video_paths, st.config.allowed_roots)
+            videos = resolve_path_list(body.video_paths or [], st.config.allowed_roots)
         except PathNotAllowedError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -1081,6 +1141,12 @@ def build_router() -> APIRouter:
         profile_ids = [p.strip() for p in body.profile_ids if (p or "").strip()]
         if not profile_ids:
             raise HTTPException(status_code=400, detail="profile_ids required")
+        await_more = bool(body.await_more_videos)
+        if not videos and not await_more:
+            raise HTTPException(
+                status_code=400,
+                detail="video_paths required (or await_more_videos for streaming)",
+            )
 
         platform = _apply_request_platform(st, body.platform)
         from zaliver.api.antydetect_resolve import (

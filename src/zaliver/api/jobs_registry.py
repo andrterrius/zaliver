@@ -66,10 +66,14 @@ class JobRecord:
     outputs: list[str] = field(default_factory=list)
     logs: list[str] = field(default_factory=list)
     error: str = ""
+    linked_upload_job_id: str = ""
+    upload_followup_active: bool = False
+    upload_followup_min_ready: int = 0
     _cancel: Callable[[], None] | None = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _finished_signaled: bool = field(default=False, repr=False)
     _from_disk: bool = field(default=False, repr=False)
+    _upload_followup: Any | None = field(default=None, repr=False)
 
     def append_log(self, line: str, *, max_lines: int) -> None:
         with self._lock:
@@ -95,6 +99,9 @@ class JobRecord:
                 "message": self.message,
                 "outputs": list(self.outputs),
                 "error": self.error,
+                "linked_upload_job_id": self.linked_upload_job_id or "",
+                "upload_followup_active": bool(self.upload_followup_active),
+                "upload_followup_min_ready": int(self.upload_followup_min_ready or 0),
             }
 
     def snapshot(
@@ -363,9 +370,16 @@ class JobRegistry:
         self._persist_meta(job)
         return job
 
-    def start(self, *, kind: JobKind, runner: JobRunner) -> JobRecord:
+    def start(
+        self,
+        *,
+        kind: JobKind,
+        runner: JobRunner,
+        bypass_limit: bool = False,
+        prepare: Callable[[JobRecord], None] | None = None,
+    ) -> JobRecord:
         with self._lock:
-            if self._active_count() >= self._max_concurrent:
+            if not bypass_limit and self._active_count() >= self._max_concurrent:
                 raise RuntimeError(
                     f"Too many concurrent jobs (max={self._max_concurrent}). "
                     "Cancel or wait for an active job."
@@ -373,6 +387,14 @@ class JobRegistry:
             job_id = uuid.uuid4().hex
             job = JobRecord(id=job_id, kind=kind)
             self._jobs[job_id] = job
+
+        if prepare is not None:
+            try:
+                prepare(job)
+            except Exception:
+                with self._lock:
+                    self._jobs.pop(job_id, None)
+                raise
 
         self._persist_meta(job)
 
@@ -395,7 +417,14 @@ class JobRegistry:
                 if p in job.outputs:
                     return
                 job.outputs.append(p)
+                outs = list(job.outputs)
             self._persist_meta(job)
+            followup = job._upload_followup
+            if followup is not None:
+                try:
+                    followup.on_outputs(job, outs)
+                except Exception as e:
+                    on_log(f"[upload] followup on_output: {e!r}")
 
         def on_finished(ok: bool, message: str) -> None:
             with job._lock:
@@ -409,6 +438,12 @@ class JobRegistry:
                         job.status = JobStatus.FAILED
                         job.error = message or "failed"
             self._persist_meta(job)
+            followup = job._upload_followup
+            if followup is not None:
+                try:
+                    followup.on_finished(job, bool(ok))
+                except Exception as e:
+                    on_log(f"[upload] followup on_finished: {e!r}")
 
         sink = JobProgressSink(
             on_progress=on_progress,
@@ -436,6 +471,12 @@ class JobRegistry:
                         job.finished_at = time.time()
                 on_log(f"job exception: {e!r}")
                 self._persist_meta(job)
+                followup = job._upload_followup
+                if followup is not None and not job._finished_signaled:
+                    try:
+                        followup.on_finished(job, False)
+                    except Exception as fe:
+                        on_log(f"[upload] followup on_finished: {fe!r}")
             finally:
                 with job._lock:
                     if (
@@ -444,9 +485,20 @@ class JobRegistry:
                     ):
                         job.status = JobStatus.SUCCEEDED
                         job.finished_at = time.time()
-                    elif job.status == JobStatus.CANCELLED and job.finished_at is None:
+                        # Runner returned without on_finished — still run followup.
+                        need_followup_finish = job._upload_followup is not None
+                    else:
+                        need_followup_finish = False
+                    if job.status == JobStatus.CANCELLED and job.finished_at is None:
                         job.finished_at = time.time()
                 self._persist_meta(job)
+                if need_followup_finish:
+                    followup = job._upload_followup
+                    if followup is not None:
+                        try:
+                            followup.on_finished(job, True)
+                        except Exception as fe:
+                            on_log(f"[upload] followup on_finished: {fe!r}")
 
         threading.Thread(
             target=thread_main, daemon=True, name=f"zaliver-job-{job_id}"

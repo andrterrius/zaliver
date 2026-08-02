@@ -6,7 +6,12 @@ export type PendingUpload = UploadAfterChoice & {
   /** Bind pending upload to the processing job that was just started. */
   processingJobId?: string;
   platform?: Platform;
+  /** Total videos planned for this processing run (inputs × copies). */
+  plannedVideos?: number;
 };
+
+/** Match desktop: streaming upload forces 2 processing workers. */
+export const STREAMING_UPLOAD_WORKERS = 2;
 
 const pendingKey = (kind: string) => `zaliver:pendingUpload:${kind}`;
 
@@ -35,6 +40,16 @@ export function loadPendingUpload(kind: string): PendingUpload | null {
   }
 }
 
+export function workersForUploadChoice(
+  choice: UploadAfterChoice,
+  fallback: number,
+): number {
+  if (choice.uploadAsReady && choice.profileIds.length > 0) {
+    return STREAMING_UPLOAD_WORKERS;
+  }
+  return fallback;
+}
+
 async function outputsForJob(job: Job): Promise<string[]> {
   let outputs = (job.outputs || []).filter(Boolean);
   if (outputs.length) return outputs;
@@ -47,11 +62,19 @@ async function outputsForJob(job: Job): Promise<string[]> {
   return outputs;
 }
 
+/** Запас перед стартом: профили×2, но не больше запланированных видео. */
 function minReadyFor(pending: PendingUpload, plannedHint: number): number {
   const nProf = Math.max(1, pending.profileIds.length);
   const target = nProf * 2;
   if (plannedHint > 0) return Math.max(1, Math.min(target, plannedHint));
   return Math.max(1, target);
+}
+
+function plannedForJob(pending: PendingUpload, job: Job): number {
+  const fromPending = Math.max(0, Number(pending.plannedVideos) || 0);
+  if (fromPending > 0) return fromPending;
+  const fromProgress = Math.max(0, Number(job.progress?.total) || 0);
+  return fromProgress;
 }
 
 async function persistUploadSettings(
@@ -183,7 +206,8 @@ export function useUploadAfterJob(
 
         // --- upload-as-ready (streaming) ---
         const outputs = (job.outputs || []).filter(Boolean);
-        const minReady = minReadyFor(pending, outputs.length);
+        const planned = plannedForJob(pending, job);
+        const minReady = minReadyFor(pending, planned);
 
         if (
           !uploadJobIdRef.current &&
@@ -197,7 +221,7 @@ export function useUploadAfterJob(
             const res = await api.startUpload(
               uploadBody(pending, outputs, plat, {
                 await_more_videos: true,
-                planned_videos: Math.max(outputs.length, minReady),
+                planned_videos: Math.max(planned, outputs.length, minReady),
               }),
             );
             uploadJobIdRef.current = res.id;

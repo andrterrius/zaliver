@@ -28,7 +28,13 @@ def _append_log(log_path: Path, line: str) -> None:
         fh.flush()
 
 
-def _patch_progress_meta(meta_path: Path, cur: int, total: int, msg: str) -> None:
+def _patch_meta(
+    meta_path: Path,
+    *,
+    progress: tuple[int, int, str] | None = None,
+    output: str | None = None,
+) -> None:
+    """Merge live progress/outputs into job meta so the API can stream mid-run."""
     try:
         if meta_path.is_file():
             data = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -36,14 +42,32 @@ def _patch_progress_meta(meta_path: Path, cur: int, total: int, msg: str) -> Non
             data = {}
         if not isinstance(data, dict):
             data = {}
-        data["progress"] = {
-            "current": int(cur),
-            "total": int(total),
-            "message": str(msg or ""),
-        }
+        if progress is not None:
+            cur, total, msg = progress
+            data["progress"] = {
+                "current": int(cur),
+                "total": int(total),
+                "message": str(msg or ""),
+            }
+        if output:
+            outs = data.get("outputs")
+            if not isinstance(outs, list):
+                outs = []
+            path = str(output)
+            if path and path not in outs:
+                outs.append(path)
+            data["outputs"] = outs
         _write_json(meta_path, data)
     except Exception:
         pass
+
+
+def _patch_progress_meta(meta_path: Path, cur: int, total: int, msg: str) -> None:
+    _patch_meta(meta_path, progress=(cur, total, msg))
+
+
+def _patch_output_meta(meta_path: Path, path: str) -> None:
+    _patch_meta(meta_path, output=path)
 
 
 def run_job_file(job_file: Path) -> int:
@@ -87,7 +111,11 @@ def run_job_file(job_file: Path) -> int:
             _patch_progress_meta(meta_path, cur, total, msg)
 
     def on_output(path: str, _skip: bool) -> None:
-        outputs.append(str(path))
+        p = str(path)
+        if p and p not in outputs:
+            outputs.append(p)
+        if meta_path and p:
+            _patch_output_meta(meta_path, p)
 
     def on_finished(ok: bool, message: str) -> None:
         finished["ok"] = bool(ok)
@@ -118,11 +146,14 @@ def run_job_file(job_file: Path) -> int:
             target=watch_cancel, daemon=True, name="zaliver-cancel"
         ).start()
         on_log("Обработка в отдельном процессе (uniquify_lite, без multiprocessing).")
+        def _lite_output(p: str) -> None:
+            on_output(str(p), False)
+
         try:
             ok, message = run_uniquify_lite(
                 options,
                 log=on_log,
-                on_output=lambda p: outputs.append(p),
+                on_output=_lite_output,
                 cancel_check=lambda: cancelled["v"],
             )
             finished["ok"] = bool(ok)

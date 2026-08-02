@@ -15,6 +15,7 @@ import {
 import {
   savePendingUpload,
   useUploadAfterJob,
+  workersForUploadChoice,
 } from "../hooks/useUploadAfterJob";
 import { ProgressBar } from "../components/ProgressBar";
 import { SectionNav } from "../components/SectionNav";
@@ -337,12 +338,13 @@ export function UniquifyPage({ platform }: Props) {
         /* continue */
       }
 
+      const plannedVideos = files.length * copies;
       const res = await api.startUniquify({
         output_dir: outputDir,
         platform,
         input_files: files,
         copies_per_file: copies,
-        num_workers: proc.numWorkers,
+        num_workers: workersForUploadChoice(choice, proc.numWorkers),
         use_gpu: proc.useGpu,
         use_gpu_finalize: proc.useGpuFinalize,
         randomize_uniquify: true,
@@ -367,7 +369,7 @@ export function UniquifyPage({ platform }: Props) {
       savePendingUpload(
         "uniquify",
         willUpload
-          ? { ...choice, processingJobId: res.id, platform }
+          ? { ...choice, processingJobId: res.id, platform, plannedVideos }
           : null,
       );
       setJobId(res.id);

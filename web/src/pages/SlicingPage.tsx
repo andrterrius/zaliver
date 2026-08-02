@@ -15,6 +15,7 @@ import {
 import {
   savePendingUpload,
   useUploadAfterJob,
+  workersForUploadChoice,
 } from "../hooks/useUploadAfterJob";
 import { ProgressBar } from "../components/ProgressBar";
 import { SectionNav } from "../components/SectionNav";
@@ -172,13 +173,14 @@ export function SlicingPage({ platform }: Props) {
       } catch {
         /* continue */
       }
+      const plannedVideos = music.length * copies;
       const res = await api.startSlicing({
         output_dir: outputDir,
         platform,
         clip_files: clips,
         music_files: music,
         copies_per_track: copies,
-        num_workers: proc.numWorkers,
+        num_workers: workersForUploadChoice(choice, proc.numWorkers),
         use_gpu: proc.useGpu,
         use_gpu_finalize: proc.useGpuFinalize,
         use_suggested_durations: autoDurations,
@@ -193,7 +195,7 @@ export function SlicingPage({ platform }: Props) {
       savePendingUpload(
         "slicing",
         willUpload
-          ? { ...choice, processingJobId: res.id, platform }
+          ? { ...choice, processingJobId: res.id, platform, plannedVideos }
           : null,
       );
       setJobId(res.id);

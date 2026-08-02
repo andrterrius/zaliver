@@ -105,7 +105,7 @@ class JobRecord:
     ) -> dict[str, Any]:
         data = self.meta_dict()
         if store is not None:
-            # Child isolated workers write progress into meta on disk — merge if ahead.
+            # Child isolated workers write progress/outputs into meta on disk.
             disk_meta = store.load_meta(self.id)
             if isinstance(disk_meta, dict):
                 dp = disk_meta.get("progress")
@@ -126,6 +126,19 @@ class JobRecord:
                             "total": disk_total,
                             "message": str(dp.get("message") or ""),
                         }
+                disk_outs = disk_meta.get("outputs")
+                if isinstance(disk_outs, list) and disk_outs:
+                    mem_outs = [
+                        str(x) for x in (data.get("outputs") or []) if str(x)
+                    ]
+                    seen = set(mem_outs)
+                    merged = list(mem_outs)
+                    for raw in disk_outs:
+                        p = str(raw or "").strip()
+                        if p and p not in seen:
+                            seen.add(p)
+                            merged.append(p)
+                    data["outputs"] = merged
         if log_tail <= 0:
             data["logs"] = []
             return data
@@ -213,7 +226,43 @@ class JobRegistry:
         if self._store is None:
             return
         try:
-            self._store.save_meta(job.id, job.meta_dict())
+            meta = job.meta_dict()
+            # Isolated workers may be ahead on disk (live outputs/progress).
+            # Never clobber those fields with a stale in-memory snapshot.
+            disk = self._store.load_meta(job.id)
+            if isinstance(disk, dict):
+                disk_outs = disk.get("outputs")
+                if isinstance(disk_outs, list) and disk_outs:
+                    mem_outs = [
+                        str(x) for x in (meta.get("outputs") or []) if str(x)
+                    ]
+                    seen = set(mem_outs)
+                    merged = list(mem_outs)
+                    for raw in disk_outs:
+                        p = str(raw or "").strip()
+                        if p and p not in seen:
+                            seen.add(p)
+                            merged.append(p)
+                    meta["outputs"] = merged
+                dp = disk.get("progress")
+                if isinstance(dp, dict):
+                    try:
+                        disk_cur = int(dp.get("current") or 0)
+                        disk_total = int(dp.get("total") or 0)
+                    except (TypeError, ValueError):
+                        disk_cur, disk_total = 0, 0
+                    mem_prog = meta.get("progress") if isinstance(meta.get("progress"), dict) else {}
+                    mem_cur = int(mem_prog.get("current") or 0)
+                    mem_total = int(mem_prog.get("total") or 0)
+                    if disk_cur > mem_cur or (
+                        disk_cur == mem_cur and disk_total > mem_total
+                    ):
+                        meta["progress"] = {
+                            "current": disk_cur,
+                            "total": disk_total,
+                            "message": str(dp.get("message") or ""),
+                        }
+            self._store.save_meta(job.id, meta)
         except Exception:
             pass
 
@@ -339,8 +388,13 @@ class JobRegistry:
             self._persist_log(job_id, text)
 
         def on_output(path: str, _skip_upload: bool) -> None:
+            p = str(path or "").strip()
+            if not p:
+                return
             with job._lock:
-                job.outputs.append(str(path))
+                if p in job.outputs:
+                    return
+                job.outputs.append(p)
             self._persist_meta(job)
 
         def on_finished(ok: bool, message: str) -> None:

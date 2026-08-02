@@ -15,6 +15,7 @@ import {
 import {
   savePendingUpload,
   useUploadAfterJob,
+  workersForUploadChoice,
 } from "../hooks/useUploadAfterJob";
 import { ProgressBar } from "../components/ProgressBar";
 import { SectionNav } from "../components/SectionNav";
@@ -207,6 +208,7 @@ export function StitchingPage({ platform }: Props) {
       } catch {
         /* continue */
       }
+      const plannedVideos = music.length * copies;
       const res = await api.startStitching({
         output_dir: outputDir,
         platform,
@@ -214,7 +216,7 @@ export function StitchingPage({ platform }: Props) {
         part2_files: part2,
         music_files: music,
         copies_per_track: copies,
-        num_workers: proc.numWorkers,
+        num_workers: workersForUploadChoice(choice, proc.numWorkers),
         use_gpu: proc.useGpu,
         use_gpu_finalize: proc.useGpuFinalize,
         transition: transition || lastTransition,
@@ -228,7 +230,7 @@ export function StitchingPage({ platform }: Props) {
       savePendingUpload(
         "stitching",
         willUpload
-          ? { ...choice, processingJobId: res.id, platform }
+          ? { ...choice, processingJobId: res.id, platform, plannedVideos }
           : null,
       );
       setJobId(res.id);

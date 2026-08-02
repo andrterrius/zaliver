@@ -180,8 +180,47 @@ def _run_via_subprocess(
         return False, f"Cannot start worker process: {e}"
 
     stderr_tail = ""
+    seen_outputs: set[str] = set()
+    last_prog: tuple[int, int, str] | None = None
+
+    def _forward_meta_live() -> None:
+        nonlocal last_prog
+        if not meta_path.is_file():
+            return
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(meta, dict):
+            return
+        dp = meta.get("progress")
+        if isinstance(dp, dict):
+            try:
+                cur = int(dp.get("current") or 0)
+                total = int(dp.get("total") or 0)
+            except (TypeError, ValueError):
+                cur, total = 0, 0
+            msg = str(dp.get("message") or "")
+            prog = (cur, total, msg)
+            if prog != last_prog:
+                last_prog = prog
+                try:
+                    sink.on_progress(cur, total, msg)
+                except Exception:
+                    pass
+        for raw in meta.get("outputs") or []:
+            p = str(raw or "").strip()
+            if not p or p in seen_outputs:
+                continue
+            seen_outputs.add(p)
+            try:
+                sink.on_output_saved(p, True)
+            except Exception:
+                pass
+
     try:
         while True:
+            _forward_meta_live()
             rc = proc.poll()
             if result_path.is_file():
                 break
@@ -230,9 +269,14 @@ def _run_via_subprocess(
             result = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as e:
             return False, f"Invalid worker result: {e}"
+        _forward_meta_live()
         for out in result.get("outputs") or []:
+            p = str(out or "").strip()
+            if not p or p in seen_outputs:
+                continue
+            seen_outputs.add(p)
             try:
-                sink.on_output_saved(str(out), True)
+                sink.on_output_saved(p, True)
             except Exception:
                 pass
         ok = bool(result.get("ok"))

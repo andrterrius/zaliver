@@ -357,24 +357,49 @@ class JobRegistry:
         if job is None:
             return None
         with job._lock:
-            if job.status in (
+            already_done = job.status in (
                 JobStatus.SUCCEEDED,
                 JobStatus.FAILED,
                 JobStatus.CANCELLED,
-            ):
-                return job
-            if job._from_disk and job._cancel is None:
+            )
+            if already_done:
+                cancel = None
+            elif job._from_disk and job._cancel is None:
                 # Cannot cancel a historical record with no runner.
                 return job
-            job.status = JobStatus.CANCELLED
-            job.message = "Cancel requested."
-            cancel = job._cancel
+            else:
+                job.status = JobStatus.CANCELLED
+                job.message = "Cancel requested."
+                cancel = job._cancel
+            linked = str(job.linked_upload_job_id or "").strip()
+            followup = job._upload_followup
+            kind = job.kind
         if cancel is not None:
             try:
                 cancel()
             except Exception:
                 pass
-        self._persist_meta(job)
+        # Streaming upload-after may already hold browser_slots while waiting.
+        # Cancel/abort it so the per-user budget is freed.
+        is_processing = kind in (
+            JobKind.UNIQUIFY,
+            JobKind.SLICING,
+            JobKind.STITCHING,
+        )
+        if is_processing and followup is not None and hasattr(
+            followup, "abort_linked_upload"
+        ):
+            try:
+                followup.abort_linked_upload(job, reason="processing_cancelled")
+            except Exception:
+                pass
+        elif is_processing and linked and linked != job_id:
+            try:
+                self.cancel(linked)
+            except Exception:
+                pass
+        if not already_done:
+            self._persist_meta(job)
         return job
 
     def start(
@@ -505,8 +530,14 @@ class JobRegistry:
                         job.finished_at = time.time()
                         # Runner returned without on_finished — still run followup.
                         need_followup_finish = job._upload_followup is not None
+                        need_followup_abort = False
                     else:
                         need_followup_finish = False
+                        need_followup_abort = (
+                            job.status == JobStatus.CANCELLED
+                            and not job._finished_signaled
+                            and job._upload_followup is not None
+                        )
                     if job.status == JobStatus.CANCELLED and job.finished_at is None:
                         job.finished_at = time.time()
                 self._persist_meta(job)
@@ -517,6 +548,17 @@ class JobRegistry:
                             followup.on_finished(job, True)
                         except Exception as fe:
                             on_log(f"[upload] followup on_finished: {fe!r}")
+                elif need_followup_abort:
+                    followup = job._upload_followup
+                    if followup is not None and hasattr(
+                        followup, "abort_linked_upload"
+                    ):
+                        try:
+                            followup.abort_linked_upload(
+                                job, reason="processing_cancelled"
+                            )
+                        except Exception as fe:
+                            on_log(f"[upload] followup abort: {fe!r}")
 
         threading.Thread(
             target=thread_main, daemon=True, name=f"zaliver-job-{job_id}"

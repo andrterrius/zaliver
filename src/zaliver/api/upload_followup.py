@@ -176,17 +176,61 @@ class UploadFollowup:
     def on_finished(self, job: JobRecord, ok: bool) -> None:
         with self._lock:
             outputs = list(job.outputs)
+            upload_id = self._upload_job_id
         if not ok:
-            job.append_log(
-                "[upload] Обработка завершилась с ошибкой — залив не стартуем.",
-                max_lines=2000,
-            )
+            # Streaming upload may already be RUNNING and holding browser_slots.
+            # Abort it so the per-user budget is released even if no browser
+            # windows are open (await_more wait loop).
+            if upload_id:
+                job.append_log(
+                    "[upload] Обработка завершилась с ошибкой — "
+                    "останавливаем залив, чтобы освободить слоты браузеров.",
+                    max_lines=2000,
+                )
+                self.abort_linked_upload(job, reason="processing_failed")
+            else:
+                job.append_log(
+                    "[upload] Обработка завершилась с ошибкой — залив не стартуем.",
+                    max_lines=2000,
+                )
             return
         if self._streaming:
             self._handle_streaming(job, outputs)
             self._mark_producer_done(job)
             return
         self._start_batch(job, outputs)
+
+    def abort_linked_upload(
+        self, job: JobRecord, *, reason: str = "aborted"
+    ) -> None:
+        """Cancel an already-started followup upload and free browser slots."""
+        with self._lock:
+            upload_id = self._upload_job_id
+            self._producer_done = True
+            self._batch_done = True
+        if not upload_id:
+            linked = str(job.linked_upload_job_id or "").strip()
+            upload_id = linked or None
+        if not upload_id or upload_id == job.id:
+            return
+        try:
+            from zaliver.api.upload_runner import mark_streaming_producer_done
+
+            mark_streaming_producer_done(upload_id)
+        except Exception:
+            pass
+        try:
+            cancelled = self._jobs.cancel(upload_id)
+            if cancelled is not None:
+                job.append_log(
+                    f"[upload] Followup-залив отменён ({reason}): {upload_id[:8]}…",
+                    max_lines=2000,
+                )
+        except Exception as e:
+            job.append_log(
+                f"[upload] Не удалось отменить followup-залив: {e!r}",
+                max_lines=2000,
+            )
 
     def _handle_streaming(self, job: JobRecord, outputs: list[str]) -> None:
         with self._lock:

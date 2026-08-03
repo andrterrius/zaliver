@@ -87,14 +87,31 @@ class ProfileJobsService:
         sink: JobProgressSink,
         register_cancel: Callable[[Callable[[], None]], None] | None,
         log_prefix: str,
+        api_token: str = "",
     ) -> ProfileJobResult:
+        from zaliver.antydetect.local_antidetect_api import local_api_token_scope
+
+        tok = (api_token or "").strip()
+
+        def _check_one(pid: str) -> None:
+            # Workers are plain threads; install session Bearer so local
+            # antidetect sees the same profiles as GET /v1/antidetect/profiles.
+            with local_api_token_scope(tok):
+                check_one(pid)
+
+        def _on_profile_done(pid: str, ok: bool, err: str) -> None:
+            if on_profile_done is None:
+                return
+            with local_api_token_scope(tok):
+                on_profile_done(pid, ok, err)
+
         def _on_progress(done: int, total: int, profile_id: str) -> None:
             sink.on_progress(done, total, profile_id)
 
         mgr = MultiProfileAvailabilityChecker(
             profile_ids=profile_ids,
-            check_one=check_one,
-            on_profile_done=on_profile_done,
+            check_one=_check_one,
+            on_profile_done=_on_profile_done if on_profile_done is not None else None,
             on_progress=_on_progress,
             log_sink=sink.on_log,
             max_concurrent=max_concurrent or DEFAULT_MAX_CONCURRENT_BROWSERS,
@@ -236,6 +253,7 @@ class ProfileJobsService:
             on_profile_done=_on_done,
             sink=sink,
             register_cancel=register_cancel,
+            api_token=req.token or "",
             log_prefix="availability",
         )
 
@@ -336,6 +354,7 @@ class ProfileJobsService:
             on_profile_done=_on_done,
             sink=sink,
             register_cancel=register_cancel,
+            api_token=req.token or "",
             log_prefix="ig-register",
         )
 
@@ -408,6 +427,7 @@ class ProfileJobsService:
             on_profile_done=_on_done,
             sink=sink,
             register_cancel=register_cancel,
+            api_token=req.token or "",
             log_prefix="ig-2fa",
         )
 
@@ -505,6 +525,7 @@ class ProfileJobsService:
             on_profile_done=_on_done,
             sink=sink,
             register_cancel=register_cancel,
+            api_token=req.token or "",
             log_prefix="warmup",
         )
 
@@ -577,6 +598,7 @@ class ProfileJobsService:
             on_profile_done=_on_done,
             sink=sink,
             register_cancel=register_cancel,
+            api_token=req.token or "",
             log_prefix="ig-warmup",
         )
 
@@ -711,6 +733,7 @@ class ProfileJobsService:
             on_profile_done=_on_done,
             sink=sink,
             register_cancel=register_cancel,
+            api_token=req.token or "",
             log_prefix="promote",
         )
 
@@ -782,6 +805,7 @@ class ProfileJobsService:
             on_profile_done=_on_done,
             sink=sink,
             register_cancel=register_cancel,
+            api_token=req.token or "",
             log_prefix="cookie_farm",
         )
 
@@ -958,5 +982,6 @@ class ProfileJobsService:
             on_profile_done=_on_done,
             sink=sink,
             register_cancel=register_cancel,
+            api_token=req.token or "",
             log_prefix="channel_setup",
         )

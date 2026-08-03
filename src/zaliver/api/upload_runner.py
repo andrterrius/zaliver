@@ -531,11 +531,14 @@ def run_upload_job(
                 on_instagram_success=_on_ig,
             )
             if own:
-                upload_youtube_and_instagram_in_local_antidetect_profile(
-                    profile_id,
-                    base_url=bu,
-                    **kw,
-                )
+                from zaliver.antydetect.local_antidetect_api import local_api_token_scope
+
+                with local_api_token_scope(token):
+                    upload_youtube_and_instagram_in_local_antidetect_profile(
+                        profile_id,
+                        base_url=bu,
+                        **kw,
+                    )
             else:
                 upload_youtube_and_instagram_in_profile(
                     profile_id,
@@ -576,11 +579,14 @@ def run_upload_job(
                 tabs_per_profile=max(1, tabs_n),
             )
             if own:
-                res = upload_instagram_reel_in_local_antidetect_profile(
-                    profile_id,
-                    base_url=bu,
-                    **kw,
-                )
+                from zaliver.antydetect.local_antidetect_api import local_api_token_scope
+
+                with local_api_token_scope(token):
+                    res = upload_instagram_reel_in_local_antidetect_profile(
+                        profile_id,
+                        base_url=bu,
+                        **kw,
+                    )
             else:
                 res = upload_instagram_reel_in_profile(
                     profile_id,
@@ -615,11 +621,14 @@ def run_upload_job(
             stats_server_username=guser or None,
         )
         if own:
-            res = open_google_in_local_antidetect_profile(
-                profile_id,
-                base_url=bu,
-                **yt_kw,
-            )
+            from zaliver.antydetect.local_antidetect_api import local_api_token_scope
+
+            with local_api_token_scope(token):
+                res = open_google_in_local_antidetect_profile(
+                    profile_id,
+                    base_url=bu,
+                    **yt_kw,
+                )
         else:
             res = open_google_in_profile(
                 profile_id,

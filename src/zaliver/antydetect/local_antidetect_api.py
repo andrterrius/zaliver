@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import requests
 from urllib.parse import quote
@@ -27,6 +29,9 @@ PROFILE_PREVIEW_CDP_NOT_READY_MSG = (
 # Процессный дефолт: выставляется из настроек (веб-API / UI).
 # Пустая строка = не слать Authorization (десктоп Qt-антидетект без auth).
 _default_api_token: str = ""
+# Per-thread override: web jobs must use the caller's session Bearer so
+# antidetect serve returns that user's profiles (not admin-only).
+_thread_api_token = threading.local()
 
 
 def set_default_local_api_token(token: str | None) -> None:
@@ -38,15 +43,36 @@ def get_default_local_api_token() -> str:
     return _default_api_token
 
 
+def set_thread_local_api_token(token: str | None) -> None:
+    _thread_api_token.value = (token or "").strip()
+
+
+def get_thread_local_api_token() -> str:
+    return str(getattr(_thread_api_token, "value", "") or "").strip()
+
+
+@contextmanager
+def local_api_token_scope(token: str | None) -> Iterator[None]:
+    """Install Bearer for this thread; restore previous value on exit."""
+    prev = get_thread_local_api_token()
+    set_thread_local_api_token(token)
+    try:
+        yield
+    finally:
+        set_thread_local_api_token(prev)
+
+
 def resolve_local_api_token(explicit: str | None = None) -> str:
-    """Явный токен → процессный дефолт → ANTIDETECT_API_TOKEN из env."""
+    """Явный токен → thread-local → процессный дефолт → ANTIDETECT_API_TOKEN."""
     tok = (explicit or "").strip()
     if tok:
         return tok
+    thread_tok = get_thread_local_api_token()
+    if thread_tok:
+        return thread_tok
     if _default_api_token:
         return _default_api_token
     return (os.environ.get("ANTIDETECT_API_TOKEN") or "").strip()
-
 
 @dataclass(frozen=True)
 class RemoteCdpLaunchOptions:

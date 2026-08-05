@@ -136,11 +136,12 @@ export function UploadPanel({
         Название <TitleVariablesHint onInsert={(t) => setTitle((v) => v + t)} />
       </label>
       <FieldWithRecent recent={recent.upload_titles} onSelect={setTitle}>
-        <input
-          className="field"
+        <textarea
+          className="field field-title"
+          rows={3}
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          placeholder="Название ({date}, {index}…)"
+          placeholder="Название ({date}, {index}…). Enter — новая строка"
         />
       </FieldWithRecent>
       <label className="hint">Описание</label>

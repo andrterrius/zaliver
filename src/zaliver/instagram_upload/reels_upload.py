@@ -13,6 +13,11 @@ from zaliver.instagram_upload.instagram_availability import (
     verify_instagram_home_available,
 )
 from zaliver.instagram_upload.logutil import emit_instagram_log, instagram_entrypoint
+from zaliver.text_format import (
+    BLANK_LINE_BRAILLE,
+    blank_line_gap_count,
+    preserve_blank_lines,
+)
 
 # Playwright при connect_over_cdp шлёт тело файла по CDP и режет ~50 MiB.
 # DOM.setFileInputFiles с путями на хосте браузера обходит это.
@@ -1328,7 +1333,6 @@ def _js_set_caption(locator, text: str) -> None:
                 el.dispatchEvent(new Event('change', { bubbles: true }));
                 return;
             }
-            // Lexical contenteditable
             try {
                 const sel = window.getSelection();
                 const range = document.createRange();
@@ -1336,20 +1340,14 @@ def _js_set_caption(locator, text: str) -> None:
                 sel.removeAllRanges();
                 sel.addRange(range);
             } catch (_) {}
-            let ok = false;
-            try { ok = document.execCommand('selectAll', false, null); } catch (_) {}
+            try { document.execCommand('selectAll', false, null); } catch (_) {}
             try { document.execCommand('delete', false, null); } catch (_) {}
             try {
-                ok = document.execCommand('insertText', false, value);
+                document.execCommand('insertText', false, value);
             } catch (_) {
-                ok = false;
-            }
-            if (!ok) {
-                // Fallback: заменить содержимое <p>
                 const p = el.querySelector('p') || el;
                 p.textContent = value;
                 fire('input', { inputType: 'insertText', data: value });
-                fire('beforeinput', { inputType: 'insertText', data: value });
             }
             el.dispatchEvent(new Event('change', { bubbles: true }));
             el.blur?.();
@@ -1359,8 +1357,57 @@ def _js_set_caption(locator, text: str) -> None:
     )
 
 
+def _read_caption_text(area) -> str:
+    try:
+        return (
+            area.evaluate(
+                "(el) => (el && (el.innerText ?? el.textContent) "
+                "? String(el.innerText ?? el.textContent) : '')"
+            )
+            or ""
+        )
+    except Exception:
+        return ""
+
+
+def _type_caption_via_keyboard(page, area, text: str) -> None:
+    """
+    Ввод подписи как у пользователя: Enter между строками.
+    Пустые строки — braille blank (U+2800), иначе Instagram схлопывает зазоры.
+    """
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    try:
+        _dom_click(area)
+    except Exception:
+        area.click(timeout=8_000)
+    page.wait_for_timeout(80)
+    try:
+        page.keyboard.press("Control+A")
+        page.keyboard.press("Backspace")
+    except Exception:
+        pass
+    page.wait_for_timeout(40)
+    for i, line in enumerate(lines):
+        if i > 0:
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(20)
+        chunk = line if line else BLANK_LINE_BRAILLE
+        page.keyboard.type(chunk, delay=0)
+        page.wait_for_timeout(10)
+
+
+def _caption_gaps_preserved(wanted: str, got: str) -> bool:
+    need = blank_line_gap_count(wanted)
+    if need <= 0:
+        return True
+    return blank_line_gap_count(got) >= need
+
+
 def _fill_caption(page, caption: str) -> None:
-    text = (caption or "").strip()
+    text = preserve_blank_lines(
+        (caption or "").strip(),
+        placeholder=BLANK_LINE_BRAILLE,
+    )
     if not text:
         return
     try:
@@ -1402,16 +1449,57 @@ def _fill_caption(page, caption: str) -> None:
             )
             return
 
-        try:
-            _dom_click(area)
-        except Exception:
-            pass
+        gaps = blank_line_gap_count(text)
+        if gaps:
+            _log(
+                f"Reels upload: в подписи {gaps} пустых строк — "
+                "ввод через клавиатуру (Enter + U+2800)."
+            )
 
+        # 1) Клавиатура — самый надёжный способ для Lexical + пустых строк.
+        try:
+            _type_caption_via_keyboard(page, area, text)
+            page.wait_for_timeout(200)
+            got = _read_caption_text(area)
+            if _caption_gaps_preserved(text, got):
+                _log(
+                    f"Reels upload: подпись задана через клавиатуру "
+                    f"({len(text)} символов, пустых строк={gaps})."
+                )
+                return
+            _log(
+                "Reels upload: после клавиатуры пустые строки схлопнулись "
+                f"(want_gaps={gaps}, got={got!r}) — повтор / JS."
+            )
+        except Exception as e:
+            _log(f"Reels upload: клавиатурный ввод подписи не удался: {e!r}")
+
+        # 2) Повтор клавиатуры ещё раз (иногда Lexical «съедает» первый Enter).
+        try:
+            _type_caption_via_keyboard(page, area, text)
+            page.wait_for_timeout(250)
+            got = _read_caption_text(area)
+            if _caption_gaps_preserved(text, got):
+                _log(
+                    f"Reels upload: подпись задана через клавиатуру (повтор, "
+                    f"{len(text)} символов)."
+                )
+                return
+        except Exception as e:
+            _log(f"Reels upload: повтор клавиатуры: {e!r}")
+
+        # 3) JS fallback (textarea / когда keyboard недоступен).
         try:
             _js_set_caption(area, text)
-            _log(f"Reels upload: подпись задана через JS ({len(text)} символов).")
-            page.wait_for_timeout(300)
-            return
+            page.wait_for_timeout(200)
+            got = _read_caption_text(area)
+            if _caption_gaps_preserved(text, got) or gaps <= 0:
+                _log(f"Reels upload: подпись задана через JS ({len(text)} символов).")
+                return
+            _log(
+                "Reels upload: JS тоже схлопнул пустые строки "
+                f"(got={got!r})."
+            )
         except Exception as e:
             _log(f"Reels upload: JS-ввод подписи не удался: {e!r}")
 

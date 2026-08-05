@@ -197,6 +197,16 @@ textarea.field {
   line-height: 1.5;
 }
 
+textarea.field.field-title {
+  min-height: 64px;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  color: inherit;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
 select.field {
   cursor: pointer;
   appearance: none;

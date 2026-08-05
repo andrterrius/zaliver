@@ -169,8 +169,12 @@ from zaliver.core.profiles import ReelsWarmupSettings, ShortsWarmupSettings
 from zaliver.ui.channel_setup_helpers import (
     field_with_recent_picker,
     make_magic_wand_button,
+    recent_picker_has_items,
 )
-from zaliver.ui.title_variables_ui import show_youtube_title_warnings, title_field_with_variables_hint
+from zaliver.ui.title_variables_ui import (
+    make_variables_hint_button,
+    show_youtube_title_warnings,
+)
 from zaliver.config.platform_settings import PlatformSettings
 from zaliver.ui.platform import (
     PLATFORM_INSTAGRAM,
@@ -3800,24 +3804,21 @@ class MainWindow(QWidget):
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(10)
 
-        title_edit = QComboBox()
-        title_edit.setEditable(True)
-        title_edit.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        title_le = title_edit.lineEdit()
-        if title_le is not None:
-            title_le.setPlaceholderText(
-                "Название видео (обязательное для загрузки в YouTube). "
-                "Можно использовать переменные: {date}, {profile}, {video}, {index}…"
-            )
-        for recent_title in self._upload_store.list_recent_upload_titles(
+        recent_upload_titles = self._upload_store.list_recent_upload_titles(
             platform=self._platform
-        ):
-            title_edit.addItem(recent_title)
-        if title_edit.count() > 0:
-            title_edit.setCurrentIndex(0)
-        elif title_le is not None:
-            title_edit.setCurrentIndex(-1)
-            title_le.clear()
+        )
+        title_edit = QPlainTextEdit()
+        title_edit.setPlaceholderText(
+            "Название видео (обязательное для загрузки в YouTube). "
+            "Можно использовать переменные: {date}, {profile}, {video}, {index}… "
+            "Enter — новая строка."
+        )
+        title_edit.setMinimumHeight(56)
+        title_edit.setMaximumHeight(96)
+        title_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        if recent_upload_titles:
+            title_edit.setPlainText(recent_upload_titles[0])
+
         desc_edit = QPlainTextEdit()
         desc_edit.setPlaceholderText("Описание (необязательно)…")
         desc_edit.setMinimumHeight(44)
@@ -3869,23 +3870,20 @@ class MainWindow(QWidget):
             "Если выключено: сначала обрабатываются все видео, затем начинается залив."
         )
 
+        btn_title_hints = make_variables_hint_button(parent=dlg, field=title_edit)
         btn_title_wand = make_magic_wand_button(
             tooltip="Сгенерировать название через ИИ (промпт «Название видео»)"
         )
-        title_row, btn_title_hints = title_field_with_variables_hint(
+        title_row, _title_recent = field_with_recent_picker(
             title_edit,
-            parent=dlg,
-            side_extras=[btn_title_wand],
+            recent=recent_upload_titles,
+            tooltip="Недавние названия видео",
+            side_extras=[btn_title_hints, btn_title_wand],
         )
 
         def _apply_ai_title(text: str) -> None:
-            value = (text or "").replace("\r\n", "\n").replace("\r", "\n")
-            value = " ".join(line.strip() for line in value.split("\n") if line.strip())
-            le = title_edit.lineEdit()
-            if le is not None:
-                le.setText(value)
-            else:
-                title_edit.setEditText(value)
+            value = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+            title_edit.setPlainText(value)
 
         btn_title_wand.clicked.connect(
             lambda _checked=False: self._on_ai_magic_generate(
@@ -3900,14 +3898,18 @@ class MainWindow(QWidget):
             title_edit.setEnabled(not checked)
             btn_title_hints.setEnabled(not checked)
             btn_title_wand.setEnabled(not checked)
-            if checked and title_le is not None:
-                title_le.setPlaceholderText(
+            _title_recent.setEnabled(
+                (not checked) and recent_picker_has_items(_title_recent)
+            )
+            if checked:
+                title_edit.setPlaceholderText(
                     "Название не вводится — берётся из Studio (настройки канала или имя файла)…"
                 )
-            elif title_le is not None:
-                title_le.setPlaceholderText(
+            else:
+                title_edit.setPlaceholderText(
                     "Название видео (обязательное для загрузки в YouTube). "
-                    "Можно использовать переменные: {date}, {profile}, {video}, {index}…"
+                    "Можно использовать переменные: {date}, {profile}, {video}, {index}… "
+                    "Enter — новая строка."
                 )
 
         keep_studio_title_cb.toggled.connect(_sync_keep_studio_title_ui)
@@ -4311,7 +4313,12 @@ class MainWindow(QWidget):
 
         is_ig_upload = self._platform == PLATFORM_INSTAGRAM
         desc_label = QLabel("Описание:")
-        grid.addWidget(QLabel("Название:"), 0, 0)
+        grid.addWidget(
+            QLabel("Название:"),
+            0,
+            0,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
+        )
         grid.addWidget(title_row, 0, 1)
         grid.addWidget(
             desc_label,
@@ -4338,17 +4345,17 @@ class MainWindow(QWidget):
                 schedule_times_widget,
             ):
                 w.setVisible(False)
-            if title_le is not None:
-                title_le.setPlaceholderText(
-                    "Подпись к Reels (необязательно). "
-                    "Можно использовать переменные: {date}, {profile}, {video}, {index}…"
-                )
+            title_edit.setPlaceholderText(
+                "Подпись к Reels (необязательно). "
+                "Можно использовать переменные: {date}, {profile}, {video}, {index}… "
+                "Enter — новая строка."
+            )
         elif self._platform == PLATFORM_YT_INST:
-            if title_le is not None:
-                title_le.setPlaceholderText(
-                    "Название YouTube / подпись Instagram. "
-                    "Переменные: {date}, {profile}, {video}, {index}…"
-                )
+            title_edit.setPlaceholderText(
+                "Название YouTube / подпись Instagram. "
+                "Переменные: {date}, {profile}, {video}, {index}… "
+                "Enter — новая строка."
+            )
         profiles_col = QWidget()
         profiles_col_l = QVBoxLayout(profiles_col)
         profiles_col_l.setContentsMargins(0, 0, 0, 0)
@@ -4371,10 +4378,7 @@ class MainWindow(QWidget):
         grid.addWidget(btns, 9, 0, 1, 2)
         grid.setRowStretch(8, 1)
 
-        if title_le is not None:
-            title_le.setFocus()
-        else:
-            title_edit.setFocus()
+        title_edit.setFocus()
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return None
 
@@ -4414,7 +4418,7 @@ class MainWindow(QWidget):
                 QMessageBox.warning(self, "Zaliver", sched_err)
                 return None
             schedule_times_iso = [t.isoformat() for t in sorted(schedule_times_msk)]
-        title = (title_edit.currentText() or "").strip()
+        title = (title_edit.toPlainText() or "").strip()
         if title and not keep_studio_title:
             if not is_ig_upload:
                 show_youtube_title_warnings(self, [title])

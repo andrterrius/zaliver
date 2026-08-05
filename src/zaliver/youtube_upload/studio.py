@@ -6465,10 +6465,18 @@ def _studio_upload_pick_file(
     return metadata_state
 
 
+from zaliver.text_format import preserve_blank_lines
+
+
 def _studio_normalize_upload_title(title: str | None) -> str:
-    """Название для Studio: без краевых пробелов, в конце всегда один пробел."""
-    t = (title or "").strip()
+    """Название для Studio: без краевых пробелов, пустые строки сохранены, в конце пробел."""
+    t = preserve_blank_lines((title or "").strip())
     return f"{t} " if t else ""
+
+
+def _studio_normalize_upload_description(description: str | None) -> str:
+    """Описание для Studio с сохранением пустых строк (двойной Enter)."""
+    return preserve_blank_lines((description or "").strip())
 
 
 def _studio_upload_title_box_locator(page):
@@ -6540,7 +6548,7 @@ def _studio_prepare_upload_details_during_transfer(
     Возвращает (title_done, description_done, not_for_kids_done).
     """
     t = "" if keep_studio_title else _studio_normalize_upload_title(title)
-    d = (description or "").strip()
+    d = _studio_normalize_upload_description(description)
     if not t and not d and not keep_studio_title:
         return True, True, False
 
@@ -6631,7 +6639,7 @@ def _studio_set_title_and_description(
     Возвращает True, если «Не для детей» уже выбрано в ходе подготовки метаданных.
     """
     t = "" if keep_studio_title else _studio_normalize_upload_title(title)
-    d = (description or "").strip()
+    d = _studio_normalize_upload_description(description)
     if not t and not d and not keep_studio_title:
         return metadata_state[2] if metadata_state else False
 

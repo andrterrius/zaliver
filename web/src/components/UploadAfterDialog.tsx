@@ -320,8 +320,9 @@ export function UploadAfterDialog({
             onSelect={setTitle}
             disabled={keepStudioTitle}
           >
-            <input
-              className="field"
+            <textarea
+              className="field field-title"
+              rows={3}
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               disabled={keepStudioTitle}
@@ -329,8 +330,8 @@ export function UploadAfterDialog({
                 keepStudioTitle
                   ? "Название не вводится — из Studio (настройки канала или имя файла)…"
                   : isIg
-                    ? "Подпись к Reels (необязательно). {date}, {profile}…"
-                    : "Название ({date}, {profile}, {video}, {index}…)"
+                    ? "Подпись к Reels (необязательно). {date}, {profile}… Enter — новая строка"
+                    : "Название ({date}, {profile}, {video}, {index}…). Enter — новая строка"
               }
               autoFocus={!keepStudioTitle}
             />

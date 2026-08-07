@@ -30,8 +30,22 @@ _NEW_POST_ARIA = (
     "Create",
     "Создать",
 )
-# Подменю после Create: Post / Live video / Ad (EN) или Публикация / …
+# Доступное имя ссылки Create в сайдбаре (в т.ч. collapsed: svg + скрытый «Создать»).
+_NEW_POST_LINK_NAME_RE = re.compile(
+    r"^(новая\s+публикация|new\s+post|создать|create)$",
+    re.I,
+)
+# Подменю после Create: Post / Live video / Ad (EN) или Публикация / Прямой эфир / Объявление.
 _CREATE_MENU_POST_RE = re.compile(r"^(post|публикация)$", re.I)
+_CREATE_MENU_POST_ARIA = ("Post", "Публикация")
+_CREATE_SUBMENU_OPEN_ARIA = (
+    "Post",
+    "Публикация",
+    "Live video",
+    "Прямой эфир",
+    "Ad",
+    "Объявление",
+)
 _CREATE_DIALOG_ARIA = (
     "Создание публикации",
     "Create new post",
@@ -116,6 +130,98 @@ def _new_post_svg_locator(page):
     return loc
 
 
+def _new_post_nav_link_locator(page):
+    """
+    Альтернативный сайдбар: плюсик в <a href="#" role="link"> (_a6hd),
+    часто внутри span[aria-describedby] + скрытый текст «Создать».
+    """
+    svg = _new_post_svg_locator(page)
+    by_svg = (
+        page.locator('a[role="link"][href="#"]').filter(has=svg)
+        .or_(page.locator("a._a6hd").filter(has=svg))
+        .or_(page.locator('span[aria-describedby] a[role="link"]').filter(has=svg))
+    )
+    by_name = page.get_by_role("link", name=_NEW_POST_LINK_NAME_RE)
+    return by_svg.or_(by_name)
+
+
+def _is_hash_nav_link(locator) -> bool:
+    """True для <a href="#" role="link"> (Create / пункты меню Create)."""
+    try:
+        return bool(
+            locator.evaluate(
+                """(el) => {
+                    const a = el.closest
+                        ? (el.closest('a[role="link"], a._a6hd, a[href]') || el)
+                        : el;
+                    if (!a || !a.tagName) return false;
+                    if (String(a.tagName).toUpperCase() !== 'A') return false;
+                    const href = (a.getAttribute('href') || '').trim();
+                    return href === '#' || href === '';
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+def _click_new_post_element(page, target, *, label: str = "") -> str:
+    """Клик по кнопке/ссылке Create; для href=\"#\" — несколько стратегий."""
+    shown = (label or "").strip() or "Новая публикация"
+
+    def _press_enter() -> None:
+        target.focus()
+        page.keyboard.press("Enter")
+
+    def _settled() -> bool:
+        # Короткий опрос: мастер / подменю Post после Create.
+        deadline = time.monotonic() + 0.55
+        while time.monotonic() < deadline:
+            if _create_flow_started(page):
+                return True
+            try:
+                page.wait_for_timeout(70)
+            except Exception:
+                time.sleep(0.07)
+        return False
+
+    # Для <a href="#"> React иногда игнорирует один synthetic click —
+    # пробуем DOM-события, force click и Enter.
+    if _is_hash_nav_link(target):
+        strategies: tuple[tuple[str, Any], ...] = (
+            ("dom", lambda: _dom_click(target)),
+            ("force", lambda: target.click(timeout=5_000, force=True)),
+            ("enter", _press_enter),
+        )
+    else:
+        strategies = (
+            ("dom", lambda: _dom_click(target)),
+            ("force", lambda: target.click(timeout=5_000, force=True)),
+        )
+    last_err: Exception | None = None
+    hash_link = _is_hash_nav_link(target)
+    for name, fn in strategies:
+        try:
+            fn()
+        except Exception as e:
+            last_err = e
+            continue
+        if name != "dom":
+            _log(f"Reels upload: клик Create через {name}.")
+        if not hash_link:
+            return shown
+        if _settled():
+            return shown
+        _log(
+            f"Reels upload: после Create ({name}) UI не открылся — "
+            "другая стратегия…"
+        )
+    if last_err is not None and not hash_link:
+        raise last_err
+    # Hash-link: клики без исключения, но UI мог открыться с задержкой.
+    return shown
+
+
 def _click_new_post_target(page, svg) -> str:
     """Клик по svg или кликабельному предку. Возвращает aria-label для лога."""
     label = ""
@@ -128,15 +234,18 @@ def _click_new_post_target(page, svg) -> str:
     )
     # DOM/JS клик: на фоновой вкладке Playwright visible/force по координатам
     # часто бесполезен — кликаем сам узел.
-    target = clickable.first if clickable.count() else svg
     try:
-        _dom_click(target)
+        target = clickable.first if clickable.count() else svg
+    except Exception:
+        target = svg
+    try:
+        return _click_new_post_element(page, target, label=label)
     except Exception:
         try:
-            target.click(timeout=5_000, force=True)
+            return _click_new_post_element(page, svg, label=label)
         except Exception:
             svg.click(timeout=5_000, force=True)
-    return label or "Новая публикация"
+            return label or "Новая публикация"
 
 
 def _try_click_new_post_once(page, *, appear_timeout_ms: float = 250) -> bool:
@@ -145,6 +254,8 @@ def _try_click_new_post_once(page, *, appear_timeout_ms: float = 250) -> bool:
     Не требуем visible — фоновые вкладки часто «невидимы» для Playwright.
     """
     wait_ms = max(50, int(appear_timeout_ms))
+
+    # 1) Классика: svg[aria-label=…] → кликабельный предок.
     try:
         svg = _new_post_svg_locator(page).first
         svg.wait_for(state="attached", timeout=wait_ms)
@@ -154,9 +265,27 @@ def _try_click_new_post_once(page, *, appear_timeout_ms: float = 250) -> bool:
     except Exception:
         pass
 
-    # Fallback: любой svg с title «Новая публикация».
+    # 2) Альтернативный дизайн: <a href="#" role="link" class="_a6hd"> + плюсик.
     try:
-        titled = page.locator("svg[aria-label] title").filter(
+        link = _new_post_nav_link_locator(page).first
+        link.wait_for(state="attached", timeout=min(400, wait_ms))
+        label = ""
+        try:
+            svg = link.locator("svg[aria-label]").first
+            if int(svg.count()) > 0:
+                label = (svg.get_attribute("aria-label") or "").strip()
+        except Exception:
+            label = ""
+        shown = label or "Новая публикация"
+        _click_new_post_element(page, link, label=shown)
+        _log(f"Reels upload: клик по ссылке Create (nav href=# «{shown}»).")
+        return True
+    except Exception:
+        pass
+
+    # 3) Fallback: любой svg с title «Новая публикация».
+    try:
+        titled = page.locator("svg title").filter(
             has_text=re.compile(r"новая публикация|new post|создать|create", re.I)
         )
         if int(titled.count()) <= 0:
@@ -172,6 +301,115 @@ def _try_click_new_post_once(page, *, appear_timeout_ms: float = 250) -> bool:
         return True
     except Exception:
         return False
+
+
+def _create_submenu_svg_locator(page):
+    """Иконки пунктов выпадающего меню Create (Post / Live / Ad)."""
+    loc = page.locator(f'svg[aria-label="{_CREATE_SUBMENU_OPEN_ARIA[0]}"]')
+    for aria in _CREATE_SUBMENU_OPEN_ARIA[1:]:
+        loc = loc.or_(page.locator(f'svg[aria-label="{aria}"]'))
+    return loc
+
+
+def _create_menu_post_svg_locator(page):
+    """Только пункт Post / Публикация в меню Create."""
+    loc = page.locator(f'svg[aria-label="{_CREATE_MENU_POST_ARIA[0]}"]')
+    for aria in _CREATE_MENU_POST_ARIA[1:]:
+        loc = loc.or_(page.locator(f'svg[aria-label="{aria}"]'))
+    return loc
+
+
+def _create_menu_post_link_locator(page):
+    """
+    Ссылка «Публикация» / Post в flyout после Create
+    (рядом с «Прямой эфир» / «Объявление»).
+    """
+    svg = _create_menu_post_svg_locator(page)
+    return (
+        page.locator('a[role="link"][href="#"]').filter(has=svg)
+        .or_(page.get_by_role("link", name=_CREATE_MENU_POST_RE))
+        .or_(
+            page.locator('a[role="link"]').filter(
+                has_text=re.compile(r"^\s*(публикация|post)\s*$", re.I)
+            )
+        )
+    )
+
+
+def _create_flow_started(page) -> bool:
+    """После клика Create: диалог, кроп/подпись или подменю Create (быстрый опрос)."""
+    try:
+        dlg = _create_dialog_locator(page)
+        n = int(dlg.count())
+        for i in range(min(n, 4)):
+            try:
+                if dlg.nth(i).is_visible(timeout=50):
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    try:
+        crop = page.locator(_CROP_BTN_SVG_SEL)
+        n = int(crop.count())
+        for i in range(min(n, 3)):
+            try:
+                if crop.nth(i).is_visible(timeout=40):
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    try:
+        cap = page.locator(_CAPTION_FIELD_CSS)
+        n = int(cap.count())
+        for i in range(min(n, 3)):
+            try:
+                if cap.nth(i).is_visible(timeout=40):
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    # Flyout открыт: Публикация / Прямой эфир / Объявление (или EN).
+    try:
+        menu = _create_submenu_svg_locator(page)
+        n = int(menu.count())
+        for i in range(min(n, 6)):
+            try:
+                el = menu.nth(i)
+                try:
+                    if el.is_visible(timeout=40):
+                        return True
+                except Exception:
+                    pass
+                fly = el.locator(
+                    "xpath=ancestor::div[@aria-hidden='false'][1]"
+                )
+                if int(fly.count()) > 0:
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    try:
+        link = _create_menu_post_link_locator(page)
+        n = int(link.count())
+        for i in range(min(n, 3)):
+            try:
+                el = link.nth(i)
+                if el.is_visible(timeout=40):
+                    return True
+                fly = el.locator(
+                    "xpath=ancestor::div[@aria-hidden='false'][1]"
+                )
+                if int(fly.count()) > 0:
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
 
 
 def _create_wizard_already_open(page) -> bool:
@@ -258,16 +496,13 @@ def _click_new_post_in_sidebar(page, *, max_seconds: float = 90.0) -> None:
         return
 
     _log("Reels upload: ищем кнопку «Новая публикация» в сайдбаре…")
-    if _try_click_new_post_once(page, appear_timeout_ms=200):
-        # Повторный Create на занятой вкладке → «Отменить»: остаёмся в мастере.
-        _dismiss_discard_create_dialog(page, prefer_keep=True)
-        return
     deadline = time.monotonic() + max(10.0, float(max_seconds))
     last_url = ""
     poll_chunk_ms = 300.0
     while time.monotonic() < deadline:
-        if _create_wizard_already_open(page):
-            _log("Reels upload: мастер создания открылся — Create больше не жмём.")
+        if _create_flow_started(page):
+            _dismiss_discard_create_dialog(page, prefer_keep=True)
+            _log("Reels upload: мастер/меню Create открыто.")
             return
         try:
             last_url = (page.url or "").strip()
@@ -275,11 +510,24 @@ def _click_new_post_in_sidebar(page, *, max_seconds: float = 90.0) -> None:
             last_url = ""
         remaining_ms = max(50.0, (deadline - time.monotonic()) * 1000.0)
         chunk = min(poll_chunk_ms, remaining_ms)
-        if _try_click_new_post_once(page, appear_timeout_ms=chunk):
-            _dismiss_discard_create_dialog(page, prefer_keep=True)
-            return
+        if not _try_click_new_post_once(page, appear_timeout_ms=chunk):
+            continue
+        # Клик «успешен», но на _a6hd/href=# UI может открыться с задержкой.
+        settle_until = time.monotonic() + 1.8
+        while time.monotonic() < settle_until:
+            if _create_flow_started(page):
+                _dismiss_discard_create_dialog(page, prefer_keep=True)
+                return
+            try:
+                page.wait_for_timeout(100)
+            except Exception:
+                time.sleep(0.1)
+        _log(
+            "Reels upload: после клика Create UI не открылся — "
+            "повторяем (в т.ч. nav href=#)…"
+        )
 
-    if _create_wizard_already_open(page):
+    if _create_flow_started(page):
         return
     raise InstagramReelsUploadError(
         "Не удалось нажать «Новая публикация» в сайдбаре Instagram."
@@ -289,27 +537,81 @@ def _click_new_post_in_sidebar(page, *, max_seconds: float = 90.0) -> None:
 
 def _try_click_create_submenu_once(page) -> bool:
     """Быстрый клик Post/Публикация в выпадающем меню Create (без долгих wait)."""
-    menu_svg = (
-        page.locator('svg[aria-label="Post"]')
-        .or_(page.locator('svg[aria-label="Публикация"]'))
-        .first
-    )
+    # 1) Ссылка flyout: «Публикация» рядом с «Прямой эфир» / «Объявление».
     try:
-        if not menu_svg.is_visible(timeout=80):
-            return False
+        links = _create_menu_post_link_locator(page)
+        n = int(links.count())
+        for i in range(min(n, 4)):
+            link = links.nth(i)
+            open_fly = False
+            try:
+                if link.is_visible(timeout=40):
+                    open_fly = True
+            except Exception:
+                pass
+            if not open_fly:
+                try:
+                    fly = link.locator(
+                        "xpath=ancestor::div[@aria-hidden='false'][1]"
+                    )
+                    open_fly = int(fly.count()) > 0
+                except Exception:
+                    open_fly = False
+            if not open_fly:
+                continue
+            try:
+                _dom_click(link)
+            except Exception:
+                link.click(timeout=4_000, force=True)
+            _log("Reels upload: в меню Create выбрали «Публикация» (link).")
+            return True
     except Exception:
+        pass
+
+    # 2) svg[aria-label=Post|Публикация] → кликабельный предок.
+    try:
+        svgs = _create_menu_post_svg_locator(page)
+        n = int(svgs.count())
+    except Exception:
+        return False
+    menu_svg = None
+    for i in range(min(n, 4)):
+        cand = svgs.nth(i)
+        try:
+            if cand.is_visible(timeout=40):
+                menu_svg = cand
+                break
+        except Exception:
+            pass
+        try:
+            fly = cand.locator(
+                "xpath=ancestor::div[@aria-hidden='false'][1]"
+            )
+            if int(fly.count()) > 0:
+                menu_svg = cand
+                break
+        except Exception:
+            continue
+    if menu_svg is None:
         return False
     clickable = menu_svg.locator(
         "xpath=ancestor::*[@role='button' or @role='link' "
         "or self::a or self::button][1]"
     )
     try:
-        clickable.first.click(timeout=4_000, force=True)
+        target = clickable.first if clickable.count() else menu_svg
+    except Exception:
+        target = menu_svg
+    try:
+        _dom_click(target)
     except Exception:
         try:
-            menu_svg.click(timeout=4_000, force=True)
+            target.click(timeout=4_000, force=True)
         except Exception:
-            return False
+            try:
+                menu_svg.click(timeout=4_000, force=True)
+            except Exception:
+                return False
     try:
         label = (menu_svg.get_attribute("aria-label") or "").strip() or "Post"
     except Exception:
@@ -319,10 +621,11 @@ def _try_click_create_submenu_once(page) -> bool:
 
 
 def _click_create_submenu_post_if_present(
-    page, *, timeout_ms: float = 2_400
+    page, *, timeout_ms: float = 4_000
 ) -> bool:
     """
-    После Create иногда выпадает меню (Post / Live video / Ad).
+    После Create иногда выпадает меню
+    (Post / Live video / Ad или Публикация / Прямой эфир / Объявление).
     Кликаем Post / Публикация; если сразу открылся диалог — выходим быстро.
     """
     deadline = time.monotonic() + max(0.3, float(timeout_ms) / 1000.0)
@@ -334,16 +637,20 @@ def _click_create_submenu_post_if_present(
             pass
 
         if _try_click_create_submenu_once(page):
-            return True
-
-        try:
-            link = page.get_by_role("link", name=_CREATE_MENU_POST_RE).first
-            if link.is_visible(timeout=80):
-                link.click(timeout=4_000, force=True)
-                _log("Reels upload: в меню Create выбрали Post/Публикация (link).")
-                return True
-        except Exception:
-            pass
+            # Даём диалогу появиться; при пустом клике повторим.
+            settle_until = time.monotonic() + 0.9
+            while time.monotonic() < settle_until:
+                try:
+                    if _create_dialog_locator(page).first.is_visible(timeout=60):
+                        return True
+                except Exception:
+                    pass
+                try:
+                    page.wait_for_timeout(80)
+                except Exception:
+                    time.sleep(0.08)
+            # Клик был, диалога ещё нет — возможно нужен повтор.
+            continue
 
         time.sleep(0.05)
 

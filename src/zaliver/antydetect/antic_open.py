@@ -2353,9 +2353,7 @@ def upload_instagram_reel_in_local_antidetect_profile(
 
         context = None
         with _profile_launch_lock(profile_id):
-            ws_url = (meta.get("ws_url") or "").strip()
-            session_id = (meta.get("session_id") or "").strip() or None
-            if not ws_url or not session_id:
+            def _bind_running_or_launch() -> tuple[str, str]:
                 ws_existing, sid_existing, _msg = (
                     api.resolve_running_cdp_ws_url_for_profile(profile_id)
                 )
@@ -2365,46 +2363,119 @@ def upload_instagram_reel_in_local_antidetect_profile(
                     and isinstance(sid_existing, str)
                     and sid_existing.strip()
                 ):
-                    session_id = sid_existing.strip()
-                    ws_url = ws_existing.strip()
+                    sid = sid_existing.strip()
+                    ws = ws_existing.strip()
                     _log(
                         "Local antidetect: переиспользуем уже запущенную сессию "
-                        f"session_id={session_id!r}, cdp_ws_url={ws_url!r}"
+                        f"session_id={sid!r}, cdp_ws_url={ws!r}"
                     )
-                else:
-                    acc = api.launch_profile(
-                        profile_id,
-                        headless=headless,
-                        expose_cdp=True,
-                        remote_cdp=remote_cdp,
-                        start_url="https://www.instagram.com/",
-                    )
-                    sid = acc.get("session_id")
-                    if not isinstance(sid, str) or not sid.strip():
-                        raise LocalAntidetectError(
-                            f"Нет session_id в ответе launch: {acc!r}"
+                    return sid, ws
+                sid, ws = _local_launch_or_reuse_instagram_session(
+                    api,
+                    profile_id=profile_id,
+                    base_url=bu,
+                    headless=headless,
+                    remote_cdp=remote_cdp,
+                )
+                return sid, ws
+
+            def _clear_dead_keep_open_session(dead_sid: str | None) -> None:
+                meta["session_id"] = None
+                meta["ws_url"] = None
+                meta["preopened"] = False
+                unregister_local_session(profile_id=profile_id)
+                sid_stop = (dead_sid or "").strip()
+                if not sid_stop:
+                    try:
+                        sid_stop = (
+                            api.find_running_session_id_for_profile(profile_id) or ""
+                        ).strip()
+                    except Exception:
+                        sid_stop = ""
+                if sid_stop:
+                    try:
+                        api.stop_session(sid_stop)
+                        _log(
+                            "Local antidetect: stop_session мёртвого CDP "
+                            f"session_id={sid_stop!r}"
                         )
-                    session_id = sid.strip()
-                    ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
-                    _log(f"Local antidetect: cdp_ws_url={ws_url!r}")
+                    except Exception as stop_e:
+                        _log(
+                            "Local antidetect: stop_session мёртвого CDP "
+                            f"не удался: {stop_e!r}"
+                        )
+                    time.sleep(0.9)
+
+            ws_url = (meta.get("ws_url") or "").strip()
+            session_id = (meta.get("session_id") or "").strip() or None
+            if not ws_url or not session_id:
+                session_id, ws_url = _bind_running_or_launch()
                 register_local_session(
                     profile_id=profile_id, base_url=bu, session_id=session_id
                 )
                 meta["session_id"] = session_id
                 meta["ws_url"] = ws_url
+            else:
+                register_local_session(
+                    profile_id=profile_id, base_url=bu, session_id=session_id
+                )
 
             pw_cm = sync_playwright()
             p = pw_cm.__enter__()
             try:
-                _browser, context, seed = _playwright_page_from_local_session_cdp(
-                    p, api, session_id, ws_url
-                )
-            except Exception:
                 try:
-                    pw_cm.__exit__(None, None, None)
-                except Exception:
-                    pass
-                pw_cm = None
+                    _browser, context, seed = _playwright_page_from_local_session_cdp(
+                        p, api, session_id, ws_url
+                    )
+                except Exception as cdp_err:
+                    # keep-open после внешнего stop / гонки: meta или API ещё
+                    # держат мёртвый ws — иначе профиль крутит ECONNREFUSED.
+                    _log(
+                        "Local antidetect: CDP keep-open недоступен "
+                        f"({type(cdp_err).__name__}: {cdp_err!r}) — relaunch…"
+                    )
+                    try:
+                        pw_cm.__exit__(None, None, None)
+                    except Exception:
+                        pass
+                    pw_cm = None
+                    _clear_dead_keep_open_session(session_id)
+                    session_id, ws_url = _local_launch_or_reuse_instagram_session(
+                        api,
+                        profile_id=profile_id,
+                        base_url=bu,
+                        headless=headless,
+                        remote_cdp=remote_cdp,
+                    )
+                    register_local_session(
+                        profile_id=profile_id, base_url=bu, session_id=session_id
+                    )
+                    meta["session_id"] = session_id
+                    meta["ws_url"] = ws_url
+                    pw_cm = sync_playwright()
+                    p = pw_cm.__enter__()
+                    try:
+                        _browser, context, seed = (
+                            _playwright_page_from_local_session_cdp(
+                                p, api, session_id, ws_url
+                            )
+                        )
+                    except Exception:
+                        try:
+                            pw_cm.__exit__(None, None, None)
+                        except Exception:
+                            pass
+                        pw_cm = None
+                        meta["session_id"] = None
+                        meta["ws_url"] = None
+                        raise
+            except Exception:
+                if pw_cm is not None:
+                    try:
+                        pw_cm.__exit__(None, None, None)
+                    except Exception:
+                        pass
+                    pw_cm = None
                 raise
             upload_page = _ig_pick_page_for_tab(
                 context,

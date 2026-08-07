@@ -982,26 +982,29 @@ class MultiProfileUploader:
                             )
                     upload_ran = True
 
-                    # После залива могли освободиться другие профили — перепроверить.
-                    if (
-                        keep_open_after
-                        and not self._multi_tab
-                        and not self.should_keep_browser_open(profile_id)
-                    ):
-                        keep_open_after = False
-                        self._log(
-                            f"[{_ts()}] [upload] [KEEP_OPEN] profile={profile_id} "
-                            "есть другие доступные профили — закрываем браузер"
-                        )
-                    elif keep_open_after and self._multi_tab:
-                        # В multi-tab держим браузер, но слот можно отдать, если
-                        # профиль больше не должен удерживать ёмкость.
-                        if not self.should_keep_browser_open(profile_id):
-                            keep_open_after = False
+                    # После залива всегда пересчитываем keep_open: во время encode
+                    # в очередь профиля могли добавить следующее видео (раньше
+                    # keep_open_after=False с START не поднимали → stop + reuse
+                    # мёртвого CDP).
+                    if self._keep_browser_open:
+                        prev_keep = bool(keep_open_after)
+                        keep_open_after = self.should_keep_browser_open(profile_id)
+                        if self._multi_tab and prev_keep and not keep_open_after:
                             self._log(
                                 f"[{_ts()}] [upload] [KEEP_OPEN] profile={profile_id}"
                                 f"{tab_note} есть другие доступные профили — "
                                 "освобождаем слот вкладки"
+                            )
+                        elif not self._multi_tab and prev_keep and not keep_open_after:
+                            self._log(
+                                f"[{_ts()}] [upload] [KEEP_OPEN] profile={profile_id} "
+                                "есть другие доступные профили — закрываем браузер"
+                            )
+                        elif not prev_keep and keep_open_after:
+                            self._log(
+                                f"[{_ts()}] [upload] [KEEP_OPEN] profile={profile_id}"
+                                f"{tab_note} очередь/слот появился во время залива — "
+                                "оставляем браузер"
                             )
 
                     cb_attempt = self._on_profile_attempt

@@ -94,7 +94,7 @@ export function SettingsPage({
         setMaxBrowsers(
           Math.max(
             1,
-            Math.min(5, Number(v["antydetect/max_concurrent_browsers"] ?? 5) || 5),
+            Math.min(10, Number(v["antydetect/max_concurrent_browsers"] ?? 5) || 5),
           ),
         );
         setAiBase(String(v["ai/base_url"] ?? ""));
@@ -135,7 +135,7 @@ export function SettingsPage({
         "antydetect/remote_cdp_public_host": remoteCdpHost.trim(),
         "antydetect/own_remote_cdp_host": remoteCdpHost.trim(),
         "antydetect/dolphin_headless": true,
-        "antydetect/max_concurrent_browsers": Math.max(1, Math.min(5, maxBrowsers)),
+        "antydetect/max_concurrent_browsers": Math.max(1, Math.min(10, maxBrowsers)),
         "ai/base_url": aiBase,
         "ai/api_key": aiKey,
         "ai/model": aiModel,
@@ -363,10 +363,10 @@ export function SettingsPage({
           style={{ maxWidth: 120 }}
           type="number"
           min={1}
-          max={5}
+          max={10}
           value={maxBrowsers}
           onChange={(e) =>
-            setMaxBrowsers(Math.max(1, Math.min(5, Number(e.target.value) || 1)))
+            setMaxBrowsers(Math.max(1, Math.min(10, Number(e.target.value) || 1)))
           }
         />
       </section>

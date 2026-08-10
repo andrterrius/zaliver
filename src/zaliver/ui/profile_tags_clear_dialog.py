@@ -118,6 +118,12 @@ class _TagClearListDragSelect(QObject):
         self._checked = set(self._tags) if checked else set()
         self._apply_visuals()
 
+    def uncheck_tags(self, tags: set[str] | frozenset[str]) -> None:
+        before = set(self._checked)
+        self._checked -= set(tags)
+        if self._checked != before:
+            self._apply_visuals()
+
     def checked_tags(self) -> list[str]:
         return [tag for tag in self._tags if tag in self._checked]
 
@@ -487,6 +493,7 @@ class ProfileTagsFilterDialog(QDialog):
         *,
         tags: tuple[str, ...],
         initially_checked: frozenset[str] | set[str] | None = None,
+        initially_excluded: frozenset[str] | set[str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -494,23 +501,23 @@ class ProfileTagsFilterDialog(QDialog):
         self.setModal(True)
         self.setMinimumWidth(520)
 
-        self._checks: dict[str, QCheckBox] = {}
-        self._drag_select: _TagClearListDragSelect | None = None
+        self._include_drag: _TagClearListDragSelect | None = None
+        self._exclude_drag: _TagClearListDragSelect | None = None
         self._cleared = False
-        row_items: list[tuple[str, QFrame, QCheckBox]] = []
+        self._syncing_sections = False
         prechecked = set(initially_checked or ())
+        preexcluded = set(initially_excluded or ()) - prechecked
 
         root = QVBoxLayout(self)
         root.setSpacing(12)
 
         hint = QLabel(
-            "Показать профили, у которых есть хотя бы один выбранный тэг"
+            "Показать профили с выбранными тэгами. "
+            "Профили с любым исключённым тэгом скрываются."
         )
         hint.setWordWrap(True)
         hint.setObjectName("hint")
         root.addWidget(hint)
-
-        root.addWidget(QLabel("Теги для фильтра:"))
 
         if not tags:
             empty = QLabel("У загруженных профилей пока нет тегов.")
@@ -518,45 +525,20 @@ class ProfileTagsFilterDialog(QDialog):
             empty.setObjectName("hint")
             root.addWidget(empty)
         else:
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-            inner = QWidget()
-            inner_layout = QVBoxLayout(inner)
-            inner_layout.setContentsMargins(0, 0, 0, 0)
-            inner_layout.setSpacing(6)
-            for tag in tags:
-                t = (tag or "").strip()
-                if not t:
-                    continue
-                row = QFrame()
-                row.setObjectName(_tag_chip_object_name(t))
-                row_lay = QHBoxLayout(row)
-                row_lay.setContentsMargins(10, 6, 10, 6)
-                row_lay.setSpacing(10)
-                cb = QCheckBox()
-                cb.setObjectName("zaliverTagClearCheck")
-                cb.setChecked(t in prechecked)
-                cb.setToolTip(t)
-                lbl = QLabel(t)
-                lbl.setObjectName("zaliverTagClearLabel")
-                lbl.setWordWrap(True)
-                _apply_tag_clear_label_style(lbl, t)
-                self._checks[t] = cb
-                row_items.append((t, row, cb))
-                row_lay.addWidget(cb, 0, Qt.AlignmentFlag.AlignTop)
-                row_lay.addWidget(lbl, 1)
-                inner_layout.addWidget(row)
-            inner_layout.addStretch(1)
-            scroll.setWidget(inner)
-            scroll.setMinimumHeight(min(360, 40 * max(1, len(self._checks)) + 16))
-            root.addWidget(scroll, 1)
-
-            self._drag_select = _TagClearListDragSelect(
-                viewport=inner,
-                rows=row_items,
-                parent=self,
+            self._include_drag = self._add_tag_section(
+                root,
+                title="Показать, если есть хотя бы один тэг:",
+                tags=tags,
+                prechecked=prechecked,
             )
+            self._exclude_drag = self._add_tag_section(
+                root,
+                title="Скрыть, если есть любой из тэгов:",
+                tags=tags,
+                prechecked=preexcluded,
+            )
+            self._include_drag.selection_changed.connect(self._on_include_changed)
+            self._exclude_drag.selection_changed.connect(self._on_exclude_changed)
 
         bulk_layout = QHBoxLayout()
         btn_all = QPushButton("Выбрать все")
@@ -584,21 +566,109 @@ class ProfileTagsFilterDialog(QDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
+    def _add_tag_section(
+        self,
+        root: QVBoxLayout,
+        *,
+        title: str,
+        tags: tuple[str, ...],
+        prechecked: set[str],
+    ) -> _TagClearListDragSelect:
+        root.addWidget(QLabel(title))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setContentsMargins(0, 0, 0, 0)
+        inner_layout.setSpacing(6)
+        row_items: list[tuple[str, QFrame, QCheckBox]] = []
+        for tag in tags:
+            t = (tag or "").strip()
+            if not t:
+                continue
+            row = QFrame()
+            row.setObjectName(_tag_chip_object_name(t))
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(10, 6, 10, 6)
+            row_lay.setSpacing(10)
+            cb = QCheckBox()
+            cb.setObjectName("zaliverTagClearCheck")
+            cb.setChecked(t in prechecked)
+            cb.setToolTip(t)
+            lbl = QLabel(t)
+            lbl.setObjectName("zaliverTagClearLabel")
+            lbl.setWordWrap(True)
+            _apply_tag_clear_label_style(lbl, t)
+            row_items.append((t, row, cb))
+            row_lay.addWidget(cb, 0, Qt.AlignmentFlag.AlignTop)
+            row_lay.addWidget(lbl, 1)
+            inner_layout.addWidget(row)
+        inner_layout.addStretch(1)
+        scroll.setWidget(inner)
+        n = max(1, len(row_items))
+        scroll.setMinimumHeight(min(200, 40 * n + 16))
+        root.addWidget(scroll, 1)
+        return _TagClearListDragSelect(
+            viewport=inner,
+            rows=row_items,
+            parent=self,
+        )
+
+    def _on_include_changed(self) -> None:
+        if self._syncing_sections or self._exclude_drag is None or self._include_drag is None:
+            return
+        overlap = set(self._include_drag.checked_tags()) & set(
+            self._exclude_drag.checked_tags()
+        )
+        if not overlap:
+            return
+        self._syncing_sections = True
+        try:
+            self._exclude_drag.uncheck_tags(overlap)
+        finally:
+            self._syncing_sections = False
+
+    def _on_exclude_changed(self) -> None:
+        if self._syncing_sections or self._exclude_drag is None or self._include_drag is None:
+            return
+        overlap = set(self._include_drag.checked_tags()) & set(
+            self._exclude_drag.checked_tags()
+        )
+        if not overlap:
+            return
+        self._syncing_sections = True
+        try:
+            self._include_drag.uncheck_tags(overlap)
+        finally:
+            self._syncing_sections = False
+
     def _select_all(self) -> None:
-        if self._drag_select is not None:
-            self._drag_select.set_all_checked(True)
+        if self._include_drag is not None:
+            self._include_drag.set_all_checked(True)
+        if self._exclude_drag is not None:
+            self._exclude_drag.set_all_checked(False)
 
     def _select_none(self) -> None:
-        if self._drag_select is not None:
-            self._drag_select.set_all_checked(False)
+        if self._include_drag is not None:
+            self._include_drag.set_all_checked(False)
+        if self._exclude_drag is not None:
+            self._exclude_drag.set_all_checked(False)
 
     def _reset_and_accept(self) -> None:
         self._cleared = True
-        if self._drag_select is not None:
-            self._drag_select.set_all_checked(False)
+        if self._include_drag is not None:
+            self._include_drag.set_all_checked(False)
+        if self._exclude_drag is not None:
+            self._exclude_drag.set_all_checked(False)
         self.accept()
 
     def selected_tags(self) -> list[str]:
-        if self._cleared or self._drag_select is None:
+        if self._cleared or self._include_drag is None:
             return []
-        return self._drag_select.checked_tags()
+        return self._include_drag.checked_tags()
+
+    def excluded_tags(self) -> list[str]:
+        if self._cleared or self._exclude_drag is None:
+            return []
+        return self._exclude_drag.checked_tags()

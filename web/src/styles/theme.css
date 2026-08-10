@@ -342,8 +342,18 @@ input[type='radio']:checked::after {
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
 }
 
+/* Держать стрелки step up/down видимыми на всех number-полях. */
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  opacity: 1;
+  height: 1.6em;
+  margin: 0 2px 0 0;
+  cursor: pointer;
+}
+
 input[type='number'].field {
   font-variant-numeric: tabular-nums;
+  padding-right: 6px;
 }
 
 .progress {
@@ -503,6 +513,12 @@ input[type='number'].field {
   border-color: rgba(99, 102, 241, 0.45);
   background: var(--accent-dim);
   color: var(--accent-soft);
+}
+
+.tag-chip.active-exclude {
+  border-color: rgba(190, 18, 60, 0.55);
+  background: rgba(190, 18, 60, 0.16);
+  color: #fda4af;
 }
 
 .tag-chip-error {

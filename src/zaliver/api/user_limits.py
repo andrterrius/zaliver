@@ -8,7 +8,7 @@ from zaliver.api.jobs_registry import JobKind, JobRecord, JobRegistry, JobStatus
 PROCESSING_WORKERS_PER_USER = 1
 
 # Browser windows open at once across all jobs of one user.
-MAX_BROWSERS_PER_USER = 5
+MAX_BROWSERS_PER_USER = 10
 
 PROCESSING_KINDS: frozenset[JobKind] = frozenset(
     {

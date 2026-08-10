@@ -919,6 +919,7 @@ class MainWindow(QWidget):
         self._settings = self._core.settings
         self._profiles_raw: list[dict[str, object]] | None = None
         self._profiles_tag_filter: frozenset[str] = frozenset()
+        self._profiles_tag_exclude: frozenset[str] = frozenset()
         self._profiles_list_render_gen: int = 0
         self._profiles_interaction: ProfilesListInteraction | None = None
         self._profile_cdp_previews: dict[str, ProfileCdpPreviewDialog] = {}
@@ -1014,10 +1015,11 @@ class MainWindow(QWidget):
 
     def _apply_theme(self) -> None:
         # Prefer shell theme when embedded; standalone still needs local QSS.
-        p = self._theme_path()
-        if not p.is_file():
+        from zaliver.ui.theme_loader import load_theme_qss
+
+        qss = load_theme_qss()
+        if not qss:
             return
-        qss = p.read_text(encoding="utf-8")
         self.setStyleSheet(qss)
         if not getattr(self, "_embedded", False):
             app = QApplication.instance()
@@ -4116,19 +4118,21 @@ class MainWindow(QWidget):
         total_dlg_profiles = len(dlg_profiles)
 
         dlg_tag_filter: list[frozenset[str]] = [frozenset()]
+        dlg_tag_exclude: list[frozenset[str]] = [frozenset()]
         dlg_filter_timer = QTimer(dlg)
         dlg_filter_timer.setSingleShot(True)
 
         def _dlg_profiles_matched(q_raw: str) -> list[dict[str, object]]:
             tokens = profile_search_tokens(q_raw)
             tag_filter = dlg_tag_filter[0]
+            tag_exclude = dlg_tag_exclude[0]
             matched: list[tuple[int, dict[str, object]]] = []
             for i, p in enumerate(dlg_profiles):
                 if not isinstance(p, dict):
                     continue
                 if not profile_matches_search(p, tokens):
                     continue
-                if not profile_matches_tag_filter(p, tag_filter):
+                if not profile_matches_tag_filter(p, tag_filter, tag_exclude):
                     continue
                 matched.append((i, p))
             matched.sort(key=lambda ip: profile_search_rank(ip[1], tokens, q_raw, ip[0]))
@@ -4164,6 +4168,7 @@ class MainWindow(QWidget):
             dlg,
             dlg_profiles,
             dlg_tag_filter,
+            dlg_tag_exclude,
             on_changed=_apply_dlg_profiles_filter,
         )
         dlg_filter_timer.timeout.connect(_apply_dlg_profiles_filter)
@@ -4248,7 +4253,7 @@ class MainWindow(QWidget):
             q = dlg_query.text().strip()
             pv = _planned_videos_count()
             lines = [f"{planned_label}: {pv}"]
-            if q or dlg_tag_filter[0]:
+            if q or dlg_tag_filter[0] or dlg_tag_exclude[0]:
                 lines.append(f"Показано профилей: {shown} из {total_dlg_profiles}")
             if n <= 0:
                 lines.append(
@@ -5529,13 +5534,14 @@ class MainWindow(QWidget):
         q_raw = (self._dolphin_query.text() if hasattr(self, "_dolphin_query") else "") or ""
         tokens = profile_search_tokens(q_raw)
         tag_filter = getattr(self, "_profiles_tag_filter", frozenset()) or frozenset()
+        tag_exclude = getattr(self, "_profiles_tag_exclude", frozenset()) or frozenset()
         matched: list[tuple[int, dict[str, object]]] = []
         for i, p in enumerate(raw):
             if not isinstance(p, dict):
                 continue
             if not profile_matches_search(p, tokens):
                 continue
-            if not profile_matches_tag_filter(p, tag_filter):
+            if not profile_matches_tag_filter(p, tag_filter, tag_exclude):
                 continue
             matched.append((i, p))
         matched.sort(key=lambda ip: profile_search_rank(ip[1], tokens, q_raw, ip[0]))
@@ -5545,7 +5551,9 @@ class MainWindow(QWidget):
         q = (self._dolphin_query.text() if hasattr(self, "_dolphin_query") else "") or ""
         if q.strip():
             return True
-        return bool(getattr(self, "_profiles_tag_filter", frozenset()))
+        if getattr(self, "_profiles_tag_filter", frozenset()):
+            return True
+        return bool(getattr(self, "_profiles_tag_exclude", frozenset()))
 
     def _sync_profiles_tag_filter_button(self) -> None:
         if not hasattr(self, "_btn_profiles_filter_tags"):
@@ -5553,21 +5561,40 @@ class MainWindow(QWidget):
         self._sync_tag_filter_button(
             self._btn_profiles_filter_tags,
             getattr(self, "_profiles_tag_filter", frozenset()) or frozenset(),
+            getattr(self, "_profiles_tag_exclude", frozenset()) or frozenset(),
         )
 
     @staticmethod
-    def _sync_tag_filter_button(btn: QPushButton, tag_filter: frozenset[str]) -> None:
-        n = len(tag_filter)
-        if n:
-            btn.setText(f"По тэгам ({n})")
+    def _sync_tag_filter_button(
+        btn: QPushButton,
+        tag_filter: frozenset[str],
+        tag_exclude: frozenset[str] | None = None,
+    ) -> None:
+        exclude = tag_exclude or frozenset()
+        n_in = len(tag_filter)
+        n_ex = len(exclude)
+        if n_in or n_ex:
+            if n_in and n_ex:
+                btn.setText(f"По тэгам ({n_in}/−{n_ex})")
+            elif n_ex:
+                btn.setText(f"По тэгам (−{n_ex})")
+            else:
+                btn.setText(f"По тэгам ({n_in})")
+            parts: list[str] = []
+            if n_in:
+                parts.append(f"включить: {n_in}")
+            if n_ex:
+                parts.append(f"исключить: {n_ex}")
             btn.setToolTip(
-                f"Активен фильтр по {n} тег(ам). Нажмите, чтобы изменить или сбросить."
+                "Активен фильтр по тегам ("
+                + ", ".join(parts)
+                + "). Нажмите, чтобы изменить или сбросить."
             )
         else:
             btn.setText("По тэгам")
             btn.setToolTip(
                 "Отфильтровать список по выбранным тегам "
-                "(все теги загруженных профилей, не только Zaliver)."
+                "(можно включить и исключить теги)."
             )
 
     def _make_dlg_profiles_search_row(
@@ -5575,12 +5602,17 @@ class MainWindow(QWidget):
         parent: QWidget,
         profiles: list[dict[str, object]],
         tag_filter_box: list[frozenset[str]],
+        tag_exclude_box: list[frozenset[str]] | None = None,
         *,
         on_changed: Callable[[], None],
     ) -> tuple[QHBoxLayout, QLineEdit]:
         """Строка поиска + «По тэгам» для диалогов выбора профилей."""
         if not tag_filter_box:
             tag_filter_box.append(frozenset())
+        if tag_exclude_box is None:
+            tag_exclude_box = [frozenset()]
+        if not tag_exclude_box:
+            tag_exclude_box.append(frozenset())
 
         query = QLineEdit()
         query.setPlaceholderText("Поиск по профилям (имя, ID, теги)…")
@@ -5589,18 +5621,20 @@ class MainWindow(QWidget):
         btn.setObjectName("secondary")
         btn.setAutoDefault(False)
         btn.setDefault(False)
-        self._sync_tag_filter_button(btn, tag_filter_box[0])
+        self._sync_tag_filter_button(btn, tag_filter_box[0], tag_exclude_box[0])
 
         def _open_tags() -> None:
             dlg = ProfileTagsFilterDialog(
                 tags=collect_all_tags_from_profiles(profiles),
                 initially_checked=tag_filter_box[0],
+                initially_excluded=tag_exclude_box[0],
                 parent=parent,
             )
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
             tag_filter_box[0] = frozenset(dlg.selected_tags())
-            self._sync_tag_filter_button(btn, tag_filter_box[0])
+            tag_exclude_box[0] = frozenset(dlg.excluded_tags())
+            self._sync_tag_filter_button(btn, tag_filter_box[0], tag_exclude_box[0])
             on_changed()
 
         btn.clicked.connect(_open_tags)
@@ -5624,11 +5658,13 @@ class MainWindow(QWidget):
         dlg = ProfileTagsFilterDialog(
             tags=tags,
             initially_checked=self._profiles_tag_filter,
+            initially_excluded=self._profiles_tag_exclude,
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         self._profiles_tag_filter = frozenset(dlg.selected_tags())
+        self._profiles_tag_exclude = frozenset(dlg.excluded_tags())
         self._sync_profiles_tag_filter_button()
         self._apply_profiles_filter()
 
@@ -5785,19 +5821,21 @@ class MainWindow(QWidget):
         total_dlg_profiles = len(dlg_profiles)
 
         dlg_tag_filter: list[frozenset[str]] = [frozenset()]
+        dlg_tag_exclude: list[frozenset[str]] = [frozenset()]
         dlg_filter_timer = QTimer(dlg)
         dlg_filter_timer.setSingleShot(True)
 
         def _dlg_profiles_matched(q_raw: str) -> list[dict[str, object]]:
             tokens = profile_search_tokens(q_raw)
             tag_filter = dlg_tag_filter[0]
+            tag_exclude = dlg_tag_exclude[0]
             matched: list[tuple[int, dict[str, object]]] = []
             for i, p in enumerate(dlg_profiles):
                 if not isinstance(p, dict):
                     continue
                 if not profile_matches_search(p, tokens):
                     continue
-                if not profile_matches_tag_filter(p, tag_filter):
+                if not profile_matches_tag_filter(p, tag_filter, tag_exclude):
                     continue
                 matched.append((i, p))
             matched.sort(key=lambda ip: profile_search_rank(ip[1], tokens, q_raw, ip[0]))
@@ -5839,6 +5877,7 @@ class MainWindow(QWidget):
             dlg,
             dlg_profiles,
             dlg_tag_filter,
+            dlg_tag_exclude,
             on_changed=_apply_dlg_profiles_filter,
         )
         dlg_filter_timer.timeout.connect(_apply_dlg_profiles_filter)
@@ -5860,7 +5899,7 @@ class MainWindow(QWidget):
             shown = dlg_interaction.lw.count()
             q = dlg_query.text().strip()
             lines = [f"{count_label_prefix}: {n}"]
-            if q or dlg_tag_filter[0]:
+            if q or dlg_tag_filter[0] or dlg_tag_exclude[0]:
                 lines.append(f"Показано профилей: {shown} из {total_dlg_profiles}")
             dlg_profile_count_lbl.setText("\n".join(lines))
 

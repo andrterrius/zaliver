@@ -329,11 +329,18 @@ def profile_matches_search(profile: dict[str, object], tokens: list[str]) -> boo
 def profile_matches_tag_filter(
     profile: dict[str, object],
     selected_tags: frozenset[str] | set[str] | None,
+    excluded_tags: frozenset[str] | set[str] | None = None,
 ) -> bool:
-    """True if no tag filter, or profile has at least one of the selected tags."""
+    """True if profile matches include tags and has none of the excluded tags.
+
+    Include: no selection → any profile; otherwise at least one selected tag.
+    Exclude: if profile has any excluded tag → hidden.
+    """
+    profile_tags = set(_profile_tag_list(profile, limit=10_000))
+    if excluded_tags and (profile_tags & set(excluded_tags)):
+        return False
     if not selected_tags:
         return True
-    profile_tags = set(_profile_tag_list(profile, limit=10_000))
     return bool(profile_tags & set(selected_tags))
 
 

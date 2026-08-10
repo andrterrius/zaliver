@@ -5,9 +5,12 @@ import {
   profileHasAccountData,
   profileHasOldestChannel,
   profileHasTagError,
+  profileMatchesTagFilters,
+  tagFilterButtonLabel,
   tagFilterClass,
   tagList,
   tagPillClass,
+  toggleTagInFilter,
 } from "../lib/profileTags";
 import { TitleVariablesHint } from "./TitleVariablesHint";
 import { FieldWithRecent } from "./RecentValuesField";
@@ -109,6 +112,7 @@ export function UploadAfterDialog({
   const { recent } = useRecentValues(platform, open);
   const [search, setSearch] = useState("");
   const [tagFilter, setTagFilter] = useState<Set<string>>(new Set());
+  const [tagExclude, setTagExclude] = useState<Set<string>>(new Set());
   const [showTagModal, setShowTagModal] = useState(false);
   const [showSelectMenu, setShowSelectMenu] = useState(false);
   const [error, setError] = useState("");
@@ -122,6 +126,7 @@ export function UploadAfterDialog({
     setError("");
     setSearch("");
     setTagFilter(new Set());
+    setTagExclude(new Set());
     setShowTagModal(false);
     setShowSelectMenu(false);
     setSelected(new Set());
@@ -180,7 +185,7 @@ export function UploadAfterDialog({
     const q = search.trim().toLowerCase();
     return profiles.filter((p) => {
       const tags = tagList(p.tags);
-      if (tagFilter.size && ![...tagFilter].every((t) => tags.includes(t))) {
+      if (!profileMatchesTagFilters(tags, tagFilter, tagExclude)) {
         return false;
       }
       if (!q) return true;
@@ -190,7 +195,7 @@ export function UploadAfterDialog({
         tags.some((t) => t.toLowerCase().includes(q))
       );
     });
-  }, [profiles, search, tagFilter]);
+  }, [profiles, search, tagFilter, tagExclude]);
 
   const paint = useCallback((id: string, paintSelect: boolean) => {
     setSelected((prev) => {
@@ -521,11 +526,11 @@ export function UploadAfterDialog({
                 style={{ width: 72 }}
                 type="number"
                 min={1}
-                max={5}
+                max={10}
                 value={maxBrowsers}
                 onChange={(e) =>
                   setMaxBrowsers(
-                    Math.max(1, Math.min(5, Number(e.target.value) || 1)),
+                    Math.max(1, Math.min(10, Number(e.target.value) || 1)),
                   )
                 }
               />
@@ -545,7 +550,7 @@ export function UploadAfterDialog({
               className="btn secondary"
               onClick={() => setShowTagModal(true)}
             >
-              По тэгам{tagFilter.size ? ` (${tagFilter.size})` : ""}
+              {tagFilterButtonLabel(tagFilter, tagExclude)}
             </button>
             <div style={{ position: "relative" }}>
               <button
@@ -599,7 +604,7 @@ export function UploadAfterDialog({
             <span className="hint">
               Выбрано: {selected.size}
               {selected.size === 0 ? " — без залива" : ""}
-              {search.trim() || tagFilter.size
+              {search.trim() || tagFilter.size || tagExclude.size
                 ? ` · показано ${filtered.length} из ${profiles.length}`
                 : ""}
             </span>
@@ -692,31 +697,52 @@ export function UploadAfterDialog({
               <button
                 type="button"
                 className="btn secondary"
-                onClick={() => setTagFilter(new Set(allTags))}
+                onClick={() => {
+                  setTagFilter(new Set(allTags));
+                  setTagExclude(new Set());
+                }}
               >
                 Все
               </button>
               <button
                 type="button"
                 className="btn secondary"
-                onClick={() => setTagFilter(new Set())}
+                onClick={() => {
+                  setTagFilter(new Set());
+                  setTagExclude(new Set());
+                }}
               >
                 Сбросить фильтр
               </button>
             </div>
+            <div className="hint">Показать, если есть все выбранные тэги:</div>
             <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
               {allTags.map((t) => (
                 <button
-                  key={t}
+                  key={`in-${t}`}
                   type="button"
-                  className={tagFilterClass(t, tagFilter.has(t))}
+                  className={tagFilterClass(t, tagFilter.has(t), "include")}
                   onClick={() => {
-                    setTagFilter((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(t)) next.delete(t);
-                      else next.add(t);
-                      return next;
-                    });
+                    setTagFilter((prev) =>
+                      toggleTagInFilter(prev, t, tagExclude, setTagExclude),
+                    );
+                  }}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+            <div className="hint">Скрыть, если есть любой из тэгов:</div>
+            <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
+              {allTags.map((t) => (
+                <button
+                  key={`ex-${t}`}
+                  type="button"
+                  className={tagFilterClass(t, tagExclude.has(t), "exclude")}
+                  onClick={() => {
+                    setTagExclude((prev) =>
+                      toggleTagInFilter(prev, t, tagFilter, setTagFilter),
+                    );
                   }}
                 >
                   {t}

@@ -97,6 +97,7 @@ class IgCheckerProfilePickDialog(QDialog):
         self._last_upload_map = last_upload_map
 
         self._tag_filter: list[frozenset[str]] = [frozenset()]
+        self._tag_exclude: list[frozenset[str]] = [frozenset()]
         self._filter_timer = QTimer(self)
         self._filter_timer.setSingleShot(True)
 
@@ -108,6 +109,7 @@ class IgCheckerProfilePickDialog(QDialog):
         btn_tags.setObjectName("secondary")
         btn_tags.setAutoDefault(False)
         btn_tags.setDefault(False)
+        self._btn_tags = btn_tags
         search_row.addWidget(self._query, 1)
         search_row.addWidget(btn_tags)
         root.addLayout(search_row)
@@ -147,14 +149,27 @@ class IgCheckerProfilePickDialog(QDialog):
             preserve_checked=preselect,
         )
 
+        def _sync_tags_btn() -> None:
+            n_in = len(self._tag_filter[0])
+            n_ex = len(self._tag_exclude[0])
+            if n_in and n_ex:
+                self._btn_tags.setText(f"По тэгам ({n_in}/−{n_ex})")
+            elif n_ex:
+                self._btn_tags.setText(f"По тэгам (−{n_ex})")
+            elif n_in:
+                self._btn_tags.setText(f"По тэгам ({n_in})")
+            else:
+                self._btn_tags.setText("По тэгам")
+
         def _matched(q_raw: str) -> list[dict[str, object]]:
             tokens = profile_search_tokens(q_raw)
             tag_filter = self._tag_filter[0]
+            tag_exclude = self._tag_exclude[0]
             matched: list[tuple[int, dict[str, object]]] = []
             for i, p in enumerate(self._dlg_profiles):
                 if not profile_matches_search(p, tokens):
                     continue
-                if not profile_matches_tag_filter(p, tag_filter):
+                if not profile_matches_tag_filter(p, tag_filter, tag_exclude):
                     continue
                 matched.append((i, p))
             matched.sort(key=lambda ip: profile_search_rank(ip[1], tokens, q_raw, ip[0]))
@@ -178,11 +193,14 @@ class IgCheckerProfilePickDialog(QDialog):
             dlg = ProfileTagsFilterDialog(
                 tags=collect_all_tags_from_profiles(self._dlg_profiles),
                 initially_checked=self._tag_filter[0],
+                initially_excluded=self._tag_exclude[0],
                 parent=self,
             )
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
             self._tag_filter[0] = frozenset(dlg.selected_tags())
+            self._tag_exclude[0] = frozenset(dlg.excluded_tags())
+            _sync_tags_btn()
             _apply_filter()
 
         def _update_count() -> None:
@@ -190,7 +208,7 @@ class IgCheckerProfilePickDialog(QDialog):
             shown = self._interaction.lw.count()
             q = self._query.text().strip()
             lines = [f"Выбрано: {n} (нужен ровно один профиль)"]
-            if q or self._tag_filter[0]:
+            if q or self._tag_filter[0] or self._tag_exclude[0]:
                 lines.append(f"Показано: {shown} из {self._total}")
             else:
                 lines.append(f"Профилей: {self._total}")

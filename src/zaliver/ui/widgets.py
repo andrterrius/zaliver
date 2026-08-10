@@ -891,29 +891,29 @@ class AnimatedProgressBar(QProgressBar):
 
 
 class NoWheelSpinBox(QSpinBox):
-    """Числовое поле без стрелок и без изменения значения колёсиком."""
+    """Числовое поле со стрелками; значение не меняется колёсиком."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # type: ignore[override]
         event.ignore()
 
 
 class NoWheelDoubleSpinBox(QDoubleSpinBox):
-    """Дробное поле без стрелок и без изменения значения колёсиком."""
+    """Дробное поле со стрелками; значение не меняется колёсиком."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # type: ignore[override]
         event.ignore()
 
 
 class _SpinBoxInputPolicy(QObject):
-    """Глобально: без колеса и без up/down на всех QAbstractSpinBox."""
+    """Глобально: стрелки up/down видны; колесо не меняет значение."""
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # type: ignore[override]
         if isinstance(obj, QAbstractSpinBox):
@@ -926,8 +926,8 @@ class _SpinBoxInputPolicy(QObject):
                 QEvent.Type.Polish,
                 QEvent.Type.StyleChange,
             ):
-                if obj.buttonSymbols() != QAbstractSpinBox.ButtonSymbols.NoButtons:
-                    obj.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+                if obj.buttonSymbols() != QAbstractSpinBox.ButtonSymbols.UpDownArrows:
+                    obj.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         return False
 
 

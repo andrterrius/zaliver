@@ -128,9 +128,10 @@ class AppShell(QWidget):
             if fusion is not None:
                 app.setStyle(fusion)
             app.setPalette(_dark_app_palette())
-        theme = self._theme_path()
-        if theme.is_file():
-            qss = theme.read_text(encoding="utf-8")
+        from zaliver.ui.theme_loader import load_theme_qss
+
+        qss = load_theme_qss()
+        if qss:
             self.setStyleSheet(qss)
             if app is not None:
                 # App-level QSS so QComboBox popups (top-level) inherit styles.

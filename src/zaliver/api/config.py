@@ -206,7 +206,7 @@ def load_api_config() -> ApiConfig:
         max_concurrent_jobs=max_jobs,
         max_workers_per_job=1,
         max_browsers_per_user=max(
-            1, min(5, _env_int("ZALIVER_API_MAX_BROWSERS_PER_USER", 5))
+            1, min(10, _env_int("ZALIVER_API_MAX_BROWSERS_PER_USER", 10))
         ),
         max_log_lines=max(100, min(50_000, _env_int("ZALIVER_API_MAX_LOG_LINES", 2000))),
         job_log_retention_days=max(

@@ -1248,13 +1248,22 @@ def _studio_wait_after_account_switch(page, *, timeout_s: float = 12.0) -> None:
         page.wait_for_timeout(250)
 
 
-def _studio_handle_channel_removed_if_present(page) -> bool:
+def _studio_handle_channel_removed_if_present(
+    page, *, switch_channel: bool = True
+) -> bool:
     """
     Канал удалён при входе в Studio: профиль → сменить аккаунт → другой канал.
     После переключения возвращаемся в Studio и продолжаем сценарий.
+    При switch_channel=False (проверка доступности) — сразу ошибка, без поиска канала.
     """
     if not _studio_channel_removed_page_visible(page):
         return False
+
+    if not switch_channel:
+        raise YoutubeStudioError(
+            "YouTube Studio: открыта страница апелляции (channel-appeal) — "
+            "канал удалён или заблокирован."
+        )
 
     _log("Studio: канал удалён/заблокирован — пробуем сменить аккаунт…")
     _studio_open_account_switcher_menu(page)
@@ -2745,6 +2754,7 @@ def _studio_try_match_expected_channel_in_studio(
     expected_name: str,
     *,
     login_credentials=None,
+    switch_on_channel_appeal: bool = True,
 ) -> bool:
     """На studio.youtube.com имя канала уже совпадает с yt_oldest_name."""
     expected = (expected_name or "").strip()
@@ -2772,12 +2782,20 @@ def _studio_try_match_expected_channel_in_studio(
                 f"Studio: проверка yt_oldest_name «{expected}» на studio.youtube.com…"
             )
         _studio_warmup_youtube_then_studio(
-            page, login_credentials=login_credentials
+            page,
+            login_credentials=login_credentials,
+            switch_on_channel_appeal=switch_on_channel_appeal,
         )
 
     _studio_try_google_login_if_needed(page, login_credentials)
-    _studio_handle_channel_removed_if_present(page)
-    _studio_handle_onboarding_dialogs_if_present(page, login_credentials=login_credentials)
+    _studio_handle_channel_removed_if_present(
+        page, switch_channel=switch_on_channel_appeal
+    )
+    _studio_handle_onboarding_dialogs_if_present(
+        page,
+        login_credentials=login_credentials,
+        switch_on_channel_appeal=switch_on_channel_appeal,
+    )
 
     current = _studio_wait_navigation_drawer_channel_name(page)
     if current and _studio_channel_names_match(expected, current):
@@ -2797,7 +2815,7 @@ def _studio_try_match_expected_channel_in_studio(
 
 
 def _studio_ensure_current_channel_in_studio(
-    page, *, login_credentials=None
+    page, *, login_credentials=None, switch_on_channel_appeal: bool = True
 ) -> str:
     """Открыть Studio без переключения канала."""
     _log(
@@ -2807,11 +2825,16 @@ def _studio_ensure_current_channel_in_studio(
     if _studio_page_on_studio_home(page) and _studio_dashboard_ready(
         page, timeout_ms=800
     ):
+        if not switch_on_channel_appeal:
+            _studio_raise_if_channel_appeal_stuck(page)
         _log("Studio: Studio уже загружен — переключение канала не нужно.")
         return ""
 
     _studio_goto_studio_if_needed(
-        page, login_credentials=login_credentials, quick=True
+        page,
+        login_credentials=login_credentials,
+        quick=True,
+        switch_on_channel_appeal=switch_on_channel_appeal,
     )
     _log("Studio: Studio открыт — текущий канал без переключения.")
     return ""
@@ -2824,6 +2847,7 @@ def _studio_ensure_correct_studio_channel(
     login_credentials=None,
     on_oldest_channel_name=None,
     search_oldest_channel: bool = False,
+    switch_on_channel_appeal: bool = True,
 ) -> str:
     """
     YouTube → выбор самого старого канала → Studio.
@@ -2833,13 +2857,18 @@ def _studio_ensure_correct_studio_channel(
     """
     if not search_oldest_channel:
         return _studio_ensure_current_channel_in_studio(
-            page, login_credentials=login_credentials
+            page,
+            login_credentials=login_credentials,
+            switch_on_channel_appeal=switch_on_channel_appeal,
         )
 
     expected = (yt_oldest_name or "").strip()
 
     if expected and _studio_try_match_expected_channel_in_studio(
-        page, expected, login_credentials=login_credentials
+        page,
+        expected,
+        login_credentials=login_credentials,
+        switch_on_channel_appeal=switch_on_channel_appeal,
     ):
         return expected
 
@@ -2903,7 +2932,11 @@ def _studio_ensure_correct_studio_channel(
     if confirmed_on_youtube and oldest:
         return oldest
 
-    _studio_goto_studio_if_needed(page, login_credentials=login_credentials)
+    _studio_goto_studio_if_needed(
+        page,
+        login_credentials=login_credentials,
+        switch_on_channel_appeal=switch_on_channel_appeal,
+    )
     current = _studio_wait_navigation_drawer_channel_name(page)
     if oldest and current and _studio_channel_names_match(oldest, current):
         _log(
@@ -2935,7 +2968,11 @@ def _studio_ensure_correct_studio_channel(
             login_credentials=login_credentials,
             on_oldest_channel_name=on_oldest_channel_name,
         ) or oldest
-        _studio_goto_studio_if_needed(page, login_credentials=login_credentials)
+        _studio_goto_studio_if_needed(
+            page,
+            login_credentials=login_credentials,
+            switch_on_channel_appeal=switch_on_channel_appeal,
+        )
         current = _studio_wait_navigation_drawer_channel_name(page)
         if oldest and current and _studio_channel_names_match(oldest, current):
             _log(
@@ -3523,7 +3560,7 @@ def _studio_handle_verify_identity_dialog_if_present(
 
 
 def _studio_handle_interrupt_dialogs_if_present(
-    page, *, login_credentials=None
+    page, *, login_credentials=None, switch_on_channel_appeal: bool = True
 ) -> bool:
     """
     Прерывающие диалоги Studio: создание канала, приветствие «Далее», AADC «ОК»,
@@ -3539,7 +3576,9 @@ def _studio_handle_interrupt_dialogs_if_present(
             page, login_credentials=login_credentials
         ):
             step_handled = True
-        if _studio_handle_channel_removed_if_present(page):
+        if _studio_handle_channel_removed_if_present(
+            page, switch_channel=switch_on_channel_appeal
+        ):
             step_handled = True
         if handle_channel_switcher_if_present(page):
             step_handled = True
@@ -3556,11 +3595,13 @@ def _studio_handle_interrupt_dialogs_if_present(
 
 
 def _studio_handle_onboarding_dialogs_if_present(
-    page, *, login_credentials=None
+    page, *, login_credentials=None, switch_on_channel_appeal: bool = True
 ) -> bool:
     """См. ``_studio_handle_interrupt_dialogs_if_present`` (обратная совместимость)."""
     return _studio_handle_interrupt_dialogs_if_present(
-        page, login_credentials=login_credentials
+        page,
+        login_credentials=login_credentials,
+        switch_on_channel_appeal=switch_on_channel_appeal,
     )
 
 
@@ -3739,11 +3780,18 @@ def _studio_dashboard_ready(page, *, timeout_ms: int = 2_000) -> bool:
 
 
 def _studio_warmup_youtube_then_studio(
-    page, *, login_credentials=None, quick: bool = False
+    page,
+    *,
+    login_credentials=None,
+    quick: bool = False,
+    switch_on_channel_appeal: bool = True,
 ) -> None:
     """Открыть YouTube Studio напрямую (без предварительного захода на youtube.com)."""
     _studio_goto_studio_if_needed(
-        page, login_credentials=login_credentials, quick=quick
+        page,
+        login_credentials=login_credentials,
+        quick=quick,
+        switch_on_channel_appeal=switch_on_channel_appeal,
     )
 
 
@@ -3767,16 +3815,27 @@ def _studio_raise_if_channel_appeal_stuck(page) -> None:
 
 
 def _studio_goto_studio_if_needed(
-    page, *, login_credentials=None, quick: bool = False
+    page,
+    *,
+    login_credentials=None,
+    quick: bool = False,
+    switch_on_channel_appeal: bool = True,
 ) -> None:
     """Открыть studio.youtube.com без ожидания кнопки «Создать»."""
     auth_fast = quick
-    # Уже channel-appeal: один раз пробуем сменить канал, иначе сразу ошибка —
-    # иначе Yt+Inst минутами ждёт «Создать», а Instagram так и не двигается.
+    # Уже channel-appeal: при заливах один раз пробуем сменить канал;
+    # при проверке доступности сразу ошибка (без поиска другого канала).
     if _studio_channel_removed_page_visible(page):
-        _log("Studio: сразу channel-appeal — пробуем сменить аккаунт…")
-        _studio_handle_channel_removed_if_present(page)
-        _studio_raise_if_channel_appeal_stuck(page)
+        if switch_on_channel_appeal:
+            _log("Studio: сразу channel-appeal — пробуем сменить аккаунт…")
+            _studio_handle_channel_removed_if_present(page)
+            _studio_raise_if_channel_appeal_stuck(page)
+        else:
+            _log(
+                "Studio: channel-appeal — сразу ошибка проверки доступности "
+                "(без поиска другого канала)."
+            )
+            _studio_raise_if_channel_appeal_stuck(page)
     on_studio = _studio_page_on_studio_home(page) and not _studio_on_google_auth_page(
         page, fast=auth_fast
     )
@@ -3812,9 +3871,15 @@ def _studio_goto_studio_if_needed(
             _studio_try_google_login_if_needed(page, login_credentials)
     elif _studio_on_google_auth_page(page) or _studio_login_required(page, fast=True):
         _studio_try_google_login_if_needed(page, login_credentials)
-    _studio_handle_channel_removed_if_present(page)
+    _studio_handle_channel_removed_if_present(
+        page, switch_channel=switch_on_channel_appeal
+    )
     _studio_raise_if_channel_appeal_stuck(page)
-    _studio_handle_onboarding_dialogs_if_present(page, login_credentials=login_credentials)
+    _studio_handle_onboarding_dialogs_if_present(
+        page,
+        login_credentials=login_credentials,
+        switch_on_channel_appeal=switch_on_channel_appeal,
+    )
 
 
 def _studio_goto_studio_home_ready(page, *, login_credentials=None):
@@ -6017,6 +6082,7 @@ def verify_studio_upload_dialog_available(
     Проверка доступности YouTube Studio по URL.
     Успех — studio.youtube.com/channel/{channel_id} (непустой id).
     Ошибка — studio.youtube.com/channel-appeal или таймаут ожидания URL.
+    При channel-appeal сразу ошибка (без поиска другого доступного канала).
     При search_oldest_channel=True: обход каналов, выбор самого старого.
     При search_oldest_channel=False: текущий канал без переключения.
     """
@@ -6037,6 +6103,7 @@ def verify_studio_upload_dialog_available(
         login_credentials=login_credentials,
         on_oldest_channel_name=on_oldest_channel_name,
         search_oldest_channel=search_oldest_channel,
+        switch_on_channel_appeal=False,
     )
     state = _studio_wait_for_availability_url(
         page, login_credentials=login_credentials

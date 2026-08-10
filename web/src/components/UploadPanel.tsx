@@ -157,10 +157,10 @@ export function UploadPanel({
         style={{ maxWidth: 100 }}
         type="number"
         min={1}
-        max={5}
+        max={10}
         value={maxBrowsers}
         onChange={(e) =>
-          setMaxBrowsers(Math.max(1, Math.min(5, Number(e.target.value) || 1)))
+          setMaxBrowsers(Math.max(1, Math.min(10, Number(e.target.value) || 1)))
         }
       />
       <label className="hint">Поиск профилей</label>

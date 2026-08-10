@@ -10,6 +10,7 @@ import { PlatformSelect } from "./components/PlatformSelect";
 import { AppShell } from "./components/AppShell";
 import { SourcesManagerModal } from "./components/SourcesManagerModal";
 import { LoginPage } from "./pages/LoginPage";
+import { useNoWheelNumberInputs } from "./hooks/useNoWheelNumberInputs";
 import { getStoredLocale, setStoredLocale, t, type Locale } from "./i18n";
 
 function platformLabel(platform: Platform): string {
@@ -19,6 +20,7 @@ function platformLabel(platform: Platform): string {
 }
 
 export default function App() {
+  useNoWheelNumberInputs();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [platform, setPlatform] = useState<Platform | null>(null);

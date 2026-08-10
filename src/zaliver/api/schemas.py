@@ -87,7 +87,7 @@ class UploadAfterFollowup(BaseModel):
     platform: str = ""
     kind: str = "local"
     headless: bool = True
-    max_concurrent_browsers: int = Field(default=5, ge=1, le=5)
+    max_concurrent_browsers: int = Field(default=5, ge=1, le=10)
     publish_before_checks: bool = True
     keep_studio_title: bool = False
     schedule_publish: bool = False
@@ -190,7 +190,7 @@ class UploadJobRequest(BaseModel):
     token: str = ""
     base_url: str = ""
     headless: bool = True
-    max_concurrent_browsers: int = Field(default=5, ge=1, le=5)
+    max_concurrent_browsers: int = Field(default=5, ge=1, le=10)
     cooldown_s: float = Field(default=0.0, ge=0.0, le=86400.0)
     publish_before_checks: bool = True
     keep_studio_title: bool = False
@@ -221,7 +221,7 @@ class ProfileJobBaseRequest(BaseModel):
     token: str = ""
     base_url: str = ""
     headless: bool = True
-    max_concurrent: int = Field(default=5, ge=1, le=5)
+    max_concurrent: int = Field(default=5, ge=1, le=10)
     # profile_id -> antidetect custom_data (credentials)
     profiles_custom_data: dict[str, dict[str, Any]] = Field(default_factory=dict)
     yt_oldest_names: dict[str, str] = Field(default_factory=dict)

@@ -3,9 +3,12 @@ import { api, type Platform, type Profile } from "../api/client";
 import { useJobPoll } from "../hooks/useJobPoll";
 import { usePersistedJobId } from "../hooks/usePersistedJobId";
 import {
+  profileMatchesTagFilters,
+  tagFilterButtonLabel,
   tagFilterClass,
   tagList,
   tagPillClass,
+  toggleTagInFilter,
 } from "../lib/profileTags";
 import { ProgressBar } from "../components/ProgressBar";
 import { JobLogBox } from "../components/JobLogBox";
@@ -38,6 +41,7 @@ export function ProfilesPage({ platform }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
   const [tagFilter, setTagFilter] = useState<Set<string>>(new Set());
+  const [tagExclude, setTagExclude] = useState<Set<string>>(new Set());
   const [showTagModal, setShowTagModal] = useState(false);
   const [modal, setModal] = useState<JobModal>(null);
   const { recent, refresh: refreshRecent } = useRecentValues(
@@ -106,7 +110,7 @@ export function ProfilesPage({ platform }: Props) {
     const q = search.trim().toLowerCase();
     return profiles.filter((p) => {
       const tags = tagList(p.tags);
-      if (tagFilter.size && ![...tagFilter].every((t) => tags.includes(t))) {
+      if (!profileMatchesTagFilters(tags, tagFilter, tagExclude)) {
         return false;
       }
       if (!q) return true;
@@ -116,7 +120,7 @@ export function ProfilesPage({ platform }: Props) {
         tags.some((t) => t.toLowerCase().includes(q))
       );
     });
-  }, [profiles, search, tagFilter]);
+  }, [profiles, search, tagFilter, tagExclude]);
 
   const toggle = (id: string) => {
     setSelected((prev) => {
@@ -277,7 +281,7 @@ export function ProfilesPage({ platform }: Props) {
           className="btn secondary"
           onClick={() => setShowTagModal(true)}
         >
-          По тэгам{tagFilter.size ? ` (${tagFilter.size})` : ""}
+          {tagFilterButtonLabel(tagFilter, tagExclude)}
         </button>
         <button
           type="button"
@@ -370,36 +374,59 @@ export function ProfilesPage({ platform }: Props) {
               <button
                 type="button"
                 className="btn secondary"
-                onClick={() => setTagFilter(new Set(allTags))}
+                onClick={() => {
+                  setTagFilter(new Set(allTags));
+                  setTagExclude(new Set());
+                }}
               >
                 Все
               </button>
               <button
                 type="button"
                 className="btn secondary"
-                onClick={() => setTagFilter(new Set())}
+                onClick={() => {
+                  setTagFilter(new Set());
+                  setTagExclude(new Set());
+                }}
               >
                 Сбросить фильтр
               </button>
             </div>
+            <div className="hint">Показать, если есть все выбранные тэги:</div>
             <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
               {allTags.map((t) => (
-              <button
-                key={t}
-                type="button"
-                className={tagFilterClass(t, tagFilter.has(t))}
-                onClick={() => {
-                  setTagFilter((prev) => {
-                    const next = new Set(prev);
-                    if (next.has(t)) next.delete(t);
-                    else next.add(t);
-                    return next;
-                  });
-                }}
-              >
-                {t}
-              </button>
-            ))}
+                <button
+                  key={`in-${t}`}
+                  type="button"
+                  className={tagFilterClass(t, tagFilter.has(t), "include")}
+                  onClick={() => {
+                    setTagFilter((prev) =>
+                      toggleTagInFilter(prev, t, tagExclude, setTagExclude),
+                    );
+                  }}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+            <div className="hint">
+              Скрыть, если есть любой из тэгов:
+            </div>
+            <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
+              {allTags.map((t) => (
+                <button
+                  key={`ex-${t}`}
+                  type="button"
+                  className={tagFilterClass(t, tagExclude.has(t), "exclude")}
+                  onClick={() => {
+                    setTagExclude((prev) =>
+                      toggleTagInFilter(prev, t, tagFilter, setTagFilter),
+                    );
+                  }}
+                >
+                  {t}
+                </button>
+              ))}
             </div>
           </div>
         </div>

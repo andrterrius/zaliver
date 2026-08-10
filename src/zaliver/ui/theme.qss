@@ -35,6 +35,10 @@ QLineEdit, QSpinBox, QDoubleSpinBox {
     min-height: 20px;
 }
 
+QSpinBox, QDoubleSpinBox {
+    padding-right: 2px;
+}
+
 QLineEdit#ioPathEdit {
     padding: 6px 8px;
     min-height: 18px;
@@ -47,9 +51,44 @@ QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
 
 QSpinBox::up-button, QSpinBox::down-button,
 QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
-    width: 0;
-    height: 0;
+    subcontrol-origin: border;
+    width: 18px;
     border: none;
+    background-color: #1a1d26;
+}
+
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-position: top right;
+    margin: 1px 1px 0 0;
+    border-top-right-radius: 7px;
+}
+
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-position: bottom right;
+    margin: 0 1px 1px 0;
+    border-bottom-right-radius: 7px;
+}
+
+QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
+    background-color: #2d3142;
+}
+
+QSpinBox::up-button:pressed, QSpinBox::down-button:pressed,
+QDoubleSpinBox::up-button:pressed, QDoubleSpinBox::down-button:pressed {
+    background-color: #3b4158;
+}
+
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url(__SPIN_UP_ARROW__);
+    width: 10px;
+    height: 6px;
+}
+
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url(__SPIN_DOWN_ARROW__);
+    width: 10px;
+    height: 6px;
 }
 
 /* Explicit dark combo styles: Windows light theme otherwise paints a light

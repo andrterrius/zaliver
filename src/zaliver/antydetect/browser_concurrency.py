@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 
 MAX_CONCURRENT_BROWSERS_MIN = 1
-MAX_CONCURRENT_BROWSERS_MAX = 5
+MAX_CONCURRENT_BROWSERS_MAX = 10
 DEFAULT_MAX_CONCURRENT_BROWSERS = 3 if sys.platform == "darwin" else 5
 SETTINGS_KEY = "antydetect/max_concurrent_browsers"
 

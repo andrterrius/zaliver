@@ -28,9 +28,11 @@ _IG_CAPTCHA_FALLBACK_URLS = (
     "https://facebook.com/",
 )
 
-# При ошибке регистрации оставлять профиль открытым (ручная капча / отладка).
-# При успехе профиль всегда закрывается автоматически.
-KEEP_PROFILE_OPEN_AFTER_IG_REGISTER = True
+# При ошибке регистрации тоже закрывать профиль.
+# True оставлял окна открытыми для отладки/ручной капчи, а слот параллельности
+# уже освобождался → при пачках ошибок копились браузеры сверх лимита.
+# Ручная капча ждётся внутри воркера (слот занят), пока wait_instagram_manual_captcha.
+KEEP_PROFILE_OPEN_AFTER_IG_REGISTER = False
 
 
 class InstagramSmsCaptchaError(RuntimeError):

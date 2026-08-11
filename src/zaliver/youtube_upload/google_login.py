@@ -90,9 +90,16 @@ _RECOVERY_INFO_HEADING_RE = re.compile(
     re.I,
 )
 _RECOVERY_PHONE_HEADING_RE = re.compile(
-    r"укажите\s+номер\s+телефона|add\s+(a\s+)?phone\s+number|enter\s+(your\s+)?phone",
+    r"укажите\s+номер\s+телефона|"
+    r"добавьте\s+(номер\s+)?телефон|"
+    r"добавьте\s+телефон\s+для\s+восстановления|"
+    r"телефон\s+для\s+восстановления|"
+    r"add\s+(a\s+)?recovery\s+phone|"
+    r"add\s+(a\s+)?phone\s+number|"
+    r"enter\s+(your\s+)?phone",
     re.I,
 )
+_CANCEL_BTN_RE = re.compile(r"^cancel$|^отмена$", re.I)
 _HOME_ADDRESS_HEADING_RE = re.compile(
     r"set\s+a\s+home\s+address|укажите\s+домашний\s+адрес|"
     r"домашний\s+адрес",
@@ -571,11 +578,12 @@ def _auth_heading_text(page) -> str:
 
 
 def _totp_input_locator(scope):
+    # Не использовать широкий input[type=tel][aria-label]: на экране
+    # «Add a recovery phone» тоже есть tel-поле, и его путают с 2FA.
     return (
         scope.locator('input[name="totpPin"], #totpPin')
         .or_(scope.locator('input[name="idvPin"], #idvPin'))
         .or_(scope.locator('input[autocomplete="one-time-code"]'))
-        .or_(scope.locator('input[type="tel"][aria-label]'))
         .or_(scope.locator('[data-challengeid] input[type="tel"]'))
     )
 
@@ -621,6 +629,9 @@ def _password_step_visible(page) -> bool:
 
 
 def _totp_step_visible(page) -> bool:
+    # Экран recovery phone / email — не 2FA (там тоже есть tel input).
+    if _recovery_info_step_visible(page):
+        return False
     url = _page_url_lower(page)
     if any(
         token in url
@@ -829,17 +840,20 @@ def _click_selfie_enrollment_not_now(page) -> None:
     page.wait_for_timeout(900)
 
 
-def _recovery_info_save_locator(scope):
+def _recovery_info_cancel_locator(scope):
+    # На этом экране вторичная кнопка — jsname=ZUkOIc (Cancel / Отмена).
     return (
-        scope.locator('[jsname="M2UYVd"]')
-        .or_(scope.locator('button[aria-label="Сохранить"]'))
-        .or_(scope.locator('button[aria-label="Save"]'))
-        .or_(scope.get_by_role("button", name=_SAVE_BTN_RE))
+        scope.locator('button[jsname="ZUkOIc"][aria-label="Cancel"]')
+        .or_(scope.locator('button[jsname="ZUkOIc"][aria-label="Отмена"]'))
+        .or_(scope.locator('button[jsname="ZUkOIc"]'))
+        .or_(scope.locator('button[aria-label="Cancel"]'))
+        .or_(scope.locator('button[aria-label="Отмена"]'))
+        .or_(scope.get_by_role("button", name=_CANCEL_BTN_RE))
     )
 
 
 def _recovery_info_step_visible(page) -> bool:
-    """Экран «Убедитесь, что вы всегда сможете войти» — запрос телефона для восстановления."""
+    """Экран «Make sure you can always sign in» / recovery phone — жмём Cancel."""
     for scope in _google_auth_scopes(page):
         has_heading = False
         has_phone = False
@@ -874,25 +888,25 @@ def _recovery_info_step_visible(page) -> bool:
         if not (has_heading or has_phone):
             continue
         try:
-            save = _recovery_info_save_locator(scope)
-            if save.count() > 0 and save.first.is_visible(timeout=300):
+            cancel = _recovery_info_cancel_locator(scope)
+            if cancel.count() > 0 and cancel.first.is_visible(timeout=300):
                 return True
         except Exception:
             pass
     return False
 
 
-def _click_recovery_info_save_js(scope) -> bool:
+def _click_recovery_info_cancel_js(scope) -> bool:
     try:
         return bool(
             scope.evaluate(
                 """() => {
-                    const labels = ['Сохранить', 'Save'];
+                    const labels = ['Cancel', 'Отмена'];
                     const tryClick = (root) => {
                         if (!root) return false;
-                        const direct = root.querySelector('[jsname="M2UYVd"]');
-                        if (direct) {
-                            direct.click();
+                        const byJsname = root.querySelector('button[jsname="ZUkOIc"]');
+                        if (byJsname) {
+                            byJsname.click();
                             return true;
                         }
                         for (const el of root.querySelectorAll('button')) {
@@ -918,12 +932,12 @@ def _click_recovery_info_save_js(scope) -> bool:
         return False
 
 
-def _click_recovery_info_save(page) -> None:
-    _log("Google: восстановление доступа — нажимаем «Сохранить»…")
+def _click_recovery_info_cancel(page) -> None:
+    _log("Google: восстановление доступа — нажимаем «Cancel»…")
     clicked = False
     last_err = ""
     for scope in _google_auth_scopes(page):
-        btn = _recovery_info_save_locator(scope)
+        btn = _recovery_info_cancel_locator(scope)
         try:
             if btn.count() == 0:
                 continue
@@ -945,13 +959,13 @@ def _click_recovery_info_save(page) -> None:
             continue
     if not clicked:
         for scope in _google_auth_scopes(page):
-            if _click_recovery_info_save_js(scope):
+            if _click_recovery_info_cancel_js(scope):
                 clicked = True
-                _log("Google: клик «Сохранить» через JS.")
+                _log("Google: клик «Cancel» через JS.")
                 break
     if not clicked:
         raise RuntimeError(
-            "Google: кнопка «Сохранить» на экране восстановления доступа не найдена. "
+            "Google: кнопка «Cancel» на экране восстановления доступа не найдена. "
             f"URL={page.url!r}. {last_err}"
         )
     page.wait_for_timeout(900)
@@ -1831,6 +1845,13 @@ def attempt_google_login_for_studio(
             _click_google_authenticator_challenge(page)
             continue
 
+        if _recovery_info_step_visible(page):
+            steps += 1
+            idle_rounds = 0
+            _log(f"Google: восстановление доступа — «Cancel» (шаг {steps})…")
+            _click_recovery_info_cancel(page)
+            continue
+
         if _totp_step_visible(page):
             token = (credentials.twofa_token or "").strip()
             if not token:
@@ -1885,13 +1906,6 @@ def attempt_google_login_for_studio(
         if _selfie_enrollment_visible(page):
             steps += 1
             _click_selfie_enrollment_not_now(page)
-            continue
-
-        if _recovery_info_step_visible(page):
-            steps += 1
-            idle_rounds = 0
-            _log(f"Google: восстановление доступа — «Сохранить» (шаг {steps})…")
-            _click_recovery_info_save(page)
             continue
 
         if _home_address_step_visible(page):

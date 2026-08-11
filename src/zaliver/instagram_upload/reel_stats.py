@@ -75,9 +75,10 @@ def fetch_reel_stats(cl: Any, shortcode: str) -> InstagramReelStats:
     # media_pk_from_code — локальный расчёт, без сети.
     pk = cl.media_pk_from_code(code)
     media = None
-    last_err: Exception | None = None
-    # Только v1: gql/лишние fallback увеличивают шанс challenge на той же сессии.
-    for getter_name in ("media_info_v1", "media_info"):
+    errors: list[str] = []
+    # Только private API. media_info → public GraphQL часто отдаёт пустое тело
+    # (JSONDecodeError на /api/graphql) и жжёт сессию challenge'ами.
+    for getter_name in ("media_info_v1", "media_info_v2"):
         getter = getattr(cl, getter_name, None)
         if not callable(getter):
             continue
@@ -85,12 +86,11 @@ def fetch_reel_stats(cl: Any, shortcode: str) -> InstagramReelStats:
             media = getter(pk)
             break
         except Exception as e:
-            last_err = e
+            errors.append(f"{getter_name}: {e}")
             continue
     if media is None:
-        raise RuntimeError(
-            f"media_info({code}): {last_err}" if last_err else "media_info failed"
-        )
+        detail = " | ".join(errors) if errors else "media_info failed"
+        raise RuntimeError(f"media_info({code}): {detail}")
     return InstagramReelStats(
         video_id=code,
         view_count=_views_from_media(media),

@@ -225,6 +225,18 @@ def _login_by_sessionid(cl: Any, sessionid: str) -> None:
         cl.login_by_sessionid(sid)
     except Exception as e:
         raise InstagrapiSessionError(f"login_by_sessionid не удался: {e}") from e
+    # login_by_sessionid умеет «успеть» через public GraphQL, даже когда
+    # private API (нужен для media_info_v1) мёртв — тогда чекер падает на graphql.
+    try:
+        cl.inject_sessionid_to_public()
+    except Exception:
+        pass
+    if not _client_looks_logged_in(cl):
+        raise InstagrapiSessionError(
+            "sessionid из браузера принят, но private API Instagram не отвечает "
+            "(нужен для метрик). Войдите в аккаунт заново в антидетекте или "
+            "проверьте inst_login/inst_password профиля."
+        )
 
 
 _SESSION_ERR_MARKERS = (
@@ -268,9 +280,10 @@ def ensure_instagrapi_client(
     source: ``dump`` | ``password`` | ``browser_cookies`` | ``relogin``.
 
     Порядок:
-    1) сохранённый dump сессии (если allow_dump; без сетевого пинга);
-    2) логин по username/password (+ TOTP), с device fingerprint из dump если есть;
-    3) sessionid из cookies антидетект-профиля.
+    1) сохранённый dump сессии (если allow_dump) — без открытия браузера;
+    2) логин по username/password (+ TOTP) — тоже без браузера;
+    3) sessionid из cookies антидетект-профиля (открывает браузер) — только
+       если dump/пароль не дали сессию.
 
     ``proxy`` — DSN того же прокси, что у антидетект-профиля
     (иначе login_by_sessionid с другого IP ломает cookies в браузере).
@@ -286,11 +299,14 @@ def ensure_instagrapi_client(
     dump_loaded = False
     if path.is_file():
         try:
-            cl.load_settings(str(path))
+            # Старый app_version в dump часто даёт пустой GraphQL / challenge.
+            cl.load_settings(str(path), override_app_version=True)
             _apply_proxy(cl, proxy_dsn)
             dump_loaded = True
             if allow_dump and _sessionid_from_loaded_client(cl):
                 # Dump без username почти всегда битый → не доверяем, идём в re-auth.
+                # Сетевой пинг здесь НЕ делаем: иначе каждый чек гоняет private API
+                # и при малейшем сбое снова открывает браузер.
                 if client_username(cl):
                     return cl, "dump"
         except Exception:
@@ -298,13 +314,16 @@ def ensure_instagrapi_client(
             dump_loaded = False
 
     errors: list[str] = []
-
     user = (username or "").strip()
     pwd = (password or "").strip()
-    if user and pwd:
+
+    def _try_password(*, prefer_relogin: bool) -> tuple[Any, str] | None:
+        nonlocal cl, dump_loaded
+        if not (user and pwd):
+            return None
         try:
             # При обновлении сессии: сначала relogin (сохраняет device UUID из dump).
-            if dump_loaded and not allow_dump:
+            if prefer_relogin and dump_loaded and not allow_dump:
                 try:
                     cl.username = user
                     cl.password = pwd
@@ -320,7 +339,7 @@ def ensure_instagrapi_client(
                     cl = _new_client(fast=False, proxy=proxy_dsn)
                     if path.is_file():
                         try:
-                            cl.load_settings(str(path))
+                            cl.load_settings(str(path), override_app_version=True)
                             _apply_proxy(cl, proxy_dsn)
                             dump_loaded = True
                         except Exception:
@@ -332,10 +351,25 @@ def ensure_instagrapi_client(
             _dump(cl, pid)
             return cl, "password"
         except Exception as e:
-            errors.append(str(e) or type(e).__name__)
+            errors.append(f"password: {e}")
             cl = _new_client(fast=False, proxy=proxy_dsn)
             dump_loaded = False
+            if path.is_file():
+                try:
+                    cl.load_settings(str(path), override_app_version=True)
+                    _apply_proxy(cl, proxy_dsn)
+                    dump_loaded = True
+                except Exception:
+                    cl = _new_client(fast=False, proxy=proxy_dsn)
+                    dump_loaded = False
+            return None
 
+    # Пароль до браузера: не поднимаем антидетект, пока есть creds.
+    got = _try_password(prefer_relogin=True)
+    if got is not None:
+        return got
+
+    # Браузер — последний resort (дорого и убивает cookies при параллельном заливе).
     if sessionid_provider is not None:
         try:
             sid = (sessionid_provider() or "").strip()
@@ -347,10 +381,12 @@ def ensure_instagrapi_client(
             if path.is_file():
                 try:
                     # Сохранить fingerprint устройства, подменить cookies через sessionid.
-                    cl.load_settings(str(path))
+                    cl.load_settings(str(path), override_app_version=True)
                     _apply_proxy(cl, proxy_dsn)
+                    dump_loaded = True
                 except Exception:
                     cl = _new_client(fast=False, proxy=proxy_dsn)
+                    dump_loaded = False
             _login_by_sessionid(cl, sid)
             _dump(cl, pid)
             return cl, "browser_cookies"

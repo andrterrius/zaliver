@@ -119,6 +119,16 @@ class UploadedInstagramStatsRefreshWorker(QObject):
             cl, source = self._open_session()
             uname = client_username(cl)
             self._log(f"Сессия OK (@{uname or '?'}, source={source})")
+            if source == "dump":
+                self._log(
+                    "Использую сохранённый токен (браузер не открываю). "
+                    "Если метрики упадут с login_required — dump сбросится."
+                )
+            elif source == "browser_cookies":
+                self._log(
+                    "Сохранённого токена не было / он без username — "
+                    "достал sessionid из антидетекта."
+                )
             if not uname and source == "dump":
                 self._log(
                     "Dump без username — не делаю auto-refresh "

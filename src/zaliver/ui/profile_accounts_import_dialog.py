@@ -89,8 +89,9 @@ class ProfileAccountsImportDialog(QDialog):
                 "или выбрать .txt-файл, либо подставить логин и пароль из "
                 "Gmail-данных (gmail_login / gmail_password, иначе yt_*) "
                 "каждого профиля.\n"
-                "Формат строки:\n"
-                "email@gmail.com:пароль:пересылка@mail.com::секрет_2FA\n\n"
+                "Форматы строки:\n"
+                "email@gmail.com:пароль:пересылка@mail.com::секрет_2FA\n"
+                "email@gmail.com:пароль:секрет_2FA\n\n"
                 "Сохраняются только Instagram-поля "
                 "(inst_login / inst_password / inst_2fa). "
                 "Учётки сопоставляются с профилями по порядку. "
@@ -99,8 +100,9 @@ class ProfileAccountsImportDialog(QDialog):
         else:
             hint = QLabel(
                 "В таблице — отмеченные профили. Вставьте строки учёток в поле ниже "
-                "или выберите .txt-файл. Формат строки:\n"
-                "email@gmail.com:пароль:пересылка@mail.com::секрет_2FA\n\n"
+                "или выберите .txt-файл. Форматы строки:\n"
+                "email@gmail.com:пароль:пересылка@mail.com::секрет_2FA\n"
+                "email@gmail.com:пароль:секрет_2FA\n\n"
                 "Учётки сопоставляются с профилями по порядку. "
                 "При сохранении сбрасывается yt_oldest_name, если он был задан. "
                 "Почты, уже привязанные к другим профилям, будут отмечены как конфликт. "
@@ -113,6 +115,7 @@ class ProfileAccountsImportDialog(QDialog):
         self._text_input = QPlainTextEdit()
         self._text_input.setPlaceholderText(
             "Вставьте учётки — по одной строке, например:\n"
+            "email@gmail.com:пароль:секрет_2FA\n"
             "email@gmail.com:пароль:пересылка@mail.com::секрет_2FA"
         )
         self._text_input.setMinimumHeight(120)

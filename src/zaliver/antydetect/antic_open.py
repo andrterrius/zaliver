@@ -2588,20 +2588,35 @@ def _instagram_sessionid_from_page(page) -> str:
     return best
 
 
+def _page_url_looks_like_instagram_home(url: str) -> bool:
+    u = (url or "").strip().lower()
+    if not u:
+        return False
+    if "instagram.com" not in u:
+        return False
+    # Google OAuth / login walls — не считаем «уже на Instagram».
+    bad = (
+        "accounts.google.com",
+        "/accounts/login",
+        "/accounts/emailsignup",
+        "/challenge/",
+        "/accounts/suspended",
+        "flowName=GlifWebSignIn",
+    )
+    return not any(b.lower() in u for b in bad)
+
+
 def _ensure_instagram_page_for_cookies(page) -> None:
     """
-    Достать sessionid из уже сохранённых cookies профиля.
-    Навигацию на Instagram делаем только если cookie ещё нет
-    (не ждём полной загрузки ленты — иначе «белый» браузер).
+    Сначала открыть Instagram, потом читать sessionid.
+
+    Иначе вкладка может висеть на Google chooser / blank, а старый
+    cookie sessionid всё равно найдётся и чекер возьмёт мёртвую сессию.
+    Не ждём networkidle — только commit + короткая пауза.
     """
     from zaliver.instagram_upload.register import INSTAGRAM_URL
 
-    sid = _instagram_sessionid_from_page(page)
-    if sid:
-        _log("Instagram cookies: sessionid уже есть в профиле, goto не нужен.")
-        return
-
-    # После launch вкладка часто about:blank — короткая пауза, не блокируем минутами.
+    # После launch вкладка часто about:blank — короткая пауза.
     try:
         for _ in range(20):
             try:
@@ -2617,25 +2632,42 @@ def _ensure_instagram_page_for_cookies(page) -> None:
     except Exception:
         pass
 
-    sid = _instagram_sessionid_from_page(page)
-    if sid:
-        _log("Instagram cookies: sessionid появился после settle blank.")
-        return
-
-    _log("Instagram cookies: sessionid нет — короткий goto instagram.com…")
     try:
-        # commit = первый байт ответа, не ждём DOM/networkidle (часто зависает).
-        page.goto(INSTAGRAM_URL, wait_until="commit", timeout=25_000)
-    except Exception as e:
-        _log(f"Instagram cookies: goto commit failed: {e!r}")
-        try:
-            page.goto(INSTAGRAM_URL, wait_until="domcontentloaded", timeout=20_000)
-        except Exception as e2:
-            _log(f"Instagram cookies: goto domcontentloaded failed: {e2!r}")
-    try:
-        page.wait_for_timeout(1200)
+        cur = (page.url or "").strip()
     except Exception:
-        time.sleep(1.2)
+        cur = ""
+    if _page_url_looks_like_instagram_home(cur):
+        _log(f"Instagram cookies: уже на Instagram ({cur[:120]}), goto не нужен.")
+    else:
+        _log(
+            "Instagram cookies: короткий goto instagram.com "
+            f"(было: {(cur or '—')[:160]})…"
+        )
+        try:
+            # commit = первый байт ответа, не ждём DOM/networkidle (часто зависает).
+            page.goto(INSTAGRAM_URL, wait_until="commit", timeout=25_000)
+        except Exception as e:
+            _log(f"Instagram cookies: goto commit failed: {e!r}")
+            try:
+                page.goto(INSTAGRAM_URL, wait_until="domcontentloaded", timeout=20_000)
+            except Exception as e2:
+                _log(f"Instagram cookies: goto domcontentloaded failed: {e2!r}")
+        try:
+            page.wait_for_timeout(1500)
+        except Exception:
+            time.sleep(1.5)
+
+    try:
+        after = (page.url or "").strip()
+    except Exception:
+        after = ""
+    if after:
+        _log(f"Instagram cookies: URL после перехода: {after[:180]}")
+    if not _page_url_looks_like_instagram_home(after):
+        _log(
+            "Instagram cookies: после goto всё ещё не лента Instagram "
+            "(login/Google/challenge) — sessionid может быть мёртвым."
+        )
 
 
 @with_log_profile

@@ -15,6 +15,7 @@ def parse_accounts_text(data_text: str) -> list[dict[str, str]]:
     """
     Parse lines like:
     email@gmail.com:password:forward@mail.com::2FA_SECRET
+    email@gmail.com:password:2FA_SECRET
 
     Returns dicts with yt_login, yt_password, yt_2fa keys.
     """
@@ -32,11 +33,19 @@ def parse_accounts_text(data_text: str) -> list[dict[str, str]]:
 
         rest = line[match.start() :]
         parts = rest.split(":")
-        if len(parts) < 5:
+        if len(parts) < 3:
             continue
 
         email = parts[0].strip()
         if not email.lower().endswith("@gmail.com"):
+            continue
+
+        # Полный: email:pass:forward::2FA  | короткий: email:pass:2FA
+        if len(parts) >= 5:
+            twofa = parts[4].strip()
+        elif len(parts) == 3:
+            twofa = parts[2].strip()
+        else:
             continue
 
         login_key = email.lower()
@@ -48,7 +57,7 @@ def parse_accounts_text(data_text: str) -> list[dict[str, str]]:
             {
                 YT_LOGIN_KEY: email,
                 YT_PASSWORD_KEY: parts[1],
-                YT_2FA_KEY: parts[4].strip(),
+                YT_2FA_KEY: twofa,
             }
         )
 

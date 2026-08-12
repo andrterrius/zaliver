@@ -315,10 +315,54 @@ def run_upload_job(
             sink.on_log(f"[upload] не удалось создать сессию залитых: {e!r}")
             upload_session = None
 
-    success_paths: set[str] = set()
     success_lock = threading.Lock()
+    yt_inst_pending_delete: set[str] = set()
     record_lock = threading.Lock()
     mgr_holder: dict[str, Any] = {"mgr": None}
+
+    def _delete_output_now(video_path: str) -> None:
+        if not delete_after_upload:
+            return
+        try:
+            path = Path(str(video_path or "").strip())
+            if path.is_file():
+                path.unlink()
+                sink.on_log(f"[upload] Удалён после залива: {path.name}")
+        except OSError as e:
+            sink.on_log(
+                f"[upload] Не удалось удалить после залива: {video_path} ({e!r})"
+            )
+
+    def _maybe_delete_after_success(
+        video_path: str, *, record_platform: str | None = None
+    ) -> None:
+        if not delete_after_upload:
+            return
+        path = str(video_path or "").strip()
+        if not path:
+            return
+        plat = (record_platform or "").strip().lower()
+        if is_yt_inst and plat == PLATFORM_YOUTUBE:
+            with success_lock:
+                yt_inst_pending_delete.add(path)
+            return
+        with success_lock:
+            yt_inst_pending_delete.discard(path)
+        _delete_output_now(path)
+
+    def _delete_yt_inst_pending(video_paths: list[str]) -> None:
+        if not delete_after_upload:
+            return
+        for video_path in video_paths:
+            path = str(video_path or "").strip()
+            if not path:
+                continue
+            with success_lock:
+                pending = path in yt_inst_pending_delete
+                if pending:
+                    yt_inst_pending_delete.discard(path)
+            if pending:
+                _delete_output_now(path)
 
     def _record_one(
         *,
@@ -404,8 +448,7 @@ def run_upload_job(
         except Exception as e:
             sink.on_log(f"[stats_server] ошибка уведомления: {e!r}")
 
-        with success_lock:
-            success_paths.add(video_path)
+        _maybe_delete_after_success(video_path, record_platform=rec_plat)
 
     def _close_kept_upload_browser(pid: str) -> None:
         pid = (pid or "").strip()
@@ -502,15 +545,45 @@ def run_upload_job(
                     )
 
             def _on_ig(one_res: dict) -> None:
-                confirmed = _confirm_instagram_result(upload_store, one_res)
-                _record_one(
-                    profile_id=profile_id,
-                    video_path=task.video_path,
-                    title=task_title,
-                    description=task_desc,
-                    one_res=confirmed,
-                    record_platform=PLATFORM_INSTAGRAM,
+                ig_batch = []
+                if isinstance(one_res, dict):
+                    raw_ig_batch = one_res.get("batch_results")
+                    if isinstance(raw_ig_batch, list):
+                        ig_batch = raw_ig_batch
+                if ig_batch and sched_batch:
+                    for item, item_res in zip(sched_batch, ig_batch):
+                        confirmed = _confirm_instagram_result(upload_store, item_res)
+                        _record_one(
+                            profile_id=profile_id,
+                            video_path=item.video_path,
+                            title=item.title,
+                            description=item.description,
+                            one_res=confirmed,
+                            record_platform=PLATFORM_INSTAGRAM,
+                        )
+                else:
+                    confirmed = _confirm_instagram_result(upload_store, one_res)
+                    _record_one(
+                        profile_id=profile_id,
+                        video_path=task.video_path,
+                        title=task_title,
+                        description=task_desc,
+                        one_res=confirmed,
+                        record_platform=PLATFORM_INSTAGRAM,
+                    )
+
+            def _on_ig_error(err: BaseException) -> None:
+                sink.on_log(
+                    f"[upload] Yt+Inst: Instagram ошибка (pipeline) — "
+                    f"{type(err).__name__}: {err}"
                 )
+                paths_to_drop = [str(task.video_path or "").strip()]
+                if sched_batch:
+                    for item in sched_batch:
+                        paths_to_drop.append(
+                            str(getattr(item, "video_path", "") or "").strip()
+                        )
+                _delete_yt_inst_pending(paths_to_drop)
 
             kw: dict[str, Any] = dict(
                 video_path=task.video_path,
@@ -529,6 +602,7 @@ def run_upload_job(
                 keep_browser_open=keep_open,
                 on_youtube_success=_on_yt,
                 on_instagram_success=_on_ig,
+                on_instagram_error=_on_ig_error,
             )
             if own:
                 from zaliver.antydetect.local_antidetect_api import local_api_token_scope
@@ -764,22 +838,12 @@ def run_upload_job(
     ok_n = int(mgr.done_ok) if hasattr(mgr, "done_ok") else 0
     total_done = ok_n + failed
 
-    if delete_after_upload and ok_n > 0:
-        to_delete = list(success_paths) if success_paths else []
-        if not to_delete and failed == 0:
-            to_delete = list(paths)
-        deleted = 0
-        for p in to_delete:
-            try:
-                path = Path(str(p))
-                if path.is_file():
-                    path.unlink()
-                    deleted += 1
-                    sink.on_log(f"[upload] Удалён после залива: {path.name}")
-            except OSError as e:
-                sink.on_log(f"[upload] Не удалось удалить после залива: {p} ({e!r})")
-        if deleted:
-            sink.on_log(f"[upload] Очередь завершена — удалено после залива: {deleted}")
+    if delete_after_upload:
+        with success_lock:
+            leftover = list(yt_inst_pending_delete)
+            yt_inst_pending_delete.clear()
+        for video_path in leftover:
+            _delete_output_now(video_path)
 
     for p in paths:
         sink.on_output_saved(p, False)

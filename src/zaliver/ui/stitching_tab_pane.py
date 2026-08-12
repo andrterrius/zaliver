@@ -534,8 +534,7 @@ class StitchingTabPane(QWidget):
         self.delete_after_upload = QCheckBox("Удалять после залива")
         self.delete_after_upload.setChecked(False)
         self.delete_after_upload.setToolTip(
-            "После полного завершения очереди залива успешно загруженные файлы "
-            "удаляются из выходной папки."
+            "После каждого успешного залива файл сразу удаляется из выходной папки."
         )
         self.delete_after_upload.toggled.connect(self.save_settings)
         io_grid.addWidget(self.delete_after_upload, 6, 0, 1, 2)

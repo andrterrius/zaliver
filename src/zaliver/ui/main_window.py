@@ -967,7 +967,8 @@ class MainWindow(QWidget):
         self._pending_upload: dict[str, str] | None = None
         self._just_saved_outputs: list[str] = []
         self._upload_delete_after_enabled = False
-        self._upload_success_video_paths: set[str] = set()
+        # Yt+Inst: пути, успешно залитые на YouTube, ждут конца Instagram перед удалением.
+        self._upload_yt_inst_pending_delete: set[str] = set()
         self._upload_success_lock = threading.Lock()
         self._upload_manager = None
         self._upload_streaming_active = False
@@ -1183,8 +1184,7 @@ class MainWindow(QWidget):
         self.delete_after_upload = QCheckBox("Удалять после залива")
         self.delete_after_upload.setChecked(False)
         self.delete_after_upload.setToolTip(
-            "После полного завершения очереди залива успешно загруженные файлы "
-            "удаляются из выходной папки."
+            "После каждого успешного залива файл сразу удаляется из выходной папки."
         )
         self.delete_after_upload.toggled.connect(self._save_folder_settings)
         io_grid.addWidget(self.delete_after_upload, 6, 0, 1, 2)
@@ -3712,31 +3712,43 @@ class MainWindow(QWidget):
         except Exception:
             pass
 
-    def _cleanup_videos_after_upload_queue_finished(self, status: str) -> None:
-        """Удалить успешно залитые файлы, когда очередь полностью завершилась."""
-        if status not in ("done", "upload_failed"):
-            return
+    def _maybe_delete_output_after_upload_success(
+        self,
+        video_path: str,
+        *,
+        record_platform: str | None = None,
+        yt_inst_upload: bool = False,
+    ) -> None:
+        """Удалить файл сразу после успеха; для Yt+Inst — после Instagram."""
         if not getattr(self, "_upload_delete_after_enabled", False):
             return
-        with self._upload_success_lock:
-            paths = list(self._upload_success_video_paths)
-            self._upload_success_video_paths.clear()
-        if not paths:
+        path = str(video_path or "").strip()
+        if not path:
             return
-        deleted = 0
-        for video_path in paths:
-            p = Path(str(video_path or "").strip()).expanduser()
-            if not p.is_file():
+        plat = (record_platform or "").strip().lower()
+        # YouTube в Yt+Inst ещё нужен Instagram (pipeline / pause 0) — не трогаем.
+        if yt_inst_upload and plat == PLATFORM_YOUTUBE:
+            with self._upload_success_lock:
+                self._upload_yt_inst_pending_delete.add(path)
+            return
+        with self._upload_success_lock:
+            self._upload_yt_inst_pending_delete.discard(path)
+        self._delete_output_video_after_upload(path)
+
+    def _delete_yt_inst_pending_outputs(self, video_paths: list[str]) -> None:
+        """Удалить файлы Yt+Inst, когда Instagram закончил (ошибка / отмена)."""
+        if not getattr(self, "_upload_delete_after_enabled", False):
+            return
+        for video_path in video_paths:
+            path = str(video_path or "").strip()
+            if not path:
                 continue
-            self._delete_output_video_after_upload(video_path)
-            deleted += 1
-        if deleted:
-            try:
-                self._ui_log_line.emit(
-                    f"[upload] Очередь завершена — удалено после залива: {deleted}"
-                )
-            except Exception:
-                pass
+            with self._upload_success_lock:
+                pending = path in self._upload_yt_inst_pending_delete
+                if pending:
+                    self._upload_yt_inst_pending_delete.discard(path)
+            if pending:
+                self._delete_output_video_after_upload(path)
 
     def _on_output_saved(self, path: str, include_in_upload: bool = True) -> None:
         if isinstance(path, str) and path.strip():
@@ -11156,7 +11168,7 @@ class MainWindow(QWidget):
             )
         self._upload_delete_after_enabled = upload_req.delete_after_upload
         with self._upload_success_lock:
-            self._upload_success_video_paths.clear()
+            self._upload_yt_inst_pending_delete.clear()
         self._sync_toolbar_for_upload_phase()
         self._upload_cancel_kind = (kind or "").strip()
         self._upload_cancel_dolphin_token = token
@@ -11361,8 +11373,11 @@ class MainWindow(QWidget):
                     QTimer.singleShot(0, self._refresh_uploaded_list)
                 except Exception:
                     pass
-                with self._upload_success_lock:
-                    self._upload_success_video_paths.add(video_path)
+                self._maybe_delete_output_after_upload_success(
+                    video_path,
+                    record_platform=plat,
+                    yt_inst_upload=is_yt_inst_upload,
+                )
 
             def _confirm_instagram_result(res, *, multi_tab: bool = False) -> dict | None:
                 ig_vid = ""
@@ -11635,6 +11650,14 @@ class MainWindow(QWidget):
                         )
                     except Exception:
                         pass
+                    # YouTube уже залит — файл больше не нужен Instagram.
+                    paths_to_drop = [str(task.video_path or "").strip()]
+                    if task.scheduled_batch:
+                        for item in task.scheduled_batch:
+                            paths_to_drop.append(
+                                str(getattr(item, "video_path", "") or "").strip()
+                            )
+                    self._delete_yt_inst_pending_outputs(paths_to_drop)
 
                 combined_kw = dict(
                     headless=headless,
@@ -12102,7 +12125,13 @@ class MainWindow(QWidget):
                     self._stop_upload_antidetect_profiles()
                 except Exception:
                     pass
-                self._cleanup_videos_after_upload_queue_finished(status)
+                # Страховка: Yt+Inst успел YouTube, а Instagram так и не закрыл файл.
+                if getattr(self, "_upload_delete_after_enabled", False):
+                    with self._upload_success_lock:
+                        leftover = list(self._upload_yt_inst_pending_delete)
+                        self._upload_yt_inst_pending_delete.clear()
+                    for video_path in leftover:
+                        self._delete_output_video_after_upload(video_path)
                 self._maybe_finish_upload_session(status=status)
                 try:
                     self._youtube_upload_phase_finished.emit(status)

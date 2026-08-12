@@ -12489,6 +12489,18 @@ class MainWindow(QWidget):
         finally:
             api.close()
 
+    def _exclude_profile_from_current_upload_session(
+        self, profile_id: str, *, reason: str = ""
+    ) -> None:
+        mgr = getattr(self, "_upload_manager", None)
+        exclude = getattr(mgr, "exclude_profile_this_session", None)
+        if not callable(exclude):
+            return
+        try:
+            exclude(profile_id, reason=reason)
+        except Exception:
+            pass
+
     def _set_previous_upload_result_tag(
         self,
         *,
@@ -12514,6 +12526,10 @@ class MainWindow(QWidget):
         else:
             success_tag = UPLOAD_PREVIOUS_SUCCESS_TAG
             error_tag = UPLOAD_PREVIOUS_ERROR_TAG
+        if not success:
+            self._exclude_profile_from_current_upload_session(
+                pid, reason=error_tag
+            )
         tag = success_tag if success else error_tag
         other = error_tag if success else success_tag
         api = self._local_antidetect_api_for_profile_tags(kind=kind, base_url=base_url)

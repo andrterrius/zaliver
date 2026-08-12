@@ -76,8 +76,9 @@ class MultiProfileUploader:
     - Per-profile cooldown: wait at least `cooldown_s` from *start time* of previous upload
       in this run (для multi-tab профиля cooldown между вкладками отключён), and optionally
       `profile_upload_pause_remaining_s` (e.g. DB «Пауза 3 ч»).
-    - Errors re-queue the same video (prefer another profile; same one if no alternative),
-      max `max_attempts_per_profile` attempts per video per profile.
+    - Errors re-queue the same video onto another profile. After a failed upload
+      the profile is skipped for the rest of this run (`exclude_profile_this_session`)
+      — we do not open it again in this session.
     - stop() requests graceful shutdown; workers finish current upload and exit.
     - Waiting for a concurrency slot uses short acquire timeouts so stop() is honored
       (plain Semaphore.acquire() would ignore threading.Event).
@@ -178,6 +179,8 @@ class MultiProfileUploader:
         self._wave_counts: dict[str, int] = {pid: 0 for pid in self._profiles}
         self._held_slot_counts: dict[str, int] = {pid: 0 for pid in self._profiles}
         self._held_slot_lock = threading.Lock()
+        self._session_skip_lock = threading.Lock()
+        self._session_skip_profiles: set[str] = set()
         self._workers: list[threading.Thread] = []
         self._dispatcher: threading.Thread | None = None
 
@@ -284,6 +287,29 @@ class MultiProfileUploader:
             f"{tabs_note}"
         )
 
+    def exclude_profile_this_session(self, profile_id: str, *, reason: str = "") -> bool:
+        """Не назначать профиль до конца текущего прогона. True — только что исключили."""
+        pid = (profile_id or "").strip()
+        if not pid:
+            return False
+        with self._session_skip_lock:
+            if pid in self._session_skip_profiles:
+                return False
+            self._session_skip_profiles.add(pid)
+        note = f" reason={reason!r}" if (reason or "").strip() else ""
+        self._log(
+            f"[{_ts()}] [upload] [SKIP] profile={pid} "
+            f"исключён до конца сессии{note}"
+        )
+        return True
+
+    def _is_profile_skipped(self, profile_id: str) -> bool:
+        pid = (profile_id or "").strip()
+        if not pid:
+            return False
+        with self._session_skip_lock:
+            return pid in self._session_skip_profiles
+
     def stop(self, *, reason: str = "user") -> None:
         self._stop_reason = (reason or "user").strip() or "user"
         self._stop.set()
@@ -330,6 +356,8 @@ class MultiProfileUploader:
 
     def _task_exhausted_on_all_profiles(self, task: VideoTask) -> bool:
         for pid in self._profiles:
+            if self._is_profile_skipped(pid):
+                continue
             if int(task.attempts_by_profile.get(pid, 0)) >= self._max_attempts:
                 continue
             return False
@@ -400,6 +428,8 @@ class MultiProfileUploader:
         """Профили, которым можно поставить задачу (есть место в очереди, лимиты попыток)."""
         out: list[str] = []
         for pid in self._profiles:
+            if self._is_profile_skipped(pid):
+                continue
             if int(task.attempts_by_profile.get(pid, 0)) >= self._max_attempts:
                 continue
             # Multi-tab: не больше вкладок на профиль одновременно.
@@ -427,6 +457,10 @@ class MultiProfileUploader:
         while checked < n:
             idx = self._schedule_profile_order_idx % n
             pid = self._profiles[idx]
+            if self._is_profile_skipped(pid):
+                self._schedule_profile_order_idx += 1
+                checked += 1
+                continue
             if self._profile_batch_assigned.get(pid, 0) < self._schedule_batch_size:
                 return pid
             self._schedule_profile_order_idx += 1
@@ -623,6 +657,8 @@ class MultiProfileUploader:
         """Пакет отложенных загрузок на один профиль без закрытия браузера."""
         eligible: list[str] = []
         for pid in self._profiles:
+            if self._is_profile_skipped(pid):
+                continue
             # Пакет целиком — только в пустую очередь tab0.
             if not self._tab_queue(pid, 0).empty():
                 continue
@@ -722,11 +758,14 @@ class MultiProfileUploader:
         pid = (profile_id or "").strip()
         if not pid:
             return False
-        if len(self._profiles) <= 1:
-            return True
         with self._active_lock:
             active_here = int(self._active_counts.get(pid, 0))
             active_map = dict(self._active_counts)
+        # Ошибка залива в этой сессии — не держим браузер ради следующих видео.
+        if self._is_profile_skipped(pid):
+            return active_here > 0
+        if len(self._profiles) <= 1:
+            return True
         # Другая вкладка того же профиля ещё заливает / очередь не пуста.
         if active_here > 0:
             return True
@@ -781,6 +820,25 @@ class MultiProfileUploader:
         except Exception:
             pass
 
+    def _bounce_task_off_skipped_profile(
+        self,
+        *,
+        profile_id: str,
+        task: VideoTask,
+        q: Queue,
+        tab_note: str,
+    ) -> None:
+        self._log(
+            f"[{_ts()}] [upload] [SKIP] profile={profile_id}{tab_note} "
+            f"video={task.video_path!r} — уже исключён в этой сессии, "
+            "отдаём другим профилям"
+        )
+        try:
+            self._global_q.put(task)
+        except Exception:
+            pass
+        self._finish_assigned_profile_task(profile_id, q)
+
     def _worker_loop(self, profile_id: str, tab_index: int = 0) -> None:
         from zaliver.log_format import log_profile_context
 
@@ -828,6 +886,18 @@ class MultiProfileUploader:
                         pass
                     self._finish_assigned_profile_task(profile_id, q)
                     break
+
+                if self._is_profile_skipped(profile_id):
+                    self._bounce_task_off_skipped_profile(
+                        profile_id=profile_id,
+                        task=task,
+                        q=q,
+                        tab_note=tab_note,
+                    )
+                    if held_slot:
+                        self._release_kept_browser_slot(profile_id)
+                        held_slot = False
+                    continue
 
                 # Cooldown: min interval between starts in this run + optional wall-clock pause (DB).
                 # Multi-tab: не сериализуем параллельные вкладки одного профиля.
@@ -886,9 +956,23 @@ class MultiProfileUploader:
                         self._finish_assigned_profile_task(profile_id, q)
                         abandon_after_wait = True
                         break
+                    if self._is_profile_skipped(profile_id):
+                        self._bounce_task_off_skipped_profile(
+                            profile_id=profile_id,
+                            task=task,
+                            q=q,
+                            tab_note=tab_note,
+                        )
+                        if held_slot:
+                            self._release_kept_browser_slot(profile_id)
+                            held_slot = False
+                        abandon_after_wait = True
+                        break
 
                 if abandon_after_wait:
-                    break
+                    if self._stop.is_set():
+                        break
+                    continue
 
                 # Semaphore: при keep_open слот уже занят этим воркером — не берём второй.
                 if not held_slot:
@@ -981,6 +1065,11 @@ class MultiProfileUploader:
                                 0, int(self._active_counts.get(profile_id, 0)) - 1
                             )
                     upload_ran = True
+                    if not ok:
+                        self.exclude_profile_this_session(
+                            profile_id,
+                            reason=(err_text or "upload_error")[:240],
+                        )
 
                     # После залива всегда пересчитываем keep_open: во время encode
                     # в очередь профиля могли добавить следующее видео (раньше

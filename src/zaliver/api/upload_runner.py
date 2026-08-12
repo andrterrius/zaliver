@@ -577,6 +577,15 @@ def run_upload_job(
                     f"[upload] Yt+Inst: Instagram ошибка (pipeline) — "
                     f"{type(err).__name__}: {err}"
                 )
+                mgr_now = mgr_holder.get("mgr")
+                if mgr_now is not None:
+                    try:
+                        mgr_now.exclude_profile_this_session(
+                            profile_id,
+                            reason=f"instagram_error:{type(err).__name__}",
+                        )
+                    except Exception:
+                        pass
                 paths_to_drop = [str(task.video_path or "").strip()]
                 if sched_batch:
                     for item in sched_batch:

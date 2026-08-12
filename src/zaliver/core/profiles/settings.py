@@ -15,6 +15,7 @@ class ShortsWarmupSettings:
     watch_full_video: bool = False
     shorts_recommendations: bool = True
     shorts_search_query: str = ""
+    hashtag: str = ""
     watch_horizontal_videos: bool = False
     horizontal_search_query: str = ""
     horizontal_videos_count: int = 3

@@ -36,6 +36,7 @@ _EXPORT_FILTER = "Промпты Zaliver (*.json);;Все файлы (*.*)"
 BUILTIN_PROMPTS: tuple[tuple[str, str, str], ...] = (
     ("builtin_video_title", "Название видео", ""),
     ("builtin_video_description", "Описание видео", ""),
+    ("builtin_video_overlay_text", "Текст на видео", ""),
     ("builtin_channel_name", "Название канала", ""),
     ("builtin_channel_description", "Описание канала", ""),
     ("builtin_link_title", "Название ссылки", ""),

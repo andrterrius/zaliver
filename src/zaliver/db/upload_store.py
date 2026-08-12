@@ -110,6 +110,7 @@ _RECENT_TEXT_TABLES: tuple[tuple[str, str], ...] = (
     ("recent_channel_name_fields", "content"),
     ("recent_video_default_title_fields", "content"),
     ("recent_promote_comment_fields", "content"),
+    ("recent_text_overlay_texts", "text"),
 )
 
 
@@ -532,6 +533,18 @@ class UploadStore:
             con.execute(
                 "CREATE INDEX IF NOT EXISTS idx_recent_promote_comment_fields_used_at "
                 "ON recent_promote_comment_fields(used_at DESC);"
+            )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS recent_text_overlay_texts (
+                    text TEXT PRIMARY KEY,
+                    used_at TEXT NOT NULL
+                );
+                """
+            )
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_recent_text_overlay_texts_used_at "
+                "ON recent_text_overlay_texts(used_at DESC);"
             )
             for table, column in _RECENT_TEXT_TABLES:
                 _migrate_recent_table_add_platform(con, table=table, column=column)
@@ -1035,6 +1048,33 @@ class UploadStore:
             table="recent_promote_comment_fields",
             column="content",
             value=content,
+            keep=_RECENT_CHANNEL_SETUP_KEEP,
+            platform=platform,
+            preserve_whitespace=True,
+        )
+
+    def list_recent_text_overlay_texts(
+        self,
+        limit: int = _RECENT_CHANNEL_SETUP_UI_LIMIT,
+        *,
+        platform: str = "youtube",
+    ) -> list[str]:
+        """Последние тексты наложения (общие для уникализации / нарезки / склейки)."""
+        return self._list_recent_text_values(
+            table="recent_text_overlay_texts",
+            column="text",
+            limit=limit,
+            platform=platform,
+        )
+
+    def remember_text_overlay_text(
+        self, text: str, *, platform: str = "youtube"
+    ) -> None:
+        """Запомнить текст наложения для текущей платформы."""
+        self._remember_recent_text_value(
+            table="recent_text_overlay_texts",
+            column="text",
+            value=text,
             keep=_RECENT_CHANNEL_SETUP_KEEP,
             platform=platform,
             preserve_whitespace=True,

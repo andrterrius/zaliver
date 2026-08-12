@@ -824,6 +824,7 @@ class ParallelShortsWarmupRunner:
         login_credentials=None,
         shorts_recommendations: bool = True,
         search_query: str | None = None,
+        hashtag: str | None = None,
         shorts_batch_count: int = 5,
         like_probability_pct: float = 10.0,
         subscribe_probability_pct: float = 10.0,
@@ -836,6 +837,7 @@ class ParallelShortsWarmupRunner:
         self._login_credentials = login_credentials
         self._shorts_recommendations = bool(shorts_recommendations)
         self._search_query = (search_query or "").strip() or None
+        self._hashtag = (hashtag or "").strip() or None
         self._shorts_batch_count = max(1, int(shorts_batch_count))
         self._like_probability_pct = float(like_probability_pct)
         self._subscribe_probability_pct = float(subscribe_probability_pct)
@@ -890,6 +892,7 @@ class ParallelShortsWarmupRunner:
                         login_credentials=self._login_credentials,
                         shorts_recommendations=self._shorts_recommendations,
                         search_query=self._search_query,
+                        hashtag=self._hashtag,
                         shorts_batch_count=self._shorts_batch_count,
                         like_probability_pct=self._like_probability_pct,
                         subscribe_probability_pct=self._subscribe_probability_pct,
@@ -921,6 +924,7 @@ def _maybe_start_parallel_shorts_warmup(
     login_credentials,
     shorts_recommendations: bool = True,
     search_query: str | None = None,
+    hashtag: str | None = None,
     shorts_batch_count: int = 5,
     like_probability_pct: float = 10.0,
     subscribe_probability_pct: float = 10.0,
@@ -936,6 +940,7 @@ def _maybe_start_parallel_shorts_warmup(
         login_credentials=login_credentials,
         shorts_recommendations=shorts_recommendations,
         search_query=search_query,
+        hashtag=hashtag,
         shorts_batch_count=shorts_batch_count,
         like_probability_pct=like_probability_pct,
         subscribe_probability_pct=subscribe_probability_pct,
@@ -4144,6 +4149,7 @@ def warmup_youtube_shorts_in_profile(
     watch_full_video: bool = False,
     shorts_recommendations: bool = True,
     search_query: str | None = None,
+    hashtag: str | None = None,
     watch_horizontal_videos: bool = False,
     horizontal_search_query: str | None = None,
     horizontal_videos_count: int | None = None,
@@ -4191,6 +4197,8 @@ def warmup_youtube_shorts_in_profile(
                 kw["shorts_recommendations"] = shorts_recommendations
                 if search_query is not None:
                     kw["search_query"] = search_query
+                if hashtag is not None:
+                    kw["hashtag"] = hashtag
                 if watch_horizontal_videos:
                     kw["watch_horizontal_videos"] = True
                     kw["horizontal_search_query"] = horizontal_search_query
@@ -4230,6 +4238,7 @@ def warmup_youtube_shorts_in_local_antidetect_profile(
     watch_full_video: bool = False,
     shorts_recommendations: bool = True,
     search_query: str | None = None,
+    hashtag: str | None = None,
     watch_horizontal_videos: bool = False,
     horizontal_search_query: str | None = None,
     horizontal_videos_count: int | None = None,
@@ -4291,6 +4300,8 @@ def warmup_youtube_shorts_in_local_antidetect_profile(
                 studio_kw["shorts_recommendations"] = shorts_recommendations
                 if search_query is not None:
                     studio_kw["search_query"] = search_query
+                if hashtag is not None:
+                    studio_kw["hashtag"] = hashtag
                 if watch_horizontal_videos:
                     studio_kw["watch_horizontal_videos"] = True
                     studio_kw["horizontal_search_query"] = horizontal_search_query
@@ -5911,6 +5922,7 @@ def upload_youtube_and_instagram_in_profile(
     warmup_during_schedule: bool = False,
     warmup_shorts_recommendations: bool = True,
     warmup_search_query: str | None = None,
+    warmup_hashtag: str | None = None,
     warmup_shorts_batch_count: int = 5,
     warmup_like_probability_pct: float = 10.0,
     warmup_subscribe_probability_pct: float = 10.0,
@@ -5985,6 +5997,7 @@ def upload_youtube_and_instagram_in_profile(
                     login_credentials=login_credentials,
                     shorts_recommendations=warmup_shorts_recommendations,
                     search_query=warmup_search_query,
+                    hashtag=warmup_hashtag,
                     shorts_batch_count=warmup_shorts_batch_count,
                     like_probability_pct=warmup_like_probability_pct,
                     subscribe_probability_pct=warmup_subscribe_probability_pct,
@@ -6158,6 +6171,7 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
     warmup_during_schedule: bool = False,
     warmup_shorts_recommendations: bool = True,
     warmup_search_query: str | None = None,
+    warmup_hashtag: str | None = None,
     warmup_shorts_batch_count: int = 5,
     warmup_like_probability_pct: float = 10.0,
     warmup_subscribe_probability_pct: float = 10.0,
@@ -6309,6 +6323,7 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
                         login_credentials=login_credentials,
                         shorts_recommendations=warmup_shorts_recommendations,
                         search_query=warmup_search_query,
+                        hashtag=warmup_hashtag,
                         shorts_batch_count=warmup_shorts_batch_count,
                         like_probability_pct=warmup_like_probability_pct,
                         subscribe_probability_pct=warmup_subscribe_probability_pct,
@@ -6472,6 +6487,7 @@ def open_google_in_profile(
     warmup_during_schedule: bool = False,
     warmup_shorts_recommendations: bool = True,
     warmup_search_query: str | None = None,
+    warmup_hashtag: str | None = None,
     warmup_shorts_batch_count: int = 5,
     warmup_like_probability_pct: float = 10.0,
     warmup_subscribe_probability_pct: float = 10.0,
@@ -6516,6 +6532,7 @@ def open_google_in_profile(
                 login_credentials=login_credentials,
                 shorts_recommendations=warmup_shorts_recommendations,
                 search_query=warmup_search_query,
+                hashtag=warmup_hashtag,
                 shorts_batch_count=warmup_shorts_batch_count,
                 like_probability_pct=warmup_like_probability_pct,
                 subscribe_probability_pct=warmup_subscribe_probability_pct,
@@ -6597,6 +6614,7 @@ def open_google_in_local_antidetect_profile(
     warmup_during_schedule: bool = False,
     warmup_shorts_recommendations: bool = True,
     warmup_search_query: str | None = None,
+    warmup_hashtag: str | None = None,
     warmup_shorts_batch_count: int = 5,
     warmup_like_probability_pct: float = 10.0,
     warmup_subscribe_probability_pct: float = 10.0,
@@ -6659,6 +6677,7 @@ def open_google_in_local_antidetect_profile(
                     login_credentials=login_credentials,
                     shorts_recommendations=warmup_shorts_recommendations,
                     search_query=warmup_search_query,
+                    hashtag=warmup_hashtag,
                     shorts_batch_count=warmup_shorts_batch_count,
                     like_probability_pct=warmup_like_probability_pct,
                     subscribe_probability_pct=warmup_subscribe_probability_pct,

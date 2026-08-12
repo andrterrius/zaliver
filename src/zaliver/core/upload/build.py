@@ -51,6 +51,9 @@ def build_upload_queue_request(
         schedule_warmup_search_query=(
             pending.get("schedule_warmup_search_query") or ""
         ).strip(),
+        schedule_warmup_hashtag=(
+            pending.get("schedule_warmup_hashtag") or ""
+        ).strip(),
         max_concurrent_browsers=int(max_concurrent_browsers),
         instagram_tabs_per_profile=int(instagram_tabs_per_profile),
         keep_browser_open=bool(keep_browser_open),

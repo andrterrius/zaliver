@@ -207,6 +207,7 @@ def run_upload_job(
     schedule_warmup_shorts: bool = False,
     schedule_warmup_shorts_recommendations: bool = True,
     schedule_warmup_search_query: str = "",
+    schedule_warmup_hashtag: str = "",
     delete_after_upload: bool = False,
     search_oldest_channel: bool = False,
     upload_store: Any | None = None,
@@ -255,6 +256,7 @@ def run_upload_job(
     warmup_on = bool(schedule_warmup_shorts) and schedule_batch > 0
     warmup_reco = bool(schedule_warmup_shorts_recommendations)
     warmup_q = (schedule_warmup_search_query or "").strip()
+    warmup_htag = (schedule_warmup_hashtag or "").strip()
     guser = (stats_server_username or "").strip()
     session_plat = PLATFORM_YT_INST if is_yt_inst else (
         PLATFORM_INSTAGRAM if is_instagram else PLATFORM_YOUTUBE
@@ -606,6 +608,7 @@ def run_upload_job(
                 warmup_during_schedule=warmup_on,
                 warmup_shorts_recommendations=warmup_reco,
                 warmup_search_query=warmup_q or None,
+                warmup_hashtag=warmup_htag or None,
                 search_oldest_channel=bool(search_oldest_channel),
                 stats_server_username=guser or None,
                 keep_browser_open=keep_open,
@@ -700,6 +703,7 @@ def run_upload_job(
             warmup_during_schedule=warmup_on,
             warmup_shorts_recommendations=warmup_reco,
             warmup_search_query=warmup_q or None,
+            warmup_hashtag=warmup_htag or None,
             search_oldest_channel=bool(search_oldest_channel),
             stats_server_username=guser or None,
         )

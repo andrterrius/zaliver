@@ -34,6 +34,7 @@ class UploadQueueRequest:
     schedule_warmup_shorts: bool = False
     schedule_warmup_shorts_recommendations: bool = True
     schedule_warmup_search_query: str = ""
+    schedule_warmup_hashtag: str = ""
     max_concurrent_browsers: int = 5
     instagram_tabs_per_profile: int = 1
     keep_browser_open: bool = False

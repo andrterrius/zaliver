@@ -24,7 +24,7 @@ NEON_WAVE_FRAME_SPEED = 0.09
 @dataclass
 class TextOverlaySettings:
     enabled: bool = True
-    text: str = "GAME IN BIO"
+    text: str = ""
     font_size: int = 95
     glow_enabled: bool = True
     glow_color: str = "#00FFFF"

@@ -85,6 +85,7 @@ def build_upload_runner(
         cfg.get("schedule_warmup_shorts_recommendations", True)
     )
     schedule_warmup_q = str(cfg.get("schedule_warmup_search_query") or "").strip()
+    schedule_warmup_htag = str(cfg.get("schedule_warmup_hashtag") or "").strip()
     delete_after_upload = bool(cfg.get("delete_after_upload", False))
     search_oldest_channel = bool(
         settings.value("youtube/search_oldest_channel", False)
@@ -116,6 +117,7 @@ def build_upload_runner(
             schedule_warmup_shorts=schedule_warmup_shorts,
             schedule_warmup_shorts_recommendations=schedule_warmup_reco,
             schedule_warmup_search_query=schedule_warmup_q,
+            schedule_warmup_hashtag=schedule_warmup_htag,
             delete_after_upload=delete_after_upload,
             search_oldest_channel=search_oldest_channel,
             upload_store=upload_store,

@@ -8945,9 +8945,14 @@ def _studio_dismiss_shorts_player_overlays(page) -> None:
 
 
 def _studio_page_on_youtube_shorts(page) -> bool:
+    """True на ленте/плеере Shorts, не на странице хэштега …/hashtag/…/shorts."""
     try:
         url = (page.url or "").lower()
-        return "www.youtube.com" in url and "/shorts" in url
+        if "youtube.com" not in url:
+            return False
+        if "/hashtag/" in url:
+            return False
+        return "/shorts" in url
     except Exception:
         return False
 
@@ -9893,6 +9898,26 @@ _SEARCH_SHORTS_SHELF_ITEM_SEL = (
     "grid-shelf-view-model .ytGridShelfViewModelGridShelfItem "
     "ytm-shorts-lockup-view-model"
 )
+_HASHTAG_SHORTS_ITEM_SEL = (
+    "ytd-rich-item-renderer[is-shorts-grid] ytm-shorts-lockup-view-model-v2, "
+    "ytd-rich-item-renderer[is-shorts-grid] ytm-shorts-lockup-view-model, "
+    "ytd-rich-grid-renderer ytm-shorts-lockup-view-model-v2, "
+    "ytd-rich-grid-renderer ytm-shorts-lockup-view-model"
+)
+
+
+def _studio_normalize_hashtag(raw: str | None) -> str:
+    """Слово хэштега для URL: без # и пробелов."""
+    tag = (raw or "").strip()
+    while tag.startswith("#"):
+        tag = tag[1:].lstrip()
+    return re.sub(r"\s+", "", tag)
+
+
+def _studio_hashtag_page_url(tag: str, *, shorts: bool = False) -> str:
+    slug = quote(_studio_normalize_hashtag(tag), safe="")
+    base = f"https://www.youtube.com/hashtag/{slug}"
+    return f"{base}/shorts" if shorts else base
 
 
 def _studio_click_search_shorts_chip(page) -> bool:
@@ -9921,28 +9946,34 @@ def _studio_collect_search_short_targets(page) -> list[tuple]:
     targets: list[tuple] = []
     seen: set[str] = set()
 
-    def _add(loc, href: str) -> None:
+    def _add(loc, href: str) -> bool:
         h = (href or "").strip()
         if "/shorts/" not in h:
-            return
+            return False
         key = h.split("?")[0]
         if key in seen:
-            return
+            return False
         try:
-            if not loc.is_visible(timeout=500):
-                return
+            if not loc.is_visible(timeout=250):
+                return False
         except Exception:
-            return
+            return False
         seen.add(key)
         targets.append((loc, h))
+        return True
 
-    shelf_items = page.locator(_SEARCH_SHORTS_SHELF_ITEM_SEL)
-    for i in range(shelf_items.count()):
+    shelf_items = page.locator(
+        f"{_SEARCH_SHORTS_SHELF_ITEM_SEL}, {_HASHTAG_SHORTS_ITEM_SEL}"
+    )
+    # Достаточно первых видимых — полный обход сетки хэштега очень долгий.
+    shelf_n = min(shelf_items.count(), 12)
+    for i in range(shelf_n):
         item = shelf_items.nth(i)
         try:
             href = (
                 item.locator(
-                    "a.shortsLockupViewModelHostEndpoint[href*='/shorts/']"
+                    "a.shortsLockupViewModelHostEndpoint[href*='/shorts/'], "
+                    "a[href*='/shorts/']"
                 )
                 .first.get_attribute("href")
                 or ""
@@ -9951,16 +9982,19 @@ def _studio_collect_search_short_targets(page) -> list[tuple]:
                 continue
             thumb = item.locator(
                 ".shortsLockupViewModelHostThumbnailParentContainer, "
-                "a.shortsLockupViewModelHostEndpoint[href*='/shorts/']"
+                "a.shortsLockupViewModelHostEndpoint[href*='/shorts/'], "
+                "a[href*='/shorts/']"
             ).first
-            _add(thumb, href)
+            if _add(thumb, href) and len(targets) >= 3:
+                break
         except Exception:
             continue
     if targets:
         return targets
 
     renderers = page.locator("ytd-video-renderer")
-    for i in range(renderers.count()):
+    renderer_n = min(renderers.count(), 12)
+    for i in range(renderer_n):
         renderer = renderers.nth(i)
         try:
             link_loc = renderer.locator(
@@ -9972,10 +10006,44 @@ def _studio_collect_search_short_targets(page) -> list[tuple]:
                 continue
             link = link_loc.first
             href = (link.get_attribute("href") or "").strip()
-            _add(link, href)
+            if _add(link, href) and len(targets) >= 3:
+                break
         except Exception:
             continue
     return targets
+
+
+def _studio_first_hashtag_short_href(page) -> str:
+    """Первая ссылка /shorts/… на странице хэштега (без обхода всей сетки)."""
+    sels = (
+        "ytd-rich-item-renderer[is-shorts-grid] "
+        "a.shortsLockupViewModelHostEndpoint[href*='/shorts/']",
+        "ytm-shorts-lockup-view-model "
+        "a.shortsLockupViewModelHostEndpoint[href*='/shorts/']",
+        "ytd-rich-grid-renderer a[href*='/shorts/']",
+        "a.shortsLockupViewModelHostEndpoint[href*='/shorts/']",
+        "a[href*='/shorts/']",
+    )
+    for sel in sels:
+        loc = page.locator(sel)
+        try:
+            n = min(loc.count(), 8)
+        except Exception:
+            n = 0
+        for i in range(n):
+            try:
+                href = (loc.nth(i).get_attribute("href") or "").strip()
+            except Exception:
+                continue
+            if "/shorts/" not in href:
+                continue
+            # Не ссылка на вкладку хэштега /hashtag/.../shorts
+            path = href.split("?")[0].rstrip("/")
+            if "/hashtag/" in path.lower():
+                continue
+            if re.search(r"/shorts/[A-Za-z0-9_-]{6,}", href):
+                return href
+    return ""
 
 
 def _studio_wait_youtube_shorts_url(page, *, timeout_ms: int = 15_000) -> bool:
@@ -10127,8 +10195,105 @@ def _studio_goto_shorts_from_search(
     return _studio_open_first_search_short(page)
 
 
+def _studio_goto_shorts_from_hashtag(
+    page, hashtag: str, *, login_credentials=None
+) -> bool:
+    """Страница хэштега Shorts → сразу открыть первый ролик (без долгого обхода сетки)."""
+    tag = _studio_normalize_hashtag(hashtag)
+    if not tag:
+        return False
+    url = _studio_hashtag_page_url(tag, shorts=True)
+    _log(f"Shorts: прогрев по хэштегу «#{tag}» ({url})…")
+    # Не гоняем на главную: только сессия, затем сразу страница хэштега.
+    try:
+        _studio_wait_for_google_session(
+            page, login_credentials=login_credentials, fast=True
+        )
+    except Exception:
+        pass
+    if "youtube.com" not in ((page.url or "").lower()):
+        _studio_goto_youtube_home(
+            page, login_credentials=login_credentials, for_channel_scan=False
+        )
+    page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+    try:
+        page.locator(_HASHTAG_SHORTS_ITEM_SEL).first.wait_for(
+            state="attached", timeout=8_000
+        )
+    except Exception:
+        try:
+            page.locator("a[href*='/shorts/']").first.wait_for(
+                state="attached", timeout=3_000
+            )
+        except Exception:
+            pass
+    href = _studio_first_hashtag_short_href(page)
+    if not href:
+        _log("Shorts: на странице хэштега нет ссылок на Shorts.")
+        return False
+    resolved = _studio_resolve_youtube_href(href)
+    _log(f"Shorts: открываем первый Short с хэштега ({resolved!r})…")
+    try:
+        page.goto(resolved, wait_until="domcontentloaded", timeout=60_000)
+    except Exception as e:
+        _log(f"Shorts: goto первого Short: {type(e).__name__}")
+        return False
+    if not _studio_wait_youtube_shorts_url(page, timeout_ms=8_000):
+        _log(f"Shorts: после перехода URL не плеер Shorts ({page.url!r}).")
+        return False
+    try:
+        _studio_wait_shorts_feed_ready(page, timeout_ms=15_000)
+    except Exception:
+        if not _studio_is_shorts_player_ready(page):
+            _log("Shorts: плеер после хэштега не готов.")
+            return False
+        _studio_dismiss_shorts_player_overlays(page)
+    _studio_ensure_shorts_playing(page)
+    vid = _studio_read_active_short_video_id(page)
+    _log(
+        "Shorts: открыт первый Short с хэштега"
+        + (f" ({vid})" if vid else "")
+        + f" — {page.url!r}"
+    )
+    return True
+
+
+def _studio_collect_rich_grid_watch_links(page) -> list:
+    """Ссылки /watch со страницы хэштега (ytd-rich-item-renderer)."""
+    items = page.locator(
+        "ytd-rich-grid-renderer ytd-rich-item-renderer:not([is-shorts-grid])"
+    )
+    count = items.count()
+    links: list = []
+    seen: set[str] = set()
+    for i in range(count):
+        item = items.nth(i)
+        try:
+            link_loc = item.locator(
+                'a#video-title-link[href*="/watch"], '
+                'a#thumbnail[href*="/watch"], '
+                'a[href*="/watch?v="]'
+            )
+            if link_loc.count() == 0:
+                continue
+            link = link_loc.first
+            if not link.is_visible(timeout=500):
+                continue
+            href = (link.get_attribute("href") or "").strip()
+            if "/watch" not in href or "/shorts/" in href:
+                continue
+            key = href.split("&")[0].split("?")[0]
+            if key in seen:
+                continue
+            seen.add(key)
+            links.append(link)
+        except Exception:
+            continue
+    return links
+
+
 def _studio_collect_search_video_links(page) -> list:
-    """Ссылки на ролики только из ytd-video-renderer (не реклама, не каналы)."""
+    """Ссылки на ролики: поиск (ytd-video-renderer) или сетка хэштега."""
     renderers = page.locator("ytd-video-renderer")
     count = renderers.count()
     links: list = []
@@ -10149,7 +10314,9 @@ def _studio_collect_search_video_links(page) -> list:
             links.append(link)
         except Exception:
             continue
-    return links
+    if links:
+        return links
+    return _studio_collect_rich_grid_watch_links(page)
 
 
 def _studio_pick_search_video_index(link_count: int, iteration: int) -> int:
@@ -10226,7 +10393,10 @@ def _studio_browse_horizontal_videos(
         try:
             links = _studio_collect_search_video_links(page)
             if not links:
-                _log("Горизонтальные видео: в выдаче нет роликов (ytd-video-renderer).")
+                _log(
+                    "Горизонтальные видео: в выдаче нет роликов "
+                    "(ytd-video-renderer / сетка хэштега)."
+                )
                 break
             idx = _studio_pick_search_video_index(len(links), i)
             link = links[idx]
@@ -10304,28 +10474,46 @@ def _studio_open_shorts_for_warmup(
     login_credentials=None,
     shorts_recommendations: bool = True,
     search_query: str | None = None,
+    hashtag: str | None = None,
     log_prefix: str = "Shorts",
     should_stop: Callable[[], bool] | None = None,
 ) -> None:
-    """Открыть ленту Shorts: рекомендации или первый ролик из поиска."""
+    """Открыть ленту Shorts: хэштег, поиск или рекомендации."""
+    tag = _studio_normalize_hashtag(hashtag)
     search_q = (search_query or "").strip()
-    opened_from_search = False
-    if not shorts_recommendations and search_q:
+    opened = False
+    if tag:
         if should_stop and should_stop():
             return
-        opened_from_search = _studio_goto_shorts_from_search(
+        opened = _studio_goto_shorts_from_hashtag(
+            page, tag, login_credentials=login_credentials
+        )
+        if should_stop and should_stop():
+            return
+        if not opened and _studio_page_on_youtube_shorts(page):
+            _log(
+                f"{log_prefix}: после хэштега уже на Shorts — "
+                "продолжаем прогрев без перехода на главную."
+            )
+            opened = True
+    elif not shorts_recommendations and search_q:
+        if should_stop and should_stop():
+            return
+        opened = _studio_goto_shorts_from_search(
             page, search_q, login_credentials=login_credentials
         )
         if should_stop and should_stop():
             return
-        if not opened_from_search and _studio_page_on_youtube_shorts(page):
+        if not opened and _studio_page_on_youtube_shorts(page):
             _log(
                 f"{log_prefix}: после поиска уже на Shorts — "
                 "продолжаем прогрев без перехода на главную."
             )
-            opened_from_search = True
-    if not opened_from_search:
-        if not shorts_recommendations and search_q:
+            opened = True
+    if not opened:
+        if tag:
+            _log(f"{log_prefix}: хэштег не удался — открываем рекомендации.")
+        elif not shorts_recommendations and search_q:
             _log(f"{log_prefix}: поиск не удался — открываем рекомендации.")
         _studio_goto_youtube_home(
             page, login_credentials=login_credentials, for_channel_scan=False
@@ -10351,11 +10539,13 @@ def run_youtube_shorts_warmup(
     watch_full_video: bool = False,
     shorts_recommendations: bool = True,
     search_query: str | None = None,
+    hashtag: str | None = None,
     watch_horizontal_videos: bool = False,
     horizontal_search_query: str | None = None,
     horizontal_videos_count: int = _HORIZONTAL_WARMUP_DEFAULT_COUNT,
 ) -> None:
     """Авторизация, выбор канала → лента Shorts → просмотр с прокруткой."""
+    tag = _studio_normalize_hashtag(hashtag)
     if search_oldest_channel:
         _studio_ensure_correct_studio_channel(
             page,
@@ -10377,6 +10567,7 @@ def run_youtube_shorts_warmup(
         login_credentials=login_credentials,
         shorts_recommendations=shorts_recommendations,
         search_query=search_query,
+        hashtag=tag or None,
     )
     _studio_browse_youtube_shorts(
         page,
@@ -10388,6 +10579,23 @@ def run_youtube_shorts_warmup(
         watch_full_video=watch_full_video,
     )
     if watch_horizontal_videos:
+        if tag:
+            url = _studio_hashtag_page_url(tag, shorts=False)
+            _log(f"Горизонтальные видео: страница хэштега «#{tag}» ({url})…")
+            page.goto(url, wait_until="domcontentloaded", timeout=120_000)
+            page.wait_for_timeout(_HORIZONTAL_SEARCH_RESULTS_WAIT_MS)
+            try:
+                page.locator(
+                    "ytd-rich-grid-renderer ytd-rich-item-renderer "
+                    "a[href*='/watch']"
+                ).first.wait_for(state="visible", timeout=8_000)
+            except Exception:
+                pass
+            _studio_browse_horizontal_videos(
+                page,
+                count=horizontal_videos_count,
+            )
+            return
         query = (horizontal_search_query or "").strip()
         if not query:
             _log("Горизонтальные видео: поисковый запрос пуст — пропуск.")
@@ -10410,6 +10618,7 @@ def run_youtube_shorts_warmup_during_upload(
     login_credentials=None,
     shorts_recommendations: bool = True,
     search_query: str | None = None,
+    hashtag: str | None = None,
     shorts_batch_count: int = _SCHEDULE_PARALLEL_WARMUP_BATCH_COUNT,
     like_probability_pct: float = _SHORTS_WARMUP_DEFAULT_LIKE_PROB_PCT,
     subscribe_probability_pct: float = _SHORTS_WARMUP_DEFAULT_SUBSCRIBE_PROB_PCT,
@@ -10426,6 +10635,7 @@ def run_youtube_shorts_warmup_during_upload(
         login_credentials=login_credentials,
         shorts_recommendations=shorts_recommendations,
         search_query=search_query,
+        hashtag=hashtag,
         log_prefix="Shorts (параллельно с отложкой)",
         should_stop=should_stop,
     )

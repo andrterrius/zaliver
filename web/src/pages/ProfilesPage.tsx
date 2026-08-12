@@ -61,6 +61,10 @@ export function ProfilesPage({ platform }: Props) {
   const [watchFull, setWatchFull] = useState(false);
   const [recs, setRecs] = useState(true);
   const [searchQ, setSearchQ] = useState("");
+  const [hashtag, setHashtag] = useState("");
+  const [watchHorizontal, setWatchHorizontal] = useState(false);
+  const [horizontalCount, setHorizontalCount] = useState(3);
+  const [horizontalSearchQ, setHorizontalSearchQ] = useState("");
 
   // Promote
   const [promoSubscribe, setPromoSubscribe] = useState(false);
@@ -186,6 +190,8 @@ export function ProfilesPage({ platform }: Props) {
   const confirmModal = () => {
     if (modal === "warmup") {
       const isIg = platform === "instagram";
+      const tag = hashtag.trim().replace(/^#+/, "").replace(/\s+/g, "");
+      const useHashtag = !isIg && tag.length > 0;
       void startJob("warmup", {
         shorts: {
           shorts_count: shortsCount,
@@ -194,8 +200,13 @@ export function ProfilesPage({ platform }: Props) {
           shorts_watch_min_s: watchMin,
           shorts_watch_max_s: watchMax,
           watch_full_video: watchFull,
-          shorts_recommendations: recs,
-          shorts_search_query: searchQ,
+          shorts_recommendations: useHashtag ? false : recs,
+          shorts_search_query: useHashtag || recs ? "" : searchQ,
+          hashtag: useHashtag ? tag : "",
+          watch_horizontal_videos: !isIg && watchHorizontal,
+          horizontal_search_query:
+            useHashtag || !watchHorizontal ? "" : horizontalSearchQ,
+          horizontal_videos_count: horizontalCount,
         },
         reels: {
           reels_count: shortsCount,
@@ -508,12 +519,67 @@ export function ProfilesPage({ platform }: Props) {
                   checked={recs}
                   onChange={setRecs}
                 />
+                {platform !== "instagram" ? (
+                  <>
+                    <label className="hint">Хэштег (Shorts и горизонтальные)</label>
+                    <input
+                      className="field"
+                      value={hashtag}
+                      onChange={(e) => setHashtag(e.target.value)}
+                      placeholder="хэштег или #хэштег"
+                    />
+                  </>
+                ) : null}
                 <label className="hint">Поисковый запрос</label>
                 <input
                   className="field"
                   value={searchQ}
                   onChange={(e) => setSearchQ(e.target.value)}
+                  disabled={
+                    platform !== "instagram" && hashtag.trim().length > 0
+                  }
                 />
+                {platform !== "instagram" ? (
+                  <>
+                    <ToggleSwitch
+                      label="Смотреть горизонтальные после Shorts"
+                      checked={watchHorizontal}
+                      onChange={setWatchHorizontal}
+                    />
+                    {watchHorizontal ? (
+                      <>
+                        <label className="hint">Количество горизонтальных</label>
+                        <input
+                          className="field"
+                          type="number"
+                          min={1}
+                          value={horizontalCount}
+                          onChange={(e) =>
+                            setHorizontalCount(Number(e.target.value) || 1)
+                          }
+                        />
+                        {!hashtag.trim() ? (
+                          <>
+                            <label className="hint">
+                              Поиск горизонтальных
+                            </label>
+                            <input
+                              className="field"
+                              value={horizontalSearchQ}
+                              onChange={(e) =>
+                                setHorizontalSearchQ(e.target.value)
+                              }
+                            />
+                          </>
+                        ) : (
+                          <p className="hint">
+                            Горизонтальные берутся со страницы хэштега.
+                          </p>
+                        )}
+                      </>
+                    ) : null}
+                  </>
+                ) : null}
               </>
             ) : null}
             {modal === "promote" ? (

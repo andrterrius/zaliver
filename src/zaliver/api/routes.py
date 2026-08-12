@@ -1292,6 +1292,7 @@ def build_router() -> APIRouter:
         schedule_warmup_shorts = bool(body.schedule_warmup_shorts)
         schedule_warmup_reco = bool(body.schedule_warmup_shorts_recommendations)
         schedule_warmup_q = str(body.schedule_warmup_search_query or "").strip()
+        schedule_warmup_htag = str(body.schedule_warmup_hashtag or "").strip()
         delete_after_upload = bool(body.delete_after_upload)
         await_more = bool(body.await_more_videos)
         planned_videos = int(body.planned_videos or 0)
@@ -1331,6 +1332,7 @@ def build_router() -> APIRouter:
                 schedule_warmup_shorts=schedule_warmup_shorts,
                 schedule_warmup_shorts_recommendations=schedule_warmup_reco,
                 schedule_warmup_search_query=schedule_warmup_q,
+                schedule_warmup_hashtag=schedule_warmup_htag,
                 delete_after_upload=delete_after_upload,
                 search_oldest_channel=search_oldest_channel,
                 upload_store=upload_store,

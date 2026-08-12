@@ -159,6 +159,7 @@ from zaliver.ui.widgets import (
     make_work_section_nav,
     wrap_work_section_page,
 )
+from zaliver.ui.text_overlay_io import make_text_overlay_io_buttons
 from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
 from zaliver.ui.slicing_tab_pane import SlicingTabPane
 from zaliver.ui.stitching_tab_pane import StitchingTabPane
@@ -168,6 +169,7 @@ from zaliver.ui.ai_generate_dialog import AiGenerateDialog
 from zaliver.core.profiles import ReelsWarmupSettings, ShortsWarmupSettings
 from zaliver.ui.channel_setup_helpers import (
     field_with_recent_picker,
+    fill_recent_values_picker,
     make_magic_wand_button,
     recent_picker_has_items,
 )
@@ -1286,7 +1288,19 @@ class MainWindow(QWidget):
         self.text_overlay_enabled.setChecked(True)
         self.text_overlay_enabled.toggled.connect(self._update_text_overlay_controls)
         self.text_overlay_enabled.toggled.connect(self._save_folder_settings)
-        text_l.addWidget(self.text_overlay_enabled)
+        btn_text_export, btn_text_import = make_text_overlay_io_buttons(
+            self,
+            get_settings=self._text_overlay_options_dict,
+            apply_settings=self._apply_text_overlay_options,
+        )
+        text_header = QHBoxLayout()
+        text_header.setContentsMargins(0, 0, 0, 0)
+        text_header.setSpacing(8)
+        text_header.addWidget(self.text_overlay_enabled)
+        text_header.addStretch(1)
+        text_header.addWidget(btn_text_export)
+        text_header.addWidget(btn_text_import)
+        text_l.addLayout(text_header)
 
         self._text_overlay_panel = QWidget()
         text_controls_l = QVBoxLayout(self._text_overlay_panel)
@@ -1300,12 +1314,30 @@ class MainWindow(QWidget):
         self.text_overlay_from_middle.toggled.connect(self._save_folder_settings)
         text_controls_l.addWidget(self.text_overlay_from_middle)
 
+        self._syncing_text_overlay = False
         self.text_overlay_edit = QPlainTextEdit()
         self.text_overlay_edit.setPlaceholderText("Текст для наложения…")
-        self.text_overlay_edit.setPlainText("GAME IN BIO")
         self.text_overlay_edit.setMaximumHeight(72)
         self.text_overlay_edit.textChanged.connect(self._on_text_overlay_content_changed)
-        text_controls_l.addWidget(self.text_overlay_edit)
+        btn_text_wand = make_magic_wand_button(
+            tooltip="Сгенерировать текст на видео через ИИ (промпт «Текст на видео»)"
+        )
+        btn_text_wand.clicked.connect(
+            lambda _checked=False: self._on_ai_magic_generate(
+                default_prompt_id="builtin_video_overlay_text",
+                window_title="Генерация текста на видео",
+                apply_text=self._apply_ai_text_overlay,
+                parent=self,
+            )
+        )
+        text_row, self._text_overlay_recent_picker = field_with_recent_picker(
+            self.text_overlay_edit,
+            recent=self._recent_text_overlay_texts(),
+            tooltip="Недавние тексты на видео (общие для всех обработок платформы)",
+            on_filled=self._on_text_overlay_content_changed,
+            side_extras=[btn_text_wand],
+        )
+        text_controls_l.addWidget(text_row)
 
         text_opts = QGridLayout()
         text_opts.setHorizontalSpacing(8)
@@ -1626,10 +1658,28 @@ class MainWindow(QWidget):
         configure_log_splitter(splitter, form_panel=scroll_left, log_panel=right)
         home_l.addWidget(splitter, 1)
 
-        self._slice_tab = SlicingTabPane(self, settings=self._settings)
+        self._slice_tab = SlicingTabPane(
+            self,
+            settings=self._settings,
+            platform=self._platform,
+            upload_store=self._upload_store,
+            ai_generate_fn=self._on_ai_magic_generate,
+            on_text_overlay_text_changed=lambda text: self._on_shared_text_overlay_changed(
+                text, source="slice"
+            ),
+        )
         self._slice_tab.start_requested.connect(self._start_slicing)
         self._slice_tab.cancel_requested.connect(self._cancel)
-        self._stitch_tab = StitchingTabPane(self, settings=self._settings)
+        self._stitch_tab = StitchingTabPane(
+            self,
+            settings=self._settings,
+            platform=self._platform,
+            upload_store=self._upload_store,
+            ai_generate_fn=self._on_ai_magic_generate,
+            on_text_overlay_text_changed=lambda text: self._on_shared_text_overlay_changed(
+                text, source="stitch"
+            ),
+        )
         self._stitch_tab.start_requested.connect(self._start_stitching)
         self._stitch_tab.cancel_requested.connect(self._cancel)
 
@@ -3789,7 +3839,7 @@ class MainWindow(QWidget):
             except Exception:
                 pass
             self._refresh_antydetect_profiles()
-            return {"title": "", "description": "", "profile_ids": "", "publish_before_checks": True, "keep_studio_title": False, "upload_as_ready": False, "schedule_publish": False, "schedule_times_iso": [], "schedule_warmup_shorts": False, "schedule_warmup_shorts_recommendations": True, "schedule_warmup_search_query": ""}
+            return {"title": "", "description": "", "profile_ids": "", "publish_before_checks": False, "keep_studio_title": False, "upload_as_ready": False, "schedule_publish": False, "schedule_times_iso": [], "schedule_warmup_shorts": False, "schedule_warmup_shorts_recommendations": False, "schedule_warmup_search_query": "", "schedule_warmup_hashtag": ""}
 
         dlg = QDialog(self)
         if mode == "slicing":
@@ -3857,7 +3907,7 @@ class MainWindow(QWidget):
         )
 
         publish_before_checks_cb = QCheckBox("Опубликовать до проверок")
-        publish_before_checks_cb.setChecked(True)
+        publish_before_checks_cb.setChecked(False)
         publish_before_checks_cb.setToolTip(
             "Если включено — сразу после названия проходим мастер до «Открытый доступ» "
             "пока идёт загрузка; «Опубликовать» нажимается после 100% загрузки "
@@ -3873,9 +3923,7 @@ class MainWindow(QWidget):
         )
 
         upload_as_ready_cb = QCheckBox("Заливать по мере готовности")
-        upload_as_ready_cb.setChecked(
-            bool(self._settings.value("upload_as_ready", False, type=bool))
-        )
+        upload_as_ready_cb.setChecked(False)
         upload_as_ready_cb.setToolTip(
             "Если включено: залив стартует после запаса готовых видео "
             "(число выбранных профилей × 2). Например, 5 профилей — после 10 роликов. "
@@ -3941,7 +3989,7 @@ class MainWindow(QWidget):
         schedule_warmup_layout.setSpacing(6)
 
         schedule_warmup_cb = QCheckBox("Прогрев Shorts во второй вкладке")
-        schedule_warmup_cb.setChecked(True)
+        schedule_warmup_cb.setChecked(False)
         schedule_warmup_cb.setToolTip(
             "Пока на одной вкладке профиля идёт отложенная заливка в Studio, "
             "на соседней вкладке того же профиля крутится лента YouTube Shorts. "
@@ -3950,12 +3998,30 @@ class MainWindow(QWidget):
         schedule_warmup_layout.addWidget(schedule_warmup_cb)
 
         schedule_warmup_recommend_cb = QCheckBox("Рекомендации Shorts")
-        schedule_warmup_recommend_cb.setChecked(True)
+        schedule_warmup_recommend_cb.setChecked(False)
         schedule_warmup_recommend_cb.setToolTip(
             "Открыть ленту рекомендаций Shorts. Если снять галочку — "
-            "можно указать поисковый запрос и смотреть Shorts из выдачи."
+            "можно указать поисковый запрос или хэштег."
         )
         schedule_warmup_layout.addWidget(schedule_warmup_recommend_cb)
+
+        schedule_warmup_hashtag_cb = QCheckBox("Хэштег")
+        schedule_warmup_hashtag_cb.setChecked(False)
+        schedule_warmup_hashtag_cb.setToolTip(
+            "Прогрев Shorts со страницы хэштега. Символ # можно не указывать."
+        )
+        schedule_warmup_layout.addWidget(schedule_warmup_hashtag_cb)
+
+        schedule_warmup_hashtag_row = QWidget()
+        schedule_warmup_hashtag_row_l = QHBoxLayout(schedule_warmup_hashtag_row)
+        schedule_warmup_hashtag_row_l.setContentsMargins(24, 0, 0, 0)
+        schedule_warmup_hashtag_row_l.setSpacing(8)
+        schedule_warmup_hashtag_lbl = QLabel("Хэштег:")
+        schedule_warmup_hashtag_edit = QLineEdit()
+        schedule_warmup_hashtag_edit.setPlaceholderText("хэштег или #хэштег")
+        schedule_warmup_hashtag_row_l.addWidget(schedule_warmup_hashtag_lbl)
+        schedule_warmup_hashtag_row_l.addWidget(schedule_warmup_hashtag_edit, 1)
+        schedule_warmup_layout.addWidget(schedule_warmup_hashtag_row)
 
         schedule_warmup_search_row = QWidget()
         schedule_warmup_search_row_l = QHBoxLayout(schedule_warmup_search_row)
@@ -4057,8 +4123,31 @@ class MainWindow(QWidget):
         def _sync_schedule_warmup_options() -> None:
             warmup_on = schedule_warmup_cb.isChecked()
             schedule_warmup_recommend_cb.setEnabled(warmup_on)
-            use_search = warmup_on and not schedule_warmup_recommend_cb.isChecked()
-            schedule_warmup_search_row.setVisible(use_search)
+            schedule_warmup_hashtag_cb.setEnabled(warmup_on)
+            use_hashtag = warmup_on and schedule_warmup_hashtag_cb.isChecked()
+            use_reco = (
+                warmup_on
+                and schedule_warmup_recommend_cb.isChecked()
+                and not use_hashtag
+            )
+            schedule_warmup_hashtag_row.setVisible(use_hashtag)
+            schedule_warmup_search_row.setVisible(
+                warmup_on and not use_reco and not use_hashtag
+            )
+
+        def _on_schedule_warmup_recommend_toggled(checked: bool) -> None:
+            if checked and schedule_warmup_hashtag_cb.isChecked():
+                schedule_warmup_hashtag_cb.blockSignals(True)
+                schedule_warmup_hashtag_cb.setChecked(False)
+                schedule_warmup_hashtag_cb.blockSignals(False)
+            _sync_schedule_warmup_options()
+
+        def _on_schedule_warmup_hashtag_toggled(checked: bool) -> None:
+            if checked and schedule_warmup_recommend_cb.isChecked():
+                schedule_warmup_recommend_cb.blockSignals(True)
+                schedule_warmup_recommend_cb.setChecked(False)
+                schedule_warmup_recommend_cb.blockSignals(False)
+            _sync_schedule_warmup_options()
 
         def _add_schedule_time_slot() -> None:
             nonlocal schedule_slots_visible
@@ -4083,7 +4172,12 @@ class MainWindow(QWidget):
         btn_remove_schedule_time.clicked.connect(_remove_schedule_time_slot)
         schedule_publish_cb.toggled.connect(_sync_schedule_times_visibility)
         schedule_warmup_cb.toggled.connect(_sync_schedule_warmup_options)
-        schedule_warmup_recommend_cb.toggled.connect(_sync_schedule_warmup_options)
+        schedule_warmup_recommend_cb.toggled.connect(
+            _on_schedule_warmup_recommend_toggled
+        )
+        schedule_warmup_hashtag_cb.toggled.connect(
+            _on_schedule_warmup_hashtag_toggled
+        )
         _sync_schedule_times_visibility(False)
         schedule_warmup_group.setVisible(False)
         _sync_schedule_warmup_options()
@@ -4406,25 +4500,51 @@ class MainWindow(QWidget):
             False if is_ig_upload else schedule_publish_cb.isChecked()
         )
         schedule_warmup_shorts = schedule_publish and schedule_warmup_cb.isChecked()
+        schedule_warmup_hashtag_raw = (
+            schedule_warmup_hashtag_edit.text().strip()
+            if schedule_warmup_shorts and schedule_warmup_hashtag_cb.isChecked()
+            else ""
+        )
+        schedule_warmup_hashtag = schedule_warmup_hashtag_raw
+        while schedule_warmup_hashtag.startswith("#"):
+            schedule_warmup_hashtag = schedule_warmup_hashtag[1:].lstrip()
+        schedule_warmup_hashtag = "".join(schedule_warmup_hashtag.split())
         schedule_warmup_shorts_recommendations = (
             schedule_warmup_recommend_cb.isChecked()
-            if schedule_warmup_shorts
-            else True
+            if schedule_warmup_shorts and not schedule_warmup_hashtag
+            else False
         )
         schedule_warmup_search_query = (
             schedule_warmup_search_edit.text().strip()
-            if schedule_warmup_shorts and not schedule_warmup_shorts_recommendations
+            if (
+                schedule_warmup_shorts
+                and not schedule_warmup_shorts_recommendations
+                and not schedule_warmup_hashtag
+            )
             else ""
         )
         if (
             schedule_warmup_shorts
-            and not schedule_warmup_shorts_recommendations
-            and not schedule_warmup_search_query
+            and schedule_warmup_hashtag_cb.isChecked()
+            and not schedule_warmup_hashtag
         ):
             QMessageBox.warning(
                 self,
                 "Zaliver",
-                "Укажите поисковый запрос для прогрева Shorts или включите «Рекомендации Shorts».",
+                "Укажите хэштег для прогрева Shorts.",
+            )
+            return None
+        if (
+            schedule_warmup_shorts
+            and not schedule_warmup_shorts_recommendations
+            and not schedule_warmup_search_query
+            and not schedule_warmup_hashtag
+        ):
+            QMessageBox.warning(
+                self,
+                "Zaliver",
+                "Укажите поисковый запрос или хэштег для прогрева Shorts "
+                "либо включите «Рекомендации Shorts».",
             )
             return None
         schedule_times_iso: list[str] = []
@@ -4468,6 +4588,7 @@ class MainWindow(QWidget):
                 "schedule_warmup_shorts": schedule_warmup_shorts,
                 "schedule_warmup_shorts_recommendations": schedule_warmup_shorts_recommendations,
                 "schedule_warmup_search_query": schedule_warmup_search_query,
+                "schedule_warmup_hashtag": schedule_warmup_hashtag,
             }
         if not is_ig_upload and not keep_studio_title and not title:
             QMessageBox.warning(self, "Zaliver", "Название видео обязательно для загрузки в YouTube.")
@@ -4485,6 +4606,7 @@ class MainWindow(QWidget):
             "schedule_warmup_shorts": schedule_warmup_shorts,
             "schedule_warmup_shorts_recommendations": schedule_warmup_shorts_recommendations,
             "schedule_warmup_search_query": schedule_warmup_search_query,
+            "schedule_warmup_hashtag": schedule_warmup_hashtag,
         }
 
     def showEvent(self, event: QShowEvent) -> None:
@@ -4697,9 +4819,22 @@ class MainWindow(QWidget):
             self.text_overlay_enabled.setChecked(
                 bool(self._settings.value("text_overlay_enabled", True, type=bool))
             )
-            self.text_overlay_edit.setPlainText(
-                self._settings.value("text_overlay_text", "GAME IN BIO", type=str) or "GAME IN BIO"
-            )
+            shared_text = self._settings.value("text_overlay_text", "", type=str) or ""
+            if str(shared_text).strip() in {
+                "GAME IN BIO",
+                "5.000.000$ GIVEAWAY IN BIO",
+            }:
+                shared_text = ""
+                try:
+                    self._settings.setValue("text_overlay_text", "")
+                except Exception:
+                    pass
+            self._set_uniquify_text_overlay_text(str(shared_text))
+            self.refresh_text_overlay_recent()
+            if hasattr(self, "_slice_tab"):
+                self._slice_tab.set_text_overlay_text(str(shared_text))
+            if hasattr(self, "_stitch_tab"):
+                self._stitch_tab.set_text_overlay_text(str(shared_text))
             self.text_overlay_from_middle.setChecked(
                 bool(
                     self._settings.value("text_overlay_from_middle", True, type=bool)
@@ -7480,9 +7615,28 @@ class MainWindow(QWidget):
         shorts_recommend_cb.setChecked(True)
         shorts_recommend_cb.setToolTip(
             "Открыть ленту рекомендаций Shorts. Если снять галочку — "
-            "можно указать поисковый запрос и смотреть Shorts из выдачи."
+            "можно указать поисковый запрос или хэштег."
         )
         form.addRow("", shorts_recommend_cb)
+
+        hashtag_cb = QCheckBox("Хэштег")
+        hashtag_cb.setChecked(False)
+        hashtag_cb.setToolTip(
+            "Прогрев Shorts и горизонтальных видео со страницы хэштега "
+            "(youtube.com/hashtag/…). Символ # в начале можно не указывать."
+        )
+        form.addRow("", hashtag_cb)
+
+        hashtag_row = QWidget()
+        hashtag_row_l = QHBoxLayout(hashtag_row)
+        hashtag_row_l.setContentsMargins(0, 0, 0, 0)
+        hashtag_row_l.setSpacing(8)
+        hashtag_lbl = QLabel("Хэштег:")
+        hashtag_edit = QLineEdit()
+        hashtag_edit.setPlaceholderText("хэштег или #хэштег")
+        hashtag_row_l.addWidget(hashtag_lbl)
+        hashtag_row_l.addWidget(hashtag_edit, 1)
+        form.addRow("", hashtag_row)
 
         shorts_search_row = QWidget()
         shorts_search_row_l = QHBoxLayout(shorts_search_row)
@@ -7495,12 +7649,32 @@ class MainWindow(QWidget):
         shorts_search_row_l.addWidget(shorts_search_edit, 1)
         form.addRow("", shorts_search_row)
 
-        def _sync_shorts_source_fields(checked: bool) -> None:
-            use_search = not checked
-            shorts_search_row.setVisible(use_search)
+        def _sync_shorts_source_fields() -> None:
+            use_hashtag = hashtag_cb.isChecked()
+            use_reco = shorts_recommend_cb.isChecked() and not use_hashtag
+            hashtag_row.setVisible(use_hashtag)
+            shorts_search_row.setVisible(not use_reco and not use_hashtag)
+            horiz_on = watch_horizontal_cb.isChecked()
+            search_label.setVisible(horiz_on and not use_hashtag)
+            search_edit.setVisible(horiz_on and not use_hashtag)
+            hashtag_horizontal_hint.setVisible(horiz_on and use_hashtag)
 
-        shorts_recommend_cb.toggled.connect(_sync_shorts_source_fields)
-        _sync_shorts_source_fields(shorts_recommend_cb.isChecked())
+        def _on_recommend_toggled(checked: bool) -> None:
+            if checked and hashtag_cb.isChecked():
+                hashtag_cb.blockSignals(True)
+                hashtag_cb.setChecked(False)
+                hashtag_cb.blockSignals(False)
+            _sync_shorts_source_fields()
+
+        def _on_hashtag_toggled(checked: bool) -> None:
+            if checked and shorts_recommend_cb.isChecked():
+                shorts_recommend_cb.blockSignals(True)
+                shorts_recommend_cb.setChecked(False)
+                shorts_recommend_cb.blockSignals(False)
+            _sync_shorts_source_fields()
+
+        shorts_recommend_cb.toggled.connect(_on_recommend_toggled)
+        hashtag_cb.toggled.connect(_on_hashtag_toggled)
 
         v.addLayout(form)
 
@@ -7514,6 +7688,14 @@ class MainWindow(QWidget):
         search_edit.setPlaceholderText("Текст для поиска на главной YouTube")
         horizontal_form.addRow(search_label, search_edit)
 
+        hashtag_horizontal_hint = QLabel(
+            "При включённом хэштеге горизонтальные видео берутся "
+            "со страницы хэштега (вкладка «Все»)."
+        )
+        hashtag_horizontal_hint.setObjectName("hint")
+        hashtag_horizontal_hint.setWordWrap(True)
+        horizontal_form.addRow(hashtag_horizontal_hint)
+
         horizontal_count_spin = QSpinBox()
         horizontal_count_spin.setRange(1, 999)
         horizontal_count_spin.setValue(3)
@@ -7526,16 +7708,16 @@ class MainWindow(QWidget):
 
         def _sync_horizontal_fields(checked: bool) -> None:
             for w in (
-                search_label,
-                search_edit,
                 horizontal_count_label,
                 horizontal_count_spin,
                 horizontal_watch_hint,
             ):
                 w.setVisible(checked)
+            _sync_shorts_source_fields()
 
         watch_horizontal_cb.toggled.connect(_sync_horizontal_fields)
         _sync_horizontal_fields(False)
+        _sync_shorts_source_fields()
         horizontal_form.addRow(horizontal_watch_hint)
         v.addWidget(horizontal_group)
 
@@ -7551,6 +7733,12 @@ class MainWindow(QWidget):
         row.addWidget(btn_start)
         v.addLayout(row)
 
+        def _normalize_hashtag_input(raw: str) -> str:
+            tag = (raw or "").strip()
+            while tag.startswith("#"):
+                tag = tag[1:].lstrip()
+            return "".join(tag.split())
+
         def _try_accept() -> None:
             if (
                 not watch_full_cb.isChecked()
@@ -7563,23 +7751,38 @@ class MainWindow(QWidget):
                     "больше максимальной.",
                 )
                 return
+            use_hashtag = hashtag_cb.isChecked()
+            tag = _normalize_hashtag_input(hashtag_edit.text()) if use_hashtag else ""
+            if use_hashtag and not tag:
+                QMessageBox.warning(
+                    dlg,
+                    "Прогрев YouTube",
+                    "Укажите хэштег для прогрева.",
+                )
+                return
             use_shorts_search = (
                 not shorts_recommend_cb.isChecked()
+                and not use_hashtag
                 and not shorts_search_edit.text().strip()
             )
             if use_shorts_search:
                 QMessageBox.warning(
                     dlg,
                     "Прогрев YouTube",
-                    "Укажите поисковый запрос для прогрева Shorts "
-                    "или включите «Рекомендации Shorts».",
+                    "Укажите поисковый запрос или хэштег для прогрева Shorts "
+                    "либо включите «Рекомендации Shorts».",
                 )
                 return
-            if watch_horizontal_cb.isChecked() and not search_edit.text().strip():
+            if (
+                watch_horizontal_cb.isChecked()
+                and not use_hashtag
+                and not search_edit.text().strip()
+            ):
                 QMessageBox.warning(
                     dlg,
                     "Прогрев YouTube",
-                    "Укажите текст для поиска горизонтальных видео.",
+                    "Укажите текст для поиска горизонтальных видео "
+                    "или включите прогрев по хэштегу.",
                 )
                 return
             dlg.accept()
@@ -7589,6 +7792,8 @@ class MainWindow(QWidget):
         count_spin.setFocus()
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return None
+        use_hashtag = hashtag_cb.isChecked()
+        tag = _normalize_hashtag_input(hashtag_edit.text()) if use_hashtag else ""
         return ShortsWarmupSettings(
             shorts_count=count_spin.value(),
             like_probability_pct=like_spin.value(),
@@ -7596,10 +7801,21 @@ class MainWindow(QWidget):
             shorts_watch_min_s=watch_min_spin.value(),
             shorts_watch_max_s=watch_max_spin.value(),
             watch_full_video=watch_full_cb.isChecked(),
-            shorts_recommendations=shorts_recommend_cb.isChecked(),
-            shorts_search_query=(shorts_search_edit.text() or "").strip(),
+            shorts_recommendations=(
+                shorts_recommend_cb.isChecked() and not use_hashtag
+            ),
+            shorts_search_query=(
+                ""
+                if use_hashtag or shorts_recommend_cb.isChecked()
+                else (shorts_search_edit.text() or "").strip()
+            ),
+            hashtag=tag,
             watch_horizontal_videos=watch_horizontal_cb.isChecked(),
-            horizontal_search_query=(search_edit.text() or "").strip(),
+            horizontal_search_query=(
+                ""
+                if use_hashtag
+                else (search_edit.text() or "").strip()
+            ),
             horizontal_videos_count=horizontal_count_spin.value(),
         )
 
@@ -7853,13 +8069,24 @@ class MainWindow(QWidget):
                 f"лайк {warmup_settings.like_probability_pct:g}%, "
                 f"подписка {warmup_settings.subscribe_probability_pct:g}%"
                 + (
-                    ", Shorts: рекомендации"
-                    if warmup_settings.shorts_recommendations
-                    else f", Shorts: поиск «{warmup_settings.shorts_search_query}»"
+                    f", Shorts: хэштег «#{warmup_settings.hashtag}»"
+                    if (warmup_settings.hashtag or "").strip()
+                    else (
+                        ", Shorts: рекомендации"
+                        if warmup_settings.shorts_recommendations
+                        else f", Shorts: поиск «{warmup_settings.shorts_search_query}»"
+                    )
                 )
                 + (
-                    f", горизонтальные: {warmup_settings.horizontal_videos_count}, "
-                    f"поиск «{warmup_settings.horizontal_search_query}»"
+                    (
+                        f", горизонтальные: {warmup_settings.horizontal_videos_count}, "
+                        f"хэштег «#{warmup_settings.hashtag}»"
+                        if (warmup_settings.hashtag or "").strip()
+                        else (
+                            f", горизонтальные: {warmup_settings.horizontal_videos_count}, "
+                            f"поиск «{warmup_settings.horizontal_search_query}»"
+                        )
+                    )
                     if warmup_settings.watch_horizontal_videos
                     else ""
                 )
@@ -7922,8 +8149,10 @@ class MainWindow(QWidget):
                 "search_query": (
                     warmup_settings.shorts_search_query or None
                     if not warmup_settings.shorts_recommendations
+                    and not (warmup_settings.hashtag or "").strip()
                     else None
                 ),
+                "hashtag": (warmup_settings.hashtag or "").strip() or None,
                 "watch_horizontal_videos": warmup_settings.watch_horizontal_videos,
                 "horizontal_search_query": warmup_settings.horizontal_search_query or None,
                 "horizontal_videos_count": warmup_settings.horizontal_videos_count,
@@ -10105,6 +10334,75 @@ class MainWindow(QWidget):
         d["wave_frame_speed_max"] = float(wfs_hi)
         return d
 
+    def _apply_text_overlay_options(self, raw: dict) -> None:
+        """Применить настройки текста (в т.ч. из импорта JSON)."""
+        from zaliver.ui.text_overlay_io import normalize_text_overlay_export_dict
+
+        d = normalize_text_overlay_export_dict(raw if isinstance(raw, dict) else {})
+        self.text_overlay_enabled.setChecked(bool(d.get("enabled", True)))
+        self._set_uniquify_text_overlay_text(str(d.get("text") or ""))
+        self.text_overlay_from_middle.setChecked(bool(d.get("from_middle", True)))
+        try:
+            fs = int(d.get("font_size", 95))
+        except (TypeError, ValueError):
+            fs = 95
+        self.text_overlay_font_size.setValue(max(12, min(240, fs)))
+        orient = (
+            "horizontal"
+            if str(d.get("preview_orientation") or "").lower() == "horizontal"
+            else "vertical"
+        )
+        idx = self.text_overlay_orientation.findData(orient)
+        if idx >= 0:
+            self.text_overlay_orientation.setCurrentIndex(idx)
+        self._text_overlay_glow_color = str(d.get("glow_color") or "#00FFFF")
+        self._text_overlay_text_color = str(d.get("text_color") or "#FFFFFF")
+        self.text_overlay_glow_enabled.setChecked(bool(d.get("glow_enabled", True)))
+        try:
+            ls = int(d.get("letter_spacing", 0))
+        except (TypeError, ValueError):
+            ls = 0
+        self.text_overlay_letter_spacing.setValue(max(-20, min(80, ls)))
+        self._text_overlay_font_path = str(d.get("custom_font_path") or "").strip()
+        self._populate_text_overlay_font_combo()
+        self.text_overlay_font_bold.setChecked(bool(d.get("font_bold", True)))
+        waf_lo = float(d.get("wave_amp_frac_min", d.get("wave_amp_frac", NEON_WAVE_AMP_FRAC)))
+        waf_hi = float(d.get("wave_amp_frac_max", waf_lo))
+        wfs_lo = float(
+            d.get("wave_frame_speed_min", d.get("wave_frame_speed", NEON_WAVE_FRAME_SPEED))
+        )
+        wfs_hi = float(d.get("wave_frame_speed_max", wfs_lo))
+        self.text_overlay_wave_amp.blockSignals(True)
+        self.text_overlay_wave_amp.setValues(
+            int(round(waf_lo * 100)), int(round(waf_hi * 100))
+        )
+        self.text_overlay_wave_amp.blockSignals(False)
+        self.text_overlay_wave_speed.blockSignals(True)
+        self.text_overlay_wave_speed.setValues(
+            int(round(wfs_lo * 100)), int(round(wfs_hi * 100))
+        )
+        self.text_overlay_wave_speed.blockSignals(False)
+        try:
+            ax = float(d.get("anchor_x", 0.5))
+            ay = float(d.get("anchor_y", 0.15))
+        except (TypeError, ValueError):
+            ax, ay = 0.5, 0.15
+        self._sync_text_overlay_color_btn(
+            self.text_overlay_glow_btn, self._text_overlay_glow_color
+        )
+        self._sync_text_overlay_color_btn(
+            self.text_overlay_text_btn, self._text_overlay_text_color
+        )
+        self._sync_text_overlay_preview(ax, ay)
+        self._update_text_overlay_controls()
+        self._save_folder_settings()
+        # Синхронизировать общий текст с нарезкой/склейкой.
+        shared = self.text_overlay_edit.toPlainText()
+        if hasattr(self, "_slice_tab"):
+            self._slice_tab.set_text_overlay_text(shared)
+        if hasattr(self, "_stitch_tab"):
+            self._stitch_tab.set_text_overlay_text(shared)
+
     def _text_overlay_preview_videos(self) -> list[str]:
         """Выбранные исходники в том же порядке, что в списке файлов."""
         out: list[str] = []
@@ -10317,7 +10615,79 @@ class MainWindow(QWidget):
 
     def _on_text_overlay_content_changed(self) -> None:
         self._schedule_text_overlay_preview_sync()
+        if getattr(self, "_syncing_text_overlay", False):
+            return
         self._save_folder_settings()
+        text = self.text_overlay_edit.toPlainText() if hasattr(self, "text_overlay_edit") else ""
+        self._on_shared_text_overlay_changed(text, source="uniquify")
+
+    def _recent_text_overlay_texts(self) -> list[str]:
+        store = getattr(self, "_upload_store", None)
+        if store is None:
+            return []
+        try:
+            return list(
+                store.list_recent_text_overlay_texts(platform=self._platform) or []
+            )
+        except Exception:
+            return []
+
+    def refresh_text_overlay_recent(self) -> None:
+        picker = getattr(self, "_text_overlay_recent_picker", None)
+        if picker is not None:
+            fill_recent_values_picker(picker, self._recent_text_overlay_texts())
+        if hasattr(self, "_slice_tab"):
+            self._slice_tab.refresh_text_overlay_recent()
+        if hasattr(self, "_stitch_tab"):
+            self._stitch_tab.refresh_text_overlay_recent()
+
+    def _set_uniquify_text_overlay_text(self, text: str) -> None:
+        if not hasattr(self, "text_overlay_edit"):
+            return
+        value = text if text is not None else ""
+        if self.text_overlay_edit.toPlainText() == value:
+            return
+        self._syncing_text_overlay = True
+        try:
+            self.text_overlay_edit.setPlainText(value)
+        finally:
+            self._syncing_text_overlay = False
+
+    def _on_shared_text_overlay_changed(
+        self, text: str, *, source: str | None = None
+    ) -> None:
+        """Синхронизировать текст наложения между уникализацией / нарезкой / склейкой."""
+        value = text if text is not None else ""
+        try:
+            self._settings.setValue("text_overlay_text", value)
+        except Exception:
+            pass
+        if source != "uniquify":
+            self._set_uniquify_text_overlay_text(value)
+        if source != "slice" and hasattr(self, "_slice_tab"):
+            self._slice_tab.set_text_overlay_text(value)
+        if source != "stitch" and hasattr(self, "_stitch_tab"):
+            self._stitch_tab.set_text_overlay_text(value)
+
+    def _apply_ai_text_overlay(self, text: str) -> None:
+        value = text if text is not None else ""
+        self._set_uniquify_text_overlay_text(value)
+        self._on_text_overlay_content_changed()
+
+    def _remember_shared_text_overlay_text(self, text: str | None = None) -> None:
+        value = text
+        if value is None and hasattr(self, "text_overlay_edit"):
+            value = self.text_overlay_edit.toPlainText()
+        value = value if value is not None else ""
+        if not str(value).strip():
+            return
+        try:
+            self._upload_store.remember_text_overlay_text(
+                value, platform=self._platform
+            )
+        except Exception:
+            pass
+        self.refresh_text_overlay_recent()
 
     def _on_text_overlay_font_size_changed(self, _value: int) -> None:
         self._schedule_text_overlay_preview_sync()
@@ -10508,6 +10878,7 @@ class MainWindow(QWidget):
                 "Введите текст или выключите опцию.",
             )
             return
+        self._remember_shared_text_overlay_text(str(toc.get("text") or ""))
         if bool(opts.get("background_music_enabled")):
             if not (opts.get("background_music_files") or []):
                 QMessageBox.warning(
@@ -10642,6 +11013,7 @@ class MainWindow(QWidget):
                 "Введите текст или выключите опцию.",
             )
             return
+        self._remember_shared_text_overlay_text(str(toc.get("text") or ""))
         scene_err = self._slice_tab.validate_scene_options()
         if scene_err:
             QMessageBox.warning(self, "Zaliver", scene_err)
@@ -10766,6 +11138,7 @@ class MainWindow(QWidget):
                 "Введите текст или выключите опцию.",
             )
             return
+        self._remember_shared_text_overlay_text(str(toc.get("text") or ""))
         part_err = self._stitch_tab.validate_part_options()
         if part_err:
             QMessageBox.warning(self, "Zaliver", part_err)
@@ -11182,6 +11555,7 @@ class MainWindow(QWidget):
             upload_req.schedule_warmup_shorts_recommendations
         )
         schedule_warmup_search_query = upload_req.schedule_warmup_search_query
+        schedule_warmup_hashtag = upload_req.schedule_warmup_hashtag
         if is_instagram_upload and pending.get("schedule_publish"):
             self._append_session_log(
                 "Instagram Reels: отложка Studio не поддерживается — публикуем сразу."
@@ -11506,6 +11880,7 @@ class MainWindow(QWidget):
                         warmup_during_schedule=True,
                         warmup_shorts_recommendations=schedule_warmup_shorts_recommendations,
                         warmup_search_query=schedule_warmup_search_query or None,
+                        warmup_hashtag=schedule_warmup_hashtag or None,
                         warmup_shorts_batch_count=5,
                         warmup_like_probability_pct=10.0,
                         warmup_subscribe_probability_pct=10.0,
@@ -11890,6 +12265,7 @@ class MainWindow(QWidget):
                         warmup_during_schedule=True,
                         warmup_shorts_recommendations=schedule_warmup_shorts_recommendations,
                         warmup_search_query=schedule_warmup_search_query or None,
+                        warmup_hashtag=schedule_warmup_hashtag or None,
                         warmup_shorts_batch_count=5,
                         warmup_like_probability_pct=10.0,
                         warmup_subscribe_probability_pct=10.0,

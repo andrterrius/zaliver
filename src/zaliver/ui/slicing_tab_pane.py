@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
@@ -41,6 +41,13 @@ from zaliver.processing.text_overlay import (
     TextOverlaySettings,
     list_bundled_overlay_fonts,
 )
+from zaliver.ui.channel_setup_helpers import (
+    field_with_recent_picker,
+    fill_recent_values_picker,
+    make_magic_wand_button,
+)
+from zaliver.ui.platform import normalize_platform
+from zaliver.ui.text_overlay_io import make_text_overlay_io_buttons
 from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
 from zaliver.ui.widgets import (
     AnimatedProgressBar,
@@ -55,7 +62,9 @@ from zaliver.ui.widgets import (
 
 _INT_MAX = 2_147_483_647
 
-DEFAULT_SLICE_TEXT_OVERLAY_TEXT = "5.000.000$ GIVEAWAY IN BIO"
+# Общий ключ настроек платформы (уникализация / нарезка / склейка).
+_SHARED_TEXT_OVERLAY_TEXT_KEY = "text_overlay_text"
+
 DEFAULT_SLICE_TEXT_OVERLAY_FONT_SIZE = 58
 DEFAULT_SLICE_WAVE_AMP_FRAC = 0.15
 DEFAULT_SLICE_WAVE_FRAME_SPEED = 0.05
@@ -72,14 +81,24 @@ class SlicingTabPane(QWidget):
         parent: QWidget | None = None,
         *,
         settings: QSettings,
+        platform: str = "youtube",
+        upload_store: Any | None = None,
+        ai_generate_fn: Callable[..., None] | None = None,
+        on_text_overlay_text_changed: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self._settings = settings
+        self._platform = normalize_platform(platform)
+        self._upload_store = upload_store
+        self._ai_generate_fn = ai_generate_fn
+        self._on_text_overlay_text_changed = on_text_overlay_text_changed
         self._clip_files: list[str] = []
         self._music_files: list[str] = []
         self._text_glow_color = "#00FFFF"
         self._text_text_color = "#FFFFFF"
         self._text_font_path = ""
+        self._text_overlay_recent_picker = None
+        self._syncing_text_overlay = False
         self._build_ui()
         self.load_settings()
 
@@ -141,8 +160,68 @@ class SlicingTabPane(QWidget):
         d["wave_frame_speed_max"] = float(self.text_overlay_wave_speed.highValue() / 100.0)
         return d
 
+    def apply_text_overlay_options(self, raw: dict[str, Any]) -> None:
+        """Применить настройки текста (в т.ч. из импорта JSON)."""
+        from zaliver.ui.text_overlay_io import normalize_text_overlay_export_dict
+
+        d = normalize_text_overlay_export_dict(raw if isinstance(raw, dict) else {})
+        self.text_overlay_enabled.setChecked(bool(d.get("enabled", True)))
+        self.set_text_overlay_text(str(d.get("text") or ""))
+        self.text_overlay_from_middle.setChecked(bool(d.get("from_middle", True)))
+        try:
+            fs = int(d.get("font_size", DEFAULT_SLICE_TEXT_OVERLAY_FONT_SIZE))
+        except (TypeError, ValueError):
+            fs = DEFAULT_SLICE_TEXT_OVERLAY_FONT_SIZE
+        self.text_overlay_font_size.setValue(max(12, min(240, fs)))
+        orient = (
+            "horizontal"
+            if str(d.get("preview_orientation") or "").lower() == "horizontal"
+            else "vertical"
+        )
+        idx = self.text_overlay_orientation.findData(orient)
+        if idx >= 0:
+            self.text_overlay_orientation.setCurrentIndex(idx)
+        self._text_glow_color = str(d.get("glow_color") or "#00FFFF")
+        self._text_text_color = str(d.get("text_color") or "#FFFFFF")
+        self.text_overlay_glow_enabled.setChecked(bool(d.get("glow_enabled", True)))
+        try:
+            ls = int(d.get("letter_spacing", 0))
+        except (TypeError, ValueError):
+            ls = 0
+        self.text_overlay_letter_spacing.setValue(max(-20, min(80, ls)))
+        self._text_font_path = str(d.get("custom_font_path") or "").strip()
+        self._populate_text_font_combo()
+        self.text_overlay_font_bold.setChecked(bool(d.get("font_bold", True)))
+        waf_lo = float(d.get("wave_amp_frac_min", d.get("wave_amp_frac", 0)))
+        waf_hi = float(d.get("wave_amp_frac_max", waf_lo))
+        wfs_lo = float(d.get("wave_frame_speed_min", d.get("wave_frame_speed", 0)))
+        wfs_hi = float(d.get("wave_frame_speed_max", wfs_lo))
+        self.text_overlay_wave_amp.blockSignals(True)
+        self.text_overlay_wave_amp.setValues(
+            int(round(waf_lo * 100)), int(round(waf_hi * 100))
+        )
+        self.text_overlay_wave_amp.blockSignals(False)
+        self.text_overlay_wave_speed.blockSignals(True)
+        self.text_overlay_wave_speed.setValues(
+            int(round(wfs_lo * 100)), int(round(wfs_hi * 100))
+        )
+        self.text_overlay_wave_speed.blockSignals(False)
+        try:
+            ax = float(d.get("anchor_x", DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_X))
+            ay = float(d.get("anchor_y", DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_Y))
+        except (TypeError, ValueError):
+            ax, ay = DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_X, DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_Y
+        self._sync_color_btn(self.text_overlay_glow_btn, self._text_glow_color)
+        self._sync_color_btn(self.text_overlay_text_btn, self._text_text_color)
+        self._sync_wave_labels()
+        self._update_text_overlay_controls()
+        self._sync_text_overlay_preview(ax, ay)
+        self.save_settings()
+        cb = self._on_text_overlay_text_changed
+        if cb is not None:
+            cb(self.text_overlay_text())
+
     def _apply_fixed_text_overlay_defaults(self) -> None:
-        self.text_overlay_edit.setPlainText(DEFAULT_SLICE_TEXT_OVERLAY_TEXT)
         self.text_overlay_font_size.setValue(DEFAULT_SLICE_TEXT_OVERLAY_FONT_SIZE)
         self.text_overlay_glow_enabled.setChecked(True)
         self.text_overlay_letter_spacing.setValue(0)
@@ -152,6 +231,66 @@ class SlicingTabPane(QWidget):
             DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_X,
             DEFAULT_SLICE_TEXT_OVERLAY_ANCHOR_Y,
         )
+
+    def _recent_text_overlay_texts(self) -> list[str]:
+        store = self._upload_store
+        if store is None:
+            return []
+        try:
+            return list(
+                store.list_recent_text_overlay_texts(platform=self._platform) or []
+            )
+        except Exception:
+            return []
+
+    def refresh_text_overlay_recent(self) -> None:
+        picker = getattr(self, "_text_overlay_recent_picker", None)
+        if picker is None:
+            return
+        fill_recent_values_picker(picker, self._recent_text_overlay_texts())
+
+    def text_overlay_text(self) -> str:
+        if not hasattr(self, "text_overlay_edit"):
+            return ""
+        return self.text_overlay_edit.toPlainText()
+
+    def set_text_overlay_text(self, text: str) -> None:
+        if not hasattr(self, "text_overlay_edit"):
+            return
+        value = text if text is not None else ""
+        if self.text_overlay_edit.toPlainText() == value:
+            return
+        self._syncing_text_overlay = True
+        try:
+            self.text_overlay_edit.setPlainText(value)
+        finally:
+            self._syncing_text_overlay = False
+
+    def remember_text_overlay_text(self) -> None:
+        store = self._upload_store
+        if store is None:
+            return
+        text = self.text_overlay_text()
+        if not str(text).strip():
+            return
+        try:
+            store.remember_text_overlay_text(text, platform=self._platform)
+        except Exception:
+            pass
+        self.refresh_text_overlay_recent()
+
+    def _on_text_overlay_edit_changed(self) -> None:
+        self._schedule_preview()
+        if self._syncing_text_overlay:
+            return
+        text = self.text_overlay_text()
+        try:
+            self._settings.setValue(_SHARED_TEXT_OVERLAY_TEXT_KEY, text)
+        except Exception:
+            pass
+        cb = self._on_text_overlay_text_changed
+        if cb is not None:
+            cb(text)
 
     def load_settings(self) -> None:
         s = self._settings
@@ -178,6 +317,20 @@ class SlicingTabPane(QWidget):
             bool(s.value("slice/text_overlay_enabled", True, type=bool))
         )
         self._apply_fixed_text_overlay_defaults()
+        shared_text = s.value(_SHARED_TEXT_OVERLAY_TEXT_KEY, "", type=str)
+        if shared_text is None:
+            shared_text = ""
+        if str(shared_text).strip() in {
+            "GAME IN BIO",
+            "5.000.000$ GIVEAWAY IN BIO",
+        }:
+            shared_text = ""
+            try:
+                s.setValue(_SHARED_TEXT_OVERLAY_TEXT_KEY, "")
+            except Exception:
+                pass
+        self.set_text_overlay_text(str(shared_text))
+        self.refresh_text_overlay_recent()
         self.text_overlay_from_middle.setChecked(
             bool(s.value("slice/text_overlay_from_middle", True, type=bool))
         )
@@ -218,7 +371,7 @@ class SlicingTabPane(QWidget):
                 bool(s.value("slice/delete_after_upload", False, type=bool))
             )
         self.auto_scene_durations.setChecked(
-            bool(s.value("slice/auto_scene_durations", False, type=bool))
+            bool(s.value("slice/auto_scene_durations", True, type=bool))
         )
         try:
             min_dur = float(
@@ -263,6 +416,7 @@ class SlicingTabPane(QWidget):
         s.setValue("slice/min_scenes", int(self.scenes_count.lowValue()))
         s.setValue("slice/max_scenes", int(self.scenes_count.highValue()))
         s.setValue("slice/text_overlay_enabled", bool(self.text_overlay_enabled.isChecked()))
+        s.setValue(_SHARED_TEXT_OVERLAY_TEXT_KEY, self.text_overlay_text())
         s.setValue("slice/text_overlay_from_middle", bool(self.text_overlay_from_middle.isChecked()))
         orient = self.text_overlay_orientation.currentData()
         s.setValue(
@@ -455,7 +609,7 @@ class SlicingTabPane(QWidget):
         self.auto_scene_durations = QCheckBox(
             "Автоматически подобрать оптимальную длительность"
         )
-        self.auto_scene_durations.setChecked(False)
+        self.auto_scene_durations.setChecked(True)
         self.auto_scene_durations.setToolTip(
             "Анализ пиков выбранного трека и рекомендация MIN/MAX длительности сцены. "
             "При включении ручные значения ниже не используются."
@@ -513,7 +667,19 @@ class SlicingTabPane(QWidget):
         self.text_overlay_enabled.setChecked(True)
         self.text_overlay_enabled.toggled.connect(self._update_text_overlay_controls)
         self.text_overlay_enabled.toggled.connect(self.save_settings)
-        text_outer.addWidget(self.text_overlay_enabled)
+        btn_text_export, btn_text_import = make_text_overlay_io_buttons(
+            self,
+            get_settings=self.text_overlay_options_dict,
+            apply_settings=self.apply_text_overlay_options,
+        )
+        text_header = QHBoxLayout()
+        text_header.setContentsMargins(0, 0, 0, 0)
+        text_header.setSpacing(8)
+        text_header.addWidget(self.text_overlay_enabled)
+        text_header.addStretch(1)
+        text_header.addWidget(btn_text_export)
+        text_header.addWidget(btn_text_import)
+        text_outer.addLayout(text_header)
         self._text_panel = QWidget()
         tp = QVBoxLayout(self._text_panel)
         tp.setContentsMargins(0, 0, 0, 0)
@@ -524,10 +690,37 @@ class SlicingTabPane(QWidget):
         tp.addWidget(self.text_overlay_from_middle)
         self.text_overlay_edit = QPlainTextEdit()
         self.text_overlay_edit.setPlaceholderText("Текст для наложения…")
-        self.text_overlay_edit.setPlainText(DEFAULT_SLICE_TEXT_OVERLAY_TEXT)
         self.text_overlay_edit.setMaximumHeight(72)
-        self.text_overlay_edit.textChanged.connect(self._schedule_preview)
-        tp.addWidget(self.text_overlay_edit)
+        self.text_overlay_edit.textChanged.connect(self._on_text_overlay_edit_changed)
+        btn_text_wand = make_magic_wand_button(
+            tooltip="Сгенерировать текст на видео через ИИ (промпт «Текст на видео»)"
+        )
+        btn_text_wand.setEnabled(self._ai_generate_fn is not None)
+
+        def _apply_ai_overlay(text: str) -> None:
+            self.set_text_overlay_text(text if text is not None else "")
+            self._on_text_overlay_edit_changed()
+
+        btn_text_wand.clicked.connect(
+            lambda _checked=False: (
+                self._ai_generate_fn(
+                    default_prompt_id="builtin_video_overlay_text",
+                    window_title="Генерация текста на видео",
+                    apply_text=_apply_ai_overlay,
+                    parent=self,
+                )
+                if self._ai_generate_fn is not None
+                else None
+            )
+        )
+        text_row, self._text_overlay_recent_picker = field_with_recent_picker(
+            self.text_overlay_edit,
+            recent=self._recent_text_overlay_texts(),
+            tooltip="Недавние тексты на видео (общие для всех обработок платформы)",
+            on_filled=self._on_text_overlay_edit_changed,
+            side_extras=[btn_text_wand],
+        )
+        tp.addWidget(text_row)
         opts = QGridLayout()
         self.text_overlay_font_size = QSpinBox()
         self.text_overlay_font_size.setRange(12, 240)

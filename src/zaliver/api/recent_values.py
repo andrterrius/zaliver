@@ -32,6 +32,7 @@ def list_recent_values(upload_store: Any, *, platform: str) -> RecentValuesRespo
         promote_comment_fields=upload_store.list_recent_promote_comment_fields(
             platform=plat
         ),
+        text_overlay_texts=upload_store.list_recent_text_overlay_texts(platform=plat),
     )
 
 

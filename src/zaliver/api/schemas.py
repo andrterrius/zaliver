@@ -95,6 +95,7 @@ class UploadAfterFollowup(BaseModel):
     schedule_warmup_shorts: bool = False
     schedule_warmup_shorts_recommendations: bool = True
     schedule_warmup_search_query: str = ""
+    schedule_warmup_hashtag: str = ""
     delete_after_upload: bool = False
     upload_as_ready: bool = False
     planned_videos: int = Field(default=0, ge=0, le=100_000)
@@ -199,6 +200,7 @@ class UploadJobRequest(BaseModel):
     schedule_warmup_shorts: bool = False
     schedule_warmup_shorts_recommendations: bool = True
     schedule_warmup_search_query: str = ""
+    schedule_warmup_hashtag: str = ""
     delete_after_upload: bool = False
     # Streaming: keep accepting enqueue until producer-done (upload-as-ready).
     await_more_videos: bool = False
@@ -249,6 +251,7 @@ class ShortsWarmupModel(BaseModel):
     watch_full_video: bool = False
     shorts_recommendations: bool = True
     shorts_search_query: str = ""
+    hashtag: str = ""
     watch_horizontal_videos: bool = False
     horizontal_search_query: str = ""
     horizontal_videos_count: int = Field(default=3, ge=1, le=100)
@@ -513,6 +516,7 @@ class RecentValuesResponse(BaseModel):
     channel_link_urls: list[str] = Field(default_factory=list)
     video_default_title_fields: list[str] = Field(default_factory=list)
     promote_comment_fields: list[str] = Field(default_factory=list)
+    text_overlay_texts: list[str] = Field(default_factory=list)
 
 
 class ErrorResponse(BaseModel):

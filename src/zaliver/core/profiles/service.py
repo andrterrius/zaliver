@@ -480,8 +480,10 @@ class ProfileJobsService:
                 "search_query": (
                     settings.shorts_search_query or None
                     if not settings.shorts_recommendations
+                    and not (settings.hashtag or "").strip()
                     else None
                 ),
+                "hashtag": (settings.hashtag or "").strip() or None,
                 "watch_horizontal_videos": settings.watch_horizontal_videos,
                 "horizontal_search_query": settings.horizontal_search_query or None,
                 "horizontal_videos_count": settings.horizontal_videos_count,

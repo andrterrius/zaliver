@@ -637,7 +637,7 @@ class ChannelEditTabPane(QWidget):
         )
         avatar_l = _section_layout(self._avatar_box)
         self._toggle_avatar = ToggleSwitch()
-        self._toggle_avatar.setChecked(True)
+        self._toggle_avatar.setChecked(False)
         self._no_crop = QCheckBox("Не обрезать")
         self._no_crop.setToolTip("1 файл = 1 профиль, без вырезки иконок")
         self._no_crop.toggled.connect(self._on_assignment_options_changed)
@@ -670,7 +670,7 @@ class ChannelEditTabPane(QWidget):
         names_l = _section_layout(self._names_box)
         self._names_section_layout = names_l
         self._toggle_names = ToggleSwitch()
-        self._toggle_names.setChecked(True)
+        self._toggle_names.setChecked(False)
         self._btn_pick_names = self._make_import_button(self._pick_names_file)
         self._btn_names_hints = make_variables_hint_button(parent=self, field=None)
         names_header, self._names_section_label = self._section_header(
@@ -737,7 +737,7 @@ class ChannelEditTabPane(QWidget):
         desc_l = _section_layout(self._desc_box)
         self._desc_section_layout = desc_l
         self._toggle_desc = ToggleSwitch()
-        self._toggle_desc.setChecked(True)
+        self._toggle_desc.setChecked(False)
         self._btn_pick_desc = self._make_import_button(self._pick_desc_file)
         self._btn_desc_hints = make_variables_hint_button(parent=self, field=None)
         desc_l.addLayout(
@@ -783,7 +783,7 @@ class ChannelEditTabPane(QWidget):
         box.setObjectName("channelEditSection")
         lay = _section_layout(box)
         self._toggle_link = ToggleSwitch()
-        self._toggle_link.setChecked(True)
+        self._toggle_link.setChecked(False)
         lay.addLayout(self._section_header(self._toggle_link, "Ссылка")[0])
 
         row = QHBoxLayout()
@@ -833,7 +833,7 @@ class ChannelEditTabPane(QWidget):
         box.setObjectName("channelEditSection")
         lay = _section_layout(box)
         self._toggle_video_title = ToggleSwitch()
-        self._toggle_video_title.setChecked(True)
+        self._toggle_video_title.setChecked(False)
         self._btn_pick_video_titles = self._make_import_button(self._pick_video_titles_file)
         self._btn_video_title_hints = make_variables_hint_button(parent=self, field=None)
         lay.addLayout(

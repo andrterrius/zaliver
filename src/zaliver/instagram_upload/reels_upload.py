@@ -23,6 +23,8 @@ from zaliver.text_format import (
 # DOM.setFileInputFiles с путями на хосте браузера обходит это.
 _PLAYWRIGHT_REMOTE_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
 _FILE_PICKER_TRANSFER_MS = 1_200_000
+# Ожидание следующего UI после клика/файла (IG долго рисует Select Crop).
+_ACTION_TIMEOUT_MS = 30_000
 
 _NEW_POST_ARIA = (
     "Новая публикация",
@@ -680,7 +682,7 @@ def _wait_create_dialog(page, *, timeout_ms: float = 90_000) -> Any:
     # экран «Выбрать на компьютере» поверх уже смонтированной обрезки.
     # Fallback attached — только для фоновых вкладок multi-tab.
     try:
-        dialog.first.wait_for(state="visible", timeout=min(25_000, timeout_ms))
+        dialog.first.wait_for(state="visible", timeout=min(_ACTION_TIMEOUT_MS, timeout_ms))
     except Exception:
         dialog.first.wait_for(state="attached", timeout=timeout_ms)
         _log(
@@ -1035,7 +1037,7 @@ def _attach_video_file(
 
     page.wait_for_timeout(800)
     _dismiss_info_dialogs(page)
-    _wait_crop_step_ready(page)
+    _wait_crop_step_ready(page, timeout_ms=_ACTION_TIMEOUT_MS)
     _log(f"Reels upload: файл передан — {video_path.name!r}.")
 
 
@@ -1187,7 +1189,7 @@ def _clear_layers_covering_crop(page) -> int:
     return n
 
 
-def _wait_crop_step_ready(page, *, timeout_ms: float = 120_000) -> None:
+def _wait_crop_step_ready(page, *, timeout_ms: float = _ACTION_TIMEOUT_MS) -> None:
     """
     После CDP setFile: дождаться смены шага (выбор файла → обрезка).
 
@@ -1195,24 +1197,45 @@ def _wait_crop_step_ready(page, *, timeout_ms: float = 120_000) -> None:
     скрываем перекрывающие слои (по elementFromPoint).
     """
     crop = _crop_btn_svg_locator(page)
-    deadline = time.monotonic() + max(5.0, float(timeout_ms) / 1000.0)
+    css_crop = page.locator(_CROP_BTN_SVG_SEL)
+    wait_ms = max(_ACTION_TIMEOUT_MS, int(float(timeout_ms)))
+    deadline = time.monotonic() + wait_ms / 1000.0
     saw_crop = False
     cleared_once = False
-    while time.monotonic() < deadline:
+    # CSS wait_for на 30 с: or_-локатор + пробы 150 мс рвали шаг, пока IG
+    # ещё обрабатывает файл.
+    for loc in (css_crop, crop):
+        remaining = int((deadline - time.monotonic()) * 1000)
+        if remaining < 1_000:
+            break
         try:
-            if crop.count():
+            loc.first.wait_for(
+                state="attached",
+                timeout=min(wait_ms, remaining),
+            )
+            saw_crop = True
+            _log("Reels upload: Select Crop в DOM.")
+            break
+        except Exception:
+            continue
+
+    while time.monotonic() < deadline:
+        if not saw_crop:
+            try:
+                crop.first.wait_for(
+                    state="attached",
+                    timeout=min(
+                        _ACTION_TIMEOUT_MS,
+                        max(1_000, int((deadline - time.monotonic()) * 1000)),
+                    ),
+                )
+                saw_crop = True
+            except Exception:
                 try:
-                    crop.first.wait_for(state="attached", timeout=150)
-                    saw_crop = True
-                except Exception:
-                    pass
-                try:
-                    if crop.first.is_visible(timeout=150):
+                    if int(crop.count()) > 0:
                         saw_crop = True
                 except Exception:
                     pass
-        except Exception:
-            pass
 
         select_up = _select_file_ui_still_up(page)
         if saw_crop and not select_up:
@@ -1244,14 +1267,14 @@ def _wait_crop_step_ready(page, *, timeout_ms: float = 120_000) -> None:
 
 
 def _click_crop_target(target) -> None:
-    """Обычный клик как раньше; force — только если перекрыт оверлеем."""
+    """DOM-клик первым: Playwright click ждёт, пока меню не перекроет кнопку."""
     try:
-        target.click(timeout=10_000)
+        _dom_click(target)
         return
     except Exception:
         pass
     try:
-        _dom_click(target)
+        target.click(timeout=10_000)
         return
     except Exception:
         pass
@@ -1261,7 +1284,7 @@ def _click_crop_target(target) -> None:
 def _select_crop_9_16(page) -> None:
     """Сразу после файла: Select Crop → 9:16 (портрет для Reels)."""
     _log("Reels upload: выбираем обрезку 9:16…")
-    _wait_crop_step_ready(page)
+    _wait_crop_step_ready(page, timeout_ms=_ACTION_TIMEOUT_MS)
 
     try:
         svg = _crop_btn_svg_locator(page).first
@@ -1291,11 +1314,11 @@ def _select_crop_9_16(page) -> None:
         text_opt = page.locator('[role="button"]').filter(
             has=page.locator("span", has_text=re.compile(r"^9\s*:\s*16$"))
         )
-        if text_opt.count() and text_opt.first.is_visible(timeout=6_000):
+        if text_opt.count() and text_opt.first.is_visible(timeout=_ACTION_TIMEOUT_MS):
             _click_crop_target(text_opt.first)
         else:
             svg9 = page.locator(_CROP_9_16_SVG_SEL).first
-            if svg9.count() and svg9.is_visible(timeout=4_000):
+            if svg9.count() and svg9.is_visible(timeout=_ACTION_TIMEOUT_MS):
                 clickable = svg9.locator(
                     "xpath=ancestor::*[@role='button'][1]"
                 )
@@ -1309,21 +1332,7 @@ def _select_crop_9_16(page) -> None:
         ) from e
 
     page.wait_for_timeout(400)
-    # Меню аспекта часто остаётся поверх «Далее» — клик по превью закрывает его.
-    try:
-        preview = (
-            page.locator('[role="dialog"]')
-            .locator("img, video, canvas, [style*='background-image']")
-            .first
-        )
-        if preview.count():
-            try:
-                preview.click(timeout=3_000)
-            except Exception:
-                preview.click(timeout=3_000, force=True)
-            page.wait_for_timeout(300)
-    except Exception:
-        pass
+    _close_crop_aspect_menu_if_open(page)
 
 
 def _upload_wizard_dialog(page):
@@ -1510,7 +1519,7 @@ def _on_caption_or_share_screen(page) -> bool:
 
 
 def _close_crop_aspect_menu_if_open(page) -> None:
-    """Меню 9:16 часто перекрывает «Далее» — закрыть кликом по превью / Escape."""
+    """Меню 9:16 часто перекрывает «Далее» — закрыть DOM-кликом по превью / Escape."""
     try:
         preview = (
             page.locator('[role="dialog"]')
@@ -1519,7 +1528,7 @@ def _close_crop_aspect_menu_if_open(page) -> None:
         )
         if preview.count():
             try:
-                preview.click(timeout=2_000)
+                _dom_click(preview)
             except Exception:
                 try:
                     preview.click(timeout=2_000, force=True)
@@ -1543,6 +1552,7 @@ def _close_crop_aspect_menu_if_open(page) -> None:
 def _click_next_until_caption_or_share(page, *, max_clicks: int = 6) -> None:
     """Прокликать «Далее» (обрезка / фильтры) до экрана подписи или Share."""
     clicked = 0
+    _log("Reels upload: жмём «Далее»…")
     _close_crop_aspect_menu_if_open(page)
     for i in range(max_clicks):
         _dismiss_info_dialogs(page)
@@ -1719,7 +1729,7 @@ def _fill_caption(page, caption: str) -> None:
         return
     try:
         area = None
-        deadline = time.monotonic() + 24.0
+        deadline = time.monotonic() + 30.0
         last_err: Exception | None = None
         while time.monotonic() < deadline:
             try:

@@ -138,6 +138,10 @@ def _process_chunk_isolated(task: Dict[str, Any], work_dir: Path) -> Dict[str, A
 
 from zaliver.core.sinks import JobProgressSink
 from zaliver.processing.batch_paths import list_video_files
+from zaliver.processing.ready_buffer import (
+    buffer_from_options,
+    settle_ready_job,
+)
 from zaliver.processing.chunking import VideoInfo, build_n_even_chunks, probe_video
 from zaliver.processing.ffmpeg_probe import estimate_target_video_bps
 from zaliver.processing.fd_limit import (
@@ -611,10 +615,14 @@ class ProcessingService:
         self._mp_cancel: Any = None
         self._upload_throttle = threading.Event()
         self._upload_throttle_logged = False
+        self._ready_buffer = None
 
     def cancel(self) -> None:
         if self._mp_cancel is not None:
             self._mp_cancel.set()
+        buf = getattr(self, "_ready_buffer", None)
+        if buf is not None:
+            buf.close()
 
     def set_upload_throttle(self, enabled: bool) -> None:
         """Приглушить encode, пока параллельно идёт залив в браузер."""
@@ -623,6 +631,11 @@ class ProcessingService:
         else:
             self._upload_throttle.clear()
             self._upload_throttle_logged = False
+
+    def release_ready_buffer_path(self, path: str) -> None:
+        buf = getattr(self, "_ready_buffer", None)
+        if buf is not None:
+            buf.release_path(path)
 
     def run(self, options: Dict[str, Any]) -> None:
         def safe_log(msg: str) -> None:
@@ -635,6 +648,14 @@ class ProcessingService:
         self._mp_cancel = None
         self._upload_throttle.clear()
         self._upload_throttle_logged = False
+        self._ready_buffer = buffer_from_options(options)
+        ready_buf = self._ready_buffer
+        if ready_buf is not None:
+            log(
+                f"Буфер готовых видео: максимум {ready_buf.limit} сделанных, "
+                "но ещё не залитых (профили×2). Когда слот освобождается — "
+                "обрабатывается следующее."
+            )
 
         try:
             out_dir = Path(options["output_dir"])
@@ -1068,6 +1089,12 @@ class ProcessingService:
                         _cleanup_partial_outputs()
                         self._sink.on_finished(False, "Отменено.")
                         return
+                    if ready_buf is not None and not ready_buf.acquire(
+                        cancelled, log=log
+                    ):
+                        _cleanup_partial_outputs()
+                        self._sink.on_finished(False, "Отменено.")
+                        return
                     temp_out = j.outp.with_name(
                         f"{j.outp.stem}._zaliver_video{j.outp.suffix}"
                     )
@@ -1126,6 +1153,13 @@ class ProcessingService:
                             )
                         except RuntimeError:
                             pass
+                        settle_ready_job(
+                            ready_buf,
+                            str(j.outp),
+                            keep=not j.skip_youtube_upload,
+                        )
+                    else:
+                        settle_ready_job(ready_buf, "", keep=False)
                     emit_progress_global()
             elif use_threads:
                 log("Пул кодирования: потоки (без ProcessPool под API на Windows).")
@@ -1205,10 +1239,14 @@ class ProcessingService:
                         while (
                             len(active_encode) < _encode_job_limit() and job_wait_queue
                         ):
+                            if ready_buf is not None:
+                                ready_buf.reclaim()
+                                if not ready_buf.try_acquire():
+                                    break
                             jid = job_wait_queue.popleft()
-                            if jid not in job_encode:
-                                continue
-                            if not job_encode[jid].pending:
+                            if jid not in job_encode or not job_encode[jid].pending:
+                                if ready_buf is not None:
+                                    ready_buf.release_inflight()
                                 continue
                             active_encode.add(jid)
                             active_encode_rr.append(jid)
@@ -1386,11 +1424,13 @@ class ProcessingService:
                             return False
                         j = jobs_by_id.get(job_id)
                         if j is None:
+                            settle_ready_job(ready_buf, "", keep=False)
                             return False
                         try:
                             status = fut.result()
                         except Exception as e:
                             _skip_job_finalize_error(j, e, log=log, n_jobs=n_jobs)
+                            settle_ready_job(ready_buf, "", keep=False)
                             emit_progress_global()
                             return False
                         if status == "cancelled":
@@ -1398,10 +1438,19 @@ class ProcessingService:
                             return True
                         if status == "ok" and not j.finalize_error:
                             _emit_job_saved(j)
+                            settle_ready_job(
+                                ready_buf,
+                                str(j.outp),
+                                keep=not j.skip_youtube_upload,
+                            )
+                        else:
+                            settle_ready_job(ready_buf, "", keep=False)
                         emit_progress_global()
                         return False
 
                     def fill_pool() -> None:
+                        if ready_buf is not None:
+                            ready_buf.reclaim()
                         limit = _pool_slot_limit()
                         while len(futures) < limit:
                             meta = _pick_next_encode_task()
@@ -1432,6 +1481,13 @@ class ProcessingService:
                             )
                         else:
                             done = []
+                            if (
+                                ready_buf is not None
+                                and _has_encode_work_left()
+                                and not ready_buf.wait_has_room(cancelled, log=log)
+                            ):
+                                finish_error("Отменено.", futures, finalize_futures)
+                                return
                             fill_pool()
                             continue
 
@@ -1498,6 +1554,10 @@ class ProcessingService:
         except Exception as e:
             self._sink.on_finished(False, str(e))
         finally:
+            buf = getattr(self, "_ready_buffer", None)
+            if buf is not None:
+                buf.close()
+            self._ready_buffer = None
             self._mp_cancel = None
 
 

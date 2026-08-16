@@ -9,20 +9,17 @@ import threading
 from typing import Any, Callable
 
 from zaliver.api.jobs_registry import JobKind, JobRecord, JobRegistry
+from zaliver.processing.ready_buffer import (
+    compute_ready_buffer_limit,
+    default_consumed_path,
+)
 
 
 STREAMING_UPLOAD_WORKERS = 1
 
 
 def compute_min_ready(*, profile_count: int, planned: int) -> int:
-    n = max(0, int(profile_count))
-    if n <= 0:
-        return 1
-    target = n * 2
-    planned_n = max(0, int(planned))
-    if planned_n > 0:
-        return max(1, min(target, planned_n))
-    return max(1, target)
+    return compute_ready_buffer_limit(profile_count=profile_count, planned=planned)
 
 
 def build_upload_runner(
@@ -95,6 +92,7 @@ def build_upload_runner(
     upload_store = st.core().uploads
     paths = list(video_paths)
     planned = max(0, int(planned_videos or 0))
+    consumed = str(cfg.get("ready_consumed_path") or "").strip()
 
     def runner(sink, register_cancel, job_id: str = "") -> None:
         run_upload_job(
@@ -126,6 +124,7 @@ def build_upload_runner(
             await_more_videos=bool(await_more),
             planned_videos=planned,
             job_id=job_id,
+            ready_consumed_path=consumed,
         )
 
     return runner
@@ -309,7 +308,7 @@ class UploadFollowup:
             return
         job.append_log(
             f"[upload] Залив по мере готовности: старт с запасом "
-            f"{len(paths)} (порог {self._min_ready})",
+            f"{len(paths)} (порог {self._min_ready}, буфер профили×2)",
             max_lines=2000,
         )
         runner = build_upload_runner(
@@ -453,10 +452,14 @@ def attach_upload_followup(
     followup.bind_job(job)
     job._upload_followup = followup  # type: ignore[attr-defined]
     if followup._streaming:
+        consumed = default_consumed_path(job.id)
+        if consumed:
+            followup._cfg["ready_consumed_path"] = consumed
         job.append_log(
             "Залив по мере готовности: обработка на сервере, "
             f"залив — после запаса {followup._min_ready} готовых видео "
-            f"({len(profile_ids)} профилей×2).",
+            f"({len(profile_ids)} профилей×2). "
+            "Буфер: максимум столько же сделанных, но ещё не залитых.",
             max_lines=2000,
         )
     else:

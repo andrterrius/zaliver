@@ -24,6 +24,10 @@ from zaliver.processing.slicing_worker import (
     _slice_music_try_order,
 )
 from zaliver.processing.pipeline import materialize_text_overlay_ranges
+from zaliver.processing.ready_buffer import (
+    buffer_from_options,
+    settle_ready_job,
+)
 from zaliver.processing.stitching import (
     DEFAULT_STITCH_FPS_MODE,
     DEFAULT_STITCH_TRANSITION,
@@ -190,9 +194,13 @@ class StitchingService:
         self._cancelled = False
         self._upload_throttle = threading.Event()
         self._upload_throttle_logged = False
+        self._ready_buffer = None
 
     def cancel(self) -> None:
         self._cancelled = True
+        buf = getattr(self, "_ready_buffer", None)
+        if buf is not None:
+            buf.close()
 
     def set_upload_throttle(self, enabled: bool) -> None:
         if enabled:
@@ -200,6 +208,11 @@ class StitchingService:
         else:
             self._upload_throttle.clear()
             self._upload_throttle_logged = False
+
+    def release_ready_buffer_path(self, path: str) -> None:
+        buf = getattr(self, "_ready_buffer", None)
+        if buf is not None:
+            buf.release_path(path)
 
     def run(self, options: Dict[str, Any]) -> None:
         def safe_log(msg: str) -> None:
@@ -212,6 +225,14 @@ class StitchingService:
         self._cancelled = False
         self._upload_throttle.clear()
         self._upload_throttle_logged = False
+        self._ready_buffer = buffer_from_options(options)
+        ready_buf = self._ready_buffer
+        if ready_buf is not None:
+            log(
+                f"Буфер готовых видео: максимум {ready_buf.limit} сделанных, "
+                "но ещё не залитых (профили×2). Когда слот освобождается — "
+                "обрабатывается следующее."
+            )
 
         try:
             out_dir = Path(options["output_dir"])
@@ -429,6 +450,11 @@ class StitchingService:
                 nonlocal done_count
                 done_count += 1
                 self._sink.on_progress(done_count, n_jobs, j.output_path.name)
+                keep = bool(
+                    j.finished
+                    and j.output_path.is_file()
+                    and not j.skip_youtube_upload
+                )
                 if j.finished and j.output_path.is_file():
                     try:
                         self._sink.on_output_saved(
@@ -438,6 +464,11 @@ class StitchingService:
                         pass
                 elif j.error and j.error != "Отменено.":
                     errors.append(f"{j.music_path.name}: {j.error}")
+                settle_ready_job(
+                    ready_buf,
+                    str(j.output_path.resolve()) if keep else "",
+                    keep=keep,
+                )
 
             job_kwargs = dict(
                 music_pool=music_pool,
@@ -457,6 +488,11 @@ class StitchingService:
             if max_concurrent <= 1 or n_jobs == 1:
                 for job in jobs:
                     if cancelled():
+                        self._sink.on_finished(False, "Отменено.")
+                        return
+                    if ready_buf is not None and not ready_buf.acquire(
+                        cancelled, log=log
+                    ):
                         self._sink.on_finished(False, "Отменено.")
                         return
                     _run_stitch_job(job, text_overlay_cfg=_text_overlay_for_job(), **job_kwargs)
@@ -483,7 +519,11 @@ class StitchingService:
                                 f.cancel()
                             self._sink.on_finished(False, "Отменено.")
                             return
+                        if ready_buf is not None:
+                            ready_buf.reclaim()
                         while pending and len(fut_map) < _stitch_slot_limit():
+                            if ready_buf is not None and not ready_buf.try_acquire():
+                                break
                             job = pending.pop(0)
                             fut = pool.submit(
                                 _run_stitch_job,
@@ -493,6 +533,11 @@ class StitchingService:
                             )
                             fut_map[fut] = job
                         if not fut_map:
+                            if pending and ready_buf is not None:
+                                if not ready_buf.wait_has_room(cancelled, log=log):
+                                    self._sink.on_finished(False, "Отменено.")
+                                    return
+                                continue
                             break
                         done, _ = wait(fut_map.keys(), return_when=FIRST_COMPLETED)
                         for fut in done:
@@ -520,3 +565,8 @@ class StitchingService:
             self._sink.on_finished(True, "")
         except Exception as e:
             self._sink.on_finished(False, str(e).strip() or repr(e))
+        finally:
+            buf = getattr(self, "_ready_buffer", None)
+            if buf is not None:
+                buf.close()
+            self._ready_buffer = None

@@ -93,6 +93,7 @@ from zaliver.antydetect.local_antidetect_api import (
     normalize_local_profile_for_ui,
 )
 from zaliver.processing.pipeline import RandomUniquifyBounds, UniquifySettings
+from zaliver.processing.ready_buffer import compute_ready_buffer_limit
 from zaliver.processing.slicing import DEFAULT_SLICE_FPS_MODE
 from zaliver.processing.text_overlay import (
     NEON_WAVE_AMP_FRAC,
@@ -3653,15 +3654,30 @@ class MainWindow(QWidget):
     def _compute_streaming_upload_min_ready(
         self, *, profile_count: int, planned: int
     ) -> int:
-        """Запас перед стартом залива: профили×2, но не больше запланированных видео."""
-        n = max(0, int(profile_count))
-        if n <= 0:
-            return 1
-        target = n * 2
-        planned_n = max(0, int(planned))
-        if planned_n > 0:
-            return max(1, min(target, planned_n))
-        return max(1, target)
+        """Запас перед стартом залива и лимит буфера: профили×2, не больше плана."""
+        return compute_ready_buffer_limit(
+            profile_count=profile_count, planned=planned
+        )
+
+    def _release_ready_buffer_slot(self, video_path: str) -> None:
+        """Слот буфера свободен — обработка может сделать следующее видео."""
+        path = str(video_path or "").strip()
+        if not path:
+            return
+        for ctrl in (
+            getattr(self, "_processor", None),
+            getattr(self, "_slice_processor", None),
+            getattr(self, "_stitch_processor", None),
+        ):
+            if ctrl is None:
+                continue
+            fn = getattr(ctrl, "release_ready_buffer_path", None)
+            if not callable(fn):
+                continue
+            try:
+                fn(path)
+            except Exception:
+                pass
 
     def _enqueue_or_start_streaming_upload(self, video_path: str) -> None:
         """При «по мере готовности»: ждём запас профили×2, затем стартуем; дальше — в очередь."""
@@ -3739,6 +3755,7 @@ class MainWindow(QWidget):
             return
         try:
             if not p.is_file():
+                self._release_ready_buffer_slot(str(p))
                 return
             p.unlink()
         except OSError as e:
@@ -3748,6 +3765,7 @@ class MainWindow(QWidget):
                 )
             except Exception:
                 pass
+            self._release_ready_buffer_slot(str(p))
             return
         try:
             self._video_store.prune_missing_files()
@@ -3757,6 +3775,7 @@ class MainWindow(QWidget):
             self._ui_log_line.emit(f"[upload] Удалён после залива: {p.name}")
         except Exception:
             pass
+        self._release_ready_buffer_slot(str(p))
         try:
             QTimer.singleShot(0, self._refresh_ready_list)
         except Exception:
@@ -3770,8 +3789,6 @@ class MainWindow(QWidget):
         yt_inst_upload: bool = False,
     ) -> None:
         """Удалить файл сразу после успеха; для Yt+Inst — после Instagram."""
-        if not getattr(self, "_upload_delete_after_enabled", False):
-            return
         path = str(video_path or "").strip()
         if not path:
             return
@@ -3783,12 +3800,14 @@ class MainWindow(QWidget):
             return
         with self._upload_success_lock:
             self._upload_yt_inst_pending_delete.discard(path)
-        self._delete_output_video_after_upload(path)
+        if getattr(self, "_upload_delete_after_enabled", False):
+            self._delete_output_video_after_upload(path)
+        else:
+            self._release_ready_buffer_slot(path)
 
     def _delete_yt_inst_pending_outputs(self, video_paths: list[str]) -> None:
         """Удалить файлы Yt+Inst, когда Instagram закончил (ошибка / отмена)."""
-        if not getattr(self, "_upload_delete_after_enabled", False):
-            return
+        delete_on = bool(getattr(self, "_upload_delete_after_enabled", False))
         for video_path in video_paths:
             path = str(video_path or "").strip()
             if not path:
@@ -3797,8 +3816,10 @@ class MainWindow(QWidget):
                 pending = path in self._upload_yt_inst_pending_delete
                 if pending:
                     self._upload_yt_inst_pending_delete.discard(path)
-            if pending:
+            if delete_on and pending:
                 self._delete_output_video_after_upload(path)
+            else:
+                self._release_ready_buffer_slot(path)
 
     def _on_output_saved(self, path: str, include_in_upload: bool = True) -> None:
         if isinstance(path, str) and path.strip():
@@ -3928,7 +3949,8 @@ class MainWindow(QWidget):
             "Если включено: залив стартует после запаса готовых видео "
             "(число выбранных профилей × 2). Например, 5 профилей — после 10 роликов. "
             "Если всего видео меньше этого запаса — ждём, пока обработаются все. "
-            "Дальше новые ролики сразу идут в очередь (браузеры параллельно с обработкой).\n"
+            "Дальше обработка не копит больше этого запаса: пока ролики заливаются "
+            "и удаляются, слот в буфере освобождается и делается следующее видео.\n"
             "Если выключено: сначала обрабатываются все видео, затем начинается залив."
         )
 
@@ -10923,6 +10945,8 @@ class MainWindow(QWidget):
         self._upload_streaming_min_ready = self._compute_streaming_upload_min_ready(
             profile_count=n_prof, planned=planned
         )
+        if self._upload_streaming_active:
+            opts["upload_ready_buffer_limit"] = int(self._upload_streaming_min_ready)
         try:
             self._upload_session = self._upload_store.start_session(
             planned_videos=planned, platform=self._platform
@@ -10951,7 +10975,8 @@ class MainWindow(QWidget):
                     if planned > 0 and planned < n_prof * 2
                     else ""
                 )
-                + ")."
+                + "). Буфер: максимум столько же сделанных, но ещё не залитых; "
+                "после залива/удаления слот освобождается и обрабатывается следующее."
             )
 
         self._work_thread = QThread()
@@ -11043,6 +11068,8 @@ class MainWindow(QWidget):
         self._upload_streaming_min_ready = self._compute_streaming_upload_min_ready(
             profile_count=n_prof, planned=planned
         )
+        if self._upload_streaming_active:
+            opts["upload_ready_buffer_limit"] = int(self._upload_streaming_min_ready)
         try:
             self._upload_session = self._upload_store.start_session(
             planned_videos=planned, platform=self._platform
@@ -11070,7 +11097,8 @@ class MainWindow(QWidget):
                     if planned > 0 and planned < n_prof * 2
                     else ""
                 )
-                + ")."
+                + "). Буфер: максимум столько же сделанных, но ещё не залитых; "
+                "после залива/удаления слот освобождается и обрабатывается следующее."
             )
 
         self._work_thread = QThread()
@@ -11168,6 +11196,8 @@ class MainWindow(QWidget):
         self._upload_streaming_min_ready = self._compute_streaming_upload_min_ready(
             profile_count=n_prof, planned=planned
         )
+        if self._upload_streaming_active:
+            opts["upload_ready_buffer_limit"] = int(self._upload_streaming_min_ready)
         try:
             self._upload_session = self._upload_store.start_session(
                 planned_videos=planned, platform=self._platform
@@ -11195,7 +11225,8 @@ class MainWindow(QWidget):
                     if planned > 0 and planned < n_prof * 2
                     else ""
                 )
-                + ")."
+                + "). Буфер: максимум столько же сделанных, но ещё не залитых; "
+                "после залива/удаления слот освобождается и обрабатывается следующее."
             )
 
         self._work_thread = QThread()
@@ -12443,6 +12474,9 @@ class MainWindow(QWidget):
             log_sink=self._ui_log_line.emit,
             upload_one=_upload_one,
             on_profile_attempt=_on_profile_upload_attempt,
+            on_video_done=lambda path, ok: (
+                None if ok else self._release_ready_buffer_slot(path)
+            ),
             schedule_batch_size=schedule_batch_size,
             schedule_times=schedule_times,
             await_more_videos=bool(streaming),
@@ -12502,12 +12536,15 @@ class MainWindow(QWidget):
                 except Exception:
                     pass
                 # Страховка: Yt+Inst успел YouTube, а Instagram так и не закрыл файл.
+                with self._upload_success_lock:
+                    leftover = list(self._upload_yt_inst_pending_delete)
+                    self._upload_yt_inst_pending_delete.clear()
                 if getattr(self, "_upload_delete_after_enabled", False):
-                    with self._upload_success_lock:
-                        leftover = list(self._upload_yt_inst_pending_delete)
-                        self._upload_yt_inst_pending_delete.clear()
                     for video_path in leftover:
                         self._delete_output_video_after_upload(video_path)
+                else:
+                    for video_path in leftover:
+                        self._release_ready_buffer_slot(video_path)
                 self._maybe_finish_upload_session(status=status)
                 try:
                     self._youtube_upload_phase_finished.emit(status)

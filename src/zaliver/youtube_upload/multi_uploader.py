@@ -98,6 +98,7 @@ class MultiProfileUploader:
         log_sink: Callable[[str], None],
         upload_one: Callable[..., None],
         on_profile_attempt: Callable[[str, bool, str], None] | None = None,
+        on_video_done: Callable[[str, bool], None] | None = None,
         schedule_batch_size: int = 0,
         schedule_times: list[datetime] | None = None,
         await_more_videos: bool = False,
@@ -146,6 +147,7 @@ class MultiProfileUploader:
         self._log = log_sink
         self._upload_one = upload_one
         self._on_profile_attempt = on_profile_attempt
+        self._on_video_done = on_video_done
         self._profile_upload_pause_remaining_s = profile_upload_pause_remaining_s
 
         self._schedule_batch_size = max(0, int(schedule_batch_size or 0))
@@ -247,6 +249,26 @@ class MultiProfileUploader:
         """Обработка больше не добавит видео — можно завершать очередь при пустых очередях."""
         with self._done_lock:
             self._producer_done = True
+
+    def _emit_video_done(self, task: VideoTask, *, ok: bool) -> None:
+        cb = self._on_video_done
+        if cb is None:
+            return
+        paths: list[str] = []
+        if task.scheduled_batch:
+            for item in task.scheduled_batch:
+                p = str(getattr(item, "video_path", "") or "").strip()
+                if p:
+                    paths.append(p)
+        else:
+            p = str(task.video_path or "").strip()
+            if p:
+                paths.append(p)
+        for path in paths:
+            try:
+                cb(path, bool(ok))
+            except Exception:
+                pass
 
     def start(self) -> None:
         if not self._profiles:
@@ -573,6 +595,7 @@ class MultiProfileUploader:
                     )
                     with self._done_lock:
                         self._done_failed += 1
+                    self._emit_video_done(task, ok=False)
                     self._global_q.task_done()
                     break
 
@@ -998,6 +1021,7 @@ class MultiProfileUploader:
                         )
                         with self._done_lock:
                             self._abandoned += 1
+                        self._emit_video_done(task, ok=False)
                         self._finish_assigned_profile_task(profile_id, q)
                         continue
                     with self._held_slot_lock:

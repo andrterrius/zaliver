@@ -105,6 +105,7 @@ from zaliver.api.upload_runner import run_upload_job
 from zaliver.api.upload_followup import (
     attach_upload_followup,
 )
+from zaliver.processing.ready_buffer import apply_ready_buffer_option
 from zaliver.api.isolated_runner import (
     slicing_runner,
     stitching_runner,
@@ -1012,6 +1013,7 @@ def build_router() -> APIRouter:
                 or bool(upload_after)
             ),
         }
+        apply_ready_buffer_option(options, upload_after, planned)
 
         try:
             job = _start_processing_job(
@@ -1108,6 +1110,7 @@ def build_router() -> APIRouter:
                 or bool(upload_after)
             ),
         }
+        apply_ready_buffer_option(options, upload_after, planned)
 
         try:
             job = _start_processing_job(
@@ -1201,6 +1204,7 @@ def build_router() -> APIRouter:
                 or bool(upload_after)
             ),
         }
+        apply_ready_buffer_option(options, upload_after, planned)
 
         try:
             job = _start_processing_job(

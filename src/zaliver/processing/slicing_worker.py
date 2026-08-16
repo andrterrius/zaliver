@@ -22,6 +22,10 @@ from zaliver.processing.ffmpeg_merge import (
 )
 from zaliver.processing.gpu_detect import detect_gpus, format_gpu_list
 from zaliver.processing.pipeline import materialize_text_overlay_ranges
+from zaliver.processing.ready_buffer import (
+    buffer_from_options,
+    settle_ready_job,
+)
 from zaliver.processing.slicing import (
     DEFAULT_EDGE_EXCLUDE,
     DEFAULT_MAX_SCENE_DURATION,
@@ -288,9 +292,13 @@ class SlicingService:
         self._cancelled = False
         self._upload_throttle = threading.Event()
         self._upload_throttle_logged = False
+        self._ready_buffer = None
 
     def cancel(self) -> None:
         self._cancelled = True
+        buf = getattr(self, "_ready_buffer", None)
+        if buf is not None:
+            buf.close()
 
     def set_upload_throttle(self, enabled: bool) -> None:
         """Приглушить нарезку, пока параллельно идёт залив в браузер."""
@@ -299,6 +307,11 @@ class SlicingService:
         else:
             self._upload_throttle.clear()
             self._upload_throttle_logged = False
+
+    def release_ready_buffer_path(self, path: str) -> None:
+        buf = getattr(self, "_ready_buffer", None)
+        if buf is not None:
+            buf.release_path(path)
 
     def run(self, options: Dict[str, Any]) -> None:
         def safe_log(msg: str) -> None:
@@ -311,6 +324,14 @@ class SlicingService:
         self._cancelled = False
         self._upload_throttle.clear()
         self._upload_throttle_logged = False
+        self._ready_buffer = buffer_from_options(options)
+        ready_buf = self._ready_buffer
+        if ready_buf is not None:
+            log(
+                f"Буфер готовых видео: максимум {ready_buf.limit} сделанных, "
+                "но ещё не залитых (профили×2). Когда слот освобождается — "
+                "обрабатывается следующее."
+            )
 
         try:
             out_dir = Path(options["output_dir"])
@@ -499,6 +520,11 @@ class SlicingService:
                 nonlocal done_count
                 done_count += 1
                 self._sink.on_progress(done_count, n_jobs, j.output_path.name)
+                keep = bool(
+                    j.finished
+                    and j.output_path.is_file()
+                    and not j.skip_youtube_upload
+                )
                 if j.finished and j.output_path.is_file():
                     try:
                         self._sink.on_output_saved(
@@ -508,10 +534,20 @@ class SlicingService:
                         pass
                 elif j.error and j.error != "Отменено.":
                     errors.append(f"{j.music_path.name}: {j.error}")
+                settle_ready_job(
+                    ready_buf,
+                    str(j.output_path.resolve()) if keep else "",
+                    keep=keep,
+                )
 
             if max_concurrent <= 1 or n_jobs == 1:
                 for job in jobs:
                     if cancelled():
+                        self._sink.on_finished(False, "Отменено.")
+                        return
+                    if ready_buf is not None and not ready_buf.acquire(
+                        cancelled, log=log
+                    ):
                         self._sink.on_finished(False, "Отменено.")
                         return
                     _run_slice_job(
@@ -559,7 +595,11 @@ class SlicingService:
                                 f.cancel()
                             self._sink.on_finished(False, "Отменено.")
                             return
+                        if ready_buf is not None:
+                            ready_buf.reclaim()
                         while pending and len(fut_map) < _slice_slot_limit():
+                            if ready_buf is not None and not ready_buf.try_acquire():
+                                break
                             job = pending.pop(0)
                             fut = pool.submit(
                                 _run_slice_job,
@@ -582,6 +622,11 @@ class SlicingService:
                             )
                             fut_map[fut] = job
                         if not fut_map:
+                            if pending and ready_buf is not None:
+                                if not ready_buf.wait_has_room(cancelled, log=log):
+                                    self._sink.on_finished(False, "Отменено.")
+                                    return
+                                continue
                             break
                         done, _ = wait(fut_map.keys(), return_when=FIRST_COMPLETED)
                         for fut in done:
@@ -609,6 +654,11 @@ class SlicingService:
             self._sink.on_finished(True, "")
         except Exception as e:
             self._sink.on_finished(False, str(e).strip() or repr(e))
+        finally:
+            buf = getattr(self, "_ready_buffer", None)
+            if buf is not None:
+                buf.close()
+            self._ready_buffer = None
 
 
 # Deprecated alias — prefer SlicingService + ui.adapters

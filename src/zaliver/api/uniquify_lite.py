@@ -29,6 +29,7 @@ from zaliver.processing.pipeline import (
     materialize_text_overlay_ranges,
     random_uniquify_settings,
 )
+from zaliver.processing.ready_buffer import buffer_from_options, settle_ready_job
 from zaliver.processing.subprocess_flags import (
     popen_creationflags,
     resolve_python_executable,
@@ -184,6 +185,13 @@ def run_uniquify_lite(
         return False, ffmpeg_drawtext_missing_user_message()
 
     log("uniquify_lite: без multiprocessing (стабильный Windows API).")
+    ready_buf = buffer_from_options(options)
+    if ready_buf is not None:
+        log(
+            f"Буфер готовых видео: максимум {ready_buf.limit} сделанных, "
+            "но ещё не залитых (профили×2). Когда слот освобождается — "
+            "обрабатывается следующее."
+        )
     if text_overlay_enabled:
         log("Наложение текста: включено.")
     if use_gpu:
@@ -212,6 +220,10 @@ def run_uniquify_lite(
 
         for copy_i in range(1, copies + 1):
             if cancel_check():
+                return False, "Отменено."
+            if ready_buf is not None and not ready_buf.acquire(
+                cancel_check, log=log
+            ):
                 return False, "Отменено."
             file_idx += 1
             tag = f"[{file_idx}/{n_jobs}] {src.name}"
@@ -303,7 +315,9 @@ def run_uniquify_lite(
                 saved += 1
                 on_output(str(outp))
                 log(f"{tag}: Сохранено: {outp.name}")
+                settle_ready_job(ready_buf, str(outp), keep=True)
             else:
+                settle_ready_job(ready_buf, "", keep=False)
                 return False, f"{tag}: output missing after mux"
 
     msg = (

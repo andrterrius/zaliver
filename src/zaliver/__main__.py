@@ -24,6 +24,21 @@ def _is_frozen_bundle() -> bool:
     )
 
 
+def _ensure_package_importable() -> None:
+    """Allow `python src/zaliver/__main__.py` (not only `python -m zaliver`)."""
+    if _is_frozen_bundle():
+        return
+    try:
+        import zaliver  # noqa: F401
+        return
+    except ImportError:
+        pass
+    here = Path(__file__).resolve().parent
+    src_root = str(here.parent)
+    if src_root not in sys.path:
+        sys.path.insert(0, src_root)
+
+
 def _pause_console() -> None:
     try:
         sys.stderr.write("\nPress Enter to close this window...\n")
@@ -70,6 +85,7 @@ if __name__ == "__main__":
     import multiprocessing
 
     multiprocessing.freeze_support()
+    _ensure_package_importable()
     try:
         main()
     except SystemExit:

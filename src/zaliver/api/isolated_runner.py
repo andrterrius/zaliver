@@ -74,18 +74,38 @@ def _limit_blas_threads() -> None:
         os.environ.setdefault(key, "1")
 
 
+def _with_ready_consumed_path(options: dict[str, Any], job_id: str) -> dict[str, Any]:
+    opts = dict(options or {})
+    try:
+        limit = int(opts.get("upload_ready_buffer_limit") or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    if limit <= 0:
+        return opts
+    if not str(opts.get("upload_ready_consumed_path") or "").strip():
+        from zaliver.processing.ready_buffer import default_consumed_path
+
+        consumed = default_consumed_path(job_id)
+        if consumed:
+            opts["upload_ready_consumed_path"] = consumed
+    if job_id and not str(opts.get("job_id") or "").strip():
+        opts["job_id"] = job_id
+    return opts
+
+
 def _run_inprocess(
     *,
     service_cls: type,
     options: dict[str, Any],
     sink: JobProgressSink,
     register_cancel: RegisterCancel,
+    job_id: str = "",
 ) -> None:
     _limit_blas_threads()
     svc = service_cls(sink)
     register_cancel(svc.cancel)
     with suppress_console_ctrl(also_ctrl_c=False):
-        svc.run(options)
+        svc.run(_with_ready_consumed_path(options, job_id))
 
 
 def _run_via_subprocess(
@@ -116,7 +136,7 @@ def _run_via_subprocess(
     spec = {
         "kind": kind,
         "job_id": job_id,
-        "options": options,
+        "options": _with_ready_consumed_path(options, job_id),
         "log_path": str(log_path),
         "meta_path": str(meta_path),
         "result_path": str(result_path),
@@ -318,6 +338,7 @@ def _make_kind_runner(kind: str, service_import: tuple[str, str]) -> Callable[[d
                 options=options,
                 sink=sink,
                 register_cancel=register_cancel,
+                job_id=job_id,
             )
 
         return runner

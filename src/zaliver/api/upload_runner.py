@@ -216,6 +216,7 @@ def run_upload_job(
     await_more_videos: bool = False,
     planned_videos: int = 0,
     job_id: str = "",
+    ready_consumed_path: str = "",
 ) -> None:
     from zaliver.youtube_upload.multi_uploader import MultiProfileUploader
     from zaliver.youtube_upload.schedule_publish import parse_msk_datetime
@@ -321,25 +322,29 @@ def run_upload_job(
     yt_inst_pending_delete: set[str] = set()
     record_lock = threading.Lock()
     mgr_holder: dict[str, Any] = {"mgr": None}
+    consumed_file = str(ready_consumed_path or "").strip()
+
+    def _consume_ready(video_path: str) -> None:
+        from zaliver.processing.ready_buffer import append_consumed_path
+
+        append_consumed_path(consumed_file, video_path)
 
     def _delete_output_now(video_path: str) -> None:
-        if not delete_after_upload:
-            return
-        try:
-            path = Path(str(video_path or "").strip())
-            if path.is_file():
-                path.unlink()
-                sink.on_log(f"[upload] Удалён после залива: {path.name}")
-        except OSError as e:
-            sink.on_log(
-                f"[upload] Не удалось удалить после залива: {video_path} ({e!r})"
-            )
+        if delete_after_upload:
+            try:
+                path = Path(str(video_path or "").strip())
+                if path.is_file():
+                    path.unlink()
+                    sink.on_log(f"[upload] Удалён после залива: {path.name}")
+            except OSError as e:
+                sink.on_log(
+                    f"[upload] Не удалось удалить после залива: {video_path} ({e!r})"
+                )
+        _consume_ready(video_path)
 
     def _maybe_delete_after_success(
         video_path: str, *, record_platform: str | None = None
     ) -> None:
-        if not delete_after_upload:
-            return
         path = str(video_path or "").strip()
         if not path:
             return
@@ -350,11 +355,12 @@ def run_upload_job(
             return
         with success_lock:
             yt_inst_pending_delete.discard(path)
-        _delete_output_now(path)
+        if delete_after_upload:
+            _delete_output_now(path)
+        else:
+            _consume_ready(path)
 
     def _delete_yt_inst_pending(video_paths: list[str]) -> None:
-        if not delete_after_upload:
-            return
         for video_path in video_paths:
             path = str(video_path or "").strip()
             if not path:
@@ -363,8 +369,10 @@ def run_upload_job(
                 pending = path in yt_inst_pending_delete
                 if pending:
                     yt_inst_pending_delete.discard(path)
-            if pending:
+            if delete_after_upload and pending:
                 _delete_output_now(path)
+            else:
+                _consume_ready(path)
 
     def _record_one(
         *,
@@ -778,6 +786,7 @@ def run_upload_job(
         ),
         log_sink=sink.on_log,
         upload_one=upload_one,
+        on_video_done=lambda path, ok: None if ok else _consume_ready(path),
         schedule_batch_size=schedule_batch,
         schedule_times=parsed_times if schedule_batch else None,
         await_more_videos=streaming,
@@ -857,6 +866,12 @@ def run_upload_job(
             yt_inst_pending_delete.clear()
         for video_path in leftover:
             _delete_output_now(video_path)
+    else:
+        with success_lock:
+            leftover = list(yt_inst_pending_delete)
+            yt_inst_pending_delete.clear()
+        for video_path in leftover:
+            _consume_ready(video_path)
 
     for p in paths:
         sink.on_output_saved(p, False)

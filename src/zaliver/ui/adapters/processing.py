@@ -61,6 +61,11 @@ class ProcessingController(QObject):
     def set_upload_throttle(self, enabled: bool) -> None:
         self._service.set_upload_throttle(enabled)
 
+    def release_ready_buffer_path(self, path: str) -> None:
+        fn = getattr(self._service, "release_ready_buffer_path", None)
+        if callable(fn):
+            fn(path)
+
     def run(self, options: dict[str, Any]) -> None:
         self._service.run(options)
 
@@ -114,6 +119,11 @@ class SlicingController(QObject):
     def set_upload_throttle(self, enabled: bool) -> None:
         self._service.set_upload_throttle(enabled)
 
+    def release_ready_buffer_path(self, path: str) -> None:
+        fn = getattr(self._service, "release_ready_buffer_path", None)
+        if callable(fn):
+            fn(path)
+
     def run(self, options: dict[str, Any]) -> None:
         self._service.run(options)
 
@@ -166,6 +176,11 @@ class StitchingController(QObject):
 
     def set_upload_throttle(self, enabled: bool) -> None:
         self._service.set_upload_throttle(enabled)
+
+    def release_ready_buffer_path(self, path: str) -> None:
+        fn = getattr(self._service, "release_ready_buffer_path", None)
+        if callable(fn):
+            fn(path)
 
     def run(self, options: dict[str, Any]) -> None:
         self._service.run(options)

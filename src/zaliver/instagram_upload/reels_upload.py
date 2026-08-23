@@ -1056,13 +1056,94 @@ _CROP_BTN_ARIA_RE = re.compile(
 )
 _CROP_BTN_SVG_SEL = ", ".join(f'svg[aria-label="{a}"]' for a in _CROP_BTN_ARIA)
 
-# Пункт 9:16 — EN «Crop portrait icon», RU «…в портной ориентации» (опечатка IG).
-_CROP_9_16_ARIA = (
-    "Crop portrait icon",
-    "Значок обрезки в портной ориентации",
-    "Значок обрезки в портретной ориентации",
+SETTINGS_KEY_INSTAGRAM_CROP_ASPECT = "instagram/crop_aspect"
+DEFAULT_INSTAGRAM_CROP_ASPECT = "original"
+INSTAGRAM_CROP_ASPECTS = ("original", "1:1", "9:16", "16:9")
+
+# Пункты Select Crop в IG (текст + aria-label EN/RU).
+# 9:16 RU: «…в портной ориентации» — опечатка Instagram.
+_CROP_ASPECT_SPECS: dict[str, dict[str, Any]] = {
+    "original": {
+        "label": "Оригинал",
+        "text_re": re.compile(r"^(оригинал|original)$", re.I),
+        "aria": (
+            "Photo outline icon",
+            "Original icon",
+            "Crop original icon",
+            "Значок контура фото",
+        ),
+    },
+    "1:1": {
+        "label": "1:1",
+        "text_re": re.compile(r"^1\s*:\s*1$"),
+        "aria": (
+            "Crop square icon",
+            "Значок обрезки в квадрате",
+        ),
+    },
+    "9:16": {
+        "label": "9:16",
+        "text_re": re.compile(r"^9\s*:\s*16$"),
+        "aria": (
+            "Crop portrait icon",
+            "Значок обрезки в портной ориентации",
+            "Значок обрезки в портретной ориентации",
+        ),
+    },
+    "16:9": {
+        "label": "16:9",
+        "text_re": re.compile(r"^16\s*:\s*9$"),
+        "aria": (
+            "Crop landscape icon",
+            "Значок обрезки в альбомной ориентации",
+        ),
+    },
+}
+_CROP_MENU_OPTION_RE = re.compile(
+    r"^(оригинал|original|1\s*:\s*1|9\s*:\s*16|16\s*:\s*9)$",
+    re.I,
 )
-_CROP_9_16_SVG_SEL = ", ".join(f'svg[aria-label="{a}"]' for a in _CROP_9_16_ARIA)
+
+
+def normalize_instagram_crop_aspect(value: object | None) -> str:
+    raw = str(value or "").strip().lower().replace(" ", "")
+    raw = raw.replace("/", ":")
+    aliases = {
+        "original": "original",
+        "оригинал": "original",
+        "orig": "original",
+        "1:1": "1:1",
+        "square": "1:1",
+        "9:16": "9:16",
+        "portrait": "9:16",
+        "vertical": "9:16",
+        "16:9": "16:9",
+        "landscape": "16:9",
+        "horizontal": "16:9",
+    }
+    return aliases.get(raw, DEFAULT_INSTAGRAM_CROP_ASPECT)
+
+
+def instagram_crop_aspect_from_settings(settings: object | None = None) -> str:
+    """Читает обрезку из настроек Instagram. По умолчанию — оригинал."""
+    if settings is not None and all(
+        callable(getattr(settings, name, None)) for name in ("contains", "value")
+    ):
+        s = settings
+    else:
+        from zaliver.config.store import ensure_settings_store
+
+        s = ensure_settings_store(settings)
+    if not s.contains(SETTINGS_KEY_INSTAGRAM_CROP_ASPECT):
+        return DEFAULT_INSTAGRAM_CROP_ASPECT
+    return normalize_instagram_crop_aspect(
+        s.value(SETTINGS_KEY_INSTAGRAM_CROP_ASPECT, DEFAULT_INSTAGRAM_CROP_ASPECT)
+    )
+
+
+def _crop_aspect_svg_sel(aspect: str) -> str:
+    spec = _CROP_ASPECT_SPECS.get(aspect) or _CROP_ASPECT_SPECS["original"]
+    return ", ".join(f'svg[aria-label="{a}"]' for a in spec["aria"])
 
 
 def _crop_btn_svg_locator(page):
@@ -1281,9 +1362,14 @@ def _click_crop_target(target) -> None:
     target.click(timeout=20_000, force=True)
 
 
-def _select_crop_9_16(page) -> None:
-    """Сразу после файла: Select Crop → 9:16 (портрет для Reels)."""
-    _log("Reels upload: выбираем обрезку 9:16…")
+def _select_crop_aspect(page, aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT) -> None:
+    """Сразу после файла: Select Crop → Оригинал / 1:1 / 9:16 / 16:9."""
+    chosen = normalize_instagram_crop_aspect(aspect)
+    spec = _CROP_ASPECT_SPECS[chosen]
+    label = str(spec["label"])
+    text_re: re.Pattern[str] = spec["text_re"]
+    svg_sel = _crop_aspect_svg_sel(chosen)
+    _log(f"Reels upload: выбираем обрезку {label}…")
     _wait_crop_step_ready(page, timeout_ms=_ACTION_TIMEOUT_MS)
 
     try:
@@ -1303,32 +1389,30 @@ def _select_crop_9_16(page) -> None:
 
     page.wait_for_timeout(500)
 
-    # Пункт 9:16 / Crop portrait (текст «9:16» общий для EN/RU)
     option = (
-        page.locator('[role="button"]').filter(has_text=re.compile(r"^9\s*:\s*16$"))
-        .or_(page.locator(_CROP_9_16_SVG_SEL))
-        .or_(page.get_by_text(re.compile(r"^9\s*:\s*16$"), exact=True))
+        page.locator('[role="button"]').filter(has_text=text_re)
+        .or_(page.locator(svg_sel))
+        .or_(page.get_by_text(text_re, exact=True))
     )
     try:
-        # Предпочитаем клик по role=button с текстом 9:16
         text_opt = page.locator('[role="button"]').filter(
-            has=page.locator("span", has_text=re.compile(r"^9\s*:\s*16$"))
+            has=page.locator("span", has_text=text_re)
         )
         if text_opt.count() and text_opt.first.is_visible(timeout=_ACTION_TIMEOUT_MS):
             _click_crop_target(text_opt.first)
         else:
-            svg9 = page.locator(_CROP_9_16_SVG_SEL).first
-            if svg9.count() and svg9.is_visible(timeout=_ACTION_TIMEOUT_MS):
-                clickable = svg9.locator(
+            svg_opt = page.locator(svg_sel).first
+            if svg_opt.count() and svg_opt.is_visible(timeout=_ACTION_TIMEOUT_MS):
+                clickable = svg_opt.locator(
                     "xpath=ancestor::*[@role='button'][1]"
                 )
-                _click_crop_target(clickable if clickable.count() else svg9)
+                _click_crop_target(clickable if clickable.count() else svg_opt)
             else:
                 _click_crop_target(option.first)
-        _log("Reels upload: выбрано 9:16.")
+        _log(f"Reels upload: выбрано {label}.")
     except Exception as e:
         raise InstagramReelsUploadError(
-            f"Не удалось выбрать обрезку 9:16: {e!r}"
+            f"Не удалось выбрать обрезку {label}: {e!r}"
         ) from e
 
     page.wait_for_timeout(400)
@@ -1519,7 +1603,7 @@ def _on_caption_or_share_screen(page) -> bool:
 
 
 def _close_crop_aspect_menu_if_open(page) -> None:
-    """Меню 9:16 часто перекрывает «Далее» — закрыть DOM-кликом по превью / Escape."""
+    """Меню обрезки часто перекрывает «Далее» — закрыть DOM-кликом по превью / Escape."""
     try:
         preview = (
             page.locator('[role="dialog"]')
@@ -1539,10 +1623,10 @@ def _close_crop_aspect_menu_if_open(page) -> None:
         pass
     # Если меню ещё открыто — лёгкий Escape (не закрывает весь мастер).
     try:
-        menu_916 = page.locator('[role="button"]').filter(
-            has_text=re.compile(r"^9\s*:\s*16$")
+        menu_opt = page.locator('[role="button"]').filter(
+            has_text=_CROP_MENU_OPTION_RE
         )
-        if menu_916.count() and menu_916.first.is_visible(timeout=150):
+        if menu_opt.count() and menu_opt.first.is_visible(timeout=150):
             page.keyboard.press("Escape")
             page.wait_for_timeout(200)
     except Exception:
@@ -1601,7 +1685,7 @@ def _click_next_until_caption_or_share(page, *, max_clicks: int = 6) -> None:
     if _on_caption_or_share_screen(page):
         return
     raise InstagramReelsUploadError(
-        "Не удалось нажать «Далее» после обрезки 9:16 "
+        "Не удалось нажать «Далее» после обрезки "
         f"(кликов={clicked}). Мастер застрял на экране кропа."
     )
 
@@ -2350,6 +2434,7 @@ def run_instagram_reels_upload(
     on_new_post_clicked=None,
     keep_in_background: bool = False,
     wait_youtube_before_done: threading.Event | None = None,
+    crop_aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT,
 ) -> dict[str, Any]:
     """
     Главная → «Новая публикация» → файл → Share → Post shared →
@@ -2363,12 +2448,14 @@ def run_instagram_reels_upload(
     (Yt+Inst: фокус остаётся на YouTube).
     ``wait_youtube_before_done`` — не жать Done / не открывать /reels/,
     пока YouTube этого ролика не завершится.
+    ``crop_aspect`` — пункт Select Crop: original / 1:1 / 9:16 / 16:9.
     """
     upload_file = _validate_video_file_path(video_path)
     caption = (title or "").strip() or (description or "").strip()
     if (description or "").strip() and (title or "").strip():
         caption = f"{(title or '').strip()}\n\n{(description or '').strip()}".strip()
 
+    crop = normalize_instagram_crop_aspect(crop_aspect)
     _log("Reels upload: проверка сессии / главной Instagram…")
     verify_instagram_home_available(
         page,
@@ -2389,7 +2476,7 @@ def run_instagram_reels_upload(
     _attach_video_file(
         page, dialog, upload_file, keep_in_background=keep_in_background
     )
-    _select_crop_9_16(page)
+    _select_crop_aspect(page, crop)
     _click_next_until_caption_or_share(page)
     _fill_caption(page, caption)
     _click_share(page)

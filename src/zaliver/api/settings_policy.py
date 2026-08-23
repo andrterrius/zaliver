@@ -141,6 +141,7 @@ SETTINGS_ALLOWLIST: frozenset[str] = frozenset(
         "antydetect/local_api_token",
         "instagram/tabs_per_profile",
         "instagram/stats_checker_profile_id",
+        "instagram/crop_aspect",
         "upload_pause_hours",
         "upload_pause_minutes",
         "ai/base_url",

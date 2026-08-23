@@ -10,6 +10,10 @@ from typing import Any, Callable
 from patchright.sync_api import sync_playwright
 
 from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI
+from zaliver.instagram_upload.reels_upload import (
+    DEFAULT_INSTAGRAM_CROP_ASPECT,
+    normalize_instagram_crop_aspect,
+)
 from zaliver.antydetect.cookie_farm import run_cookie_farm
 from zaliver.log_format import with_log_profile
 from zaliver.youtube_upload.studio import (
@@ -1966,6 +1970,7 @@ def upload_instagram_reel_in_profile(
     top_reels_scan: int = 1,
     tab_index: int = 0,
     tabs_per_profile: int = 1,
+    crop_aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT,
 ) -> dict:
     """Dolphin → Instagram → «Новая публикация» → файл → Share (Reels)."""
     from zaliver.instagram_upload.reels_upload import run_instagram_reels_upload
@@ -1975,11 +1980,13 @@ def upload_instagram_reel_in_profile(
     scan_n = max(1, int(top_reels_scan or 1))
     tab_i = max(0, int(tab_index or 0))
     tabs_n = max(1, int(tabs_per_profile or 1))
+    crop = normalize_instagram_crop_aspect(crop_aspect)
     _log(
         "Dolphin: залив Instagram Reels. "
         f"profile_id={profile_id!r}, headless={headless}, "
         f"keep_browser_open={keep_open}, dedicated_tab={use_tab}, "
-        f"tab={tab_i}/{tabs_n}, top_reels_scan={scan_n}, video_path={video_path!r}"
+        f"tab={tab_i}/{tabs_n}, top_reels_scan={scan_n}, "
+        f"crop={crop}, video_path={video_path!r}"
     )
     api = DolphinAntyLocalAPI()
     pw_cm = None
@@ -2018,6 +2025,7 @@ def upload_instagram_reel_in_profile(
                         session_twofa=session_twofa,
                         profile_id=profile_id,
                         top_reels_scan=scan_n,
+                        crop_aspect=crop,
                     )
                 finally:
                     if own_page:
@@ -2109,6 +2117,7 @@ def upload_instagram_reel_in_profile(
                 profile_id=profile_id,
                 top_reels_scan=scan_n,
                 on_new_post_clicked=_on_new_post if (tab_i == 0 and tabs_n > 1) else None,
+                crop_aspect=crop,
             )
             _log(
                 "Dolphin: браузер оставлен открытым "
@@ -2247,6 +2256,7 @@ def upload_instagram_reel_in_local_antidetect_profile(
     top_reels_scan: int = 1,
     tab_index: int = 0,
     tabs_per_profile: int = 1,
+    crop_aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT,
 ) -> dict:
     """Локальный антидетект → Instagram → «Новая публикация» → файл → Share (Reels)."""
     from zaliver.instagram_upload.reels_upload import run_instagram_reels_upload
@@ -2264,11 +2274,13 @@ def upload_instagram_reel_in_local_antidetect_profile(
     scan_n = max(1, int(top_reels_scan or 1))
     tab_i = max(0, int(tab_index or 0))
     tabs_n = max(1, int(tabs_per_profile or 1))
+    crop = normalize_instagram_crop_aspect(crop_aspect)
     _log(
         "Local antidetect: залив Instagram Reels. "
         f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}, "
         f"keep_browser_open={keep_open}, dedicated_tab={use_tab}, "
-        f"tab={tab_i}/{tabs_n}, top_reels_scan={scan_n}, video_path={video_path!r}"
+        f"tab={tab_i}/{tabs_n}, top_reels_scan={scan_n}, "
+        f"crop={crop}, video_path={video_path!r}"
     )
     api = LocalAntidetectHttpAPI(base_url)
     session_id: str | None = None
@@ -2326,6 +2338,7 @@ def upload_instagram_reel_in_local_antidetect_profile(
                         session_twofa=twofa,
                         profile_id=profile_id,
                         top_reels_scan=scan_n,
+                        crop_aspect=crop,
                     )
                 finally:
                     if own_page:
@@ -2517,6 +2530,7 @@ def upload_instagram_reel_in_local_antidetect_profile(
                 profile_id=profile_id,
                 top_reels_scan=scan_n,
                 on_new_post_clicked=_on_new_post if (tab_i == 0 and tabs_n > 1) else None,
+                crop_aspect=crop,
             )
             _log(
                 "Local antidetect: браузер оставлен открытым "
@@ -5188,6 +5202,7 @@ class _YtInstIgPipeline:
         session_login: str = "",
         session_password: str = "",
         session_twofa: str = "",
+        crop_aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT,
     ) -> None:
         self.profile_id = (profile_id or "").strip()
         self._cdp_endpoints = tuple(
@@ -5196,6 +5211,7 @@ class _YtInstIgPipeline:
         self._session_login = session_login
         self._session_password = session_password
         self._session_twofa = session_twofa
+        self._crop_aspect = normalize_instagram_crop_aspect(crop_aspect)
         self._q: queue.Queue[_YtInstIgJob | None] = queue.Queue()
         self._idle = threading.Event()
         self._idle.set()
@@ -5318,6 +5334,7 @@ class _YtInstIgPipeline:
                             top_reels_scan=1,
                             keep_in_background=True,
                             wait_youtube_before_done=job.youtube_done,
+                            crop_aspect=self._crop_aspect,
                         )
                         batch_results.append(one)
                     if not batch_results:
@@ -5383,8 +5400,10 @@ def _get_yt_inst_ig_pipeline(
     session_login: str = "",
     session_password: str = "",
     session_twofa: str = "",
+    crop_aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT,
 ) -> _YtInstIgPipeline:
     pid = (profile_id or "").strip() or "_unknown"
+    crop = normalize_instagram_crop_aspect(crop_aspect)
     with _YT_INST_IG_PIPELINES_GUARD:
         pipe = _YT_INST_IG_PIPELINES.get(pid)
         if pipe is None or not pipe._thread.is_alive():
@@ -5394,6 +5413,7 @@ def _get_yt_inst_ig_pipeline(
                 session_login=session_login,
                 session_password=session_password,
                 session_twofa=session_twofa,
+                crop_aspect=crop,
             )
             _YT_INST_IG_PIPELINES[pid] = pipe
         else:
@@ -5404,6 +5424,7 @@ def _get_yt_inst_ig_pipeline(
                 pipe._session_password = session_password
             if session_twofa:
                 pipe._session_twofa = session_twofa
+            pipe._crop_aspect = crop
         return pipe
 
 
@@ -5568,6 +5589,7 @@ def _run_youtube_and_instagram_parallel(
     on_youtube_success: Callable[[dict], None] | None = None,
     on_instagram_success: Callable[[dict], None] | None = None,
     on_instagram_error: Callable[[BaseException], None] | None = None,
+    crop_aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT,
 ) -> dict:
     """
     Вкладка 1 — YouTube, вкладка 2 — Instagram (отдельный CDP / pipeline).
@@ -5654,6 +5676,7 @@ def _run_youtube_and_instagram_parallel(
             session_login=session_login,
             session_password=session_password,
             session_twofa=session_twofa,
+            crop_aspect=crop_aspect,
         )
         ig_job = _YtInstIgJob(
             items=ig_items,
@@ -5829,6 +5852,7 @@ def _run_youtube_then_instagram_session(
     on_youtube_success: Callable[[dict], None] | None = None,
     on_instagram_success: Callable[[dict], None] | None = None,
     on_instagram_error: Callable[[BaseException], None] | None = None,
+    crop_aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT,
 ) -> dict:
     """Совместимая обёртка → параллельный / pipeline залив YT+Inst."""
     return _run_youtube_and_instagram_parallel(
@@ -5854,6 +5878,7 @@ def _run_youtube_then_instagram_session(
         on_youtube_success=on_youtube_success,
         on_instagram_success=on_instagram_success,
         on_instagram_error=on_instagram_error,
+        crop_aspect=crop_aspect,
     )
 
 
@@ -5871,6 +5896,7 @@ def _fallback_instagram_only_upload(
     base_url: str = "",
     remote_cdp=None,
     own_antidetect: bool = False,
+    crop_aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT,
 ) -> dict:
     """Отдельный запуск профиля только для Instagram (если общая сессия умерла)."""
     if own_antidetect:
@@ -5886,6 +5912,7 @@ def _fallback_instagram_only_upload(
             session_password=session_password,
             session_twofa=session_twofa,
             keep_browser_open=False,
+            crop_aspect=crop_aspect,
         )
     return upload_instagram_reel_in_profile(
         profile_id,
@@ -5898,6 +5925,7 @@ def _fallback_instagram_only_upload(
         session_password=session_password,
         session_twofa=session_twofa,
         keep_browser_open=False,
+        crop_aspect=crop_aspect,
     )
 
 
@@ -5935,6 +5963,7 @@ def upload_youtube_and_instagram_in_profile(
     on_youtube_success=None,
     on_instagram_success=None,
     on_instagram_error=None,
+    crop_aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT,
 ) -> dict:
     """
     Dolphin: один профиль, 2 вкладки — YouTube Studio затем Instagram Reels.
@@ -6034,6 +6063,7 @@ def upload_youtube_and_instagram_in_profile(
                     on_youtube_success=on_youtube_success,
                     on_instagram_success=on_instagram_success,
                     on_instagram_error=on_instagram_error,
+                    crop_aspect=crop_aspect,
                 )
                 if keep_open:
                     _log(
@@ -6073,6 +6103,7 @@ def upload_youtube_and_instagram_in_profile(
                     session_twofa=session_twofa,
                     local_token=local_token,
                     own_antidetect=False,
+                    crop_aspect=crop_aspect,
                 )
                 return {
                     "youtube": None,
@@ -6115,6 +6146,7 @@ def upload_youtube_and_instagram_in_profile(
                     session_twofa=session_twofa,
                     local_token=local_token,
                     own_antidetect=False,
+                    crop_aspect=crop_aspect,
                 )
                 return {
                     "youtube": None,
@@ -6184,6 +6216,7 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
     on_youtube_success=None,
     on_instagram_success=None,
     on_instagram_error=None,
+    crop_aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT,
 ) -> dict:
     """
     Локальный антидетект: один профиль, 2 вкладки — YouTube затем Instagram.
@@ -6362,6 +6395,7 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
                         on_youtube_success=on_youtube_success,
                         on_instagram_success=on_instagram_success,
                         on_instagram_error=on_instagram_error,
+                        crop_aspect=crop_aspect,
                     )
                     if keep_open:
                         _log(
@@ -6417,6 +6451,7 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
                     base_url=bu,
                     remote_cdp=remote_cdp,
                     own_antidetect=True,
+                    crop_aspect=crop_aspect,
                 )
                 return {
                     "youtube": None,

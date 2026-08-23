@@ -115,6 +115,12 @@ from zaliver.ui.profile_list_helpers import (
     profile_search_rank,
     profile_search_tokens,
 )
+from zaliver.instagram_upload.reels_upload import (
+    DEFAULT_INSTAGRAM_CROP_ASPECT,
+    SETTINGS_KEY_INSTAGRAM_CROP_ASPECT,
+    instagram_crop_aspect_from_settings,
+    normalize_instagram_crop_aspect,
+)
 from zaliver.core.profiles.account_data import (
     GMAIL_LOGIN_KEY,
     INST_LOGIN_KEY,
@@ -2416,6 +2422,19 @@ class MainWindow(QWidget):
             self._sync_instagram_tabs_setting_visibility
         )
 
+        crop_tip = (
+            "Как в Instagram (Select Crop): Оригинал, 1:1, 9:16 или 16:9.\n"
+            "По умолчанию — Оригинал (без принудительной обрезки)."
+        )
+        self._instagram_crop_aspect_label = QLabel("Обрезка:")
+        self._instagram_crop_aspect_label.setToolTip(crop_tip)
+        self._instagram_crop_aspect = QComboBox()
+        self._instagram_crop_aspect.addItem("Оригинал", "original")
+        self._instagram_crop_aspect.addItem("1:1", "1:1")
+        self._instagram_crop_aspect.addItem("9:16", "9:16")
+        self._instagram_crop_aspect.addItem("16:9", "16:9")
+        self._instagram_crop_aspect.setToolTip(crop_tip)
+
         self._btn_save_instagram = QPushButton("Сохранить")
         self._btn_save_instagram.setObjectName("secondary")
         self._btn_save_instagram.clicked.connect(self._save_instagram_settings)
@@ -2424,10 +2443,12 @@ class MainWindow(QWidget):
         self._instagram_settings_status.setWordWrap(True)
         gi.addWidget(QLabel("Пауза между видео:"), 0, 0)
         gi.addWidget(pause_wrap, 0, 1)
-        gi.addWidget(self._instagram_tabs_per_profile_label, 1, 0)
-        gi.addWidget(self._instagram_tabs_per_profile, 1, 1)
-        gi.addWidget(_settings_save_row(self._btn_save_instagram), 2, 0, 1, 2)
-        gi.addWidget(self._instagram_settings_status, 3, 0, 1, 2)
+        gi.addWidget(self._instagram_crop_aspect_label, 1, 0)
+        gi.addWidget(self._instagram_crop_aspect, 1, 1)
+        gi.addWidget(self._instagram_tabs_per_profile_label, 2, 0)
+        gi.addWidget(self._instagram_tabs_per_profile, 2, 1)
+        gi.addWidget(_settings_save_row(self._btn_save_instagram), 3, 0, 1, 2)
+        gi.addWidget(self._instagram_settings_status, 4, 0, 1, 2)
         gb_ig.setVisible(
             self._platform in (PLATFORM_INSTAGRAM, PLATFORM_YT_INST)
         )
@@ -5341,6 +5362,14 @@ class MainWindow(QWidget):
             self._instagram_tabs_per_profile.blockSignals(True)
             self._instagram_tabs_per_profile.setValue(tabs_n)
             self._instagram_tabs_per_profile.blockSignals(False)
+        if hasattr(self, "_instagram_crop_aspect"):
+            crop = instagram_crop_aspect_from_settings(
+                self._settings_for(PLATFORM_INSTAGRAM)
+            )
+            idx = self._instagram_crop_aspect.findData(crop)
+            self._instagram_crop_aspect.blockSignals(True)
+            self._instagram_crop_aspect.setCurrentIndex(idx if idx >= 0 else 0)
+            self._instagram_crop_aspect.blockSignals(False)
         self._sync_instagram_tabs_setting_visibility()
 
     def _sync_instagram_tabs_setting_visibility(self, *_args) -> None:
@@ -5370,6 +5399,18 @@ class MainWindow(QWidget):
             self._settings_for(PLATFORM_INSTAGRAM)
         )
 
+    def _instagram_crop_aspect_value(self) -> str:
+        if self._platform in (PLATFORM_INSTAGRAM, PLATFORM_YT_INST) and hasattr(
+            self, "_instagram_crop_aspect"
+        ):
+            raw = self._instagram_crop_aspect.currentData()
+            return normalize_instagram_crop_aspect(
+                raw if raw is not None else DEFAULT_INSTAGRAM_CROP_ASPECT
+            )
+        return instagram_crop_aspect_from_settings(
+            self._settings_for(PLATFORM_INSTAGRAM)
+        )
+
     def _save_instagram_settings(self) -> None:
         if not hasattr(self, "_instagram_upload_pause_hours"):
             return
@@ -5384,6 +5425,8 @@ class MainWindow(QWidget):
         ig.setValue("upload_pause_hours", hours)
         tabs_n = self._instagram_tabs_per_profile_value()
         ig.setValue(SETTINGS_KEY_INSTAGRAM_TABS_PER_PROFILE, tabs_n)
+        crop = self._instagram_crop_aspect_value()
+        ig.setValue(SETTINGS_KEY_INSTAGRAM_CROP_ASPECT, crop)
         try:
             ig.sync()
         except Exception:
@@ -5402,7 +5445,7 @@ class MainWindow(QWidget):
             if total_mins <= 0:
                 extra = f" Вкладок на профиль: {tabs_n}."
             self._instagram_settings_status.setText(
-                f"Пауза между видео сохранена: {short}.{extra}"
+                f"Пауза между видео сохранена: {short}.{extra} Обрезка: {crop}."
             )
 
     def _sync_upload_pause_selection_labels(self) -> None:
@@ -11620,6 +11663,15 @@ class MainWindow(QWidget):
                     f"профилей ≤ лимита окон ({max_browsers}). "
                     f"Вкладки: {tabs_fmt} (всего слотов={total_slots})."
                 )
+        ig_crop_aspect = (
+            self._instagram_crop_aspect_value()
+            if (is_instagram_upload or is_yt_inst_upload)
+            else DEFAULT_INSTAGRAM_CROP_ASPECT
+        )
+        if is_instagram_upload or is_yt_inst_upload:
+            self._append_session_log(
+                f"Instagram: обрезка при заливе — {ig_crop_aspect}."
+            )
         mgr_holder: dict[str, MultiProfileUploader | None] = {"mgr": None}
 
         upload_var_index = {"n": 0}
@@ -12085,6 +12137,7 @@ class MainWindow(QWidget):
                     on_youtube_success=_record_yt_inst_youtube,
                     on_instagram_success=_record_yt_inst_instagram,
                     on_instagram_error=_on_yt_inst_ig_error,
+                    crop_aspect=ig_crop_aspect,
                     **warmup_kw,
                 )
                 if _is_own_antidetect_kind(kind):
@@ -12221,6 +12274,7 @@ class MainWindow(QWidget):
                     top_reels_scan=top_reels_scan,
                     tab_index=int(tab_index),
                     tabs_per_profile=max(1, tabs_n),
+                    crop_aspect=ig_crop_aspect,
                 )
                 if _is_own_antidetect_kind(kind):
                     res = upload_instagram_reel_in_local_antidetect_profile(

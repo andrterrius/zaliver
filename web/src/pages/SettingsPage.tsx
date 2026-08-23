@@ -48,6 +48,7 @@ export function SettingsPage({
   const [igPauseHours, setIgPauseHours] = useState(3);
   const [igTabs, setIgTabs] = useState(1);
   const [igChecker, setIgChecker] = useState("");
+  const [igCrop, setIgCrop] = useState("original");
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
@@ -109,6 +110,10 @@ export function SettingsPage({
         setIgPauseHours(Number(v["upload_pause_hours"] ?? 3));
         setIgTabs(Number(v["instagram/tabs_per_profile"] ?? 1));
         setIgChecker(String(v["instagram/stats_checker_profile_id"] ?? ""));
+        const crop = String(v["instagram/crop_aspect"] ?? "original").trim().toLowerCase();
+        setIgCrop(
+          crop === "1:1" || crop === "9:16" || crop === "16:9" ? crop : "original",
+        );
         if (user.is_admin) {
           try {
             setUsers(await api.listUsers());
@@ -153,6 +158,7 @@ export function SettingsPage({
         values.upload_pause_minutes = Math.max(0, Math.floor(igPauseHours) * 60);
         values["instagram/tabs_per_profile"] = igTabs;
         values["instagram/stats_checker_profile_id"] = igChecker;
+        values["instagram/crop_aspect"] = igCrop;
       }
       await api.patchSettings(values);
       const mePatch: { locale: string; password?: string } = { locale };
@@ -405,6 +411,19 @@ export function SettingsPage({
       {showIg ? (
         <section className="group stack">
           <h3 className="group-title">Instagram</h3>
+          <label className="hint">{t("igCropAspect", locale)}</label>
+          <p className="hint">{t("igCropHint", locale)}</p>
+          <select
+            className="field"
+            style={{ maxWidth: 220 }}
+            value={igCrop}
+            onChange={(e) => setIgCrop(e.target.value)}
+          >
+            <option value="original">{t("igCropOriginal", locale)}</option>
+            <option value="1:1">1:1</option>
+            <option value="9:16">9:16</option>
+            <option value="16:9">16:9</option>
+          </select>
           <label className="hint">Пауза между заливами (часы)</label>
           <input
             className="field"

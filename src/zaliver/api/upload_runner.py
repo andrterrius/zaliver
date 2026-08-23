@@ -9,11 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from zaliver.antydetect.browser_concurrency import (
-    clamp_max_concurrent_browsers,
-    compute_instagram_tabs_per_profile,
-    instagram_tabs_per_profile_from_settings,
-)
+from zaliver.instagram_upload.reels_upload import instagram_crop_aspect_from_settings
 from zaliver.config.platform_settings import (
     PLATFORM_INSTAGRAM,
     PLATFORM_YOUTUBE,
@@ -302,6 +298,14 @@ def run_upload_job(
             f"[upload] Instagram keep_browser_open={ig_keep_browser_open} "
             f"(pause={pause_td}, tabs={ig_tabs_n})"
         )
+
+    ig_crop_aspect = (
+        instagram_crop_aspect_from_settings(settings)
+        if (is_instagram or is_yt_inst)
+        else "original"
+    )
+    if is_instagram or is_yt_inst:
+        sink.on_log(f"[upload] Instagram обрезка: {ig_crop_aspect}")
 
     planned = max(int(planned_videos or 0), len(paths), 1)
     upload_session = None
@@ -623,6 +627,7 @@ def run_upload_job(
                 on_youtube_success=_on_yt,
                 on_instagram_success=_on_ig,
                 on_instagram_error=_on_ig_error,
+                crop_aspect=ig_crop_aspect,
             )
             if own:
                 from zaliver.antydetect.local_antidetect_api import local_api_token_scope
@@ -671,6 +676,7 @@ def run_upload_job(
                 top_reels_scan=top_reels_scan,
                 tab_index=int(tab_index),
                 tabs_per_profile=max(1, tabs_n),
+                crop_aspect=ig_crop_aspect,
             )
             if own:
                 from zaliver.antydetect.local_antidetect_api import local_api_token_scope

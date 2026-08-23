@@ -39,6 +39,9 @@ const dict = {
     newPassword: "Новый пароль",
     localeRu: "Русский",
     localeEn: "English",
+    igCropAspect: "Обрезка при заливе",
+    igCropHint: "Как в Instagram (Select Crop). По умолчанию — Оригинал.",
+    igCropOriginal: "Оригинал",
   },
   en: {
     loginTitle: "Sign in",
@@ -76,6 +79,9 @@ const dict = {
     newPassword: "New password",
     localeRu: "Русский",
     localeEn: "English",
+    igCropAspect: "Crop when uploading",
+    igCropHint: "Same as Instagram Select Crop. Default is Original.",
+    igCropOriginal: "Original",
   },
 } as const;
 

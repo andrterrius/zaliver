@@ -13,6 +13,7 @@ from zaliver.instagram_upload.instagram_availability import (
     verify_instagram_home_available,
 )
 from zaliver.instagram_upload.logutil import emit_instagram_log, instagram_entrypoint
+from zaliver.instagram_upload.register import INSTAGRAM_URL, _navigate_page_to
 from zaliver.text_format import (
     BLANK_LINE_BRAILLE,
     blank_line_gap_count,
@@ -25,6 +26,18 @@ _PLAYWRIGHT_REMOTE_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
 _FILE_PICKER_TRANSFER_MS = 1_200_000
 # Ожидание следующего UI после клика/файла (IG долго рисует Select Crop).
 _ACTION_TIMEOUT_MS = 30_000
+_SELECT_CROP_MISSING_ERR = (
+    "Кнопка Select Crop не появилась после передачи файла."
+)
+_NEW_POST_CLICK_ERR = (
+    "Не удалось нажать «Новая публикация» в сайдбаре Instagram."
+)
+_CREATE_PUBLICATION_ERR = (
+    "Не удалось выбрать «Публикация» в меню Create."
+)
+_CREATE_DIALOG_ERR = "Диалог создания публикации не открылся."
+# Первая попытка Create + одна повторная после reload; затем профиль исключается.
+_CREATE_FLOW_RETRY_ATTEMPTS = 2
 
 _NEW_POST_ARIA = (
     "Новая публикация",
@@ -532,8 +545,7 @@ def _click_new_post_in_sidebar(page, *, max_seconds: float = 90.0) -> None:
     if _create_flow_started(page):
         return
     raise InstagramReelsUploadError(
-        "Не удалось нажать «Новая публикация» в сайдбаре Instagram."
-        + (f" URL={last_url!r}" if last_url else "")
+        _NEW_POST_CLICK_ERR + (f" URL={last_url!r}" if last_url else "")
     )
 
 
@@ -629,8 +641,10 @@ def _click_create_submenu_post_if_present(
     После Create иногда выпадает меню
     (Post / Live video / Ad или Публикация / Прямой эфир / Объявление).
     Кликаем Post / Публикация; если сразу открылся диалог — выходим быстро.
+    Если меню висит, а «Публикация» не находится — ошибка (reload + повтор).
     """
     deadline = time.monotonic() + max(0.3, float(timeout_ms) / 1000.0)
+    clicked_post = False
     while time.monotonic() < deadline:
         try:
             if _create_dialog_locator(page).first.is_visible(timeout=80):
@@ -639,6 +653,7 @@ def _click_create_submenu_post_if_present(
             pass
 
         if _try_click_create_submenu_once(page):
+            clicked_post = True
             # Даём диалогу появиться; при пустом клике повторим.
             settle_until = time.monotonic() + 0.9
             while time.monotonic() < settle_until:
@@ -656,7 +671,18 @@ def _click_create_submenu_post_if_present(
 
         time.sleep(0.05)
 
-    return False
+    try:
+        if _create_dialog_locator(page).first.is_visible(timeout=80):
+            return clicked_post
+    except Exception:
+        pass
+    if (
+        not clicked_post
+        and not _create_wizard_already_open(page)
+        and _create_flow_started(page)
+    ):
+        raise InstagramReelsUploadError(_CREATE_PUBLICATION_ERR)
+    return clicked_post
 
 def _create_dialog_locator(page):
     parts = [
@@ -682,9 +708,16 @@ def _wait_create_dialog(page, *, timeout_ms: float = 90_000) -> Any:
     # экран «Выбрать на компьютере» поверх уже смонтированной обрезки.
     # Fallback attached — только для фоновых вкладок multi-tab.
     try:
-        dialog.first.wait_for(state="visible", timeout=min(_ACTION_TIMEOUT_MS, timeout_ms))
+        dialog.first.wait_for(
+            state="visible", timeout=min(_ACTION_TIMEOUT_MS, timeout_ms)
+        )
     except Exception:
-        dialog.first.wait_for(state="attached", timeout=timeout_ms)
+        try:
+            dialog.first.wait_for(state="attached", timeout=timeout_ms)
+        except Exception as e:
+            raise InstagramReelsUploadError(
+                f"{_CREATE_DIALOG_ERR} {e!r}"
+            ) from e
         _log(
             "Reels upload: диалог создания в DOM (attached) — "
             "visible не дождались (фон?)."
@@ -1338,9 +1371,7 @@ def _wait_crop_step_ready(page, *, timeout_ms: float = _ACTION_TIMEOUT_MS) -> No
         page.wait_for_timeout(250)
 
     if not saw_crop:
-        raise InstagramReelsUploadError(
-            "Кнопка Select Crop не появилась после передачи файла."
-        )
+        raise InstagramReelsUploadError(_SELECT_CROP_MISSING_ERR)
     _clear_layers_covering_crop(page)
     _log(
         "Reels upload: кроп в DOM после таймаута — сняли оверлеи, продолжаем."
@@ -2419,6 +2450,78 @@ def _collect_profile_reel_urls(
     )
 
 
+def _is_retryable_create_flow_error(exc: BaseException) -> bool:
+    msg = str(exc) or ""
+    return any(
+        needle in msg
+        for needle in (
+            _SELECT_CROP_MISSING_ERR,
+            _NEW_POST_CLICK_ERR,
+            _CREATE_PUBLICATION_ERR,
+            _CREATE_DIALOG_ERR,
+        )
+    )
+
+
+def _reload_instagram_home_for_retry(
+    page, *, keep_in_background: bool = False
+) -> None:
+    """Сбросить застрявший мастер Create: закрыть диалоги и открыть главную."""
+    _log(
+        "Reels upload: шаг Create не удался — "
+        "обновляем страницу и повторяем залив того же видео."
+    )
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(250)
+    except Exception:
+        pass
+    _dismiss_discard_create_dialog(page, prefer_keep=False)
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
+    except Exception:
+        pass
+
+    def _accept_leave(dialog) -> None:
+        try:
+            dialog.accept()
+        except Exception:
+            pass
+
+    listener_attached = False
+    try:
+        page.on("dialog", _accept_leave)
+        listener_attached = True
+    except Exception:
+        pass
+    try:
+        try:
+            _navigate_page_to(
+                page,
+                INSTAGRAM_URL,
+                label="Reels upload",
+                keep_in_background=keep_in_background,
+            )
+        except Exception as e:
+            _log(f"Reels upload: переход на главную не удался: {e!r} — reload.")
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=120_000)
+            except Exception as e2:
+                _log(f"Reels upload: reload не удался: {e2!r}")
+    finally:
+        if listener_attached:
+            try:
+                page.remove_listener("dialog", _accept_leave)
+            except Exception:
+                pass
+    try:
+        page.wait_for_timeout(1_500)
+    except Exception:
+        time.sleep(1.5)
+    _dismiss_discard_create_dialog(page, prefer_keep=False)
+
+
 @instagram_entrypoint
 def run_instagram_reels_upload(
     page,
@@ -2465,18 +2568,39 @@ def run_instagram_reels_upload(
         profile_id=profile_id,
     )
 
-    _click_new_post_in_sidebar(page)
-    if callable(on_new_post_clicked):
+    for attempt in range(1, _CREATE_FLOW_RETRY_ATTEMPTS + 1):
         try:
-            on_new_post_clicked()
-        except Exception as e:
-            _log(f"Reels upload: on_new_post_clicked: {e!r}")
-    _click_create_submenu_post_if_present(page)
-    dialog = _wait_create_dialog(page)
-    _attach_video_file(
-        page, dialog, upload_file, keep_in_background=keep_in_background
-    )
-    _select_crop_aspect(page, crop)
+            _click_new_post_in_sidebar(page)
+            if attempt == 1 and callable(on_new_post_clicked):
+                try:
+                    on_new_post_clicked()
+                except Exception as e:
+                    _log(f"Reels upload: on_new_post_clicked: {e!r}")
+            _click_create_submenu_post_if_present(page)
+            dialog = _wait_create_dialog(page)
+            _attach_video_file(
+                page, dialog, upload_file, keep_in_background=keep_in_background
+            )
+            _select_crop_aspect(page, crop)
+            break
+        except InstagramReelsUploadError as e:
+            if not _is_retryable_create_flow_error(e):
+                raise
+            if attempt >= _CREATE_FLOW_RETRY_ATTEMPTS:
+                _log(
+                    "Reels upload: шаг Create не удался после "
+                    f"{_CREATE_FLOW_RETRY_ATTEMPTS} попыток — "
+                    "профиль будет исключён из очереди."
+                )
+                raise
+            _log(
+                f"Reels upload: {e} "
+                f"(попытка {attempt}/{_CREATE_FLOW_RETRY_ATTEMPTS}) — "
+                "обновляем страницу и повторяем залив того же видео."
+            )
+            _reload_instagram_home_for_retry(
+                page, keep_in_background=keep_in_background
+            )
     _click_next_until_caption_or_share(page)
     _fill_caption(page, caption)
     _click_share(page)

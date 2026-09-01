@@ -6,7 +6,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 
 def _normalize_platform(value: str | None) -> str:
@@ -78,19 +78,42 @@ def uploaded_at_sort_ts(iso_s: str) -> float:
     return dt.timestamp() if dt is not None else 0.0
 
 
-# YouTube: фиксированная пауза. Instagram: из настроек (см. upload_pause_hours).
+# Дефолт, если в настройках платформы пауза не задана.
 # Подпись в UI — `antic_profile_row.format_upload_cooldown_line`.
 DEFAULT_UPLOAD_PAUSE_BETWEEN_UPLOADS = timedelta(hours=3)
 _UPLOAD_PAUSE_BETWEEN_UPLOADS = DEFAULT_UPLOAD_PAUSE_BETWEEN_UPLOADS
+_UPLOAD_PAUSE_MAX_MINUTES = 168 * 60 + 59
 
 
 def resolve_upload_pause(pause: timedelta | None = None) -> timedelta:
-    """Пауза между заливами; None / отрицательное — дефолт YouTube (3 ч)."""
+    """Пауза между заливами; None / отрицательное — дефолт (3 ч). 0 — без ожидания."""
     if pause is None:
         return DEFAULT_UPLOAD_PAUSE_BETWEEN_UPLOADS
     if pause.total_seconds() < 0:
         return DEFAULT_UPLOAD_PAUSE_BETWEEN_UPLOADS
     return pause
+
+
+def upload_pause_from_settings(settings: Any) -> timedelta:
+    """Пауза между заливами из настроек платформы (минуты или legacy часы)."""
+    try:
+        if settings is not None and settings.contains("upload_pause_minutes"):
+            mins = int(settings.value("upload_pause_minutes", 180) or 0)
+            mins = max(0, min(_UPLOAD_PAUSE_MAX_MINUTES, mins))
+            return resolve_upload_pause(timedelta(minutes=mins))
+    except Exception:
+        pass
+    try:
+        hours = int(
+            (settings.value("upload_pause_hours", 3) if settings is not None else 3)
+            or 0
+        )
+        hours = max(0, min(168, hours))
+        return resolve_upload_pause(timedelta(hours=hours))
+    except Exception:
+        return resolve_upload_pause(None)
+
+
 # Сколько уникальных названий показывать в выпадающем списке перед заливом.
 _RECENT_UPLOAD_TITLES_UI_LIMIT = 5
 # Сколько строк хранить в таблице recent_upload_titles (с запасом).

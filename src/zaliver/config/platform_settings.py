@@ -80,7 +80,7 @@ def platform_settings_storage_id(platform: str | None) -> str:
     Namespace for PlatformSettings keys.
 
     Yt+Inst shares the YouTube namespace for prep/shared UI keys (folders, uniquify).
-    Platform-specific upload params (IG pause/tabs, YT API) should be read via
+    Platform-specific upload params (IG pause/tabs, YT pause/API) should be read via
     PlatformSettings(store, youtube|instagram) explicitly when in yt_inst mode.
     """
     p = normalize_platform(platform)

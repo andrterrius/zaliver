@@ -6528,55 +6528,96 @@ def open_google_in_profile(
     warmup_subscribe_probability_pct: float = 10.0,
     warmup_shorts_watch_min_s: float = 5.0,
     warmup_shorts_watch_max_s: float = 25.0,
+    keep_browser_open: bool = False,
 ) -> dict | None:
     """
     Запуск профиля через Dolphin Local API + Playwright CDP.
 
     Важно: логин Google должен быть уже в профиле антидетекта.
+    keep_browser_open: как у Instagram — не stop_profile, повторный залив
+    на тот же профиль переиспользует CDP.
     """
+    keep_open = bool(keep_browser_open)
     _log(
         "Dolphin: старт. "
         f"profile_id={profile_id!r}, headless={headless}, "
         f"upload_latest_zaliver_video={upload_latest_zaliver_video}, "
+        f"keep_browser_open={keep_open}, "
         f"local_token={'<set>' if (local_token or '').strip() else None}"
     )
     api = DolphinAntyLocalAPI()
+    endpoints: tuple[str, ...] = ()
     try:
         tok = (local_token or "").strip()
         if tok:
             _log("Dolphin: login_with_token…")
             api.login_with_token(tok)
 
-        _log("Dolphin: start_profile…")
-        conn = api.start_profile(profile_id, headless=headless)
-        _log(
-            "Dolphin: профиль запущен. "
-            f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
-        )
+        with _profile_launch_lock(profile_id):
+            if keep_open:
+                cached = _get_dolphin_keep_open_cdp(profile_id)
+                if cached:
+                    endpoints = cached
+                    _log(
+                        "Dolphin: переиспользуем CDP keep-open "
+                        f"profile_id={profile_id!r}, endpoints={endpoints!r}"
+                    )
+                else:
+                    _log("Dolphin: start_profile…")
+                    conn = api.start_profile(profile_id, headless=headless)
+                    endpoints = (conn.ws_url(), conn.http_url())
+                    _cache_dolphin_keep_open_cdp(profile_id, endpoints)
+                    _log(
+                        "Dolphin: профиль запущен (keep-open). "
+                        f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+                    )
+            else:
+                _log("Dolphin: start_profile…")
+                conn = api.start_profile(profile_id, headless=headless)
+                endpoints = (conn.ws_url(), conn.http_url())
+                _log(
+                    "Dolphin: профиль запущен. "
+                    f"ws_url={conn.ws_url()!r}, http_url={conn.http_url()!r}"
+                )
 
-        with sync_playwright() as p:
-            browser, context, page = _playwright_page_from_cdp(
-                p, (conn.ws_url(), conn.http_url())
-            )
-
-            warmup_runner = _maybe_start_parallel_shorts_warmup(
-                enabled=warmup_during_schedule,
-                schedule_publish_at=schedule_publish_at,
-                scheduled_batch=scheduled_batch,
-                cdp_endpoints=(conn.ws_url(), conn.http_url()),
-                login_credentials=login_credentials,
-                shorts_recommendations=warmup_shorts_recommendations,
-                search_query=warmup_search_query,
-                hashtag=warmup_hashtag,
-                shorts_batch_count=warmup_shorts_batch_count,
-                like_probability_pct=warmup_like_probability_pct,
-                subscribe_probability_pct=warmup_subscribe_probability_pct,
-                shorts_watch_min_s=warmup_shorts_watch_min_s,
-                shorts_watch_max_s=warmup_shorts_watch_max_s,
-            )
-            if warmup_runner is not None:
-                _refocus_studio_tab_after_warmup_start(page)
+        def _yt_job(pw):
+            nonlocal endpoints
+            browser = None
+            warmup_runner = None
             try:
+                try:
+                    browser, context, page = _playwright_page_from_cdp(pw, endpoints)
+                except Exception as cdp_err:
+                    if not keep_open:
+                        raise
+                    _log(
+                        "Dolphin: CDP keep-open недоступен "
+                        f"({type(cdp_err).__name__}: {cdp_err!r}) — relaunch…"
+                    )
+                    clear_dolphin_keep_open_cdp(profile_id)
+                    with _profile_launch_lock(profile_id):
+                        conn = api.start_profile(profile_id, headless=headless)
+                        endpoints = (conn.ws_url(), conn.http_url())
+                        _cache_dolphin_keep_open_cdp(profile_id, endpoints)
+                    browser, context, page = _playwright_page_from_cdp(pw, endpoints)
+
+                warmup_runner = _maybe_start_parallel_shorts_warmup(
+                    enabled=warmup_during_schedule,
+                    schedule_publish_at=schedule_publish_at,
+                    scheduled_batch=scheduled_batch,
+                    cdp_endpoints=endpoints,
+                    login_credentials=login_credentials,
+                    shorts_recommendations=warmup_shorts_recommendations,
+                    search_query=warmup_search_query,
+                    hashtag=warmup_hashtag,
+                    shorts_batch_count=warmup_shorts_batch_count,
+                    like_probability_pct=warmup_like_probability_pct,
+                    subscribe_probability_pct=warmup_subscribe_probability_pct,
+                    shorts_watch_min_s=warmup_shorts_watch_min_s,
+                    shorts_watch_max_s=warmup_shorts_watch_max_s,
+                )
+                if warmup_runner is not None:
+                    _refocus_studio_tab_after_warmup_start(page)
                 if upload_latest_zaliver_video:
                     res = _run_profile_studio_upload(
                         page=page,
@@ -6597,13 +6638,17 @@ def open_google_in_profile(
                             "search_oldest_channel": search_oldest_channel,
                         },
                     )
+                    if keep_open:
+                        _log(
+                            "Dolphin: браузер оставлен открытым "
+                            f"(profile_id={profile_id!r}) — следующий залив без stop."
+                        )
                     return res
-                else:
-                    # Ничего не делаем — открываем Studio напрямую.
-                    _studio._studio_warmup_youtube_then_studio(
-                        page, login_credentials=login_credentials
-                    )
-                    time.sleep(1)
+                _studio._studio_warmup_youtube_then_studio(
+                    page, login_credentials=login_credentials
+                )
+                time.sleep(1)
+                return None
             except YoutubeAllChannelsRemovedError as e:
                 _log("Dolphin: все каналы удалены — закрываем профиль.")
                 _close_playwright_browser(browser)
@@ -6611,18 +6656,29 @@ def open_google_in_profile(
                     api.stop_profile(profile_id)
                 except Exception as se:
                     _log(f"Dolphin: stop_profile: {se!r}")
+                clear_dolphin_keep_open_cdp(profile_id)
                 raise _wrap_exc(e) from e
             finally:
                 _stop_parallel_shorts_warmup(warmup_runner)
+                if not keep_open:
+                    _close_playwright_browser(browser)
 
-            _close_playwright_browser(browser)
-        return None
+        return _with_sync_playwright(
+            _yt_job,
+            label=f"yt-dolphin-{profile_id[:8]}",
+            release_before_stop=keep_open,
+        )
     except YoutubeAllChannelsRemovedError:
         raise
     except Exception as e:
         _log(f"Ошибка: {type(e).__name__}: {e!r}")
         raise _wrap_exc(e) from e
     finally:
+        if keep_open:
+            _log(
+                "Dolphin: stop_profile пропущен (keep_browser_open) "
+                f"profile_id={profile_id!r}."
+            )
         api.close()
 
 
@@ -6655,54 +6711,174 @@ def open_google_in_local_antidetect_profile(
     warmup_subscribe_probability_pct: float = 10.0,
     warmup_shorts_watch_min_s: float = 5.0,
     warmup_shorts_watch_max_s: float = 25.0,
+    keep_browser_open: bool = False,
 ) -> dict | None:
     """
     Запуск профиля через локальный HTTP API (см. OpenAPI антидетекта: launch + опрос сессии на cdp_ws_url),
     затем тот же сценарий YouTube Studio.
+    keep_browser_open: как у Instagram — сессия не stop'ится между заливами
+    на тот же профиль.
     """
+    from zaliver.antydetect.local_antidetect_api import (
+        LocalAntidetectError,
+        LocalAntidetectHttpAPI,
+    )
+    from zaliver.antydetect.local_active_sessions import (
+        register_local_session,
+        unregister_local_session,
+    )
+
+    keep_open = bool(keep_browser_open)
     _log(
         "Local antidetect: вход в функцию. "
         f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}, "
-        f"upload_latest_zaliver_video={upload_latest_zaliver_video}"
+        f"upload_latest_zaliver_video={upload_latest_zaliver_video}, "
+        f"keep_browser_open={keep_open}"
     )
-    try:
-        from zaliver.antydetect.local_antidetect_api import (
-            LocalAntidetectError,
-            LocalAntidetectHttpAPI,
-        )
-    except Exception as e:
-        _log(f"Local antidetect: import local_antidetect_api failed: {type(e).__name__}: {e!r}")
-        raise
 
     api = LocalAntidetectHttpAPI(base_url)
     session_id: str | None = None
+    ws_url = ""
+    started_at = time.perf_counter()
+    bu = (base_url or "").strip() or "http://127.0.0.1:18765"
     try:
-        started_at = time.perf_counter()
         _log("Local antidetect: клиент создан, запускаем профиль…")
-        acc = api.launch_profile(
-            profile_id, headless=headless, expose_cdp=True, remote_cdp=remote_cdp
-        )
-        _log(f"Local antidetect: launch_profile ответ: {acc!r}")
-        sid = acc.get("session_id")
-        if not isinstance(sid, str) or not sid.strip():
-            raise LocalAntidetectError(f"Нет session_id в ответе launch: {acc!r}")
-        session_id = sid.strip()
-        _log(f"Local antidetect: session_id={session_id!r}. Ждём cdp_ws_url…")
-        from zaliver.antydetect.local_active_sessions import (
-            register_local_session,
-            unregister_local_session,
-        )
-
-        bu = (base_url or "").strip() or "http://127.0.0.1:18765"
-        register_local_session(profile_id=profile_id, base_url=bu, session_id=session_id)
-        try:
-            ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
-            _log(f"Local antidetect: получен cdp_ws_url: {ws_url!r}")
-
-            with sync_playwright() as p:
-                browser, context, page = _playwright_page_from_local_session_cdp(
-                    p, api, session_id, ws_url
+        with _profile_launch_lock(profile_id):
+            if keep_open:
+                meta = _ig_meta_get(profile_id)
+                if meta is None:
+                    meta = {
+                        "tabs_ready": threading.Event(),
+                        "preopened": False,
+                        "session_id": None,
+                        "ws_url": None,
+                    }
+                    _ig_meta_set(profile_id, meta)
+                ws_url = (meta.get("ws_url") or "").strip()
+                session_id = (meta.get("session_id") or "").strip() or None
+                if not ws_url or not session_id:
+                    ws_existing, sid_existing, _msg = (
+                        api.resolve_running_cdp_ws_url_for_profile(profile_id)
+                    )
+                    if (
+                        isinstance(ws_existing, str)
+                        and ws_existing.strip()
+                        and isinstance(sid_existing, str)
+                        and sid_existing.strip()
+                    ):
+                        session_id = sid_existing.strip()
+                        ws_url = ws_existing.strip()
+                        _log(
+                            "Local antidetect: переиспользуем сессию "
+                            f"session_id={session_id!r}, cdp_ws_url={ws_url!r}"
+                        )
+                    else:
+                        acc = api.launch_profile(
+                            profile_id,
+                            headless=headless,
+                            expose_cdp=True,
+                            remote_cdp=remote_cdp,
+                        )
+                        _log(f"Local antidetect: launch_profile ответ: {acc!r}")
+                        sid = acc.get("session_id")
+                        if not isinstance(sid, str) or not sid.strip():
+                            raise LocalAntidetectError(
+                                f"Нет session_id в ответе launch: {acc!r}"
+                            )
+                        session_id = sid.strip()
+                        ws_url = api.wait_for_cdp_ws_url(
+                            session_id, timeout_s=120.0
+                        )
+                        _log(
+                            "Local antidetect: профиль запущен (keep-open). "
+                            f"cdp_ws_url={ws_url!r}"
+                        )
+                    meta["session_id"] = session_id
+                    meta["ws_url"] = ws_url
+                else:
+                    _log(
+                        "Local antidetect: CDP keep-open из meta "
+                        f"session_id={session_id!r}, cdp_ws_url={ws_url!r}"
+                    )
+                register_local_session(
+                    profile_id=profile_id, base_url=bu, session_id=session_id
                 )
+            else:
+                acc = api.launch_profile(
+                    profile_id,
+                    headless=headless,
+                    expose_cdp=True,
+                    remote_cdp=remote_cdp,
+                )
+                _log(f"Local antidetect: launch_profile ответ: {acc!r}")
+                sid = acc.get("session_id")
+                if not isinstance(sid, str) or not sid.strip():
+                    raise LocalAntidetectError(
+                        f"Нет session_id в ответе launch: {acc!r}"
+                    )
+                session_id = sid.strip()
+                _log(f"Local antidetect: session_id={session_id!r}. Ждём cdp_ws_url…")
+                register_local_session(
+                    profile_id=profile_id, base_url=bu, session_id=session_id
+                )
+                ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+                _log(f"Local antidetect: получен cdp_ws_url: {ws_url!r}")
+
+        def _yt_job(pw):
+            nonlocal session_id, ws_url, keep_open
+            browser = None
+            warmup_runner = None
+            try:
+                try:
+                    browser, context, page = _playwright_page_from_local_session_cdp(
+                        pw, api, session_id, ws_url
+                    )
+                except Exception as cdp_err:
+                    if not keep_open:
+                        raise
+                    _log(
+                        "Local antidetect: CDP keep-open недоступен "
+                        f"({type(cdp_err).__name__}: {cdp_err!r}) — relaunch…"
+                    )
+                    meta = _ig_meta_get(profile_id)
+                    if meta is None:
+                        meta = {
+                            "tabs_ready": threading.Event(),
+                            "preopened": False,
+                            "session_id": None,
+                            "ws_url": None,
+                        }
+                    meta["session_id"] = None
+                    meta["ws_url"] = None
+                    unregister_local_session(profile_id=profile_id)
+                    sid_stop = (session_id or "").strip()
+                    if sid_stop:
+                        try:
+                            api.stop_session(sid_stop)
+                        except Exception:
+                            pass
+                    acc = api.launch_profile(
+                        profile_id,
+                        headless=headless,
+                        expose_cdp=True,
+                        remote_cdp=remote_cdp,
+                    )
+                    sid = acc.get("session_id")
+                    if not isinstance(sid, str) or not sid.strip():
+                        raise LocalAntidetectError(
+                            f"Нет session_id в ответе launch: {acc!r}"
+                        )
+                    session_id = sid.strip()
+                    ws_url = api.wait_for_cdp_ws_url(session_id, timeout_s=120.0)
+                    meta["session_id"] = session_id
+                    meta["ws_url"] = ws_url
+                    _ig_meta_set(profile_id, meta)
+                    register_local_session(
+                        profile_id=profile_id, base_url=bu, session_id=session_id
+                    )
+                    browser, context, page = _playwright_page_from_local_session_cdp(
+                        pw, api, session_id, ws_url
+                    )
 
                 warmup_runner = _maybe_start_parallel_shorts_warmup(
                     enabled=warmup_during_schedule,
@@ -6721,69 +6897,82 @@ def open_google_in_local_antidetect_profile(
                 )
                 if warmup_runner is not None:
                     _refocus_studio_tab_after_warmup_start(page)
-                try:
-                    if upload_latest_zaliver_video:
+                if upload_latest_zaliver_video:
+                    _log(
+                        "Studio upload: запуск сценария загрузки. "
+                        f"zaliver_db_path={str(zaliver_db_path) if zaliver_db_path else None!r}, "
+                        f"video_path={video_path!r}, title={'<set>' if title else None}, "
+                        f"description={'<set>' if description else None}"
+                    )
+                    studio_kw = _local_studio_workflow_kwargs(
+                        api,
+                        profile_id,
+                        login_credentials=login_credentials,
+                        yt_oldest_name=yt_oldest_name,
+                        search_oldest_channel=search_oldest_channel,
+                    )
+                    res = _run_profile_studio_upload(
+                        page=page,
+                        browser=browser,
+                        zaliver_db_path=zaliver_db_path,
+                        video_path=video_path,
+                        title=title,
+                        description=description,
+                        publish_before_checks=publish_before_checks,
+                        keep_studio_title=keep_studio_title,
+                        schedule_publish_at=schedule_publish_at,
+                        scheduled_batch=scheduled_batch,
+                        stats_server_username=stats_server_username,
+                        studio_kw=studio_kw,
+                    )
+                    _log("Studio upload: сценарий завершён.")
+                    if keep_open:
                         _log(
-                            "Studio upload: запуск сценария загрузки. "
-                            f"zaliver_db_path={str(zaliver_db_path) if zaliver_db_path else None!r}, "
-                            f"video_path={video_path!r}, title={'<set>' if title else None}, "
-                            f"description={'<set>' if description else None}"
+                            "Local antidetect: браузер оставлен открытым "
+                            f"(profile_id={profile_id!r}) — следующий залив без stop."
                         )
+                    return res
+                _log("Studio: upload_latest_zaliver_video=False → открываем Studio…")
+                _studio._studio_warmup_youtube_then_studio(
+                    page, login_credentials=login_credentials
+                )
+                time.sleep(1)
+                _log(f"Studio: открыт URL: {page.url!r}")
+                return None
+            except YoutubeAllChannelsRemovedError as e:
+                _log("Local antidetect: все каналы удалены — закрываем профиль.")
+                _close_playwright_browser(browser)
+                keep_open = False
+                close_instagram_keep_open_hub(profile_id)
+                raise LocalAntidetectError(str(e)) from e
+            finally:
+                _stop_parallel_shorts_warmup(warmup_runner)
+                if not keep_open:
+                    _close_playwright_browser(browser, shared_cdp=True)
 
-                        studio_kw = _local_studio_workflow_kwargs(
-                            api,
-                            profile_id,
-                            login_credentials=login_credentials,
-                            yt_oldest_name=yt_oldest_name,
-                            search_oldest_channel=search_oldest_channel,
-                        )
-
-                        res = _run_profile_studio_upload(
-                            page=page,
-                            browser=browser,
-                            zaliver_db_path=zaliver_db_path,
-                            video_path=video_path,
-                            title=title,
-                            description=description,
-                            publish_before_checks=publish_before_checks,
-                            keep_studio_title=keep_studio_title,
-                            schedule_publish_at=schedule_publish_at,
-                            scheduled_batch=scheduled_batch,
-                            stats_server_username=stats_server_username,
-                            studio_kw=studio_kw,
-                        )
-                        _log("Studio upload: сценарий завершён.")
-                        return res
-                    else:
-                        _log("Studio: upload_latest_zaliver_video=False → открываем Studio…")
-                        _studio._studio_warmup_youtube_then_studio(
-                            page, login_credentials=login_credentials
-                        )
-                        time.sleep(1)
-                        _log(f"Studio: открыт URL: {page.url!r}")
-                except YoutubeAllChannelsRemovedError as e:
-                    _log("Local antidetect: все каналы удалены — закрываем профиль.")
-                    _close_playwright_browser(browser)
-                    raise LocalAntidetectError(str(e)) from e
-                finally:
-                    _stop_parallel_shorts_warmup(warmup_runner)
-
-                if not upload_latest_zaliver_video:
-                    _close_playwright_browser(browser)
-            return None
-        finally:
-            unregister_local_session(profile_id=profile_id)
+        return _with_sync_playwright(
+            _yt_job,
+            label=f"yt-local-{profile_id[:8]}",
+            release_before_stop=keep_open,
+        )
     except Exception as e:
         _log(f"Ошибка: {type(e).__name__}: {e!r}")
         raise LocalAntidetectError(f"Ошибка открытия профиля локального антика: {e}")
     finally:
-        if session_id:
-            try:
-                _log(f"Local antidetect: останавливаем сессию {session_id!r}…")
-                api.stop_session(session_id)
-                _log("Local antidetect: сессия остановлена.")
-            except Exception:
-                pass
+        if not keep_open:
+            unregister_local_session(profile_id=profile_id)
+            if session_id:
+                try:
+                    _log(f"Local antidetect: останавливаем сессию {session_id!r}…")
+                    api.stop_session(session_id)
+                    _log("Local antidetect: сессия остановлена.")
+                except Exception:
+                    pass
+        else:
+            _log(
+                "Local antidetect: stop_session пропущен (keep_browser_open) "
+                f"profile_id={profile_id!r}."
+            )
         try:
             elapsed_s = time.perf_counter() - started_at
             _log(f"Local antidetect: завершение. elapsed_s={elapsed_s:.3f}")

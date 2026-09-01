@@ -153,9 +153,11 @@ export function SettingsPage({
         values["youtube/api_key"] = ytApiKey;
         values["youtube/search_oldest_channel"] = searchOldest;
       }
-      if (showIg) {
+      if (showIg || platform === "youtube") {
         values.upload_pause_hours = igPauseHours;
         values.upload_pause_minutes = Math.max(0, Math.floor(igPauseHours) * 60);
+      }
+      if (showIg) {
         values["instagram/tabs_per_profile"] = igTabs;
         values["instagram/stats_checker_profile_id"] = igChecker;
         values["instagram/crop_aspect"] = igCrop;
@@ -405,6 +407,20 @@ export function SettingsPage({
             />
             Искать старый канал
           </label>
+          {platform === "youtube" ? (
+            <>
+              <label className="hint">Пауза между заливами (часы)</label>
+              <input
+                className="field"
+                style={{ maxWidth: 120 }}
+                type="number"
+                min={0}
+                max={168}
+                value={igPauseHours}
+                onChange={(e) => setIgPauseHours(Number(e.target.value) || 0)}
+              />
+            </>
+          ) : null}
         </section>
       ) : null}
 

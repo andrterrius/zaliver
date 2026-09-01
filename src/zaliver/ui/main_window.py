@@ -66,8 +66,8 @@ from PyQt6.QtWidgets import (
 
 from zaliver.core import ZaliverCore
 from zaliver.db.upload_store import (
-    DEFAULT_UPLOAD_PAUSE_BETWEEN_UPLOADS,
     UploadedVideo,
+    upload_pause_from_settings,
     uploaded_at_sort_ts,
 )
 from zaliver.antydetect.browser_concurrency import (
@@ -2348,7 +2348,38 @@ class MainWindow(QWidget):
         self._youtube_search_oldest.stateChanged.connect(
             self._on_youtube_search_oldest_changed
         )
-        self._btn_save_youtube = QPushButton("Сохранить ключ")
+        yt_pause_tip = (
+            "Минимальная пауза между успешными заливами с одного профиля YouTube.\n"
+            "0 ч 0 мин — браузер не закрывается между роликами на том же профиле;\n"
+            "следующее видео с того же профиля можно заливать сразу."
+        )
+        self._youtube_upload_pause_hours = QSpinBox()
+        self._youtube_upload_pause_hours.setRange(0, 168)
+        self._youtube_upload_pause_hours.setSingleStep(1)
+        self._youtube_upload_pause_hours.setValue(3)
+        self._youtube_upload_pause_hours.setSuffix(" ч")
+        self._youtube_upload_pause_hours.setToolTip(yt_pause_tip)
+        self._youtube_upload_pause_minutes = QSpinBox()
+        self._youtube_upload_pause_minutes.setRange(0, 59)
+        self._youtube_upload_pause_minutes.setSingleStep(1)
+        self._youtube_upload_pause_minutes.setValue(0)
+        self._youtube_upload_pause_minutes.setSuffix(" мин")
+        self._youtube_upload_pause_minutes.setToolTip(yt_pause_tip)
+        yt_pause_row = QHBoxLayout()
+        yt_pause_row.setContentsMargins(0, 0, 0, 0)
+        yt_pause_row.setSpacing(8)
+        yt_pause_row.addWidget(self._youtube_upload_pause_hours)
+        yt_pause_row.addWidget(self._youtube_upload_pause_minutes)
+        yt_pause_row.addStretch(1)
+        yt_pause_wrap = QWidget()
+        yt_pause_wrap.setLayout(yt_pause_row)
+        self._youtube_pause_label = QLabel("Пауза между видео:")
+        self._youtube_pause_label.setToolTip(yt_pause_tip)
+        self._youtube_pause_wrap = yt_pause_wrap
+        yt_pause_visible = self._platform == PLATFORM_YOUTUBE
+        self._youtube_pause_label.setVisible(yt_pause_visible)
+        self._youtube_pause_wrap.setVisible(yt_pause_visible)
+        self._btn_save_youtube = QPushButton("Сохранить")
         self._btn_save_youtube.setObjectName("secondary")
         self._btn_save_youtube.clicked.connect(self._save_youtube_settings)
         self._youtube_settings_status = QLabel("")
@@ -2359,8 +2390,10 @@ class MainWindow(QWidget):
         gy.addWidget(self._youtube_api_key, 0, 1)
         gy.addWidget(self._youtube_show_key, 1, 0, 1, 2)
         gy.addWidget(self._youtube_search_oldest, 2, 0, 1, 2)
-        gy.addWidget(_settings_save_row(self._btn_save_youtube), 3, 0, 1, 2)
-        gy.addWidget(self._youtube_settings_status, 4, 0, 1, 2)
+        gy.addWidget(self._youtube_pause_label, 3, 0)
+        gy.addWidget(self._youtube_pause_wrap, 3, 1)
+        gy.addWidget(_settings_save_row(self._btn_save_youtube), 4, 0, 1, 2)
+        gy.addWidget(self._youtube_settings_status, 5, 0, 1, 2)
         # В Instagram API-ключ Data API не используется (статистика через сессию профиля).
         # Yt+Inst — оба раздела: YouTube и Instagram.
         gb_yt.setVisible(self._platform != PLATFORM_INSTAGRAM)
@@ -2372,7 +2405,6 @@ class MainWindow(QWidget):
             "Минимальная пауза между успешными заливами с одного профиля Instagram.\n"
             "0 ч 0 мин — браузер не закрывается между роликами на том же профиле;\n"
             "появляется настройка «Вкладок на профиль» для параллельного залива.\n"
-            "У YouTube всегда 3 часа и в настройках не меняется.\n"
             "В режиме Yt+Inst используется эта же пауза Instagram "
             "(0 — следующий залив на тот же профиль без закрытия браузера)."
         )
@@ -5307,37 +5339,36 @@ class MainWindow(QWidget):
                 yt.value("stats_server/username", "", type=str) or ""
             ).strip()
             self._stats_server_username.setText(gu)
+        self._load_youtube_upload_pause_widgets(yt)
 
     def _upload_pause_between_uploads(
         self, platform: str | None = None
     ) -> timedelta:
         """
-        Пауза между заливами.
-        YouTube — всегда 3 ч; Instagram и Yt+Inst — из настроек Instagram.
+        Пауза между заливами из настроек платформы.
+        YouTube и Instagram — свои значения; Yt+Inst — пауза Instagram.
         """
         plat = normalize_platform(platform or self._platform)
         if plat == PLATFORM_YT_INST:
-            return self._upload_pause_between_uploads(PLATFORM_INSTAGRAM)
-        if plat != PLATFORM_INSTAGRAM:
-            return DEFAULT_UPLOAD_PAUSE_BETWEEN_UPLOADS
-        ig = self._settings_for(PLATFORM_INSTAGRAM)
-        total_mins: int | None = None
-        if ig.contains("upload_pause_minutes"):
-            try:
-                total_mins = int(
-                    ig.value("upload_pause_minutes", 180, type=int)
-                )
-            except (TypeError, ValueError):
-                total_mins = None
-        if total_mins is None:
-            # Миграция со старого ключа (только часы).
-            try:
-                hours = int(ig.value("upload_pause_hours", 3, type=int))
-            except (TypeError, ValueError):
-                hours = 3
-            total_mins = max(0, min(168, hours)) * 60
-        total_mins = max(0, min(168 * 60 + 59, total_mins))
-        return timedelta(minutes=total_mins)
+            plat = PLATFORM_INSTAGRAM
+        return upload_pause_from_settings(self._settings_for(plat))
+
+    def _load_youtube_upload_pause_widgets(self, yt: PlatformSettings) -> None:
+        if not hasattr(self, "_youtube_upload_pause_hours"):
+            return
+        if not hasattr(self, "_youtube_upload_pause_minutes"):
+            return
+        pause = upload_pause_from_settings(yt)
+        total_mins = max(0, int(round(pause.total_seconds() / 60.0)))
+        hours, mins = divmod(total_mins, 60)
+        hours = max(0, min(168, hours))
+        mins = max(0, min(59, mins))
+        self._youtube_upload_pause_hours.blockSignals(True)
+        self._youtube_upload_pause_minutes.blockSignals(True)
+        self._youtube_upload_pause_hours.setValue(hours)
+        self._youtube_upload_pause_minutes.setValue(mins)
+        self._youtube_upload_pause_hours.blockSignals(False)
+        self._youtube_upload_pause_minutes.blockSignals(False)
 
     def _load_instagram_settings(self) -> None:
         if not hasattr(self, "_instagram_upload_pause_hours"):
@@ -5538,30 +5569,45 @@ class MainWindow(QWidget):
             return
         yt = self._settings_for(PLATFORM_YOUTUBE)
         key = (self._youtube_api_key.text() or "").strip()
+        key_msg = ""
         if key:
             yt.setValue("youtube/api_key", key)
             os.environ["YOUTUBE_API_KEY"] = key
+            key_msg = "Ключ YouTube Data API сохранён."
+        else:
             try:
-                yt.sync()
+                yt.remove("youtube/api_key")
             except Exception:
-                pass
-            if hasattr(self, "_youtube_settings_status"):
-                self._youtube_settings_status.setText(
-                    "Ключ YouTube Data API сохранён."
-                )
-            return
+                yt.setValue("youtube/api_key", "")
+            os.environ.pop("YOUTUBE_API_KEY", None)
+            key_msg = "Ключ API очищен."
 
-        try:
-            yt.remove("youtube/api_key")
-        except Exception:
-            yt.setValue("youtube/api_key", "")
-        os.environ.pop("YOUTUBE_API_KEY", None)
+        pause_msg = ""
+        if (
+            self._platform == PLATFORM_YOUTUBE
+            and hasattr(self, "_youtube_upload_pause_hours")
+            and hasattr(self, "_youtube_upload_pause_minutes")
+        ):
+            hours = max(0, min(168, int(self._youtube_upload_pause_hours.value())))
+            mins = max(0, min(59, int(self._youtube_upload_pause_minutes.value())))
+            total_mins = hours * 60 + mins
+            yt.setValue("upload_pause_minutes", total_mins)
+            yt.setValue("upload_pause_hours", hours)
+            pause = timedelta(minutes=total_mins)
+            if self._profiles_interaction is not None:
+                self._profiles_interaction.set_upload_pause(pause)
+            self._update_profiles_section_header()
+            self._sync_upload_pause_selection_labels()
+            if self._profiles_raw is not None:
+                self._apply_profiles_filter()
+            pause_msg = f" Пауза между видео: {format_upload_pause_short(pause)}."
+
         try:
             yt.sync()
         except Exception:
             pass
         if hasattr(self, "_youtube_settings_status"):
-            self._youtube_settings_status.setText("Ключ API очищен.")
+            self._youtube_settings_status.setText(f"{key_msg}{pause_msg}".strip())
 
     def _on_youtube_show_key_changed(self, _state: int) -> None:
         if not hasattr(self, "_youtube_api_key") or not hasattr(self, "_youtube_show_key"):
@@ -11545,10 +11591,9 @@ class MainWindow(QWidget):
             )
         is_instagram_upload = self._platform == PLATFORM_INSTAGRAM
         is_yt_inst_upload = self._platform == PLATFORM_YT_INST
-        # Пауза 0 (из настроек Instagram): keep-open для Instagram и Yt+Inst.
+        # Пауза 0: keep-open для Instagram, Yt+Inst и YouTube.
         ig_keep_browser_open = (
-            (is_instagram_upload or is_yt_inst_upload)
-            and self._upload_pause_between_uploads().total_seconds() <= 0
+            self._upload_pause_between_uploads().total_seconds() <= 0
         )
         upload_req = build_upload_queue_request(
             platform=self._platform,
@@ -11611,6 +11656,15 @@ class MainWindow(QWidget):
         if is_yt_inst_upload and ig_keep_browser_open:
             self._append_session_log(
                 "Yt+Inst: пауза Instagram = 0 — браузер не закрывается, "
+                "если следующий залив на тот же профиль."
+            )
+        elif (
+            not is_instagram_upload
+            and not is_yt_inst_upload
+            and ig_keep_browser_open
+        ):
+            self._append_session_log(
+                "YouTube: пауза = 0 — браузер не закрывается, "
                 "если следующий залив на тот же профиль."
             )
         self._upload_delete_after_enabled = upload_req.delete_after_upload
@@ -12357,6 +12411,12 @@ class MainWindow(QWidget):
                         warmup_shorts_watch_min_s=5.0,
                         warmup_shorts_watch_max_s=25.0,
                     )
+                mgr_now = mgr_holder.get("mgr")
+                keep_open = bool(ig_keep_browser_open) and (
+                    mgr_now.should_keep_browser_open(profile_id)
+                    if mgr_now is not None
+                    else True
+                )
                 open_kw = dict(
                     headless=headless,
                     video_path=task.video_path,
@@ -12370,6 +12430,7 @@ class MainWindow(QWidget):
                     schedule_publish_at=task.schedule_publish_at,
                     scheduled_batch=resolved_scheduled_batch,
                     stats_server_username=guser or None,
+                    keep_browser_open=keep_open,
                     **warmup_kw,
                 )
                 if _is_own_antidetect_kind(kind):

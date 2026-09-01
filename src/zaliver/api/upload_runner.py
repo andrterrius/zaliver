@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +16,7 @@ from zaliver.config.platform_settings import (
     PLATFORM_YT_INST,
 )
 from zaliver.core.sinks import JobProgressSink
-from zaliver.db.upload_store import resolve_upload_pause
+from zaliver.db.upload_store import upload_pause_from_settings
 from zaliver.stats_server_client import notify_uploaded_video
 
 
@@ -31,24 +31,6 @@ class _StreamingUploadSlot:
 
 _STREAMING_LOCK = threading.Lock()
 _STREAMING: dict[str, _StreamingUploadSlot] = {}
-
-
-def upload_pause_from_settings(settings: Any) -> timedelta:
-    """Пауза между заливами Instagram из настроек (минуты или legacy часы)."""
-    try:
-        if settings is not None and settings.contains("upload_pause_minutes"):
-            mins = int(settings.value("upload_pause_minutes", 180) or 0)
-            return resolve_upload_pause(timedelta(minutes=max(0, mins)))
-    except Exception:
-        pass
-    try:
-        hours = int(
-            (settings.value("upload_pause_hours", 3) if settings is not None else 3)
-            or 0
-        )
-        return resolve_upload_pause(timedelta(hours=max(0, hours)))
-    except Exception:
-        return resolve_upload_pause(None)
 
 
 def enqueue_streaming_upload(
@@ -260,9 +242,7 @@ def run_upload_job(
     )
 
     pause_td = upload_pause_from_settings(settings)
-    ig_keep_browser_open = (is_instagram or is_yt_inst) and (
-        pause_td.total_seconds() <= 0
-    )
+    ig_keep_browser_open = pause_td.total_seconds() <= 0
     max_browsers = clamp_max_concurrent_browsers(max_concurrent)
     ig_tabs_n = (
         instagram_tabs_per_profile_from_settings(settings)
@@ -297,6 +277,11 @@ def run_upload_job(
         sink.on_log(
             f"[upload] Instagram keep_browser_open={ig_keep_browser_open} "
             f"(pause={pause_td}, tabs={ig_tabs_n})"
+        )
+    elif ig_keep_browser_open:
+        sink.on_log(
+            f"[upload] YouTube keep_browser_open={ig_keep_browser_open} "
+            f"(pause={pause_td})"
         )
 
     ig_crop_aspect = (
@@ -720,6 +705,11 @@ def run_upload_job(
             warmup_hashtag=warmup_htag or None,
             search_oldest_channel=bool(search_oldest_channel),
             stats_server_username=guser or None,
+            keep_browser_open=bool(ig_keep_browser_open) and (
+                mgr_now.should_keep_browser_open(profile_id)
+                if mgr_now is not None
+                else True
+            ),
         )
         if own:
             from zaliver.antydetect.local_antidetect_api import local_api_token_scope

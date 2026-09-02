@@ -1,4 +1,4 @@
-"""Two-part video stitch: full source clips, cut locked to a music beat."""
+"""Multi-part video stitch: full source clips, optional beat-locked music."""
 
 from __future__ import annotations
 
@@ -24,7 +24,10 @@ DEFAULT_MAX_PART_DURATION = 6.0
 DEFAULT_STITCH_EDGE_EXCLUDE = DEFAULT_EDGE_EXCLUDE
 DEFAULT_STITCH_FPS_MODE = DEFAULT_SLICE_FPS_MODE
 
-# Визуальные переходы часть1→часть2 (ffmpeg xfade, кроме cut).
+MIN_STITCH_PARTS = 2
+MAX_STITCH_PARTS = 12
+
+# Визуальные переходы между соседними частями (ffmpeg xfade, кроме cut).
 STITCH_TRANSITION_CUT = "cut"
 STITCH_TRANSITION_FADE = "fade"
 STITCH_TRANSITION_CIRCLE = "circleopen"
@@ -79,15 +82,43 @@ def normalize_stitch_transition(value: object) -> str:
 
 def clamp_stitch_transition_duration(
     duration: float,
-    part1_duration: float,
-    part2_duration: float,
+    *part_durations: float,
 ) -> float:
-    """Перекрытие xfade не длиннее ~45% каждой части."""
+    """Перекрытие xfade не длиннее ~45% самой короткой части."""
     d = max(0.0, float(duration))
     if d <= 1e-6:
         return 0.0
-    cap = min(float(part1_duration), float(part2_duration)) * 0.45
+    durs = [float(x) for x in part_durations if float(x) > 0]
+    if len(durs) < 2:
+        return 0.0
+    cap = min(durs) * 0.45
     return max(0.05, min(d, cap)) if cap >= 0.05 else 0.0
+
+
+def collect_stitch_part_pools(options: dict) -> list[list[str]]:
+    """Собрать пулы клипов: ``part_files`` / ``part_pools`` или ``partN_files``."""
+    def _files(group) -> list[str]:
+        out: list[str] = []
+        for x in group or []:
+            p = str(x).strip()
+            if p and os.path.isfile(p):
+                try:
+                    out.append(str(os.path.abspath(p)))
+                except OSError:
+                    out.append(p)
+        return out
+
+    raw = options.get("part_pools") or options.get("part_files")
+    if isinstance(raw, list) and raw:
+        if isinstance(raw[0], (list, tuple)):
+            return [_files(g) for g in raw]
+    pools: list[list[str]] = []
+    for i in range(1, MAX_STITCH_PARTS + 1):
+        key = f"part{i}_files"
+        if key not in options:
+            break
+        pools.append(_files(options.get(key)))
+    return pools
 
 
 @dataclass
@@ -97,6 +128,7 @@ class MusicAlignPlan:
     loop_audio: bool
     part1_duration: float
     part2_duration: float
+    part_durations: list[float]
     total_duration: float
     strategy: str
 
@@ -124,8 +156,7 @@ def _pick_random_existing(pool: list[str]) -> Optional[str]:
 
 def plan_music_for_stitch(
     audio_file: str,
-    part1_duration: float,
-    part2_duration: float,
+    part_durations: list[float],
     *,
     transition_overlap: float = 0.0,
     log: Optional[LogCallback] = None,
@@ -133,9 +164,10 @@ def plan_music_for_stitch(
     """
     Музыка с начала песни (или почти с начала).
 
-    Переход часть1→часть2 должен попасть на бит: ищем сильный бит около
+    Первый переход должен попасть на бит: ищем сильный бит около
     момента смены (середина xfade или стык cut) от начала ролика,
-    тогда ``music_start = beat - anchor ≈ 0``.
+    тогда ``music_start = beat - anchor ≈ 0``. Последующие стыки идут
+    по длительностям клипов.
 
     Продление после EOF — только если ролик длиннее остатка трека.
     """
@@ -143,13 +175,18 @@ def plan_music_for_stitch(
         if log is not None:
             log(msg)
 
-    d1 = max(0.05, float(part1_duration))
-    d2 = max(0.05, float(part2_duration))
+    durs = [max(0.05, float(d)) for d in part_durations]
+    if len(durs) < 2:
+        _log("Для склейки нужно хотя бы две части.")
+        return None
+    d1 = durs[0]
+    d2 = durs[1]
     overlap = max(0.0, float(transition_overlap))
-    if overlap >= min(d1, d2) - 1e-3:
+    n_xfades = max(0, len(durs) - 1)
+    if overlap >= min(durs) - 1e-3:
         overlap = 0.0
-    total = d1 + d2 - overlap
-    # Бит на середине визуального перехода (для cut overlap=0 → якорь = d1).
+    total = sum(durs) - overlap * n_xfades
+    # Бит на середине первого визуального перехода (для cut overlap=0 → якорь = d1).
     beat_anchor = d1 - overlap * 0.5
 
     sample_rate, audio_data, music_duration = load_audio_for_analysis(audio_file)
@@ -217,6 +254,7 @@ def plan_music_for_stitch(
             loop_audio=not fits,
             part1_duration=d1,
             part2_duration=d2,
+            part_durations=list(durs),
             total_duration=total,
             strategy="start_near_zero_beat" if fits else "start_near_zero_extend",
         )
@@ -237,6 +275,7 @@ def plan_music_for_stitch(
         loop_audio=not fits,
         part1_duration=d1,
         part2_duration=d2,
+        part_durations=list(durs),
         total_duration=total,
         strategy="start_zero_plain",
     )
@@ -248,11 +287,12 @@ def plan_music_for_stitch(
 
 
 def generate_stitched_video(
-    audio_file: str,
+    audio_file: str | None,
     output_video: str,
     *,
-    part1_pool: list[str],
-    part2_pool: list[str],
+    part1_pool: list[str] | None = None,
+    part2_pool: list[str] | None = None,
+    part_pools: list[list[str]] | None = None,
     min_part_duration: float = DEFAULT_MIN_PART_DURATION,
     max_part_duration: float = DEFAULT_MAX_PART_DURATION,
     edge_exclude: float = DEFAULT_STITCH_EDGE_EXCLUDE,
@@ -264,10 +304,13 @@ def generate_stitched_video(
     transition: str = DEFAULT_STITCH_TRANSITION,
     transition_duration: float = DEFAULT_STITCH_TRANSITION_DURATION,
     transition_random: bool = False,
+    mute_source_audio: bool = False,
 ) -> Optional[str]:
     """
-    Склейка: полный клип из пула 1 + полный клип из пула 2.
-    Длительность ролика = d1 + d2 (− перекрытие xfade). Переход на бит музыки.
+    Склейка: по одному полному клипу из каждого пула частей.
+    Длительность ролика = сумма частей (− перекрытия xfade).
+    Если есть музыка — первый переход на бит; иначе звук исходников
+    (или полная тишина при ``mute_source_audio``).
     """
     del min_part_duration, max_part_duration, edge_exclude  # API/compat, unused
 
@@ -275,26 +318,29 @@ def generate_stitched_video(
         if log is not None:
             log(msg)
 
-    clip1 = _pick_random_existing(part1_pool)
-    clip2 = _pick_random_existing(part2_pool)
-    if clip1 is None:
-        _log("Нет видеофайлов для части 1.")
-        return None
-    if clip2 is None:
-        _log("Нет видеофайлов для части 2.")
-        return None
-
-    d1 = get_media_duration(clip1)
-    d2 = get_media_duration(clip2)
-    if d1 is None or d1 <= 0.05:
-        _log(f"Не удалось определить длительность: {os.path.basename(clip1)}")
-        return None
-    if d2 is None or d2 <= 0.05:
-        _log(f"Не удалось определить длительность: {os.path.basename(clip2)}")
+    pools: list[list[str]]
+    if part_pools:
+        pools = [list(p) for p in part_pools]
+    else:
+        pools = [list(part1_pool or []), list(part2_pool or [])]
+    if len(pools) < MIN_STITCH_PARTS:
+        _log(f"Для склейки нужно хотя бы {MIN_STITCH_PARTS} части.")
         return None
 
-    d1 = float(d1)
-    d2 = float(d2)
+    clips: list[str] = []
+    durs: list[float] = []
+    for i, pool in enumerate(pools, 1):
+        clip = _pick_random_existing(pool)
+        if clip is None:
+            _log(f"Нет видеофайлов для части {i}.")
+            return None
+        dur = get_media_duration(clip)
+        if dur is None or dur <= 0.05:
+            _log(f"Не удалось определить длительность: {os.path.basename(clip)}")
+            return None
+        clips.append(clip)
+        durs.append(float(dur))
+
     if transition_random:
         transition_id = random.choice(list(STITCH_TRANSITIONS))
         _log(
@@ -306,7 +352,7 @@ def generate_stitched_video(
     overlap = 0.0
     if transition_id != STITCH_TRANSITION_CUT:
         overlap = clamp_stitch_transition_duration(
-            float(transition_duration), d1, d2
+            float(transition_duration), *durs
         )
         if overlap <= 1e-6:
             _log(
@@ -315,56 +361,69 @@ def generate_stitched_video(
             )
             transition_id = STITCH_TRANSITION_CUT
             overlap = 0.0
-    total = d1 + d2 - overlap
+    n_xfades = max(0, len(durs) - 1)
+    total = sum(durs) - overlap * n_xfades
     label = STITCH_TRANSITION_LABELS.get(transition_id, transition_id)
+    parts_desc = ", ".join(
+        f"часть{i}={os.path.basename(c)} ({d:.2f}с)"
+        for i, (c, d) in enumerate(zip(clips, durs), 1)
+    )
     _log(
-        f"Исходники целиком: часть1={os.path.basename(clip1)} ({d1:.2f}с), "
-        f"часть2={os.path.basename(clip2)} ({d2:.2f}с), "
+        f"Исходники целиком: {parts_desc}, "
         f"переход «{label}»"
         + (f" {overlap:.2f}с, " if overlap > 0 else ", ")
         + f"итого {total:.2f}с"
     )
 
-    plan = plan_music_for_stitch(
-        audio_file, d1, d2, transition_overlap=overlap, log=log
-    )
-    if plan is None:
-        return None
+    use_music = bool(audio_file) and os.path.isfile(str(audio_file))
+    mute_originals = bool(mute_source_audio) and not use_music
+    music_start = 0.0
+    beat_time = max(0.05, durs[0] - overlap * 0.5)
+    loop_audio = False
+    if use_music:
+        plan = plan_music_for_stitch(
+            str(audio_file), durs, transition_overlap=overlap, log=log
+        )
+        if plan is None:
+            return None
+        music_start = float(plan.music_start)
+        beat_time = float(plan.beat_time)
+        loop_audio = bool(plan.loop_audio)
+    elif mute_originals:
+        _log("Без музыки и без звука исходников — ролик без аудио.")
+    else:
+        _log("Без музыки — оставляем звук исходников.")
 
     segment = {
-        "start_time": float(plan.music_start),
-        "end_time": float(plan.music_start + total),
+        "start_time": float(music_start),
+        "end_time": float(music_start + total),
         "duration": float(total),
-        "transitions": [{"time": float(plan.beat_time), "amplitude": 1.0}],
-        "scene_durations": [float(d1), float(d2)],
-        "num_transitions": 1,
-        "num_scenes": 2,
+        "transitions": [{"time": float(beat_time), "amplitude": 1.0}],
+        "scene_durations": [float(d) for d in durs],
+        "num_transitions": max(0, len(durs) - 1),
+        "num_scenes": len(durs),
         "min_interval": 0.05,
-        "transition_time": float(plan.beat_time),
-        "loop_audio": bool(plan.loop_audio),
+        "transition_time": float(beat_time),
+        "loop_audio": bool(loop_audio),
         # Склейка: не укорачивать/не лупить видео под аудио-snap.
         "stitch_preserve_full_clips": True,
+        "stitch_keep_source_audio": not use_music and not mute_originals,
         "stitch_transition": transition_id,
         "stitch_transition_duration": float(overlap),
     }
 
     fixed_clips = [
         {
-            "path": clip1,
+            "path": clip,
             "start": 0.0,
-            "duration": float(d1),
+            "duration": float(dur),
             "loop": False,
-        },
-        {
-            "path": clip2,
-            "start": 0.0,
-            "duration": float(d2),
-            "loop": False,
-        },
+        }
+        for clip, dur in zip(clips, durs)
     ]
 
     return generate_video_from_segment(
-        audio_file,
+        str(audio_file) if use_music else "",
         segment,
         output_video,
         fixed_scene_clips=fixed_clips,
@@ -373,5 +432,5 @@ def generate_stitched_video(
         use_gpu=use_gpu,
         use_gpu_finalize=use_gpu_finalize,
         text_overlay_cfg=text_overlay_cfg,
-        loop_audio=bool(plan.loop_audio),
+        loop_audio=bool(loop_audio),
     )

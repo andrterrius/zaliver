@@ -11225,27 +11225,6 @@ class MainWindow(QWidget):
         if not opts["output_dir"]:
             QMessageBox.warning(self, "Zaliver", "Укажите выходную папку.")
             return
-        if not opts.get("part1_files"):
-            QMessageBox.warning(
-                self,
-                "Zaliver",
-                "Выберите хотя бы одно видео для первой части.",
-            )
-            return
-        if not opts.get("part2_files"):
-            QMessageBox.warning(
-                self,
-                "Zaliver",
-                "Выберите хотя бы одно видео для второй части.",
-            )
-            return
-        if not opts.get("music_files"):
-            QMessageBox.warning(
-                self,
-                "Zaliver",
-                "Добавьте хотя бы один аудиотрек для склейки.",
-            )
-            return
         toc = opts.get("text_overlay") or {}
         if bool(toc.get("enabled")) and not str(toc.get("text") or "").strip():
             QMessageBox.warning(
@@ -11276,9 +11255,7 @@ class MainWindow(QWidget):
             opts["num_workers"] = 2
 
         try:
-            planned = len(list(opts.get("music_files") or [])) * max(
-                1, int(opts.get("copies_per_track") or 1)
-            )
+            planned = max(1, int(opts.get("copies_per_track") or 1))
         except Exception:
             planned = 0
         n_prof = self._streaming_upload_profile_count(pending)

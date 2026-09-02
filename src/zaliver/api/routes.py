@@ -1159,9 +1159,17 @@ def build_router() -> APIRouter:
                     create=True,
                 )
             )
-            part1 = resolve_path_list(body.part1_files, st.config.allowed_roots)
-            part2 = resolve_path_list(body.part2_files, st.config.allowed_roots)
-            music = resolve_path_list(body.music_files, st.config.allowed_roots)
+            if len(body.part_files) >= 2:
+                part_pools = [
+                    resolve_path_list(list(group or []), st.config.allowed_roots)
+                    for group in body.part_files
+                ]
+            else:
+                part_pools = [
+                    resolve_path_list(body.part1_files, st.config.allowed_roots),
+                    resolve_path_list(body.part2_files, st.config.allowed_roots),
+                ]
+            music = resolve_path_list(body.music_files or [], st.config.allowed_roots)
             overlay = body.text_overlay.model_dump(exclude_none=True)
             if "orientation" in overlay:
                 overlay["preview_orientation"] = overlay.pop("orientation")
@@ -1176,7 +1184,7 @@ def build_router() -> APIRouter:
         except OSError as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
-        planned = len(music) * max(1, int(body.copies_per_track or 1))
+        planned = max(1, int(body.copies_per_track or 1))
         upload_after = _upload_after_cfg(body, platform=plat, planned=planned)
         if upload_after:
             upload_after["max_concurrent_browsers"] = clamp_browsers_per_user(
@@ -1185,9 +1193,11 @@ def build_router() -> APIRouter:
         workers = PROCESSING_WORKERS_PER_USER
         options: dict[str, Any] = {
             "output_dir": out_dir,
-            "part1_files": part1,
-            "part2_files": part2,
+            "part_files": part_pools,
+            "part1_files": part_pools[0] if part_pools else [],
+            "part2_files": part_pools[1] if len(part_pools) > 1 else [],
             "music_files": music,
+            "mute_source_audio": bool(body.mute_source_audio) and not music,
             "num_workers": workers,
             "copies_per_track": int(body.copies_per_track),
             "text_overlay": overlay,

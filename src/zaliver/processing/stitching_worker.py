@@ -1,4 +1,4 @@
-"""Headless stitching orchestration: two clip pools, beat-synced cut."""
+"""Headless stitching orchestration: N clip pools, optional beat-synced music."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from zaliver.processing.stitching import (
     DEFAULT_STITCH_TRANSITION,
     DEFAULT_STITCH_TRANSITION_DURATION,
     STITCH_TRANSITION_LABELS,
+    collect_stitch_part_pools,
     generate_stitched_video,
     normalize_stitch_transition,
 )
@@ -51,7 +52,7 @@ def _unique_stitch_filename(music_stem: str) -> str:
 @dataclass
 class StitchJob:
     job_idx: int
-    music_path: Path
+    music_path: Optional[Path]
     copy_index: int
     track_use_total: int
     output_path: Path
@@ -60,6 +61,8 @@ class StitchJob:
     error: Optional[str] = None
 
     def tag(self, n_jobs: int) -> str:
+        if self.music_path is None:
+            return f"[{self.job_idx}/{n_jobs}] склейка"
         name = self.music_path.name
         if self.track_use_total == 1:
             return f"[{self.job_idx}/{n_jobs}] {name}"
@@ -70,11 +73,10 @@ class StitchJob:
 
 
 def _attempt_stitch_with_music(
-    music: str,
+    music: Optional[str],
     output_path: Path,
     *,
-    part1_pool: List[str],
-    part2_pool: List[str],
+    part_pools: List[List[str]],
     text_overlay_cfg: Optional[Dict[str, Any]],
     use_gpu: bool,
     use_gpu_finalize: bool,
@@ -82,6 +84,7 @@ def _attempt_stitch_with_music(
     transition: str,
     transition_duration: float,
     transition_random: bool,
+    mute_source_audio: bool,
     log: LogCallback,
     cancel_check: Callable[[], bool],
     tag: str,
@@ -92,10 +95,9 @@ def _attempt_stitch_with_music(
 
     try:
         result = generate_stitched_video(
-            music,
+            music or "",
             str(output_path),
-            part1_pool=part1_pool,
-            part2_pool=part2_pool,
+            part_pools=part_pools,
             fps=stitch_fps_mode,
             log=log,
             use_gpu=bool(use_gpu),
@@ -104,6 +106,7 @@ def _attempt_stitch_with_music(
             transition=transition,
             transition_duration=transition_duration,
             transition_random=bool(transition_random),
+            mute_source_audio=bool(mute_source_audio),
         )
         if not result or not output_path.is_file():
             return "Не удалось склеить видео из исходников."
@@ -118,8 +121,7 @@ def _run_stitch_job(
     job: StitchJob,
     *,
     music_pool: List[str],
-    part1_pool: List[str],
-    part2_pool: List[str],
+    part_pools: List[List[str]],
     text_overlay_cfg: Optional[Dict[str, Any]],
     use_gpu: bool,
     use_gpu_finalize: bool,
@@ -127,6 +129,7 @@ def _run_stitch_job(
     transition: str,
     transition_duration: float,
     transition_random: bool,
+    mute_source_audio: bool,
     log: LogCallback,
     cancel_check: Callable[[], bool],
     n_jobs: int,
@@ -136,8 +139,40 @@ def _run_stitch_job(
         return job
 
     tag = job.tag(n_jobs)
-    try_order = _slice_music_try_order(job.music_path, music_pool)
     last_error: Optional[str] = None
+
+    if job.music_path is None:
+        log(
+            f"{tag}: склейка без звука…"
+            if mute_source_audio
+            else f"{tag}: склейка без музыки…"
+        )
+        err = _attempt_stitch_with_music(
+            None,
+            job.output_path,
+            part_pools=part_pools,
+            text_overlay_cfg=text_overlay_cfg,
+            use_gpu=use_gpu,
+            use_gpu_finalize=use_gpu_finalize,
+            stitch_fps_mode=stitch_fps_mode,
+            transition=transition,
+            transition_duration=transition_duration,
+            transition_random=transition_random,
+            mute_source_audio=mute_source_audio,
+            log=log,
+            cancel_check=cancel_check,
+            tag=tag,
+        )
+        if err is None:
+            job.finished = True
+            log(f"{tag}: готово → {job.output_path.name}")
+            return job
+        job.error = err
+        if err != "Отменено.":
+            job.skip_youtube_upload = True
+        return job
+
+    try_order = _slice_music_try_order(job.music_path, music_pool)
 
     for attempt_no, music_path in enumerate(try_order):
         if cancel_check():
@@ -154,8 +189,7 @@ def _run_stitch_job(
         err = _attempt_stitch_with_music(
             str(music_path),
             job.output_path,
-            part1_pool=part1_pool,
-            part2_pool=part2_pool,
+            part_pools=part_pools,
             text_overlay_cfg=text_overlay_cfg,
             use_gpu=use_gpu,
             use_gpu_finalize=use_gpu_finalize,
@@ -163,6 +197,7 @@ def _run_stitch_job(
             transition=transition,
             transition_duration=transition_duration,
             transition_random=transition_random,
+            mute_source_audio=mute_source_audio,
             log=log,
             cancel_check=cancel_check,
             tag=tag,
@@ -236,37 +271,24 @@ class StitchingService:
 
         try:
             out_dir = Path(options["output_dir"])
-            part1_pool: List[str] = []
-            for x in options.get("part1_files") or []:
-                p = Path(str(x))
-                if p.is_file():
-                    part1_pool.append(str(p.resolve()))
-            part2_pool: List[str] = []
-            for x in options.get("part2_files") or []:
-                p = Path(str(x))
-                if p.is_file():
-                    part2_pool.append(str(p.resolve()))
+            part_pools = collect_stitch_part_pools(options)
             music_pool: List[str] = []
             for x in options.get("music_files") or []:
                 p = Path(str(x))
                 if p.is_file():
                     music_pool.append(str(p.resolve()))
 
-            if not part1_pool:
+            if len(part_pools) < 2:
                 self._sink.on_finished(
-                    False, "Выберите хотя бы одно видео для первой части."
+                    False, "Нужны хотя бы две части для склейки."
                 )
                 return
-            if not part2_pool:
-                self._sink.on_finished(
-                    False, "Выберите хотя бы одно видео для второй части."
-                )
-                return
-            if not music_pool:
-                self._sink.on_finished(
-                    False, "Добавьте хотя бы один аудиотрек для склейки."
-                )
-                return
+            for i, pool in enumerate(part_pools, 1):
+                if not pool:
+                    self._sink.on_finished(
+                        False, f"Выберите хотя бы одно видео для части {i}."
+                    )
+                    return
             if not check_ffmpeg_tools():
                 self._sink.on_finished(False, "Нужны ffmpeg и ffprobe в PATH.")
                 return
@@ -324,6 +346,10 @@ class StitchingService:
                 options.get("transition_random")
                 or options.get("stitch_transition_random")
             )
+            mute_source_audio = bool(
+                options.get("mute_source_audio")
+                or options.get("stitch_mute_source_audio")
+            )
             try:
                 transition_duration = float(
                     options.get("transition_duration")
@@ -364,49 +390,90 @@ class StitchingService:
                 log("GPU финал: выключена (CPU, libx264).")
 
             n_tracks = len(music_pool)
-            assigned_tracks = _pick_random_tracks_for_jobs(music_pool, output_count)
-            use_totals: Dict[str, int] = {}
-            for music in assigned_tracks:
-                key = os.path.normcase(music)
-                use_totals[key] = use_totals.get(key, 0) + 1
-            use_seen: Dict[str, int] = {}
             jobs: List[StitchJob] = []
-            for i, music in enumerate(assigned_tracks):
-                key = os.path.normcase(music)
-                use_seen[key] = use_seen.get(key, 0) + 1
-                stem = Path(music).stem
-                outp = out_dir / _unique_stitch_filename(stem)
-                jobs.append(
-                    StitchJob(
-                        job_idx=i + 1,
-                        music_path=Path(music),
-                        copy_index=use_seen[key],
-                        track_use_total=use_totals[key],
-                        output_path=outp,
+            if music_pool:
+                assigned_tracks = _pick_random_tracks_for_jobs(music_pool, output_count)
+                use_totals: Dict[str, int] = {}
+                for music in assigned_tracks:
+                    key = os.path.normcase(music)
+                    use_totals[key] = use_totals.get(key, 0) + 1
+                use_seen: Dict[str, int] = {}
+                for i, music in enumerate(assigned_tracks):
+                    key = os.path.normcase(music)
+                    use_seen[key] = use_seen.get(key, 0) + 1
+                    stem = Path(music).stem
+                    outp = out_dir / _unique_stitch_filename(stem)
+                    jobs.append(
+                        StitchJob(
+                            job_idx=i + 1,
+                            music_path=Path(music),
+                            copy_index=use_seen[key],
+                            track_use_total=use_totals[key],
+                            output_path=outp,
+                        )
                     )
-                )
+            else:
+                for i in range(output_count):
+                    outp = out_dir / _unique_stitch_filename("stitch")
+                    jobs.append(
+                        StitchJob(
+                            job_idx=i + 1,
+                            music_path=None,
+                            copy_index=1,
+                            track_use_total=1,
+                            output_path=outp,
+                        )
+                    )
 
             n_jobs = len(jobs)
             if n_jobs == 0:
                 self._sink.on_finished(False, "Нет заданий для склейки.")
                 return
 
-            repeat_videos = max(0, output_count - n_tracks)
-            if repeat_videos:
+            parts_label = ", ".join(
+                f"часть{i}={len(p)}" for i, p in enumerate(part_pools, 1)
+            )
+            repeat_videos = max(0, output_count - n_tracks) if n_tracks else 0
+            if not music_pool:
+                log(
+                    f"Склейка: {output_count} роликов без музыки, "
+                    f"{parts_label}, потоков {num_workers}"
+                )
+            elif repeat_videos:
                 log(
                     f"Склейка: {output_count} роликов из {n_tracks} треков "
                     f"({repeat_videos} с повторением треков), "
-                    f"часть1={len(part1_pool)}, часть2={len(part2_pool)}, "
+                    f"{parts_label}, "
                     f"потоков {num_workers}"
                 )
             else:
                 log(
                     f"Склейка: {output_count} роликов из {n_tracks} треков, "
-                    f"часть1={len(part1_pool)}, часть2={len(part2_pool)}, "
+                    f"{parts_label}, "
                     f"потоков {num_workers}"
                 )
             trans_label = STITCH_TRANSITION_LABELS.get(transition, transition)
-            if transition_random:
+            if not music_pool:
+                audio_note = (
+                    "без звука"
+                    if mute_source_audio
+                    else "звук клипов"
+                )
+                log(
+                    "Хронометраж: сумма полных исходников; "
+                    f"{audio_note}; "
+                    + (
+                        "эффект случайный из всех переходов (включая простую склейку)"
+                        if transition_random
+                        else f"эффект «{trans_label}»"
+                        + (
+                            f" ({transition_duration:.2f}с)"
+                            if transition != DEFAULT_STITCH_TRANSITION
+                            else ""
+                        )
+                    )
+                )
+            elif transition_random:
                 log(
                     "Хронометраж: сумма полных исходников; переход на бит; "
                     "эффект случайный из всех переходов (включая простую склейку); "
@@ -463,7 +530,12 @@ class StitchingService:
                     except RuntimeError:
                         pass
                 elif j.error and j.error != "Отменено.":
-                    errors.append(f"{j.music_path.name}: {j.error}")
+                    src = (
+                        j.music_path.name
+                        if j.music_path is not None
+                        else j.output_path.name
+                    )
+                    errors.append(f"{src}: {j.error}")
                 settle_ready_job(
                     ready_buf,
                     str(j.output_path.resolve()) if keep else "",
@@ -472,14 +544,14 @@ class StitchingService:
 
             job_kwargs = dict(
                 music_pool=music_pool,
-                part1_pool=part1_pool,
-                part2_pool=part2_pool,
+                part_pools=part_pools,
                 use_gpu=use_gpu,
                 use_gpu_finalize=use_gpu_finalize,
                 stitch_fps_mode=stitch_fps_mode,
                 transition=transition,
                 transition_duration=transition_duration,
                 transition_random=transition_random,
+                mute_source_audio=mute_source_audio,
                 log=log,
                 cancel_check=cancelled,
                 n_jobs=n_jobs,

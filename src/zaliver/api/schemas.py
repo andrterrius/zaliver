@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class HealthResponse(BaseModel):
@@ -160,9 +160,11 @@ class StitchingJobRequest(BaseModel):
     # Optional; must be under managed output/<platform>/gluing (or empty = that folder).
     output_dir: str = ""
     platform: str = ""
-    part1_files: list[str] = Field(min_length=1)
-    part2_files: list[str] = Field(min_length=1)
-    music_files: list[str] = Field(min_length=1)
+    part1_files: list[str] = Field(default_factory=list)
+    part2_files: list[str] = Field(default_factory=list)
+    part_files: list[list[str]] = Field(default_factory=list)
+    music_files: list[str] = Field(default_factory=list)
+    mute_source_audio: bool = False
     num_workers: int = Field(default=1, ge=1, le=1)
     copies_per_track: int = Field(default=1, ge=1)
     use_gpu: bool = False
@@ -176,6 +178,20 @@ class StitchingJobRequest(BaseModel):
     text_overlay: TextOverlayModel = Field(default_factory=TextOverlayModel)
     youtube_upload_after_processing: bool = False
     upload_after: UploadAfterFollowup | None = None
+
+    @model_validator(mode="after")
+    def _require_two_parts(self) -> "StitchingJobRequest":
+        pools = (
+            self.part_files
+            if len(self.part_files) >= 2
+            else [self.part1_files, self.part2_files]
+        )
+        if len(pools) < 2:
+            raise ValueError("Need at least two stitch parts")
+        for i, group in enumerate(pools, 1):
+            if not group:
+                raise ValueError(f"Part {i} needs at least one clip")
+        return self
 
 
 class UploadJobRequest(BaseModel):

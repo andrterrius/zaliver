@@ -1229,25 +1229,25 @@ def _encode_args_for_scenes(
     if scaled_overlay is not None and scaled_overlay.lines:
         concat_out = "[concatv]"
 
+    filter_complex = ""
     xfade_name = str(video_transition or "").strip().lower()
     use_xfade = (
-        n == 2
+        n >= 2
         and xfade_name not in ("", "cut", "none")
         and float(video_transition_duration) > 1e-3
     )
     if use_xfade:
-        fc0 = max(1, int(scene_clips[0]["frame_count"]))
-        fc1 = max(1, int(scene_clips[1]["frame_count"]))
         overlap_frames = max(
             1, int(round(float(video_transition_duration) * fps_f))
         )
-        overlap_frames = min(overlap_frames, fc0 - 1, fc1 - 1)
+        for frag in scene_clips:
+            overlap_frames = min(
+                overlap_frames, max(1, int(frag["frame_count"])) - 1
+            )
         if overlap_frames < 1:
             use_xfade = False
         else:
-            offset = (fc0 - overlap_frames) / fps_f
             dur = overlap_frames / fps_f
-            total_frames = fc0 + fc1 - overlap_frames
             # ffmpeg xfade transition names; unknown → fade
             xfade_aliases = {
                 "fade": "fade",
@@ -1268,11 +1268,24 @@ def _encode_args_for_scenes(
                 "blur": "hblur",
             }
             xname = xfade_aliases.get(xfade_name, "fade")
-            filter_complex = (
-                ";".join(filters)
-                + f";[s0][s1]xfade=transition={xname}:duration={dur:.6f}"
-                f":offset={offset:.6f}{concat_out}"
-            )
+            xfade_parts: list[str] = []
+            running_frames = max(1, int(scene_clips[0]["frame_count"]))
+            for i in range(1, n):
+                left = "s0" if i == 1 else f"xf{i - 1}"
+                right = f"s{i}"
+                dest = concat_out if i == n - 1 else f"[xf{i}]"
+                offset = (running_frames - overlap_frames) / fps_f
+                xfade_parts.append(
+                    f"[{left}][{right}]xfade=transition={xname}:duration={dur:.6f}"
+                    f":offset={offset:.6f}{dest}"
+                )
+                running_frames = (
+                    running_frames
+                    + max(1, int(scene_clips[i]["frame_count"]))
+                    - overlap_frames
+                )
+            total_frames = running_frames
+            filter_complex = ";".join(filters + xfade_parts)
 
     if not use_xfade:
         filter_complex = (
@@ -1776,6 +1789,203 @@ def _concat_audio_with_crossfade(
     return False
 
 
+def _clip_audio_to_wav(
+    path: str,
+    *,
+    start_sec: float,
+    duration_sec: float,
+    out_wav: str,
+) -> bool:
+    """Вырезает PCM из клипа; если звука нет — тишина той же длины."""
+    duration_sec = max(0.05, float(duration_sec))
+    start_sec = max(0.0, float(start_sec))
+    extracted = False
+    try:
+        run_ffmpeg(
+            [
+                "-ss",
+                f"{start_sec:.6f}",
+                "-i",
+                path,
+                "-t",
+                f"{duration_sec:.6f}",
+                "-vn",
+                *_pcm_audio_argv_tail(),
+                out_wav,
+            ],
+        )
+        if os.path.exists(out_wav) and os.path.getsize(out_wav) > 200:
+            extracted = True
+    except Exception:
+        extracted = False
+    if not extracted:
+        try:
+            run_ffmpeg(
+                [
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "anullsrc=channel_layout=stereo:sample_rate=44100",
+                    "-t",
+                    f"{duration_sec:.6f}",
+                    *_pcm_audio_argv_tail(),
+                    out_wav,
+                ],
+            )
+        except Exception:
+            return False
+        return os.path.exists(out_wav) and os.path.getsize(out_wav) > 200
+    got = probe_media_duration_seconds(out_wav) or 0.0
+    if got + 0.05 >= duration_sec:
+        return True
+    padded = out_wav + ".pad.wav"
+    try:
+        run_ffmpeg(
+            [
+                "-i",
+                out_wav,
+                "-af",
+                f"apad=whole_dur={duration_sec:.6f}",
+                "-t",
+                f"{duration_sec:.6f}",
+                *_pcm_audio_argv_tail(),
+                padded,
+            ],
+        )
+        if os.path.exists(padded) and os.path.getsize(padded) > 200:
+            shutil.copy2(padded, out_wav)
+            try:
+                os.remove(padded)
+            except OSError:
+                pass
+            return True
+    except Exception:
+        pass
+    return os.path.exists(out_wav) and os.path.getsize(out_wav) > 200
+
+
+def _concat_wav_files(
+    wavs: list[str],
+    out_wav: str,
+    *,
+    duration_sec: float,
+) -> bool:
+    if not wavs:
+        return False
+    if len(wavs) == 1:
+        try:
+            run_ffmpeg(
+                [
+                    "-i",
+                    wavs[0],
+                    "-t",
+                    f"{duration_sec:.6f}",
+                    "-af",
+                    f"apad=whole_dur={duration_sec:.6f}",
+                    *_pcm_audio_argv_tail(),
+                    out_wav,
+                ],
+            )
+            return os.path.exists(out_wav) and os.path.getsize(out_wav) > 200
+        except Exception:
+            return False
+    list_path = out_wav + ".concat.txt"
+    try:
+        with open(list_path, "w", encoding="utf-8") as fh:
+            for p in wavs:
+                escaped = os.path.abspath(p).replace("\\", "/").replace("'", "'\\''")
+                fh.write(f"file '{escaped}'\n")
+        run_ffmpeg(
+            [
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                list_path,
+                "-t",
+                f"{duration_sec:.6f}",
+                "-af",
+                f"apad=whole_dur={duration_sec:.6f}",
+                *_pcm_audio_argv_tail(),
+                out_wav,
+            ],
+        )
+        return os.path.exists(out_wav) and os.path.getsize(out_wav) > 200
+    except Exception:
+        return False
+    finally:
+        try:
+            os.remove(list_path)
+        except OSError:
+            pass
+
+
+def build_source_clips_audio_wav(
+    scene_clips: list[dict],
+    *,
+    duration_sec: float,
+    out_wav: str,
+    temp_dir: str,
+    overlap_sec: float = 0.0,
+    log: Optional[LogCallback] = None,
+) -> bool:
+    """Склеивает оригинальный звук клипов (тишина, если дорожки нет)."""
+    duration_sec = max(0.05, float(duration_sec))
+    overlap = max(0.0, float(overlap_sec))
+    wavs: list[str] = []
+    for i, frag in enumerate(scene_clips):
+        path = str((frag or {}).get("path") or "")
+        start = float((frag or {}).get("start", 0.0) or 0.0)
+        dur = float((frag or {}).get("duration", 0.0) or 0.0)
+        if dur <= 0.05:
+            dur = duration_sec
+        part = os.path.join(temp_dir, f"src_audio_{i:02d}.wav")
+        if not _clip_audio_to_wav(path, start_sec=start, duration_sec=dur, out_wav=part):
+            _log(f"    Не удалось взять звук части {i + 1}", log)
+            return False
+        wavs.append(part)
+    if not wavs:
+        return False
+    if overlap > 1e-3 and len(wavs) >= 2:
+        current = wavs[0]
+        running = probe_media_duration_seconds(current) or 0.0
+        for i, nxt in enumerate(wavs[1:], 1):
+            nxt_dur = probe_media_duration_seconds(nxt) or 0.0
+            expected = max(0.05, running + nxt_dur - overlap)
+            joined = os.path.join(temp_dir, f"src_audio_xf_{i}.wav")
+            ok = _concat_audio_with_crossfade(
+                current,
+                nxt,
+                joined,
+                duration_sec=expected,
+                crossfade_sec=overlap,
+                log=log,
+            )
+            if not ok:
+                _log("    Crossfade звука исходников не удался — простая склейка", log)
+                return _concat_wav_files(wavs, out_wav, duration_sec=duration_sec)
+            current = joined
+            running = probe_media_duration_seconds(current) or expected
+        try:
+            run_ffmpeg(
+                [
+                    "-i",
+                    current,
+                    "-t",
+                    f"{duration_sec:.6f}",
+                    "-af",
+                    f"apad=whole_dur={duration_sec:.6f}",
+                    *_pcm_audio_argv_tail(),
+                    out_wav,
+                ],
+            )
+            return os.path.exists(out_wav) and os.path.getsize(out_wav) > 200
+        except Exception:
+            return False
+    return _concat_wav_files(wavs, out_wav, duration_sec=duration_sec)
+
+
 def _prepare_loopable_song_body(
     audio_file: str,
     body_wav: str,
@@ -2098,9 +2308,11 @@ def generate_video_from_segment(
             scene_durations.append(relative_transitions[i + 1] - relative_transitions[i])
         scene_durations.append(video_end - transition_times[-1])
 
-    audio_duration = get_audio_duration(audio_file)
+    audio_file = str(audio_file or "").strip()
+    keep_source_audio = bool(segment.get("stitch_keep_source_audio"))
+    audio_duration = get_audio_duration(audio_file) if audio_file else None
     preserve_full = bool(segment.get("stitch_preserve_full_clips"))
-    if preserve_full or loop_audio:
+    if preserve_full or loop_audio or keep_source_audio or not audio_file:
         # Видео фиксированной длины (склейка полных клипов) — не ужимаем под аудио.
         video_start = float(segment.get("start_time", video_start) or 0.0)
         min_scene = segment.get("min_interval")
@@ -2327,12 +2539,15 @@ def generate_video_from_segment(
     stitch_overlap = max(0.0, float(segment.get("stitch_transition_duration") or 0.0))
     if stitch_transition in ("", "none"):
         stitch_transition = "cut"
-    if stitch_transition == "cut" or stitch_overlap <= 1e-6 or len(scene_clips) != 2:
+    if stitch_transition == "cut" or stitch_overlap <= 1e-6 or len(scene_clips) < 2:
         stitch_transition = "cut"
         stitch_overlap = 0.0
     else:
         # Перекрытие xfade укорачивает ролик; клипы остаются полными.
-        total_video_duration = max(0.05, sum(scene_durations) - stitch_overlap)
+        n_xfades = max(0, len(scene_clips) - 1)
+        total_video_duration = max(
+            0.05, sum(scene_durations) - stitch_overlap * n_xfades
+        )
         video_end = video_start + total_video_duration
         _log(
             f"    Визуальный переход «{stitch_transition}» "
@@ -2468,15 +2683,49 @@ def generate_video_from_segment(
     temp_audio = os.path.join(temp_dir, "temp_audio.wav")
 
     try:
-        ok_audio = build_audio_wav_exact_duration(
-            audio_file,
-            start_sec=float(video_start),
-            duration_sec=float(final_duration),
-            out_wav=temp_audio,
-            temp_dir=temp_dir,
-            log=log,
-            prefer_loop=bool(loop_audio),
-        )
+        ok_audio = False
+        if keep_source_audio:
+            ok_audio = build_source_clips_audio_wav(
+                scene_clips,
+                duration_sec=float(final_duration),
+                out_wav=temp_audio,
+                temp_dir=temp_dir,
+                overlap_sec=(
+                    float(stitch_overlap) if stitch_transition != "cut" else 0.0
+                ),
+                log=log,
+            )
+        elif audio_file:
+            ok_audio = build_audio_wav_exact_duration(
+                audio_file,
+                start_sec=float(video_start),
+                duration_sec=float(final_duration),
+                out_wav=temp_audio,
+                temp_dir=temp_dir,
+                log=log,
+                prefer_loop=bool(loop_audio),
+            )
+        else:
+            try:
+                run_ffmpeg(
+                    [
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "anullsrc=channel_layout=stereo:sample_rate=44100",
+                        "-t",
+                        f"{final_duration:.6f}",
+                        *_pcm_audio_argv_tail(),
+                        temp_audio,
+                    ],
+                )
+                ok_audio = (
+                    os.path.exists(temp_audio) and os.path.getsize(temp_audio) > 200
+                )
+                if ok_audio:
+                    _log("    Аудио: тишина (без музыки и без звука исходников)", log)
+            except Exception:
+                ok_audio = False
 
         if ok_audio and os.path.exists(temp_audio) and os.path.getsize(temp_audio) > 1000:
             run_ffmpeg(

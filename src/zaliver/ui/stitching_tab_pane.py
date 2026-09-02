@@ -1,4 +1,4 @@
-"""UI for the «Склейка» tab (two-part beat-synced stitch)."""
+"""UI for the «Склейка» tab (N-part stitch, optional music)."""
 
 from __future__ import annotations
 
@@ -35,6 +35,8 @@ from PyQt6.QtWidgets import (
 from zaliver.processing.stitching import (
     DEFAULT_STITCH_TRANSITION,
     DEFAULT_STITCH_TRANSITION_DURATION,
+    MAX_STITCH_PARTS,
+    MIN_STITCH_PARTS,
     STITCH_TRANSITION_CIRCLE,
     STITCH_TRANSITION_CUT,
     STITCH_TRANSITION_FADE,
@@ -100,8 +102,8 @@ class StitchingTabPane(QWidget):
         self._upload_store = upload_store
         self._ai_generate_fn = ai_generate_fn
         self._on_text_overlay_text_changed = on_text_overlay_text_changed
-        self._part1_files: list[str] = []
-        self._part2_files: list[str] = []
+        self._part_files: list[list[str]] = [[] for _ in range(MIN_STITCH_PARTS)]
+        self._part_row_refs: list[dict[str, Any]] = []
         self._music_files: list[str] = []
         self._text_glow_color = "#00FFFF"
         self._text_text_color = "#FFFFFF"
@@ -118,9 +120,16 @@ class StitchingTabPane(QWidget):
     def build_options(self) -> dict[str, Any]:
         return {
             "output_dir": self.output_dir_edit.text().strip(),
-            "part1_files": list(self._part1_files),
-            "part2_files": list(self._part2_files),
+            "part_files": [list(p) for p in self._part_files],
+            "part1_files": list(self._part_files[0]) if self._part_files else [],
+            "part2_files": (
+                list(self._part_files[1]) if len(self._part_files) > 1 else []
+            ),
             "music_files": list(self._music_files),
+            "mute_source_audio": bool(
+                not self._music_files
+                and self.mute_source_audio.isChecked()
+            ),
             "copies_per_track": int(self.copies_per_track.value()),
             "text_overlay": self.text_overlay_options_dict(),
             "transition": self._selected_transition(),
@@ -160,6 +169,11 @@ class StitchingTabPane(QWidget):
                 self._set_transition(self._last_transition)
 
     def validate_part_options(self) -> str | None:
+        if len(self._part_files) < MIN_STITCH_PARTS:
+            return f"Нужны хотя бы {MIN_STITCH_PARTS} части для склейки."
+        for i, files in enumerate(self._part_files, 1):
+            if not files:
+                return f"Выберите хотя бы одно видео для части {i}."
         return None
 
     def text_overlay_settings(self) -> TextOverlaySettings:
@@ -367,11 +381,27 @@ class StitchingTabPane(QWidget):
     def _load_settings_impl(self) -> None:
         s = self._settings
         self.output_dir_edit.setText(s.value("stitch/output_folder", "", type=str) or "")
-        self._part1_files = self._load_file_list("stitch/part1_files")
-        self._part2_files = self._load_file_list("stitch/part2_files")
+        try:
+            count = int(s.value("stitch/part_count", MIN_STITCH_PARTS, type=int))
+        except Exception:
+            count = MIN_STITCH_PARTS
+        count = max(MIN_STITCH_PARTS, min(MAX_STITCH_PARTS, count))
+        pools: list[list[str]] = []
+        for i in range(1, count + 1):
+            pools.append(self._load_file_list(f"stitch/part{i}_files"))
+        self._part_files = pools
+        if hasattr(self, "part_count_spin"):
+            self.part_count_spin.blockSignals(True)
+            self.part_count_spin.setValue(count)
+            self.part_count_spin.blockSignals(False)
+        self._rebuild_part_rows()
         self._music_files = self._load_file_list("stitch/music_files")
-        self._sync_part1_hint()
-        self._sync_part2_hint()
+        if hasattr(self, "mute_source_audio"):
+            self.mute_source_audio.blockSignals(True)
+            self.mute_source_audio.setChecked(
+                bool(s.value("stitch/mute_source_audio", False, type=bool))
+            )
+            self.mute_source_audio.blockSignals(False)
         self._sync_music_hint()
         saved_transition = normalize_stitch_transition(
             s.value("stitch/transition", DEFAULT_STITCH_TRANSITION, type=str)
@@ -459,9 +489,15 @@ class StitchingTabPane(QWidget):
             return
         s = self._settings
         s.setValue("stitch/output_folder", self.output_dir_edit.text().strip())
-        s.setValue("stitch/part1_files", list(self._part1_files))
-        s.setValue("stitch/part2_files", list(self._part2_files))
+        s.setValue("stitch/part_count", len(self._part_files))
+        for i, files in enumerate(self._part_files):
+            s.setValue(f"stitch/part{i + 1}_files", list(files))
         s.setValue("stitch/music_files", list(self._music_files))
+        if hasattr(self, "mute_source_audio"):
+            s.setValue(
+                "stitch/mute_source_audio",
+                bool(self.mute_source_audio.isChecked()),
+            )
         s.setValue("stitch/copies_per_track", int(self.copies_per_track.value()))
         if hasattr(self, "delete_after_upload"):
             s.setValue(
@@ -556,7 +592,8 @@ class StitchingTabPane(QWidget):
         on_pick,
         on_add,
         on_clear,
-    ) -> tuple[QWidget, QLabel, QPushButton, QPushButton, QPushButton]:
+        on_remove=None,
+    ) -> tuple[QWidget, QLabel, QPushButton, QPushButton, QPushButton, QPushButton]:
         btn_pick = QPushButton(pick_label)
         btn_pick.setObjectName("secondary")
         btn_pick.clicked.connect(on_pick)
@@ -566,10 +603,15 @@ class StitchingTabPane(QWidget):
         btn_clear = QPushButton("Очистить")
         btn_clear.setObjectName("secondary")
         btn_clear.clicked.connect(on_clear)
+        btn_remove = QPushButton("Удалить часть")
+        btn_remove.setObjectName("secondary")
+        if on_remove is not None:
+            btn_remove.clicked.connect(on_remove)
         btns = FlowLayout(hspacing=6, vspacing=6)
         btns.addWidget(btn_pick)
         btns.addWidget(btn_add)
         btns.addWidget(btn_clear)
+        btns.addWidget(btn_remove)
         btns_w = QWidget()
         btns_w.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         btns_w.setLayout(btns)
@@ -578,7 +620,7 @@ class StitchingTabPane(QWidget):
         hint.setWordWrap(True)
         hint.setMinimumWidth(0)
         hint.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        return btns_w, hint, btn_pick, btn_add, btn_clear
+        return btns_w, hint, btn_pick, btn_add, btn_clear, btn_remove
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -633,30 +675,19 @@ class StitchingTabPane(QWidget):
         io_grid.setHorizontalSpacing(8)
         io_grid.setVerticalSpacing(8)
 
-        (
-            part1_btns_w,
-            self._part1_hint,
-            self._btn_pick_part1,
-            self._btn_add_part1,
-            self._btn_clear_part1,
-        ) = self._make_clip_row(
-            pick_label="Выбрать клипы (часть 1)…",
-            on_pick=self._browse_part1,
-            on_add=self._add_part1,
-            on_clear=self._clear_part1,
+        self.part_count_spin = QSpinBox()
+        self.part_count_spin.setRange(MIN_STITCH_PARTS, MAX_STITCH_PARTS)
+        self.part_count_spin.setValue(MIN_STITCH_PARTS)
+        self.part_count_spin.setMaximumWidth(80)
+        self.part_count_spin.setToolTip(
+            f"Сколько клипов склеивать в один ролик ({MIN_STITCH_PARTS}…{MAX_STITCH_PARTS})."
         )
-        (
-            part2_btns_w,
-            self._part2_hint,
-            self._btn_pick_part2,
-            self._btn_add_part2,
-            self._btn_clear_part2,
-        ) = self._make_clip_row(
-            pick_label="Выбрать клипы (часть 2)…",
-            on_pick=self._browse_part2,
-            on_add=self._add_part2,
-            on_clear=self._clear_part2,
-        )
+        self.part_count_spin.valueChanged.connect(self._on_part_count_changed)
+
+        self._parts_host = QWidget()
+        self._parts_layout = QVBoxLayout(self._parts_host)
+        self._parts_layout.setContentsMargins(0, 0, 0, 0)
+        self._parts_layout.setSpacing(8)
 
         self.output_dir_edit = QLineEdit()
         self.output_dir_edit.setObjectName("ioPathEdit")
@@ -677,29 +708,27 @@ class StitchingTabPane(QWidget):
         out_row.addWidget(btn_out, 0)
         out_row.addStretch(1)
 
-        io_grid.addWidget(QLabel("Часть 1:"), 0, 0, Qt.AlignmentFlag.AlignTop)
-        io_grid.addWidget(self._part1_hint, 0, 1)
-        io_grid.addWidget(part1_btns_w, 1, 1)
-        io_grid.addWidget(QLabel("Часть 2:"), 2, 0, Qt.AlignmentFlag.AlignTop)
-        io_grid.addWidget(self._part2_hint, 2, 1)
-        io_grid.addWidget(part2_btns_w, 3, 1)
-        io_grid.addWidget(QLabel("Выходная папка:"), 4, 0)
-        io_grid.addLayout(out_row, 4, 1)
+        io_grid.addWidget(QLabel("Частей:"), 0, 0)
+        io_grid.addWidget(self.part_count_spin, 0, 1)
+        io_grid.addWidget(self._parts_host, 1, 0, 1, 2)
+        io_grid.addWidget(QLabel("Выходная папка:"), 2, 0)
+        io_grid.addLayout(out_row, 2, 1)
         io_grid.setColumnStretch(1, 1)
         self.copies_per_track = QSpinBox()
         self.copies_per_track.setRange(1, _INT_MAX)
         self.copies_per_track.setValue(1)
         self.copies_per_track.setMaximumWidth(120)
         self.copies_per_track.valueChanged.connect(lambda *_: self.save_settings())
-        io_grid.addWidget(QLabel("Количество роликов:"), 5, 0)
-        io_grid.addWidget(self.copies_per_track, 5, 1)
+        io_grid.addWidget(QLabel("Количество роликов:"), 3, 0)
+        io_grid.addWidget(self.copies_per_track, 3, 1)
         self.delete_after_upload = QCheckBox("Удалять после залива")
         self.delete_after_upload.setChecked(False)
         self.delete_after_upload.setToolTip(
             "После каждого успешного залива файл сразу удаляется из выходной папки."
         )
         self.delete_after_upload.toggled.connect(self.save_settings)
-        io_grid.addWidget(self.delete_after_upload, 6, 0, 1, 2)
+        io_grid.addWidget(self.delete_after_upload, 4, 0, 1, 2)
+        self._rebuild_part_rows()
 
         music_gb = QGroupBox("Треки для склейки")
         music_grid = QGridLayout(music_gb)
@@ -727,14 +756,25 @@ class StitchingTabPane(QWidget):
         music_grid.addWidget(QLabel("Аудиотреки:"), 0, 0)
         music_grid.addWidget(self._music_hint, 0, 1)
         music_grid.addWidget(music_btns_w, 0, 2)
+        self.mute_source_audio = QCheckBox(
+            "Вообще без фонового звука от оригиналов"
+        )
+        self.mute_source_audio.setToolTip(
+            "Ролик будет без звука: ни музыки, ни дорожки исходников."
+        )
+        self.mute_source_audio.toggled.connect(self._sync_music_hint)
+        self.mute_source_audio.toggled.connect(self.save_settings)
+        music_grid.addWidget(self.mute_source_audio, 1, 0, 1, 3)
         music_desc = QLabel(
-            "Случайный полный клип из части 1 и из части 2 склеиваются; "
-            "длительность ролика — их сумма. "
-            "Переход ставится на бит трека; при нехватке музыки хвост зацикливается."
+            "Музыка необязательна: без треков ролики склеиваются со звуком исходников. "
+            "Галочка «без звука от оригиналов» убирает и его — ролик будет тихим. "
+            "Если треки выбраны — поверх кладётся музыка, первый переход ставится на бит; "
+            "при нехватке музыки хвост зацикливается. "
+            "Из каждой части берётся случайный полный клип, длительность — их сумма."
         )
         music_desc.setObjectName("hint")
         music_desc.setWordWrap(True)
-        music_grid.addWidget(music_desc, 1, 0, 1, 3)
+        music_grid.addWidget(music_desc, 2, 0, 1, 3)
 
         transitions_gb = QGroupBox("Переход между частями")
         transitions_layout = QVBoxLayout(transitions_gb)
@@ -749,7 +789,7 @@ class StitchingTabPane(QWidget):
         self._transition_group = QButtonGroup(self)
         self._transition_radios: dict[str, QRadioButton] = {}
         transition_hints = {
-            STITCH_TRANSITION_CUT: "Жёсткий стык двух клипов без эффекта.",
+            STITCH_TRANSITION_CUT: "Жёсткий стык частей без эффекта.",
             STITCH_TRANSITION_FADE: "Плавное растворение одного кадра в другой (~0.4с).",
             STITCH_TRANSITION_CIRCLE: "Вторая часть открывается кругом из центра (~0.4с).",
             STITCH_TRANSITION_ZOOM: "Punch-zoom как в эдитах: наезд в стык (~0.4с).",
@@ -778,6 +818,7 @@ class StitchingTabPane(QWidget):
         for rb in self._transition_group.buttons():
             rb.toggled.connect(self._on_transition_toggled)
         transitions_note = QLabel(
+            "Эффект ставится на каждый стык соседних частей. "
             "Если клипы слишком короткие — автоматически останется простая склейка. "
             "Галочка «Выбирать рандомно» — свой эффект на каждый ролик."
         )
@@ -817,8 +858,8 @@ class StitchingTabPane(QWidget):
         self.text_overlay_after_frame_change = QCheckBox("Текст после смены кадра")
         self.text_overlay_after_frame_change.setChecked(False)
         self.text_overlay_after_frame_change.setToolTip(
-            "Показывать текст только после перехода с части 1 на часть 2 "
-            "(в момент смены кадра по ритму)."
+            "Показывать текст только после первого перехода "
+            "(в момент смены кадра)."
         )
         self.text_overlay_after_frame_change.toggled.connect(
             self._on_after_frame_change_toggled
@@ -1096,73 +1137,132 @@ class StitchingTabPane(QWidget):
             return self._merge_unique_paths([], files)
         return self._merge_unique_paths(existing, files)
 
-    def _browse_part1(self) -> None:
+    def _rebuild_part_rows(self) -> None:
+        layout = getattr(self, "_parts_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._part_row_refs = []
+        n = len(self._part_files)
+        can_remove = n > MIN_STITCH_PARTS
+        for i in range(n):
+            (
+                btns_w,
+                hint,
+                _btn_pick,
+                btn_add,
+                btn_clear,
+                btn_remove,
+            ) = self._make_clip_row(
+                pick_label=f"Выбрать клипы (часть {i + 1})…",
+                on_pick=lambda _checked=False, idx=i: self._browse_part(idx),
+                on_add=lambda _checked=False, idx=i: self._add_part(idx),
+                on_clear=lambda _checked=False, idx=i: self._clear_part(idx),
+                on_remove=lambda _checked=False, idx=i: self._remove_part_at(idx),
+            )
+            btn_remove.setVisible(can_remove)
+            block = QWidget()
+            grid = QGridLayout(block)
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setHorizontalSpacing(8)
+            grid.setVerticalSpacing(4)
+            grid.addWidget(QLabel(f"Часть {i + 1}:"), 0, 0, Qt.AlignmentFlag.AlignTop)
+            grid.addWidget(hint, 0, 1)
+            grid.addWidget(btns_w, 1, 1)
+            grid.setColumnStretch(1, 1)
+            layout.addWidget(block)
+            self._part_row_refs.append(
+                {
+                    "hint": hint,
+                    "btn_add": btn_add,
+                    "btn_clear": btn_clear,
+                    "btn_remove": btn_remove,
+                }
+            )
+            self._sync_part_hint_at(i)
+        self._sync_preview_part_titles()
+
+    def _on_part_count_changed(self, value: int) -> None:
+        if self._loading_settings:
+            return
+        self._set_part_count(int(value))
+        self.save_settings()
+        self._sync_text_overlay_preview()
+
+    def _set_part_count(self, n: int) -> None:
+        n = max(MIN_STITCH_PARTS, min(MAX_STITCH_PARTS, int(n)))
+        while len(self._part_files) < n:
+            idx = len(self._part_files)
+            extra = self._load_file_list(f"stitch/part{idx + 1}_files")
+            self._part_files.append(extra)
+        if len(self._part_files) > n:
+            self._part_files = self._part_files[:n]
+        self._rebuild_part_rows()
+
+    def _remove_part_at(self, index: int) -> None:
+        if len(self._part_files) <= MIN_STITCH_PARTS:
+            return
+        if index < 0 or index >= len(self._part_files):
+            return
+        del self._part_files[index]
+        self.part_count_spin.blockSignals(True)
+        self.part_count_spin.setValue(len(self._part_files))
+        self.part_count_spin.blockSignals(False)
+        self._rebuild_part_rows()
+        self.save_settings()
+        self._sync_text_overlay_preview()
+
+    def _browse_part(self, index: int) -> None:
+        if index < 0 or index >= len(self._part_files):
+            return
         files = self._pick_part_files(
-            title="Выберите видео для первой части",
-            existing=self._part1_files,
+            title=f"Выберите видео для части {index + 1}",
+            existing=self._part_files[index],
             replace=True,
         )
         if files is not None:
-            self._part1_files = files
-            self._sync_part1_hint()
+            self._part_files[index] = files
+            self._sync_part_hint_at(index)
             self._sync_text_overlay_preview()
             self.save_settings()
 
-    def _add_part1(self) -> None:
+    def _add_part(self, index: int) -> None:
+        if index < 0 or index >= len(self._part_files):
+            return
         files = self._pick_part_files(
-            title="Добавить видео к первой части",
-            existing=self._part1_files,
+            title=f"Добавить видео к части {index + 1}",
+            existing=self._part_files[index],
             replace=False,
         )
         if files is not None:
-            self._part1_files = files
-            self._sync_part1_hint()
+            self._part_files[index] = files
+            self._sync_part_hint_at(index)
             self._sync_text_overlay_preview()
             self.save_settings()
 
-    def _clear_part1(self) -> None:
-        if not self._part1_files:
+    def _clear_part(self, index: int) -> None:
+        if index < 0 or index >= len(self._part_files):
             return
-        self._part1_files = []
-        self._sync_part1_hint()
+        if not self._part_files[index]:
+            return
+        self._part_files[index] = []
+        self._sync_part_hint_at(index)
         self._sync_text_overlay_preview()
         self.save_settings()
 
-    def _browse_part2(self) -> None:
-        files = self._pick_part_files(
-            title="Выберите видео для второй части",
-            existing=self._part2_files,
-            replace=True,
-        )
-        if files is not None:
-            self._part2_files = files
-            self._sync_part2_hint()
-            self._sync_text_overlay_preview()
-            self.save_settings()
-
-    def _add_part2(self) -> None:
-        files = self._pick_part_files(
-            title="Добавить видео ко второй части",
-            existing=self._part2_files,
-            replace=False,
-        )
-        if files is not None:
-            self._part2_files = files
-            self._sync_part2_hint()
-            self._sync_text_overlay_preview()
-            self.save_settings()
-
-    def _clear_part2(self) -> None:
-        if not self._part2_files:
-            return
-        self._part2_files = []
-        self._sync_part2_hint()
-        self._sync_text_overlay_preview()
-        self.save_settings()
+    def _any_part_files(self) -> list[str]:
+        for files in self._part_files:
+            if files:
+                return files
+        return []
 
     def _browse_output_dir(self) -> None:
         start = self.output_dir_edit.text().strip() or self._part_start_dir(
-            self._part1_files or self._part2_files
+            self._any_part_files()
         )
         path = QFileDialog.getExistingDirectory(self, "Папка для склеенных роликов", start)
         if path:
@@ -1225,22 +1325,18 @@ class StitchingTabPane(QWidget):
         hint.setToolTip("\n".join(names))
         self._schedule_preview()
 
-    def _sync_part1_hint(self) -> None:
+    def _sync_part_hint_at(self, index: int) -> None:
+        if index < 0 or index >= len(self._part_files):
+            return
+        if index >= len(self._part_row_refs):
+            return
+        ref = self._part_row_refs[index]
         self._sync_part_hint(
-            self._part1_files,
-            self._part1_hint,
-            self._btn_add_part1,
-            self._btn_clear_part1,
-            "Не выбрано — нажмите «Выбрать клипы (часть 1)…»",
-        )
-
-    def _sync_part2_hint(self) -> None:
-        self._sync_part_hint(
-            self._part2_files,
-            self._part2_hint,
-            self._btn_add_part2,
-            self._btn_clear_part2,
-            "Не выбрано — нажмите «Выбрать клипы (часть 2)…»",
+            self._part_files[index],
+            ref["hint"],
+            ref["btn_add"],
+            ref["btn_clear"],
+            f"Не выбрано — нажмите «Выбрать клипы (часть {index + 1})…»",
         )
 
     def _sync_music_hint(self) -> None:
@@ -1248,8 +1344,18 @@ class StitchingTabPane(QWidget):
         has_files = n > 0
         self._btn_add_music.setVisible(has_files)
         self._btn_clear_music.setVisible(has_files)
+        if hasattr(self, "mute_source_audio"):
+            self.mute_source_audio.setVisible(not has_files)
         if n <= 0:
-            self._music_hint.setText("Не выбрано — нажмите «Выбрать треки…»")
+            mute = bool(
+                getattr(self, "mute_source_audio", None)
+                and self.mute_source_audio.isChecked()
+            )
+            self._music_hint.setText(
+                "Не выбрано — ролик без звука"
+                if mute
+                else "Не выбрано — склейка со звуком исходников"
+            )
             self._music_hint.setToolTip("")
             return
         names = [Path(p).name for p in self._music_files]
@@ -1356,7 +1462,9 @@ class StitchingTabPane(QWidget):
         self.save_settings()
 
     def _schedule_preview(self) -> None:
-        self._preview_timer.start(40)
+        timer = getattr(self, "_preview_timer", None)
+        if timer is not None:
+            timer.start(40)
         self.save_settings()
 
     def _schedule_preview_light(self) -> None:
@@ -1439,12 +1547,14 @@ class StitchingTabPane(QWidget):
             self._btn_text_preview_prev_part1 = btn_prev
             self._btn_text_preview_next_part1 = btn_next
             self._text_overlay_preview_meta_part1 = meta
+            self._preview_title_part1 = title_lbl
         else:
             btn_prev.clicked.connect(self._text_overlay_preview_prev_part2)
             btn_next.clicked.connect(self._text_overlay_preview_next_part2)
             self._btn_text_preview_prev_part2 = btn_prev
             self._btn_text_preview_next_part2 = btn_next
             self._text_overlay_preview_meta_part2 = meta
+            self._preview_title_part2 = title_lbl
 
         nav = QHBoxLayout()
         nav.setContentsMargins(0, 0, 0, 0)
@@ -1478,8 +1588,18 @@ class StitchingTabPane(QWidget):
             preview.set_anchor(ax, ay)
             preview.blockSignals(False)
 
+    def _sync_preview_part_titles(self) -> None:
+        n = max(MIN_STITCH_PARTS, len(self._part_files))
+        if hasattr(self, "_preview_title_part1"):
+            self._preview_title_part1.setText("Часть 1")
+        if hasattr(self, "_preview_title_part2"):
+            self._preview_title_part2.setText(f"Часть {n}")
+
     def _text_overlay_preview_videos(self, part: int) -> list[str]:
-        files = self._part1_files if part == 1 else self._part2_files
+        if part == 1:
+            files = self._part_files[0] if self._part_files else []
+        else:
+            files = self._part_files[-1] if self._part_files else []
         out: list[str] = []
         seen: set[str] = set()
         for raw in files:
@@ -1529,7 +1649,8 @@ class StitchingTabPane(QWidget):
             btn_prev = self._btn_text_preview_prev_part2
             btn_next = self._btn_text_preview_next_part2
             meta = self._text_overlay_preview_meta_part2
-            empty_msg = "Нет исходников части 2"
+            last_n = max(1, len(self._part_files))
+            empty_msg = f"Нет исходников части {last_n}"
         btn_prev.setEnabled(can_cycle)
         btn_next.setEnabled(can_cycle)
         if n <= 0:
@@ -1587,7 +1708,7 @@ class StitchingTabPane(QWidget):
         preview.set_background_video(current, force=force)
         overlay_on = bool(self.text_overlay_enabled.isChecked())
         after_cut = bool(self.text_overlay_after_frame_change.isChecked())
-        # «После смены кадра» — текст только на части 2.
+        # «После смены кадра» — текст только после первой части.
         preview.set_text_visible(overlay_on and not (part == 1 and after_cut))
 
     def _sync_text_overlay_preview(

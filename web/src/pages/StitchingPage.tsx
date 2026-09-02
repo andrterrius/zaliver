@@ -36,12 +36,20 @@ import {
 import { RangeSlider, type RangeValue } from "../components/RangeSlider";
 
 const SECTIONS = ["Исходники", "Текст", "Музыка", "Переходы"];
+const MIN_STITCH_PARTS = 2;
+const MAX_STITCH_PARTS = 12;
+
+function clampPartCount(n: number): number {
+  const v = Math.round(Number(n));
+  if (!Number.isFinite(v)) return MIN_STITCH_PARTS;
+  return Math.max(MIN_STITCH_PARTS, Math.min(MAX_STITCH_PARTS, v));
+}
 
 const TRANSITIONS = [
   {
     id: "cut",
     label: "Простая склейка",
-    hint: "Жёсткий стык двух клипов без эффекта.",
+    hint: "Жёсткий стык частей без эффекта.",
   },
   {
     id: "fade",
@@ -78,10 +86,10 @@ export function StitchingPage({ platform }: Props) {
   const proc = useProcessingDefaults();
   const [section, setSection] = useState(0);
   const [hydrated, setHydrated] = useState(false);
-  const [part1, setPart1] = useState<string[]>([]);
-  const [part2, setPart2] = useState<string[]>([]);
+  const [parts, setParts] = useState<string[][]>([[], []]);
   const [outputDir, setOutputDir] = useState("");
   const [music, setMusic] = useState<string[]>([]);
+  const [muteSourceAudio, setMuteSourceAudio] = useState(false);
   const [copies, setCopies] = useState(1);
   const [transition, setTransition] = useState<TransitionId | "">("cut");
   const [lastTransition, setLastTransition] = useState<TransitionId>("cut");
@@ -118,10 +126,17 @@ export function StitchingPage({ platform }: Props) {
       try {
         const s = await api.getSettings();
         const v = s.values;
-        setPart1(asStringList(v["stitch/part1_files"]));
-        setPart2(asStringList(v["stitch/part2_files"]));
+        const count = clampPartCount(
+          asNumber(v["stitch/part_count"], MIN_STITCH_PARTS),
+        );
+        setParts(
+          Array.from({ length: count }, (_, i) =>
+            asStringList(v[`stitch/part${i + 1}_files`]),
+          ),
+        );
         setOutputDir(String(v["stitch/output_folder"] || "").trim());
         setMusic(asStringList(v["stitch/music_files"]));
+        setMuteSourceAudio(asBool(v["stitch/mute_source_audio"], false));
         setCopies(
           Math.max(1, Math.round(asNumber(v["stitch/copies_per_track"], 1))),
         );
@@ -150,11 +165,17 @@ export function StitchingPage({ platform }: Props) {
 
   const persistValues = useMemo(() => {
     if (!hydrated) return null;
+    const partPersist: Record<string, unknown> = {
+      "stitch/part_count": parts.length,
+    };
+    parts.forEach((p, i) => {
+      partPersist[`stitch/part${i + 1}_files`] = p;
+    });
     return {
-      "stitch/part1_files": part1,
-      "stitch/part2_files": part2,
+      ...partPersist,
       "stitch/output_folder": outputDir,
       "stitch/music_files": music,
+      "stitch/mute_source_audio": muteSourceAudio,
       "stitch/copies_per_track": copies,
       "stitch/transition": transition || lastTransition || "cut",
       "stitch/transition_random": transitionRandom,
@@ -164,10 +185,10 @@ export function StitchingPage({ platform }: Props) {
     };
   }, [
     hydrated,
-    part1,
-    part2,
+    parts,
     outputDir,
     music,
+    muteSourceAudio,
     copies,
     transition,
     lastTransition,
@@ -180,16 +201,13 @@ export function StitchingPage({ platform }: Props) {
 
   const onStart = () => {
     setError("");
-    if (!part1.length) {
-      setError("Добавьте клипы для части 1.");
+    if (parts.length < MIN_STITCH_PARTS) {
+      setError("Нужны хотя бы две части для склейки.");
       return;
     }
-    if (!part2.length) {
-      setError("Добавьте клипы для части 2.");
-      return;
-    }
-    if (!music.length) {
-      setError("Добавьте аудиотреки.");
+    const empty = parts.findIndex((p) => !p.length);
+    if (empty >= 0) {
+      setError(`Добавьте клипы для части ${empty + 1}.`);
       return;
     }
     setUploadDialogOpen(true);
@@ -209,14 +227,16 @@ export function StitchingPage({ platform }: Props) {
       } catch {
         /* continue */
       }
-      const plannedVideos = music.length * copies;
+      const plannedVideos = copies;
       const uploadAfter = uploadAfterPayload(choice, platform, plannedVideos);
       const res = await api.startStitching({
         output_dir: outputDir,
         platform,
-        part1_files: part1,
-        part2_files: part2,
+        part_files: parts,
+        part1_files: parts[0] ?? [],
+        part2_files: parts[1] ?? [],
         music_files: music,
+        mute_source_audio: !music.length && muteSourceAudio,
         copies_per_track: copies,
         num_workers: workersForUploadChoice(choice, proc.numWorkers),
         use_gpu: proc.useGpu,
@@ -285,20 +305,60 @@ export function StitchingPage({ platform }: Props) {
           {section === 0 ? (
             <section className="group stack">
               <h3 className="group-title">Части</h3>
-              <SourcePicker
-                label="Часть 1 — видео"
-                value={part1}
-                onChange={setPart1}
-                kind="video"
-                accept="video/*"
-              />
-              <SourcePicker
-                label="Часть 2 — видео"
-                value={part2}
-                onChange={setPart2}
-                kind="video"
-                accept="video/*"
-              />
+              <label>
+                Число частей{" "}
+                <input
+                  className="field"
+                  style={{ width: 90 }}
+                  type="number"
+                  min={MIN_STITCH_PARTS}
+                  max={MAX_STITCH_PARTS}
+                  value={parts.length}
+                  onChange={(e) => {
+                    const next = clampPartCount(Number(e.target.value));
+                    setParts((prev) => {
+                      if (next === prev.length) return prev;
+                      if (next > prev.length) {
+                        return [
+                          ...prev,
+                          ...Array.from({ length: next - prev.length }, () => []),
+                        ];
+                      }
+                      return prev.slice(0, next);
+                    });
+                  }}
+                />
+              </label>
+              {parts.map((files, i) => (
+                <div key={i} className="stack" style={{ gap: 6 }}>
+                  <SourcePicker
+                    label={`Часть ${i + 1} — видео`}
+                    value={files}
+                    onChange={(next) => {
+                      setParts((prev) =>
+                        prev.map((p, idx) => (idx === i ? next : p)),
+                      );
+                    }}
+                    kind="video"
+                    accept="video/*"
+                  />
+                  {parts.length > MIN_STITCH_PARTS ? (
+                    <button
+                      type="button"
+                      className="btn secondary"
+                      onClick={() =>
+                        setParts((prev) =>
+                          prev.length <= MIN_STITCH_PARTS
+                            ? prev
+                            : prev.filter((_, idx) => idx !== i),
+                        )
+                      }
+                    >
+                      Удалить часть {i + 1}
+                    </button>
+                  ) : null}
+                </div>
+              ))}
               <OutputFolderPicker
                 kind="gluing"
                 platform={platform}
@@ -342,6 +402,10 @@ export function StitchingPage({ platform }: Props) {
           {section === 2 ? (
             <section className="group stack">
               <h3 className="group-title">Музыка</h3>
+              <p className="hint">
+                Необязательно. Без треков остаётся звук исходников; если треки
+                выбраны — поверх кладётся музыка, первый переход ставится на бит.
+              </p>
               <SourcePicker
                 label="Аудиотреки"
                 value={music}
@@ -349,6 +413,21 @@ export function StitchingPage({ platform }: Props) {
                 kind="audio"
                 accept="audio/*"
               />
+              {!music.length ? (
+                <label className="row" style={{ gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={muteSourceAudio}
+                    onChange={(e) => setMuteSourceAudio(e.target.checked)}
+                  />
+                  <span>
+                    <strong>Вообще без фонового звука от оригиналов</strong>
+                    <div className="hint">
+                      Ролик будет без звука: ни музыки, ни дорожки исходников.
+                    </div>
+                  </span>
+                </label>
+              ) : null}
             </section>
           ) : null}
 
@@ -406,9 +485,9 @@ export function StitchingPage({ platform }: Props) {
                 </label>
               ))}
               <p className="hint">
-                Длительность ролика = сумма двух полных исходников. Переход на
-                бит; если фрагмент не найден — старт ~10% трека, при нехватке
-                хвост зацикливается.
+                Длительность ролика = сумма полных исходников. С музыкой первый
+                переход на бит; без музыки — звук клипов. Если фрагмент не
+                найден — старт ~10% трека, при нехватке хвост зацикливается.
               </p>
             </section>
           ) : null}

@@ -23,6 +23,8 @@ from zaliver.api.profile_jobs import (
     start_cookie_farm,
     start_instagram_2fa,
     start_instagram_register,
+    start_tiktok_2fa,
+    start_tiktok_register,
     start_promote,
     start_warmup,
 )
@@ -67,6 +69,8 @@ from zaliver.api.schemas import (
     IdsRequest,
     Instagram2FAJobRequest,
     InstagramRegisterJobRequest,
+    TikTok2FAJobRequest,
+    TikTokRegisterJobRequest,
     JobCreatedResponse,
     JobListResponse,
     OutputDirsResponse,
@@ -399,7 +403,7 @@ def build_router() -> APIRouter:
         request: Request,
         platform: str | None = Query(
             default=None,
-            description="Override platform (youtube|instagram|yt_inst)",
+            description="Override platform (youtube|instagram|tiktok|yt_inst)",
         ),
     ) -> OutputDirsResponse:
         st = _state(request)
@@ -745,9 +749,13 @@ def build_router() -> APIRouter:
         if not vids:
             raise HTTPException(status_code=400, detail="Нет video_id для проверки")
 
-        from zaliver.config.platform_settings import is_instagram_platform
+        from zaliver.config.platform_settings import (
+            is_instagram_platform,
+            is_tiktok_platform,
+        )
 
         use_ig = is_instagram_platform(platform)
+        use_tt = is_tiktok_platform(platform)
 
         def runner(sink, register_cancel, job_id: str = "") -> None:
             del job_id
@@ -759,7 +767,17 @@ def build_router() -> APIRouter:
             register_cancel(_cancel)
             total = len(vids)
             sink.on_progress(0, total, "stats")
-            if use_ig:
+            if use_tt:
+                _run_tt_stats_refresh(
+                    sink=sink,
+                    store=store,
+                    platform=platform,
+                    video_ids=vids,
+                    body=body,
+                    settings=settings,
+                    cancelled=cancelled,
+                )
+            elif use_ig:
                 _run_ig_stats_refresh(
                     sink=sink,
                     store=store,
@@ -1462,6 +1480,40 @@ def build_router() -> APIRouter:
         )
 
     @router.post(
+        "/v1/jobs/profiles/tiktok-register",
+        response_model=JobCreatedResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def job_tt_register(
+        body: TikTokRegisterJobRequest, request: Request
+    ) -> JobCreatedResponse:
+        return _profile_job_response(
+            start_tiktok_register(
+                _state(request),
+                body,
+                username=_username(request),
+                session_token=_bearer(request),
+            )
+        )
+
+    @router.post(
+        "/v1/jobs/profiles/tiktok-2fa",
+        response_model=JobCreatedResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def job_tt_2fa(
+        body: TikTok2FAJobRequest, request: Request
+    ) -> JobCreatedResponse:
+        return _profile_job_response(
+            start_tiktok_2fa(
+                _state(request),
+                body,
+                username=_username(request),
+                session_token=_bearer(request),
+            )
+        )
+
+    @router.post(
         "/v1/jobs/profiles/channel-setup",
         response_model=JobCreatedResponse,
         status_code=status.HTTP_202_ACCEPTED,
@@ -1687,4 +1739,66 @@ def _run_ig_stats_refresh(
             fail_n += 1
             sink.on_log(f"{vid}: {e}")
         sink.on_progress(i + 1, total, vid)
+    sink.on_finished(True, f"OK={ok_n}, fail={fail_n}")
+
+
+def _run_tt_stats_refresh(
+    *,
+    sink: Any,
+    store: Any,
+    platform: str,
+    video_ids: list[str],
+    body: StatsRefreshRequest,
+    settings: Any,
+    cancelled: dict[str, bool],
+) -> None:
+    from zaliver.tiktok_upload.reel_stats import (
+        DEFAULT_STATS_WORKERS,
+        fetch_reel_stats_many,
+    )
+
+    del body, settings
+    if not video_ids:
+        sink.on_finished(False, "Нет TikTok video_id для проверки")
+        return
+
+    ok_n = 0
+    fail_n = 0
+
+    def _on_progress(step: int, total: int, vid: str) -> None:
+        sink.on_progress(step, total, vid)
+
+    def _on_item(st: Any, vid: str, err: str | None) -> None:
+        nonlocal ok_n, fail_n
+        if err is None and st is not None:
+            store.update_video_stats(
+                video_id=vid,
+                view_count=int(getattr(st, "view_count", 0) or 0),
+                like_count=getattr(st, "like_count", None),
+                comment_count=getattr(st, "comment_count", None),
+                age_restricted=False,
+                platform=platform,
+            )
+            ok_n += 1
+            sink.on_log(
+                f"{vid}: views={int(getattr(st, 'view_count', 0) or 0)} "
+                f"likes={getattr(st, 'like_count', None)} "
+                f"comments={getattr(st, 'comment_count', None)}"
+            )
+            return
+        store.mark_video_stats_unavailable(video_id=vid, platform=platform)
+        fail_n += 1
+        sink.on_log(f"{vid}: {err}")
+
+    try:
+        fetch_reel_stats_many(
+            list(video_ids),
+            workers=DEFAULT_STATS_WORKERS,
+            on_progress=_on_progress,
+            on_item=_on_item,
+            should_cancel=lambda: bool(cancelled["v"]),
+        )
+    except Exception as e:
+        sink.on_finished(False, f"Не удалось проверить TikTok: {e}")
+        return
     sink.on_finished(True, f"OK={ok_n}, fail={fail_n}")

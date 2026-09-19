@@ -63,7 +63,7 @@ function SectionHead({
 }
 
 export function ChannelEditPage({ platform }: Props) {
-  const isIg = platform === "instagram";
+  const isIg = platform === "instagram" || platform === "tiktok";
   const namesTitle = isIg ? "Юзернейм" : "Название канала";
 
   const [profiles, setProfiles] = useState<Profile[]>([]);

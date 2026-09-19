@@ -1,4 +1,4 @@
-"""Экран выбора режима: YouTube / Instagram / Yt+Inst."""
+"""Экран выбора режима: YouTube / Instagram / TikTok / Yt+Inst."""
 
 from __future__ import annotations
 

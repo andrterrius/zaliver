@@ -1,5 +1,5 @@
 """
-Уведомление stats_server об успешной загрузке ролика (YouTube / Instagram).
+Уведомление stats_server об успешной загрузке ролика (YouTube / Instagram / TikTok).
 """
 
 from __future__ import annotations
@@ -14,13 +14,18 @@ STATS_SERVER_UPLOADED_VIDEO_PATH = "/api/zaliver/uploaded-video"
 
 PLATFORM_YOUTUBE = "youtube"
 PLATFORM_INSTAGRAM = "instagram"
+PLATFORM_TIKTOK = "tiktok"
 
 _LOG = logging.getLogger(__name__)
 
 
 def _normalize_platform(value: str | None) -> str:
     v = (value or "").strip().lower()
-    return PLATFORM_INSTAGRAM if v == PLATFORM_INSTAGRAM else PLATFORM_YOUTUBE
+    if v == PLATFORM_INSTAGRAM:
+        return PLATFORM_INSTAGRAM
+    if v == PLATFORM_TIKTOK:
+        return PLATFORM_TIKTOK
+    return PLATFORM_YOUTUBE
 
 
 def notify_uploaded_video(
@@ -35,7 +40,7 @@ def notify_uploaded_video(
     """
     POST JSON ``{ "username", "video_id", "profile_id", "platform", "scheduled"? }``
     на stats_server.
-    ``platform`` — ``youtube`` или ``instagram``.
+    ``platform`` — ``youtube``, ``instagram`` или ``tiktok``.
     ``profile_id`` — id профиля антидетект-браузера или пустая строка.
     ``scheduled`` — unix-время отложенной публикации (только для schedule).
     Не бросает исключения наружу (ошибки только в лог).

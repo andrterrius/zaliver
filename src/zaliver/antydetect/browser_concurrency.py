@@ -15,6 +15,12 @@ INSTAGRAM_TABS_PER_PROFILE_MAX = 10
 DEFAULT_INSTAGRAM_TABS_PER_PROFILE = 3
 SETTINGS_KEY_INSTAGRAM_TABS_PER_PROFILE = "instagram/tabs_per_profile"
 
+# TikTok multi-tab (пауза 0): вкладок на один открытый профиль.
+TIKTOK_TABS_PER_PROFILE_MIN = INSTAGRAM_TABS_PER_PROFILE_MIN
+TIKTOK_TABS_PER_PROFILE_MAX = INSTAGRAM_TABS_PER_PROFILE_MAX
+DEFAULT_TIKTOK_TABS_PER_PROFILE = DEFAULT_INSTAGRAM_TABS_PER_PROFILE
+SETTINGS_KEY_TIKTOK_TABS_PER_PROFILE = "tiktok/tabs_per_profile"
+
 
 def clamp_max_concurrent_browsers(value: int | float | str | None) -> int:
     try:
@@ -88,3 +94,36 @@ def compute_instagram_tabs_per_profile(
         if len(ids) > cap:
             return {pid: 1 for pid in ids}
     return {pid: n_tabs for pid in ids}
+
+
+def clamp_tiktok_tabs_per_profile(value: int | float | str | None) -> int:
+    return clamp_instagram_tabs_per_profile(value)
+
+
+def tiktok_tabs_per_profile_from_settings(
+    settings: object | None = None,
+) -> int:
+    from zaliver.config.store import ensure_settings_store
+
+    s = ensure_settings_store(settings)
+    if not s.contains(SETTINGS_KEY_TIKTOK_TABS_PER_PROFILE):
+        return DEFAULT_TIKTOK_TABS_PER_PROFILE
+    return clamp_tiktok_tabs_per_profile(
+        s.value(
+            SETTINGS_KEY_TIKTOK_TABS_PER_PROFILE,
+            DEFAULT_TIKTOK_TABS_PER_PROFILE,
+        )
+    )
+
+
+def compute_tiktok_tabs_per_profile(
+    profile_ids: list[str] | tuple[str, ...],
+    tabs_per_profile: int | float | str | None,
+    *,
+    max_concurrent_browsers: int | float | str | None = None,
+) -> dict[str, int]:
+    return compute_instagram_tabs_per_profile(
+        profile_ids,
+        tabs_per_profile,
+        max_concurrent_browsers=max_concurrent_browsers,
+    )

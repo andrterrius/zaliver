@@ -26,7 +26,7 @@ from zaliver.ui.account_import_parser import (
     build_selected_profile_rows,
     parse_accounts_text,
 )
-from zaliver.ui.platform import PLATFORM_INSTAGRAM, normalize_platform
+from zaliver.ui.platform import PLATFORM_INSTAGRAM, PLATFORM_TIKTOK, normalize_platform
 from zaliver.core.profiles.account_data import (
     GMAIL_2FA_KEY,
     GMAIL_LOGIN_KEY,
@@ -34,11 +34,15 @@ from zaliver.core.profiles.account_data import (
     INST_2FA_KEY,
     INST_LOGIN_KEY,
     INST_PASSWORD_KEY,
+    TT_2FA_KEY,
+    TT_LOGIN_KEY,
+    TT_PASSWORD_KEY,
     YT_2FA_KEY,
     YT_LOGIN_KEY,
     YT_PASSWORD_KEY,
     build_account_credentials_payload,
     build_instagram_credentials_payload,
+    build_tiktok_credentials_payload,
 )
 
 
@@ -70,7 +74,7 @@ class ProfileAccountsImportDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self._platform = normalize_platform(platform)
-        self._instagram = self._platform == PLATFORM_INSTAGRAM
+        self._instagram = self._platform in (PLATFORM_INSTAGRAM, PLATFORM_TIKTOK)
         self.setWindowTitle("Импорт данных учёток")
         self.setModal(True)
         self.setMinimumSize(720, 520)
@@ -198,18 +202,26 @@ class ProfileAccountsImportDialog(QDialog):
             if not pid or not isinstance(account, dict):
                 continue
             if self._instagram:
+                builder = (
+                    build_tiktok_credentials_payload
+                    if self._platform == PLATFORM_TIKTOK
+                    else build_instagram_credentials_payload
+                )
+                login_key = TT_LOGIN_KEY if self._platform == PLATFORM_TIKTOK else INST_LOGIN_KEY
+                pwd_key = TT_PASSWORD_KEY if self._platform == PLATFORM_TIKTOK else INST_PASSWORD_KEY
+                tfa_key = TT_2FA_KEY if self._platform == PLATFORM_TIKTOK else INST_2FA_KEY
                 out.append(
                     (
                         pid,
-                        build_instagram_credentials_payload(
+                        builder(
                             login=_account_field(
-                                account, INST_LOGIN_KEY, YT_LOGIN_KEY
+                                account, login_key, YT_LOGIN_KEY
                             ),
                             password=_account_field(
-                                account, INST_PASSWORD_KEY, YT_PASSWORD_KEY
+                                account, pwd_key, YT_PASSWORD_KEY
                             ),
                             twofa=_account_field(
-                                account, INST_2FA_KEY, YT_2FA_KEY
+                                account, tfa_key, YT_2FA_KEY
                             ),
                         ),
                     )

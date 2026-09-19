@@ -1,4 +1,4 @@
-"""Залив видео в Instagram Reels: главная → «Новая публикация» → файл → Share."""
+"""Залив видео в TikTok: главная → Upload → Studio → файл → Post."""
 
 from __future__ import annotations
 
@@ -9,11 +9,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from zaliver.instagram_upload.instagram_availability import (
-    verify_instagram_home_available,
+from zaliver.tiktok_upload.tiktok_availability import (
+    verify_tiktok_home_available,
 )
-from zaliver.instagram_upload.logutil import emit_instagram_log, instagram_entrypoint
-from zaliver.instagram_upload.register import INSTAGRAM_URL, _navigate_page_to
+from zaliver.tiktok_upload.logutil import emit_tiktok_log, tiktok_entrypoint
+from zaliver.tiktok_upload.register import TIKTOK_URL, _navigate_page_to
 from zaliver.text_format import (
     BLANK_LINE_BRAILLE,
     blank_line_gap_count,
@@ -30,12 +30,12 @@ _SELECT_CROP_MISSING_ERR = (
     "Кнопка Select Crop не появилась после передачи файла."
 )
 _NEW_POST_CLICK_ERR = (
-    "Не удалось нажать «Новая публикация» в сайдбаре Instagram."
+    "Не удалось нажать «Upload» в сайдбаре TikTok."
 )
 _CREATE_PUBLICATION_ERR = (
     "Не удалось выбрать «Публикация» в меню Create."
 )
-_CREATE_DIALOG_ERR = "Диалог создания публикации не открылся."
+_CREATE_DIALOG_ERR = "Страница загрузки TikTok Studio не открылась."
 # Первая попытка Create + одна повторная после reload; затем профиль исключается.
 _CREATE_FLOW_RETRY_ATTEMPTS = 2
 
@@ -67,17 +67,23 @@ _CREATE_DIALOG_ARIA = (
     "New post",
 )
 _SELECT_FILE_BTN_RE = re.compile(
-    r"выбрать на компьютере|select from computer|select files?",
+    r"выбрать на компьютере|select from computer|select files?|"
+    r"select video|select file|"
+    r"выбрать видео|выбрать файлы?|загрузить видео",
     re.I,
 )
 _NEXT_RE = re.compile(r"^\s*(Далее|далее|Next|next)\s*$")
 _SHARE_RE = re.compile(r"^\s*(Поделиться|поделиться|Share|share)\s*$")
-_OK_DISMISS_RE = re.compile(r"^(ок|ok|понятно|got it)$", re.I)
+_OK_DISMISS_RE = re.compile(
+    r"^(ок|ok|понятно|хорошо|ясно|got it)$", re.I
+)
 _DONE_RE = re.compile(r"^(done|готово)$", re.I)
 _POST_SHARED_ARIA = (
     "Post shared",
     "Reel shared",
     "Публикация отправлена",
+    "Видео опубликовано",
+    "Ролик опубликован",
     "Reel опубликован",
     "Видео Reels опубликовано",
     "Ваше видео Reels опубликовано",
@@ -85,6 +91,7 @@ _POST_SHARED_ARIA = (
 _POST_SHARED_HEADING_RE = re.compile(
     r"reel shared|post shared|your reel has been shared|"
     r"публикация отправлена|рилс опубликован|"
+    r"видео опубликовано|ролик опубликован|"
     r"ваше видео(?:\s+reels)?\s+опубликовано|"
     r"видео\s+reels\s+опубликовано",
     re.I,
@@ -104,14 +111,36 @@ _POST_FAILED_ARIA_RE = re.compile(
 )
 _RETRY_BTN_RE = re.compile(r"^(повторить|retry|try again)$", re.I)
 _REEL_HREF_RE = re.compile(r"/reel/([^/?#]+)/?", re.I)
+_TT_VIDEO_HREF_RE = re.compile(r"/@([^/?#]+)/video/(\d{8,})", re.I)
+_TURN_ON_BTN_RE = re.compile(
+    r"turn\s*on|enable|включить",
+    re.I,
+)
+_GOT_IT_BTN_RE = re.compile(
+    r"got\s*it|понятно|хорошо|ясно",
+    re.I,
+)
+_CHECKING_PROGRESS_RE = re.compile(
+    r"checking in progress|"
+    r"checking copyright|"
+    r"проверк[аи].{0,40}процессе|"
+    r"ид[её]т проверка|"
+    r"проверка выполняется|"
+    r"проверяем",
+    re.I,
+)
+_POST_BTN_RE = re.compile(
+    r"^\s*(post|опубликовать|разместить)\s*$",
+    re.I,
+)
 
 
-class InstagramReelsUploadError(RuntimeError):
-    """Ошибка сценария залива Reels."""
+class TikTokReelsUploadError(RuntimeError):
+    """Ошибка сценария залива Тиктоков."""
 
 
 def _log(message: str) -> None:
-    emit_instagram_log(message, tag="[instagram]")
+    emit_tiktok_log(message, tag="[tiktok]")
 
 
 def _cdp_chrome_file_path(local_path: str) -> str:
@@ -130,7 +159,7 @@ def _validate_video_file_path(video_path: str | Path) -> Path:
         except Exception as e:
             last_err = e
         if time.monotonic() >= deadline:
-            raise InstagramReelsUploadError(
+            raise TikTokReelsUploadError(
                 f"Видеофайл не найден/не доступен: {video_path!r}. "
                 f"expanded={str(p)!r}, last_stat_err={last_err!r}"
             )
@@ -222,13 +251,13 @@ def _click_new_post_element(page, target, *, label: str = "") -> str:
             last_err = e
             continue
         if name != "dom":
-            _log(f"Reels upload: клик Create через {name}.")
+            _log(f"TikToks upload: клик Create через {name}.")
         if not hash_link:
             return shown
         if _settled():
             return shown
         _log(
-            f"Reels upload: после Create ({name}) UI не открылся — "
+            f"TikToks upload: после Create ({name}) UI не открылся — "
             "другая стратегия…"
         )
     if last_err is not None and not hash_link:
@@ -275,7 +304,7 @@ def _try_click_new_post_once(page, *, appear_timeout_ms: float = 250) -> bool:
         svg = _new_post_svg_locator(page).first
         svg.wait_for(state="attached", timeout=wait_ms)
         label = _click_new_post_target(page, svg)
-        _log(f"Reels upload: клик по «{label}».")
+        _log(f"TikToks upload: клик по «{label}».")
         return True
     except Exception:
         pass
@@ -293,7 +322,7 @@ def _try_click_new_post_once(page, *, appear_timeout_ms: float = 250) -> bool:
             label = ""
         shown = label or "Новая публикация"
         _click_new_post_element(page, link, label=shown)
-        _log(f"Reels upload: клик по ссылке Create (nav href=# «{shown}»).")
+        _log(f"TikToks upload: клик по ссылке Create (nav href=# «{shown}»).")
         return True
     except Exception:
         pass
@@ -312,7 +341,7 @@ def _try_click_new_post_once(page, *, appear_timeout_ms: float = 250) -> bool:
             if int(svg.count()) <= 0:
                 return False
         _click_new_post_target(page, svg)
-        _log("Reels upload: клик по svg через <title>.")
+        _log("TikToks upload: клик по svg через <title>.")
         return True
     except Exception:
         return False
@@ -484,7 +513,7 @@ def _dismiss_discard_create_dialog(page, *, prefer_keep: bool = False) -> None:
                 _dom_click(keep.first)
                 page.wait_for_timeout(300)
                 _log(
-                    "Reels upload: диалог отмены — продолжаем редактирование."
+                    "TikToks upload: диалог отмены — продолжаем редактирование."
                 )
                 return
         except Exception:
@@ -494,7 +523,7 @@ def _dismiss_discard_create_dialog(page, *, prefer_keep: bool = False) -> None:
         if btn.count() and btn.first.is_visible(timeout=400):
             _dom_click(btn.first)
             page.wait_for_timeout(400)
-            _log("Reels upload: закрыли диалог отмены публикации.")
+            _log("TikToks upload: закрыли диалог отмены публикации.")
     except Exception:
         pass
 
@@ -505,19 +534,19 @@ def _click_new_post_in_sidebar(page, *, max_seconds: float = 90.0) -> None:
     _dismiss_discard_create_dialog(page, prefer_keep=False)
     if _create_wizard_already_open(page):
         _log(
-            "Reels upload: мастер создания уже открыт — "
+            "TikToks upload: мастер создания уже открыт — "
             "«Новая публикация» не нажимаем (иначе «Отменить»)."
         )
         return
 
-    _log("Reels upload: ищем кнопку «Новая публикация» в сайдбаре…")
+    _log("TikToks upload: ищем кнопку «Новая публикация» в сайдбаре…")
     deadline = time.monotonic() + max(10.0, float(max_seconds))
     last_url = ""
     poll_chunk_ms = 300.0
     while time.monotonic() < deadline:
         if _create_flow_started(page):
             _dismiss_discard_create_dialog(page, prefer_keep=True)
-            _log("Reels upload: мастер/меню Create открыто.")
+            _log("TikToks upload: мастер/меню Create открыто.")
             return
         try:
             last_url = (page.url or "").strip()
@@ -538,13 +567,13 @@ def _click_new_post_in_sidebar(page, *, max_seconds: float = 90.0) -> None:
             except Exception:
                 time.sleep(0.1)
         _log(
-            "Reels upload: после клика Create UI не открылся — "
+            "TikToks upload: после клика Create UI не открылся — "
             "повторяем (в т.ч. nav href=#)…"
         )
 
     if _create_flow_started(page):
         return
-    raise InstagramReelsUploadError(
+    raise TikTokReelsUploadError(
         _NEW_POST_CLICK_ERR + (f" URL={last_url!r}" if last_url else "")
     )
 
@@ -577,7 +606,7 @@ def _try_click_create_submenu_once(page) -> bool:
                 _dom_click(link)
             except Exception:
                 link.click(timeout=4_000, force=True)
-            _log("Reels upload: в меню Create выбрали «Публикация» (link).")
+            _log("TikToks upload: в меню Create выбрали «Публикация» (link).")
             return True
     except Exception:
         pass
@@ -630,7 +659,7 @@ def _try_click_create_submenu_once(page) -> bool:
         label = (menu_svg.get_attribute("aria-label") or "").strip() or "Post"
     except Exception:
         label = "Post"
-    _log(f"Reels upload: в меню Create выбрали «{label}».")
+    _log(f"TikToks upload: в меню Create выбрали «{label}».")
     return True
 
 
@@ -681,7 +710,7 @@ def _click_create_submenu_post_if_present(
         and not _create_wizard_already_open(page)
         and _create_flow_started(page)
     ):
-        raise InstagramReelsUploadError(_CREATE_PUBLICATION_ERR)
+        raise TikTokReelsUploadError(_CREATE_PUBLICATION_ERR)
     return clicked_post
 
 def _create_dialog_locator(page):
@@ -715,15 +744,15 @@ def _wait_create_dialog(page, *, timeout_ms: float = 90_000) -> Any:
         try:
             dialog.first.wait_for(state="attached", timeout=timeout_ms)
         except Exception as e:
-            raise InstagramReelsUploadError(
+            raise TikTokReelsUploadError(
                 f"{_CREATE_DIALOG_ERR} {e!r}"
             ) from e
         _log(
-            "Reels upload: диалог создания в DOM (attached) — "
+            "TikToks upload: диалог создания в DOM (attached) — "
             "visible не дождались (фон?)."
         )
     else:
-        _log("Reels upload: диалог «Создание публикации» открыт.")
+        _log("TikToks upload: диалог «Создание публикации» открыт.")
     return dialog
 
 
@@ -775,7 +804,7 @@ def _cdp_set_file_input_on_target_once(
                         "DOM.querySelector", {"nodeId": root_id, "selector": sel}
                     )
                 except Exception as qe:
-                    _log(f"Reels upload: CDP querySelector({sel!r}): {qe!r}")
+                    _log(f"TikToks upload: CDP querySelector({sel!r}): {qe!r}")
                     continue
                 nid = int(qs.get("nodeId") or 0)
                 if nid <= 0:
@@ -786,12 +815,12 @@ def _cdp_set_file_input_on_target_once(
                         {"nodeId": nid, "files": [files_path]},
                     )
                     _log(
-                        f"Reels upload: CDP querySelector({sel!r}) → setFileInputFiles ок."
+                        f"TikToks upload: CDP querySelector({sel!r}) → setFileInputFiles ок."
                     )
                     return True
                 except Exception as e:
                     _log(
-                        f"Reels upload: setFileInputFiles после querySelector({sel!r}): {e!r}"
+                        f"TikToks upload: setFileInputFiles после querySelector({sel!r}): {e!r}"
                     )
                     continue
 
@@ -853,12 +882,12 @@ def _cdp_set_file_input_on_target_once(
             )
             if ev.get("exceptionDetails"):
                 _log(
-                    f"Reels upload: CDP Runtime.evaluate — {ev.get('exceptionDetails')!r}"
+                    f"TikToks upload: CDP Runtime.evaluate — {ev.get('exceptionDetails')!r}"
                 )
                 return False
             res = ev.get("result") or {}
             if res.get("subtype") != "node" or not res.get("objectId"):
-                _log("Reels upload: CDP — input[type=file] не найден.")
+                _log("TikToks upload: CDP — input[type=file] не найден.")
                 return False
             rn = session.send("DOM.requestNode", {"objectId": res["objectId"]})
             node_id = int(rn.get("nodeId") or 0) or None
@@ -872,14 +901,14 @@ def _cdp_set_file_input_on_target_once(
                 "DOM.setFileInputFiles", {"nodeId": node_id, "files": [files_path]}
             )
         except Exception as e:
-            _log(f"Reels upload: CDP DOM.setFileInputFiles отклонён: {e!r}")
+            _log(f"TikToks upload: CDP DOM.setFileInputFiles отклонён: {e!r}")
             _discard()
             return False
         _discard()
-        _log("Reels upload: DOM.setFileInputFiles (CDP, локальный путь) выполнен.")
+        _log("TikToks upload: DOM.setFileInputFiles (CDP, локальный путь) выполнен.")
         return True
     except Exception as e:
-        _log(f"Reels upload: CDP исключение на цели {type(target).__name__}: {e!r}")
+        _log(f"TikToks upload: CDP исключение на цели {type(target).__name__}: {e!r}")
         return False
     finally:
         if search_id is not None and session is not None:
@@ -929,10 +958,10 @@ def _set_file_input_via_cdp(
     except Exception:
         pass
 
-    _log(f"Reels upload: CDP — целей в очереди: {len(order)}")
+    _log(f"TikToks upload: CDP — целей в очереди: {len(order)}")
     for i, tgt in enumerate(order):
         _log(
-            f"Reels upload: CDP setFileInputFiles — цель {i + 1}/{len(order)} "
+            f"TikToks upload: CDP setFileInputFiles — цель {i + 1}/{len(order)} "
             f"({type(tgt).__name__})…"
         )
         if _cdp_set_file_input_on_target_once(
@@ -959,7 +988,7 @@ def _mark_dialog_file_input(dialog) -> str | None:
         )
         return f'input[{_ZALIVER_FILE_INPUT_MARK}="1"]'
     except Exception as e:
-        _log(f"Reels upload: не удалось пометить file input: {e!r}")
+        _log(f"TikToks upload: не удалось пометить file input: {e!r}")
         return None
 
 
@@ -973,7 +1002,7 @@ def _dismiss_info_dialogs(page) -> None:
         if btn.count() and btn.is_visible(timeout=120):
             btn.click(timeout=3_000)
             page.wait_for_timeout(150)
-            _log("Reels upload: закрыт информационный диалог.")
+            _log("TikToks upload: закрыт информационный диалог.")
     except Exception:
         pass
 
@@ -990,7 +1019,7 @@ def _attach_video_file(
     except OSError:
         sz = -1
     _log(
-        f"Reels upload: передаём файл resolved={resolved!r}, size={sz} "
+        f"TikToks upload: передаём файл resolved={resolved!r}, size={sz} "
         "(CDP DOM.setFileInputFiles)…"
     )
 
@@ -1000,7 +1029,13 @@ def _attach_video_file(
         except Exception:
             pass
 
+    _wait_studio_file_picker(page)
     file_input = _create_file_input_locator(dialog)
+    try:
+        if int(file_input.count()) <= 0:
+            file_input = _create_file_input_locator(page)
+    except Exception:
+        file_input = _create_file_input_locator(page)
     preferred_frame = page
     try:
         if file_input.count():
@@ -1008,27 +1043,56 @@ def _attach_video_file(
     except Exception:
         preferred_frame = page
 
-    prefer_sel = _mark_dialog_file_input(dialog)
+    prefer_sel = _mark_dialog_file_input(dialog) or _mark_dialog_file_input(page)
     if prefer_sel:
-        _log(f"Reels upload: file input помечен для CDP: {prefer_sel}")
+        _log(f"TikToks upload: file input помечен для CDP: {prefer_sel}")
 
     file_submitted = False
-    if _set_file_input_via_cdp(
-        page, preferred_frame, resolved, prefer_selector=prefer_sel
-    ):
-        file_submitted = True
-    else:
+    cdp_deadline = time.monotonic() + 45.0
+    cdp_attempt = 0
+    while time.monotonic() < cdp_deadline and not file_submitted:
+        cdp_attempt += 1
+        if cdp_attempt > 1:
+            _wait_studio_file_picker(page, timeout_s=20.0)
+            prefer_sel = (
+                _mark_dialog_file_input(dialog)
+                or _mark_dialog_file_input(page)
+                or prefer_sel
+            )
+            try:
+                if file_input.count():
+                    preferred_frame = (
+                        file_input.first.element_handle().owner_frame() or page
+                    )
+            except Exception:
+                preferred_frame = page
+            _log(
+                f"TikToks upload: повтор CDP setFileInputFiles "
+                f"(попытка {cdp_attempt})…"
+            )
+        if _set_file_input_via_cdp(
+            page, preferred_frame, resolved, prefer_selector=prefer_sel
+        ):
+            file_submitted = True
+            break
+        try:
+            page.wait_for_timeout(500)
+        except Exception:
+            time.sleep(0.5)
+    if not file_submitted:
         _log(
-            "Reels upload: CDP не удался — fallback file chooser / set_input_files…"
+            "TikToks upload: CDP не удался — fallback file chooser / set_input_files…"
         )
         select_btn = (
-            dialog.get_by_role("button", name=_SELECT_FILE_BTN_RE)
+            page.get_by_role("button", name=_SELECT_FILE_BTN_RE)
+            .or_(page.locator('[data-e2e="select_video_button"]'))
+            .or_(dialog.get_by_role("button", name=_SELECT_FILE_BTN_RE))
             .or_(dialog.locator("button").filter(has_text=_SELECT_FILE_BTN_RE))
         )
         last_err: Exception | None = None
         for attempt in range(1, 4):
             try:
-                _log(f"Reels upload: file chooser… (попытка {attempt}/3)")
+                _log(f"TikToks upload: file chooser… (попытка {attempt}/3)")
                 with page.expect_file_chooser(timeout=240_000) as fc_info:
                     if select_btn.count() and select_btn.first.is_visible(timeout=4_000):
                         select_btn.first.click(timeout=60_000)
@@ -1053,28 +1117,27 @@ def _attach_video_file(
                     last_err = e2
                     err_t = str(e2).lower()
                     if "50" in err_t and "mb" in err_t:
-                        raise InstagramReelsUploadError(
+                        raise TikTokReelsUploadError(
                             "Видео слишком велико для передачи через Playwright по CDP; "
                             "обход через DOM.setFileInputFiles не удался."
                         ) from e2
                     page.wait_for_timeout(500)
         if not file_submitted and last_err is not None:
-            raise InstagramReelsUploadError(
+            raise TikTokReelsUploadError(
                 f"Не удалось передать файл в диалог создания: {last_err!r}"
             ) from last_err
 
     if sz > _PLAYWRIGHT_REMOTE_UPLOAD_LIMIT_BYTES and not file_submitted:
-        raise InstagramReelsUploadError(
+        raise TikTokReelsUploadError(
             f"Файл {sz} байт не передан (лимит Playwright ~50 MiB без CDP)."
         )
 
     page.wait_for_timeout(800)
     _dismiss_info_dialogs(page)
-    _wait_crop_step_ready(page, timeout_ms=_ACTION_TIMEOUT_MS)
-    _log(f"Reels upload: файл передан — {video_path.name!r}.")
+    _log(f"TikToks upload: файл передан — {video_path.name!r}.")
 
 
-# Кнопка «Select Crop» / «Выбрать размер и обрезать» (RU UI Instagram).
+# Кнопка «Select Crop» / «Выбрать размер и обрезать» (RU UI TikTok).
 # aria-label EN: «Select Crop» (C заглавная) — селектор чувствителен к регистру.
 _CROP_BTN_ARIA = (
     "Select Crop",
@@ -1089,12 +1152,12 @@ _CROP_BTN_ARIA_RE = re.compile(
 )
 _CROP_BTN_SVG_SEL = ", ".join(f'svg[aria-label="{a}"]' for a in _CROP_BTN_ARIA)
 
-SETTINGS_KEY_INSTAGRAM_CROP_ASPECT = "instagram/crop_aspect"
-DEFAULT_INSTAGRAM_CROP_ASPECT = "original"
-INSTAGRAM_CROP_ASPECTS = ("original", "1:1", "9:16", "16:9")
+SETTINGS_KEY_TIKTOK_CROP_ASPECT = "tiktok/crop_aspect"
+DEFAULT_TIKTOK_CROP_ASPECT = "original"
+TIKTOK_CROP_ASPECTS = ("original", "1:1", "9:16", "16:9")
 
 # Пункты Select Crop в IG (текст + aria-label EN/RU).
-# 9:16 RU: «…в портной ориентации» — опечатка Instagram.
+# 9:16 RU: «…в портной ориентации» — опечатка TikTok.
 _CROP_ASPECT_SPECS: dict[str, dict[str, Any]] = {
     "original": {
         "label": "Оригинал",
@@ -1138,7 +1201,7 @@ _CROP_MENU_OPTION_RE = re.compile(
 )
 
 
-def normalize_instagram_crop_aspect(value: object | None) -> str:
+def normalize_tiktok_crop_aspect(value: object | None) -> str:
     raw = str(value or "").strip().lower().replace(" ", "")
     raw = raw.replace("/", ":")
     aliases = {
@@ -1154,11 +1217,11 @@ def normalize_instagram_crop_aspect(value: object | None) -> str:
         "landscape": "16:9",
         "horizontal": "16:9",
     }
-    return aliases.get(raw, DEFAULT_INSTAGRAM_CROP_ASPECT)
+    return aliases.get(raw, DEFAULT_TIKTOK_CROP_ASPECT)
 
 
-def instagram_crop_aspect_from_settings(settings: object | None = None) -> str:
-    """Читает обрезку из настроек Instagram. По умолчанию — оригинал."""
+def tiktok_crop_aspect_from_settings(settings: object | None = None) -> str:
+    """Читает обрезку из настроек TikTok. По умолчанию — оригинал."""
     if settings is not None and all(
         callable(getattr(settings, name, None)) for name in ("contains", "value")
     ):
@@ -1167,10 +1230,10 @@ def instagram_crop_aspect_from_settings(settings: object | None = None) -> str:
         from zaliver.config.store import ensure_settings_store
 
         s = ensure_settings_store(settings)
-    if not s.contains(SETTINGS_KEY_INSTAGRAM_CROP_ASPECT):
-        return DEFAULT_INSTAGRAM_CROP_ASPECT
-    return normalize_instagram_crop_aspect(
-        s.value(SETTINGS_KEY_INSTAGRAM_CROP_ASPECT, DEFAULT_INSTAGRAM_CROP_ASPECT)
+    if not s.contains(SETTINGS_KEY_TIKTOK_CROP_ASPECT):
+        return DEFAULT_TIKTOK_CROP_ASPECT
+    return normalize_tiktok_crop_aspect(
+        s.value(SETTINGS_KEY_TIKTOK_CROP_ASPECT, DEFAULT_TIKTOK_CROP_ASPECT)
     )
 
 
@@ -1293,13 +1356,13 @@ def _clear_layers_covering_crop(page) -> int:
     try:
         res = page.evaluate(_CLEAR_CROP_COVER_JS)
     except Exception as e:
-        _log(f"Reels upload: clear crop cover: {e!r}")
+        _log(f"TikToks upload: clear crop cover: {e!r}")
         return 0
     if not isinstance(res, dict):
         return 0
     n = int(res.get("hidden") or 0)
     if n:
-        _log(f"Reels upload: скрыто слоёв поверх кропа: {n}")
+        _log(f"TikToks upload: скрыто слоёв поверх кропа: {n}")
     return n
 
 
@@ -1328,7 +1391,7 @@ def _wait_crop_step_ready(page, *, timeout_ms: float = _ACTION_TIMEOUT_MS) -> No
                 timeout=min(wait_ms, remaining),
             )
             saw_crop = True
-            _log("Reels upload: Select Crop в DOM.")
+            _log("TikToks upload: Select Crop в DOM.")
             break
         except Exception:
             continue
@@ -1356,7 +1419,7 @@ def _wait_crop_step_ready(page, *, timeout_ms: float = _ACTION_TIMEOUT_MS) -> No
             # Даже без текста кнопки слой может перекрывать — проверим и снимем.
             n = _clear_layers_covering_crop(page)
             if n == 0 or cleared_once:
-                _log("Reels upload: шаг обрезки готов.")
+                _log("TikToks upload: шаг обрезки готов.")
                 return
             cleared_once = True
             page.wait_for_timeout(200)
@@ -1366,15 +1429,15 @@ def _wait_crop_step_ready(page, *, timeout_ms: float = _ACTION_TIMEOUT_MS) -> No
             _clear_layers_covering_crop(page)
             cleared_once = True
             if not _select_file_ui_still_up(page):
-                _log("Reels upload: экран выбора файла снят, кроп доступен.")
+                _log("TikToks upload: экран выбора файла снят, кроп доступен.")
                 return
         page.wait_for_timeout(250)
 
     if not saw_crop:
-        raise InstagramReelsUploadError(_SELECT_CROP_MISSING_ERR)
+        raise TikTokReelsUploadError(_SELECT_CROP_MISSING_ERR)
     _clear_layers_covering_crop(page)
     _log(
-        "Reels upload: кроп в DOM после таймаута — сняли оверлеи, продолжаем."
+        "TikToks upload: кроп в DOM после таймаута — сняли оверлеи, продолжаем."
     )
 
 
@@ -1393,14 +1456,14 @@ def _click_crop_target(target) -> None:
     target.click(timeout=20_000, force=True)
 
 
-def _select_crop_aspect(page, aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT) -> None:
+def _select_crop_aspect(page, aspect: str = DEFAULT_TIKTOK_CROP_ASPECT) -> None:
     """Сразу после файла: Select Crop → Оригинал / 1:1 / 9:16 / 16:9."""
-    chosen = normalize_instagram_crop_aspect(aspect)
+    chosen = normalize_tiktok_crop_aspect(aspect)
     spec = _CROP_ASPECT_SPECS[chosen]
     label = str(spec["label"])
     text_re: re.Pattern[str] = spec["text_re"]
     svg_sel = _crop_aspect_svg_sel(chosen)
-    _log(f"Reels upload: выбираем обрезку {label}…")
+    _log(f"TikToks upload: выбираем обрезку {label}…")
     _wait_crop_step_ready(page, timeout_ms=_ACTION_TIMEOUT_MS)
 
     try:
@@ -1412,9 +1475,9 @@ def _select_crop_aspect(page, aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT) -> No
         if not target.count():
             target = svg
         _click_crop_target(target)
-        _log("Reels upload: открыли меню Select Crop.")
+        _log("TikToks upload: открыли меню Select Crop.")
     except Exception as e:
-        raise InstagramReelsUploadError(
+        raise TikTokReelsUploadError(
             f"Не удалось нажать Select Crop: {e!r}"
         ) from e
 
@@ -1440,9 +1503,9 @@ def _select_crop_aspect(page, aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT) -> No
                 _click_crop_target(clickable if clickable.count() else svg_opt)
             else:
                 _click_crop_target(option.first)
-        _log(f"Reels upload: выбрано {label}.")
+        _log(f"TikToks upload: выбрано {label}.")
     except Exception as e:
-        raise InstagramReelsUploadError(
+        raise TikTokReelsUploadError(
             f"Не удалось выбрать обрезку {label}: {e!r}"
         ) from e
 
@@ -1574,30 +1637,37 @@ def _click_next_button(page, *, find_timeout_s: float = 8.0) -> bool:
         _dom_click(target)
         return True
     except Exception as e1:
-        _log(f"Reels upload: DOM-клик «Далее» не удался: {e1!r}")
+        _log(f"TikToks upload: DOM-клик «Далее» не удался: {e1!r}")
 
     # 2) Playwright force — запасной
     try:
         target.click(timeout=6_000, force=True)
         return True
     except Exception as e2:
-        _log(f"Reels upload: force-клик «Далее» не удался: {e2!r}")
+        _log(f"TikToks upload: force-клик «Далее» не удался: {e2!r}")
     return False
 
 
 # Lexical caption: aria-label/placeholder «Добавьте подпись…» (многоточие …).
 _CAPTION_ARIA_RE = re.compile(
     r"добавьте\s+подпись|напишите\s+подпись|write\s+a\s+caption|"
-    r"caption|подпись",
+    r"добавьте\s+описание|напишите\s+описание|"
+    r"caption|подпись|описание|description",
     re.I,
 )
 
 _CAPTION_FIELD_CSS = (
+    '[data-e2e="caption_container"] .public-DraftEditor-content, '
+    '[data-e2e="caption_container"] [contenteditable="true"], '
     '[data-lexical-editor="true"][role="textbox"][contenteditable="true"], '
     '[role="textbox"][contenteditable="true"][aria-label*="подпись" i], '
+    '[role="textbox"][contenteditable="true"][aria-label*="описание" i], '
     '[role="textbox"][contenteditable="true"][aria-label*="caption" i], '
+    '[role="textbox"][contenteditable="true"][aria-label*="description" i], '
     '[role="textbox"][contenteditable="true"][aria-placeholder*="подпись" i], '
-    '[role="textbox"][contenteditable="true"][aria-placeholder*="caption" i]'
+    '[role="textbox"][contenteditable="true"][aria-placeholder*="описание" i], '
+    '[role="textbox"][contenteditable="true"][aria-placeholder*="caption" i], '
+    '[role="textbox"][contenteditable="true"][aria-placeholder*="description" i]'
 )
 
 
@@ -1667,39 +1737,39 @@ def _close_crop_aspect_menu_if_open(page) -> None:
 def _click_next_until_caption_or_share(page, *, max_clicks: int = 6) -> None:
     """Прокликать «Далее» (обрезка / фильтры) до экрана подписи или Share."""
     clicked = 0
-    _log("Reels upload: жмём «Далее»…")
+    _log("TikToks upload: жмём «Далее»…")
     _close_crop_aspect_menu_if_open(page)
     for i in range(max_clicks):
         _dismiss_info_dialogs(page)
         if _on_caption_or_share_screen(page):
-            _log("Reels upload: экран Share / подписи.")
+            _log("TikToks upload: экран Share / подписи.")
             return
 
         if i == 0:
             _close_crop_aspect_menu_if_open(page)
 
         if not _click_next_button(page, find_timeout_s=8.0 if clicked == 0 else 4.0):
-            _log(f"Reels upload: «Далее» не найдена (шаг {i + 1}).")
+            _log(f"TikToks upload: «Далее» не найдена (шаг {i + 1}).")
             # Меню кропа могло перехватить — закрыть и ещё раз.
             if clicked == 0:
                 _close_crop_aspect_menu_if_open(page)
                 if _click_next_button(page, find_timeout_s=5.0):
                     clicked += 1
-                    _log("Reels upload: «Далее» после закрытия меню кропа.")
+                    _log("TikToks upload: «Далее» после закрытия меню кропа.")
                 else:
                     break
             else:
                 break
         else:
             clicked += 1
-            _log(f"Reels upload: «Далее» ({clicked}/{max_clicks}).")
+            _log(f"TikToks upload: «Далее» ({clicked}/{max_clicks}).")
 
         # Короткая пауза + опрос; не путать с Share из ленты.
         page.wait_for_timeout(250)
         settle_deadline = time.monotonic() + 2.5
         while time.monotonic() < settle_deadline:
             if _on_caption_or_share_screen(page):
-                _log("Reels upload: экран Share / подписи.")
+                _log("TikToks upload: экран Share / подписи.")
                 return
             # Экран сменился, «Далее» снова в DOM — можно жать следующий шаг.
             if time.monotonic() - (settle_deadline - 2.5) >= 0.35:
@@ -1715,21 +1785,22 @@ def _click_next_until_caption_or_share(page, *, max_clicks: int = 6) -> None:
 
     if _on_caption_or_share_screen(page):
         return
-    raise InstagramReelsUploadError(
+    raise TikTokReelsUploadError(
         "Не удалось нажать «Далее» после обрезки "
         f"(кликов={clicked}). Мастер застрял на экране кропа."
     )
 
 
 def _caption_input_locator(page):
-    """
-    Поле подписи Reels — Lexical editor:
-    <div role="textbox" contenteditable data-lexical-editor
-         aria-label="Добавьте подпись…">
-    Ищем по всей странице (не только role=dialog).
-    """
+    """Поле Description в TikTok Studio (DraftEditor) или Lexical caption."""
     return (
-        page.locator(_CAPTION_FIELD_CSS)
+        page.locator('[data-e2e="caption_container"] .public-DraftEditor-content')
+        .or_(
+            page.locator(
+                '[data-e2e="caption_container"] [contenteditable="true"]'
+            )
+        )
+        .or_(page.locator(_CAPTION_FIELD_CSS))
         .or_(page.get_by_role("textbox", name=_CAPTION_ARIA_RE))
         .or_(
             page.locator('[role="dialog"]').locator(
@@ -1805,7 +1876,7 @@ def _read_caption_text(area) -> str:
 def _type_caption_via_keyboard(page, area, text: str) -> None:
     """
     Ввод подписи как у пользователя: Enter между строками.
-    Пустые строки — braille blank (U+2800), иначе Instagram схлопывает зазоры.
+    Пустые строки — braille blank (U+2800), иначе TikTok схлопывает зазоры.
     """
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     try:
@@ -1840,8 +1911,6 @@ def _fill_caption(page, caption: str) -> None:
         (caption or "").strip(),
         placeholder=BLANK_LINE_BRAILLE,
     )
-    if not text:
-        return
     try:
         area = None
         deadline = time.monotonic() + 30.0
@@ -1853,7 +1922,7 @@ def _fill_caption(page, caption: str) -> None:
                 if n <= 0:
                     page.wait_for_timeout(250)
                     continue
-                # Предпочитаем Lexical с aria-label подписи.
+                # Предпочитаем DraftEditor / Lexical описания.
                 picked = None
                 for i in range(min(n, 10)):
                     cand = loc.nth(i)
@@ -1863,7 +1932,12 @@ def _fill_caption(page, caption: str) -> None:
                             + " "
                             + (cand.get_attribute("aria-placeholder") or "")
                         ).lower()
-                        if "подпись" in label or "caption" in label:
+                        if (
+                            "подпись" in label
+                            or "описан" in label
+                            or "caption" in label
+                            or "description" in label
+                        ):
                             picked = cand
                             break
                     except Exception:
@@ -1876,7 +1950,7 @@ def _fill_caption(page, caption: str) -> None:
 
         if area is None:
             _log(
-                "Reels upload: поле подписи не найдено — пропускаем."
+                "TikToks upload: поле описания не найдено — пропускаем."
                 + (f" last_err={last_err!r}" if last_err else "")
             )
             return
@@ -1884,41 +1958,44 @@ def _fill_caption(page, caption: str) -> None:
         gaps = blank_line_gap_count(text)
         if gaps:
             _log(
-                f"Reels upload: в подписи {gaps} пустых строк — "
+                f"TikToks upload: в описании {gaps} пустых строк — "
                 "ввод через клавиатуру (Enter + U+2800)."
             )
 
-        # 1) Клавиатура — самый надёжный способ для Lexical + пустых строк.
+        # 1) Как в YouTube Studio: клик → Control+A → Backspace → ввод.
         try:
             _type_caption_via_keyboard(page, area, text)
             page.wait_for_timeout(200)
             got = _read_caption_text(area)
-            if _caption_gaps_preserved(text, got):
+            if not text or _caption_gaps_preserved(text, got):
                 _log(
-                    f"Reels upload: подпись задана через клавиатуру "
+                    f"TikToks upload: описание задано через клавиатуру "
                     f"({len(text)} символов, пустых строк={gaps})."
                 )
                 return
             _log(
-                "Reels upload: после клавиатуры пустые строки схлопнулись "
+                "TikToks upload: после клавиатуры пустые строки схлопнулись "
                 f"(want_gaps={gaps}, got={got!r}) — повтор / JS."
             )
         except Exception as e:
-            _log(f"Reels upload: клавиатурный ввод подписи не удался: {e!r}")
+            _log(f"TikToks upload: клавиатурный ввод описания не удался: {e!r}")
 
-        # 2) Повтор клавиатуры ещё раз (иногда Lexical «съедает» первый Enter).
+        if not text:
+            return
+
+        # 2) Повтор клавиатуры ещё раз (иногда редактор «съедает» первый Enter).
         try:
             _type_caption_via_keyboard(page, area, text)
             page.wait_for_timeout(250)
             got = _read_caption_text(area)
             if _caption_gaps_preserved(text, got):
                 _log(
-                    f"Reels upload: подпись задана через клавиатуру (повтор, "
+                    f"TikToks upload: описание задано через клавиатуру (повтор, "
                     f"{len(text)} символов)."
                 )
                 return
         except Exception as e:
-            _log(f"Reels upload: повтор клавиатуры: {e!r}")
+            _log(f"TikToks upload: повтор клавиатуры: {e!r}")
 
         # 3) JS fallback (textarea / когда keyboard недоступен).
         try:
@@ -1926,23 +2003,23 @@ def _fill_caption(page, caption: str) -> None:
             page.wait_for_timeout(200)
             got = _read_caption_text(area)
             if _caption_gaps_preserved(text, got) or gaps <= 0:
-                _log(f"Reels upload: подпись задана через JS ({len(text)} символов).")
+                _log(f"TikToks upload: описание задано через JS ({len(text)} символов).")
                 return
             _log(
-                "Reels upload: JS тоже схлопнул пустые строки "
+                "TikToks upload: JS тоже схлопнул пустые строки "
                 f"(got={got!r})."
             )
         except Exception as e:
-            _log(f"Reels upload: JS-ввод подписи не удался: {e!r}")
+            _log(f"TikToks upload: JS-ввод описания не удался: {e!r}")
 
         try:
             area.fill(text, timeout=16_000)
-            _log(f"Reels upload: подпись задана через fill ({len(text)} символов).")
+            _log(f"TikToks upload: описание задано через fill ({len(text)} символов).")
             page.wait_for_timeout(300)
         except Exception as e:
-            _log(f"Reels upload: не удалось ввести подпись: {e!r}")
+            _log(f"TikToks upload: не удалось ввести описание: {e!r}")
     except Exception as e:
-        _log(f"Reels upload: не удалось ввести подпись: {e!r}")
+        _log(f"TikToks upload: не удалось ввести описание: {e!r}")
 
 
 def _pick_header_share_button(page):
@@ -2027,22 +2104,22 @@ def _click_share(page) -> None:
             break
         page.wait_for_timeout(250)
     if target is None:
-        raise InstagramReelsUploadError(
+        raise TikTokReelsUploadError(
             "Кнопка «Поделиться» / Share не найдена после мастера создания."
         )
 
     try:
         _dom_click(target)
-        _log("Reels upload: нажали «Поделиться» в шапке (JS).")
+        _log("TikToks upload: нажали «Поделиться» в шапке (JS).")
         return
     except Exception as e1:
-        _log(f"Reels upload: DOM-клик «Поделиться» не удался: {e1!r}")
+        _log(f"TikToks upload: DOM-клик «Поделиться» не удался: {e1!r}")
 
     try:
         target.click(timeout=60_000, force=True)
-        _log("Reels upload: нажали «Поделиться» в шапке (force).")
+        _log("TikToks upload: нажали «Поделиться» в шапке (force).")
     except Exception as e2:
-        raise InstagramReelsUploadError(
+        raise TikTokReelsUploadError(
             f"Не удалось нажать «Поделиться» / Share: {e2!r}"
         ) from e2
 
@@ -2071,7 +2148,7 @@ def _post_share_failed_visible(page) -> bool:
     except Exception:
         pass
     try:
-        # Текст без role=heading (как в разметке Instagram).
+        # Текст без role=heading (как в разметке TikTok).
         txt = page.get_by_text(_POST_FAILED_HEADING_RE)
         if txt.count() and txt.first.is_visible(timeout=250):
             return True
@@ -2109,7 +2186,7 @@ def _click_post_failed_retry(page) -> bool:
         btn.first.click(timeout=30_000)
         return True
     except Exception as e:
-        _log(f"Reels upload: клик «Повторить» не удался: {e!r}")
+        _log(f"TikToks upload: клик «Повторить» не удался: {e!r}")
         return False
 
 
@@ -2129,12 +2206,12 @@ def _click_post_shared_done(
                 done.first.evaluate("el => el.click()")
             else:
                 done.first.click(timeout=30_000)
-            _log("Reels upload: нажали Done.")
-            # Дать Instagram время проставить Reel в сетку профиля.
+            _log("TikToks upload: нажали Done.")
+            # Дать TikTok время проставить Reel в сетку профиля.
             page.wait_for_timeout(2_500)
             return
     except Exception as e:
-        _log(f"Reels upload: клик Done не удался ({e!r}) — пробуем Escape.")
+        _log(f"TikToks upload: клик Done не удался ({e!r}) — пробуем Escape.")
 
     try:
         page.keyboard.press("Escape")
@@ -2162,7 +2239,7 @@ def _wait_post_shared_and_done(
     пока YouTube этого же ролика не закончил (иначе фокус срывает Studio).
     """
     _log(
-        "Reels upload: ждём экран «Reel shared» / Post shared "
+        "TikToks upload: ждём экран «Reel shared» / Post shared "
         f"(таймаут {timeout_s:.0f} с)…"
     )
     deadline = time.monotonic() + max(30.0, float(timeout_s))
@@ -2173,21 +2250,21 @@ def _wait_post_shared_and_done(
         dialog = _post_shared_dialog_locator(page)
         try:
             if dialog.count() and dialog.first.is_visible(timeout=400):
-                _log("Reels upload: диалог Post shared виден.")
+                _log("TikToks upload: диалог Post shared виден.")
                 if wait_before_done is not None:
                     _log(
-                        "Reels upload: ждём завершения YouTube перед Done /reels/…"
+                        "TikToks upload: ждём завершения YouTube перед Done /reels/…"
                     )
                     if not wait_before_done.wait(
                         timeout=max(30.0, float(wait_before_done_timeout_s))
                     ):
                         _log(
-                            "Reels upload: таймаут ожидания YouTube — "
+                            "TikToks upload: таймаут ожидания YouTube — "
                             "продолжаем Done /reels/."
                         )
                     else:
                         _log(
-                            "Reels upload: YouTube готов — Done /reels/."
+                            "TikToks upload: YouTube готов — Done /reels/."
                         )
                 _click_post_shared_done(
                     page, dialog, keep_in_background=keep_in_background
@@ -2198,17 +2275,17 @@ def _wait_post_shared_and_done(
 
         if _post_share_failed_visible(page):
             if retries_used >= max_auto_retries:
-                raise InstagramReelsUploadError(
+                raise TikTokReelsUploadError(
                     "Не удалось разместить публикацию: после «Повторить» "
                     "ошибка появилась снова."
                 )
             _log(
-                "Reels upload: ошибка публикации "
+                "TikToks upload: ошибка публикации "
                 "(«Не удалось разместить…») — жмём «Повторить» "
                 f"({retries_used + 1}/{max_auto_retries})…"
             )
             if not _click_post_failed_retry(page):
-                raise InstagramReelsUploadError(
+                raise TikTokReelsUploadError(
                     "Не удалось разместить публикацию: "
                     "кнопка «Повторить» не найдена."
                 )
@@ -2218,26 +2295,26 @@ def _wait_post_shared_and_done(
 
         page.wait_for_timeout(500)
 
-    raise InstagramReelsUploadError(
+    raise TikTokReelsUploadError(
         "Не дождались диалога «Post shared» / «Reel shared» после Share."
     )
 
 
-def _absolute_instagram_url(href: str) -> str:
+def _absolute_tiktok_url(href: str) -> str:
     h = (href or "").strip()
     if not h:
         return ""
     if h.startswith("/"):
-        h = "https://www.instagram.com" + h
+        h = "https://www.tiktok.com" + h
     return h.split("?")[0]
 
 
 def _normalize_reel_url(url: str) -> str:
-    """Канонический URL вида https://www.instagram.com/reel/<id>/."""
+    """Канонический URL вида https://www.tiktok.com/reel/<id>/."""
     m = _REEL_HREF_RE.search(url or "")
     if not m:
         return (url or "").strip().split("?")[0].rstrip("/")
-    return f"https://www.instagram.com/reel/{m.group(1)}/"
+    return f"https://www.tiktok.com/reel/{m.group(1)}/"
 
 
 def _video_id_from_reel_url(url: str) -> str:
@@ -2278,7 +2355,7 @@ _PROFILE_URL_RESERVED = frozenset(
 
 
 def _username_from_url(url: str) -> str:
-    """Из https://www.instagram.com/sedaguler7602026[/reels/] → sedaguler7602026."""
+    """Из https://www.tiktok.com/sedaguler7602026[/reels/] → sedaguler7602026."""
     try:
         from urllib.parse import urlparse
 
@@ -2310,7 +2387,7 @@ def _resolve_own_username(page, *, session_login: str = "") -> str:
     Username своего профиля без клика по сайдбару:
     href кнопки Profile → extract → подсказка из session_login → URL.
     """
-    from zaliver.instagram_upload.register import _extract_logged_in_username
+    from zaliver.tiktok_upload.register import _extract_logged_in_username
 
     hint = _username_hint_from_login(session_login)
     extracted = (_extract_logged_in_username(page) or "").strip().lstrip("@")
@@ -2321,7 +2398,7 @@ def _resolve_own_username(page, *, session_login: str = "") -> str:
         from_url = ""
     username = (extracted or from_url or hint or "").strip().lstrip("@")
     _log(
-        "Reels upload: username без клика по профилю "
+        "TikToks upload: username без клика по профилю "
         f"(extracted={extracted!r}, url={from_url!r}, hint={hint!r}) → "
         f"{username!r}"
     )
@@ -2336,9 +2413,9 @@ def _open_own_profile(page, *, session_login: str = "") -> str:
     """
     username = _resolve_own_username(page, session_login=session_login)
     if not username:
-        raise InstagramReelsUploadError(
+        raise TikTokReelsUploadError(
             "Не удалось получить username из ссылки профиля в сайдбаре "
-            "(без клика). Проверьте, что сессия Instagram активна."
+            "(без клика). Проверьте, что сессия TikTok активна."
         )
     return username
 
@@ -2346,16 +2423,16 @@ def _open_own_profile(page, *, session_login: str = "") -> str:
 def _open_profile_reels_tab(
     page, username: str, *, keep_in_background: bool = False
 ) -> None:
-    """Сразу https://www.instagram.com/{username}/reels/ (без захода на профиль)."""
+    """Сразу https://www.tiktok.com/{username}/reels/ (без захода на профиль)."""
     uname = (username or "").strip().lstrip("@")
     if not uname:
-        raise InstagramReelsUploadError(
+        raise TikTokReelsUploadError(
             "Не удалось открыть /reels/ профиля (username пуст)."
         )
-    from zaliver.instagram_upload.register import _navigate_page_to
+    from zaliver.tiktok_upload.register import _navigate_page_to
 
-    reels_url = f"https://www.instagram.com/{uname}/reels/"
-    _log(f"Reels upload: сразу открываем {reels_url} (href профиля + /reels/)…")
+    reels_url = f"https://www.tiktok.com/{uname}/reels/"
+    _log(f"TikToks upload: сразу открываем {reels_url} (href профиля + /reels/)…")
     _navigate_page_to(
         page,
         reels_url,
@@ -2367,7 +2444,7 @@ def _open_profile_reels_tab(
     try:
         page.wait_for_selector('a[href*="/reel/"]', timeout=120_000)
     except Exception as e:
-        raise InstagramReelsUploadError(
+        raise TikTokReelsUploadError(
             f"На {reels_url} нет видео (сетка не прогрузилась)."
         ) from e
 
@@ -2411,7 +2488,7 @@ def _collect_profile_reel_urls(
                 if len(out) >= want:
                     break
                 href = (links.nth(i).get_attribute("href") or "").strip()
-                abs_url = _absolute_instagram_url(href)
+                abs_url = _absolute_tiktok_url(href)
                 canon = _normalize_reel_url(abs_url)
                 vid = _video_id_from_reel_url(canon)
                 if not vid or vid in seen:
@@ -2422,7 +2499,7 @@ def _collect_profile_reel_urls(
                 raise RuntimeError(f"no valid reel hrefs (links={n})")
 
             _log(
-                f"Reels upload: кандидаты в сетке ({len(out)}/{want}) — "
+                f"TikToks upload: кандидаты в сетке ({len(out)}/{want}) — "
                 + ", ".join(repr(u) for u in out)
                 + f" (попытка {attempt}/{retries})."
             )
@@ -2430,7 +2507,7 @@ def _collect_profile_reel_urls(
         except Exception as e:
             last_err = e
             _log(
-                f"Reels upload: сетка Reel ещё не готова "
+                f"TikToks upload: сетка Reel ещё не готова "
                 f"(попытка {attempt}/{retries}): {e!r}"
             )
             page.wait_for_timeout(wait_ms)
@@ -2444,7 +2521,7 @@ def _collect_profile_reel_urls(
                     page.wait_for_timeout(1_500)
             except Exception:
                 pass
-    raise InstagramReelsUploadError(
+    raise TikTokReelsUploadError(
         "Не удалось открыть/прочитать Reel в профиле."
         + (f" last_err={last_err!r}" if last_err else "")
     )
@@ -2459,16 +2536,18 @@ def _is_retryable_create_flow_error(exc: BaseException) -> bool:
             _NEW_POST_CLICK_ERR,
             _CREATE_PUBLICATION_ERR,
             _CREATE_DIALOG_ERR,
+            "не появился выбор файла",
+            "не дождался статуса Uploaded",
         )
     )
 
 
-def _reload_instagram_home_for_retry(
+def _reload_tiktok_home_for_retry(
     page, *, keep_in_background: bool = False
 ) -> None:
     """Сбросить застрявший мастер Create: закрыть диалоги и открыть главную."""
     _log(
-        "Reels upload: шаг Create не удался — "
+        "TikToks upload: шаг Upload не удался — "
         "обновляем страницу и повторяем залив того же видео."
     )
     try:
@@ -2499,16 +2578,16 @@ def _reload_instagram_home_for_retry(
         try:
             _navigate_page_to(
                 page,
-                INSTAGRAM_URL,
+                TIKTOK_URL,
                 label="Reels upload",
                 keep_in_background=keep_in_background,
             )
         except Exception as e:
-            _log(f"Reels upload: переход на главную не удался: {e!r} — reload.")
+            _log(f"TikToks upload: переход на главную не удался: {e!r} — reload.")
             try:
                 page.reload(wait_until="domcontentloaded", timeout=120_000)
             except Exception as e2:
-                _log(f"Reels upload: reload не удался: {e2!r}")
+                _log(f"TikToks upload: reload не удался: {e2!r}")
     finally:
         if listener_attached:
             try:
@@ -2522,8 +2601,491 @@ def _reload_instagram_home_for_retry(
     _dismiss_discard_create_dialog(page, prefer_keep=False)
 
 
-@instagram_entrypoint
-def run_instagram_reels_upload(
+def _studio_file_picker_ready(page) -> bool:
+    """Select video / input[type=file] — появляется не сразу после открытия Studio."""
+    sels = (
+        'input[type="file"][accept*="video"]',
+        'input[type="file"]',
+        '[data-e2e="select_video_button"]',
+        '[data-e2e="select_video_container"]',
+    )
+    for sel in sels:
+        try:
+            loc = page.locator(sel)
+            if int(loc.count()) <= 0:
+                continue
+            if sel.startswith("input"):
+                return True
+            try:
+                if loc.first.is_visible(timeout=120):
+                    return True
+            except Exception:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _studio_upload_page_ready(page) -> bool:
+    try:
+        url = (page.url or "").lower()
+    except Exception:
+        url = ""
+    if "tiktokstudio" in url and "upload" in url:
+        return True
+    if _studio_file_picker_ready(page):
+        return True
+    sels = (
+        '[data-e2e="caption_container"]',
+        '[data-e2e="post_video_button"]',
+        '[data-e2e="upload_status_container"]',
+    )
+    for sel in sels:
+        try:
+            if int(page.locator(sel).count()) > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+_STUDIO_UPLOAD_STATUS_JS = """() => {
+  const box = document.querySelector('[data-e2e="upload_status_container"]');
+  if (!box) return {state: 'none', text: '', pct: ''};
+  const success = box.querySelector('.info-status.success');
+  const info = box.querySelector('.info-status.info');
+  const node = success || info || box;
+  const text = String(node.innerText || '').replace(/\\s+/g, ' ').trim();
+  const pctEl = box.querySelector('.info-progress-num');
+  const pct = String((pctEl && pctEl.innerText) || '').trim();
+  if (success || /uploaded|загружено|загрузка завершена/i.test(text)) {
+    return {state: 'success', text, pct: pct || '100%'};
+  }
+  if (info || /\\d+(?:\\.\\d+)?\\s*mb\\s*\\/\\s*\\d/i.test(text)
+      || /seconds left|осталось|сек\\.?\\s+осталось/i.test(text)
+      || /cloudupload/i.test(box.innerHTML || '')) {
+    return {state: 'uploading', text, pct};
+  }
+  return {state: 'unknown', text, pct};
+}"""
+
+
+def _studio_upload_status(page) -> dict[str, str]:
+    try:
+        raw = page.evaluate(_STUDIO_UPLOAD_STATUS_JS)
+    except Exception:
+        return {"state": "none", "text": "", "pct": ""}
+    if not isinstance(raw, dict):
+        return {"state": "none", "text": "", "pct": ""}
+    return {
+        "state": str(raw.get("state") or "none"),
+        "text": str(raw.get("text") or ""),
+        "pct": str(raw.get("pct") or ""),
+    }
+
+
+def _studio_file_uploaded(page) -> bool:
+    return _studio_upload_status(page).get("state") == "success"
+
+
+def _wait_studio_file_picker(page, *, timeout_s: float = 90.0) -> None:
+    """Ждём, пока Studio отрисует Select video / hidden file input."""
+    if _studio_file_uploaded(page) or _studio_file_picker_ready(page):
+        return
+    _log("TikToks upload: ждём появления выбора файла на Studio…")
+    deadline = time.monotonic() + max(8.0, float(timeout_s))
+    last_log = 0.0
+    while time.monotonic() < deadline:
+        _dismiss_studio_modals(page)
+        if _studio_file_uploaded(page) or _studio_file_picker_ready(page):
+            _log("TikToks upload: выбор файла на странице появился.")
+            return
+        now = time.monotonic()
+        if now - last_log >= 8.0:
+            last_log = now
+            _log("TikToks upload: Select video / input[type=file] ещё нет, ждём…")
+        try:
+            page.wait_for_timeout(250)
+        except Exception:
+            time.sleep(0.25)
+    raise TikTokReelsUploadError(
+        "На странице TikTok Studio не появился выбор файла (Select video)."
+    )
+
+
+def _wait_studio_file_uploaded(page, *, timeout_s: float = 900.0) -> None:
+    """Ждём Uploaded / .info-status.success, не Post пока идёт 24MB/37MB."""
+    st = _studio_upload_status(page)
+    if st.get("state") == "success":
+        _log(f"TikToks upload: файл уже загружен ({st.get('text') or 'Uploaded'}).")
+        return
+    _log("TikToks upload: ждём окончания загрузки файла в Studio…")
+    deadline = time.monotonic() + max(30.0, float(timeout_s))
+    last_log = 0.0
+    last_key = ""
+    while time.monotonic() < deadline:
+        _dismiss_studio_modals(page)
+        st = _studio_upload_status(page)
+        state = st.get("state") or "none"
+        key = f"{state}|{st.get('pct')}|{st.get('text')}"
+        now = time.monotonic()
+        if state == "success":
+            _log(
+                "TikToks upload: загрузка файла завершена "
+                f"({st.get('text') or 'Uploaded'})."
+            )
+            return
+        if now - last_log >= 5.0 and key != last_key:
+            last_log = now
+            last_key = key
+            extra = st.get("pct") or ""
+            txt = st.get("text") or state
+            _log(
+                "TikToks upload: файл ещё грузится"
+                + (f" {extra}" if extra else "")
+                + (f" — {txt}" if txt else "")
+                + "…"
+            )
+        try:
+            page.wait_for_timeout(400)
+        except Exception:
+            time.sleep(0.4)
+    raise TikTokReelsUploadError(
+        "Файл не дождался статуса Uploaded в TikTok Studio."
+    )
+
+
+def _try_click_sidebar_upload_once(page, *, appear_timeout_ms: float = 250) -> bool:
+    wait_ms = max(50, int(appear_timeout_ms))
+    locators = (
+        page.locator('a[data-e2e="nav-upload"]'),
+        page.locator('[data-e2e="nav-upload"]'),
+        page.get_by_role(
+            "button",
+            name=re.compile(r"^(upload|загрузить)(\s+видео)?$", re.I),
+        ),
+        page.get_by_role(
+            "link",
+            name=re.compile(r"^(upload|загрузить)(\s+видео)?$", re.I),
+        ),
+        page.locator(
+            'a[aria-label="Upload" i], a[aria-label="Загрузить" i], '
+            'button[aria-label="Upload" i], button[aria-label="Загрузить" i], '
+            'a[aria-label="Загрузить видео" i], '
+            'button[aria-label="Загрузить видео" i]'
+        ),
+    )
+    for loc in locators:
+        try:
+            loc.first.wait_for(state="attached", timeout=wait_ms)
+        except Exception:
+            continue
+        target = loc.first
+        try:
+            href = target.get_attribute("href") or ""
+        except Exception:
+            href = ""
+        try:
+            _dom_click(target)
+        except Exception:
+            try:
+                target.click(timeout=5_000, force=True)
+            except Exception:
+                continue
+        _log(
+            "TikToks upload: клик по Upload"
+            + (f" href={href!r}" if href else "")
+            + "."
+        )
+        return True
+    return False
+
+
+def _click_sidebar_upload(page, *, max_seconds: float = 90.0) -> None:
+    """Сайдбар главной: кнопка Upload → TikTok Studio."""
+    if _studio_upload_page_ready(page):
+        _log("TikToks upload: страница Studio Upload уже открыта.")
+        return
+    _log("TikToks upload: ищем кнопку Upload в сайдбаре…")
+    deadline = time.monotonic() + max(10.0, float(max_seconds))
+    last_url = ""
+    while time.monotonic() < deadline:
+        if _studio_upload_page_ready(page):
+            return
+        try:
+            last_url = (page.url or "").strip()
+        except Exception:
+            last_url = ""
+        remaining_ms = max(50.0, (deadline - time.monotonic()) * 1000.0)
+        if not _try_click_sidebar_upload_once(
+            page, appear_timeout_ms=min(300.0, remaining_ms)
+        ):
+            continue
+        settle_until = time.monotonic() + 4.0
+        while time.monotonic() < settle_until:
+            if _studio_upload_page_ready(page):
+                return
+            _dismiss_studio_modals(page)
+            try:
+                page.wait_for_timeout(150)
+            except Exception:
+                time.sleep(0.15)
+    if _studio_upload_page_ready(page):
+        return
+    raise TikTokReelsUploadError(
+        _NEW_POST_CLICK_ERR + (f" URL={last_url!r}" if last_url else "")
+    )
+
+
+def _wait_studio_upload_page(page, *, timeout_s: float = 90.0):
+    deadline = time.monotonic() + max(8.0, float(timeout_s))
+    last_url = ""
+    while time.monotonic() < deadline:
+        try:
+            last_url = (page.url or "").strip()
+        except Exception:
+            last_url = ""
+        _dismiss_studio_modals(page)
+        if _studio_upload_page_ready(page):
+            scope = page.locator(
+                '[data-e2e="select_video_container"]'
+            ).or_(page.locator("div.upload")).or_(page.locator("body"))
+            _log(
+                "TikToks upload: страница загрузки Studio открыта "
+                f"URL={last_url!r}."
+            )
+            _wait_studio_file_picker(page)
+            return scope.first
+        try:
+            page.wait_for_timeout(200)
+        except Exception:
+            time.sleep(0.2)
+    raise TikTokReelsUploadError(
+        _CREATE_DIALOG_ERR + (f" URL={last_url!r}" if last_url else "")
+    )
+
+
+def _dismiss_studio_modals(page) -> None:
+    """Turn on (проверки контента) и Got it (обучение Studio)."""
+    try:
+        dlg = page.locator('[role="dialog"]')
+        n = int(dlg.count())
+    except Exception:
+        n = 0
+    for i in range(min(n, 4)):
+        try:
+            box = dlg.nth(i)
+            turn = box.get_by_role("button", name=_TURN_ON_BTN_RE)
+            if int(turn.count()) > 0:
+                _dom_click(turn.first)
+                _log("TikToks upload: в модалке нажали Turn on.")
+                page.wait_for_timeout(200)
+                continue
+            got = box.get_by_role("button", name=_GOT_IT_BTN_RE)
+            if int(got.count()) > 0:
+                _dom_click(got.first)
+                _log("TikToks upload: закрыли обучение (Got it).")
+                page.wait_for_timeout(200)
+        except Exception:
+            continue
+    try:
+        tips = page.locator(".tutorial-tooltip").get_by_role(
+            "button", name=_GOT_IT_BTN_RE
+        )
+        if int(tips.count()) > 0:
+            _dom_click(tips.first)
+            _log("TikToks upload: закрыли tutorial (Got it).")
+            page.wait_for_timeout(200)
+    except Exception:
+        pass
+    _dismiss_info_dialogs(page)
+
+
+def _studio_details_ready(page) -> bool:
+    """Форма Details (описание / Post / статус файла) — не путать с готовностью Post."""
+    sels = (
+        '[data-e2e="caption_container"]',
+        '[data-e2e="post_video_button"]',
+        '[data-e2e="upload_status_container"]',
+    )
+    for sel in sels:
+        try:
+            if int(page.locator(sel).count()) > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _wait_studio_details(page, *, timeout_s: float = 300.0) -> None:
+    deadline = time.monotonic() + max(15.0, float(timeout_s))
+    while time.monotonic() < deadline:
+        _dismiss_studio_modals(page)
+        if _studio_details_ready(page):
+            _log("TikToks upload: форма Details после загрузки файла видна.")
+            return
+        try:
+            page.wait_for_timeout(250)
+        except Exception:
+            time.sleep(0.25)
+    raise TikTokReelsUploadError(
+        "После выбора файла не появилась форма описания TikTok Studio."
+    )
+
+
+def _copyright_check_in_progress(page) -> bool:
+    try:
+        loc = page.get_by_text(_CHECKING_PROGRESS_RE)
+        n = int(loc.count())
+    except Exception:
+        return False
+    for i in range(min(n, 8)):
+        el = loc.nth(i)
+        try:
+            if el.is_visible(timeout=80):
+                return True
+        except Exception:
+            continue
+        try:
+            shown = el.evaluate(
+                """(node) => {
+                    const row = node.closest('[data-show]');
+                    if (row && String(row.getAttribute('data-show')) === 'false') {
+                        return false;
+                    }
+                    const st = window.getComputedStyle(node);
+                    return st && st.display !== 'none' && st.visibility !== 'hidden';
+                }"""
+            )
+            if shown:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _wait_copyright_checks_done(page, *, timeout_s: float = 1_200.0) -> None:
+    """Ждём исчезновения «Checking in progress…» (30 с / 10 мин)."""
+    started = time.monotonic()
+    logged = False
+    deadline = started + max(30.0, float(timeout_s))
+    while time.monotonic() < deadline:
+        _dismiss_studio_modals(page)
+        if not _copyright_check_in_progress(page):
+            if logged:
+                _log("TikToks upload: проверка музыки/контента завершена.")
+            return
+        if not logged:
+            logged = True
+            _log("TikToks upload: ждём окончание Checking in progress…")
+        try:
+            page.wait_for_timeout(800)
+        except Exception:
+            time.sleep(0.8)
+    raise TikTokReelsUploadError(
+        "Не дождались окончания проверки музыки/контента перед Post."
+    )
+
+
+def _click_studio_post(page) -> None:
+    btn = (
+        page.locator('[data-e2e="post_video_button"]')
+        .or_(page.get_by_role("button", name=_POST_BTN_RE))
+    )
+    deadline = time.monotonic() + 180.0
+    while time.monotonic() < deadline:
+        _dismiss_studio_modals(page)
+        try:
+            if not _studio_file_uploaded(page):
+                page.wait_for_timeout(400)
+                continue
+            if int(btn.count()) <= 0:
+                page.wait_for_timeout(200)
+                continue
+            target = btn.first
+            disabled = False
+            try:
+                disabled = bool(
+                    target.get_attribute("aria-disabled") == "true"
+                    or target.get_attribute("data-disabled") == "true"
+                    or target.get_attribute("data-loading") == "true"
+                )
+            except Exception:
+                disabled = False
+            if disabled:
+                page.wait_for_timeout(300)
+                continue
+            try:
+                _dom_click(target)
+            except Exception:
+                target.click(timeout=8_000, force=True)
+            _log("TikToks upload: нажали Post.")
+            page.wait_for_timeout(400)
+            return
+        except Exception:
+            page.wait_for_timeout(250)
+    raise TikTokReelsUploadError("Не удалось нажать кнопку Post.")
+
+
+def _normalize_tiktok_video_url(url: str) -> str:
+    m = _TT_VIDEO_HREF_RE.search(url or "")
+    if not m:
+        return (url or "").strip().split("?")[0].rstrip("/")
+    return f"https://www.tiktok.com/@{m.group(1)}/video/{m.group(2)}"
+
+
+def _video_id_from_tiktok_url(url: str) -> str:
+    m = _TT_VIDEO_HREF_RE.search(url or "")
+    if m:
+        return m.group(2)
+    return _video_id_from_reel_url(url)
+
+
+def _collect_posted_tiktok_urls(
+    page, *, limit: int = 1, timeout_s: float = 180.0
+) -> list[str]:
+    """После Post — таблица постов, ссылка /@user/video/<id>."""
+    limit = max(1, int(limit or 1))
+    deadline = time.monotonic() + max(15.0, float(timeout_s))
+    last_n = 0
+    while time.monotonic() < deadline:
+        _dismiss_studio_modals(page)
+        found: list[str] = []
+        seen: set[str] = set()
+        try:
+            links = page.locator('a[href*="/video/"]')
+            n = int(links.count())
+            last_n = n
+            for i in range(min(n, 30)):
+                try:
+                    href = links.nth(i).get_attribute("href") or ""
+                except Exception:
+                    continue
+                url = _normalize_tiktok_video_url(_absolute_tiktok_url(href))
+                vid = _video_id_from_tiktok_url(url)
+                if not vid or url in seen:
+                    continue
+                seen.add(url)
+                found.append(url)
+                if len(found) >= limit:
+                    break
+        except Exception:
+            found = []
+        if found:
+            return found
+        try:
+            page.wait_for_timeout(400)
+        except Exception:
+            time.sleep(0.4)
+    raise TikTokReelsUploadError(
+        "Не удалось найти URL залитого видео (/@user/video/…)"
+        + (f", ссылок /video/={last_n}" if last_n else "")
+        + "."
+    )
+
+
+@tiktok_entrypoint
+def run_tiktok_reels_upload(
     page,
     *,
     video_path: str | Path,
@@ -2537,30 +3099,23 @@ def run_instagram_reels_upload(
     on_new_post_clicked=None,
     keep_in_background: bool = False,
     wait_youtube_before_done: threading.Event | None = None,
-    crop_aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT,
+    crop_aspect: str = DEFAULT_TIKTOK_CROP_ASPECT,
 ) -> dict[str, Any]:
     """
-    Главная → «Новая публикация» → файл → Share → Post shared →
-    username из href Profile → сразу /{username}/reels/ → кандидаты из сетки.
+    Главная → Upload в сайдбаре → Studio → файл → описание → Post →
+    URL /@user/video/<id> из таблицы постов.
 
     Возвращает dict: video_id, url, title, description, candidate_reels.
-    При ``top_reels_scan`` > 1 собирает несколько первых роликов
-    (для multi-tab: если первый уже в БД — взять следующий).
-    ``on_new_post_clicked`` — сразу после клика Create (открыть соседние вкладки).
-    ``keep_in_background`` — не переключать фокус браузера на эту вкладку
-    (Yt+Inst: фокус остаётся на YouTube).
-    ``wait_youtube_before_done`` — не жать Done / не открывать /reels/,
-    пока YouTube этого ролика не завершится.
-    ``crop_aspect`` — пункт Select Crop: original / 1:1 / 9:16 / 16:9.
+    ``on_new_post_clicked`` — сразу после клика Upload.
+    ``wait_youtube_before_done`` — не жать Post, пока YouTube не завершится.
     """
     upload_file = _validate_video_file_path(video_path)
     caption = (title or "").strip() or (description or "").strip()
     if (description or "").strip() and (title or "").strip():
         caption = f"{(title or '').strip()}\n\n{(description or '').strip()}".strip()
 
-    crop = normalize_instagram_crop_aspect(crop_aspect)
-    _log("Reels upload: проверка сессии / главной Instagram…")
-    verify_instagram_home_available(
+    _log("TikToks upload: проверка сессии / главной TikTok…")
+    verify_tiktok_home_available(
         page,
         session_login=session_login,
         session_password=session_password,
@@ -2570,69 +3125,69 @@ def run_instagram_reels_upload(
 
     for attempt in range(1, _CREATE_FLOW_RETRY_ATTEMPTS + 1):
         try:
-            _click_new_post_in_sidebar(page)
+            _click_sidebar_upload(page)
             if attempt == 1 and callable(on_new_post_clicked):
                 try:
                     on_new_post_clicked()
                 except Exception as e:
-                    _log(f"Reels upload: on_new_post_clicked: {e!r}")
-            _click_create_submenu_post_if_present(page)
-            dialog = _wait_create_dialog(page)
-            _attach_video_file(
-                page, dialog, upload_file, keep_in_background=keep_in_background
-            )
-            _select_crop_aspect(page, crop)
+                    _log(f"TikToks upload: on_new_post_clicked: {e!r}")
+            dialog = _wait_studio_upload_page(page)
+            _dismiss_studio_modals(page)
+            if not _studio_file_uploaded(page):
+                _attach_video_file(
+                    page, dialog, upload_file, keep_in_background=keep_in_background
+                )
             break
-        except InstagramReelsUploadError as e:
+        except TikTokReelsUploadError as e:
             if not _is_retryable_create_flow_error(e):
                 raise
             if attempt >= _CREATE_FLOW_RETRY_ATTEMPTS:
                 _log(
-                    "Reels upload: шаг Create не удался после "
+                    "TikToks upload: шаг Upload не удался после "
                     f"{_CREATE_FLOW_RETRY_ATTEMPTS} попыток — "
                     "профиль будет исключён из очереди."
                 )
                 raise
             _log(
-                f"Reels upload: {e} "
+                f"TikToks upload: {e} "
                 f"(попытка {attempt}/{_CREATE_FLOW_RETRY_ATTEMPTS}) — "
                 "обновляем страницу и повторяем залив того же видео."
             )
-            _reload_instagram_home_for_retry(
+            _reload_tiktok_home_for_retry(
                 page, keep_in_background=keep_in_background
             )
-    _click_next_until_caption_or_share(page)
+
+    _wait_studio_details(page)
+    _wait_studio_file_uploaded(page)
+    _dismiss_studio_modals(page)
     _fill_caption(page, caption)
-    _click_share(page)
-    _wait_post_shared_and_done(
-        page,
-        keep_in_background=keep_in_background,
-        wait_before_done=wait_youtube_before_done,
-    )
-    username = _open_own_profile(page, session_login=session_login)
-    _open_profile_reels_tab(
-        page, username, keep_in_background=keep_in_background
-    )
+    _wait_copyright_checks_done(page)
+    if wait_youtube_before_done is not None:
+        _log("TikToks upload: ждём завершения YouTube перед Post…")
+        if not wait_youtube_before_done.wait(timeout=3_600.0):
+            _log("TikToks upload: таймаут ожидания YouTube — продолжаем Post.")
+        else:
+            _log("TikToks upload: YouTube готов — Post.")
+    _click_studio_post(page)
     scan_n = max(1, int(top_reels_scan or 1))
-    urls = _collect_profile_reel_urls(
-        page, limit=scan_n, keep_in_background=keep_in_background
-    )
+    urls = _collect_posted_tiktok_urls(page, limit=scan_n)
     candidates: list[dict[str, str]] = []
     for u in urls:
-        vid_i = _video_id_from_reel_url(u)
+        vid_i = _video_id_from_tiktok_url(u)
         if not vid_i:
             continue
         candidates.append({"video_id": vid_i, "url": u})
     if not candidates:
-        raise InstagramReelsUploadError("Не удалось извлечь video_id из сетки Reels.")
+        raise TikTokReelsUploadError(
+            "Не удалось извлечь video_id из ссылки /@user/video/…"
+        )
     url = candidates[0]["url"]
     vid = candidates[0]["video_id"]
 
     _log(
-        f"Reels upload: готово video_id={vid!r} url={url!r} "
+        f"TikToks upload: готово video_id={vid!r} url={url!r} "
         f"candidates={len(candidates)}"
     )
-    # video_id получен — алгоритм залива завершён (без возврата на главную).
     return {
         "video_id": vid,
         "url": url,

@@ -13,6 +13,8 @@ def _normalize_platform(value: str | None) -> str:
     v = (value or "").strip().lower().replace("+", "_").replace("-", "_")
     if v in ("instagram", "ig", "inst"):
         return "instagram"
+    if v in ("tiktok", "tt", "tik_tok"):
+        return "tiktok"
     if v in ("yt_inst", "youtube_instagram", "youtube_inst", "ytinstagram", "yt_ig"):
         return "yt_inst"
     return "youtube"

@@ -32,7 +32,7 @@ def make_login_credentials_resolver(
         cd = custom_data_for_profile(profiles_custom_data, profile_id)
         if not cd:
             return None
-        if (platform or "").strip().lower() == "instagram":
+        if (platform or "").strip().lower() in ("instagram", "tiktok"):
             return gmail_or_yt_credentials_from_custom_data(cd)
         return credentials_from_custom_data(cd)
 
@@ -44,6 +44,28 @@ def make_instagram_session_resolver(
 ) -> Callable[[str], tuple[str, str, str]]:
     def _resolve(profile_id: str) -> tuple[str, str, str]:
         from zaliver.instagram_upload.instagram_availability import (
+            session_login_from_custom_data,
+            session_password_from_custom_data,
+            session_twofa_from_custom_data,
+        )
+
+        cd = custom_data_for_profile(profiles_custom_data, profile_id)
+        if not cd:
+            return "", "", ""
+        return (
+            session_login_from_custom_data(cd),
+            session_password_from_custom_data(cd),
+            session_twofa_from_custom_data(cd),
+        )
+
+    return _resolve
+
+
+def make_tiktok_session_resolver(
+    profiles_custom_data: Mapping[str, Mapping[str, Any]] | None,
+) -> Callable[[str], tuple[str, str, str]]:
+    def _resolve(profile_id: str) -> tuple[str, str, str]:
+        from zaliver.tiktok_upload.tiktok_availability import (
             session_login_from_custom_data,
             session_password_from_custom_data,
             session_twofa_from_custom_data,

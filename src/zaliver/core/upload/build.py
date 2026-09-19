@@ -26,7 +26,7 @@ def build_upload_queue_request(
     raw_ids = (pending.get("profile_ids", "") or "").strip()
     profile_ids = [p.strip() for p in raw_ids.split(",") if p.strip()]
     schedule_times = []
-    if pending.get("schedule_publish") and plat != "instagram":
+    if pending.get("schedule_publish") and plat not in ("instagram", "tiktok"):
         for raw in pending.get("schedule_times_iso") or []:
             dt = parse_msk_datetime(raw)
             if dt is not None:

@@ -21,13 +21,18 @@ from zaliver.core.profiles.account_data import (
     INST_PASSWORD_KEY,
     SECTION_GMAIL,
     SECTION_INSTAGRAM,
+    SECTION_TIKTOK,
     SECTION_YOUTUBE,
+    TT_2FA_KEY,
+    TT_LOGIN_KEY,
+    TT_PASSWORD_KEY,
     YT_2FA_KEY,
     YT_LOGIN_KEY,
     YT_PASSWORD_KEY,
     build_account_credentials_payload,
     build_gmail_credentials_payload,
     build_instagram_credentials_payload,
+    build_tiktok_credentials_payload,
 )
 
 # Re-export for older UI imports that still pull keys from this module.
@@ -62,7 +67,7 @@ def _custom_data_str(custom_data: dict[str, object] | None, key: str) -> str:
 
 def _normalize_section(section: str | None) -> str:
     s = (section or "").strip().lower()
-    if s in (SECTION_INSTAGRAM, SECTION_GMAIL, SECTION_YOUTUBE):
+    if s in (SECTION_INSTAGRAM, SECTION_TIKTOK, SECTION_GMAIL, SECTION_YOUTUBE):
         return s
     return SECTION_YOUTUBE
 
@@ -81,10 +86,16 @@ class ProfileAccountDataDialog(QDialog):
         super().__init__(parent)
         # platform оставлен для совместимости вызовов; приоритет у section.
         if section is None and platform is not None:
-            from zaliver.ui.platform import PLATFORM_INSTAGRAM, normalize_platform
+            from zaliver.ui.platform import (
+                PLATFORM_INSTAGRAM,
+                PLATFORM_TIKTOK,
+                normalize_platform,
+            )
 
             section = (
-                SECTION_INSTAGRAM
+                SECTION_TIKTOK
+                if normalize_platform(platform) == PLATFORM_TIKTOK
+                else SECTION_INSTAGRAM
                 if normalize_platform(platform) == PLATFORM_INSTAGRAM
                 else SECTION_YOUTUBE
             )
@@ -94,6 +105,7 @@ class ProfileAccountDataDialog(QDialog):
 
         titles = {
             SECTION_INSTAGRAM: "Данные Insta",
+            SECTION_TIKTOK: "Данные TikTok",
             SECTION_GMAIL: "Данные Gmail",
             SECTION_YOUTUBE: "Данные учетки",
         }
@@ -108,6 +120,11 @@ class ProfileAccountDataDialog(QDialog):
             hint_extra = (
                 "Редактируются только данные Instagram "
                 "(inst_login / inst_password / inst_2fa)."
+            )
+        elif self._section == SECTION_TIKTOK:
+            hint_extra = (
+                "Редактируются только данные TikTok "
+                "(tt_login / tt_password / tt_2fa)."
             )
         elif self._section == SECTION_GMAIL:
             hint_extra = (
@@ -168,6 +185,29 @@ class ProfileAccountDataDialog(QDialog):
                 _custom_data_str(self._custom_data, INST_2FA_KEY)
             )
             form.addRow("2FA Instagram:", self._inst_twofa)
+        elif self._section == SECTION_TIKTOK:
+            self._inst_login = QLineEdit()
+            self._inst_login.setPlaceholderText("email или логин TikTok")
+            tt_login = _custom_data_str(self._custom_data, TT_LOGIN_KEY).strip()
+            if not tt_login:
+                tt_login = (profile_name or "").strip()
+            self._inst_login.setText(tt_login)
+            form.addRow("Логин TikTok:", self._inst_login)
+
+            self._inst_password = QLineEdit()
+            self._inst_password.setEchoMode(QLineEdit.EchoMode.Password)
+            self._inst_password.setPlaceholderText("Пароль")
+            self._inst_password.setText(
+                _custom_data_str(self._custom_data, TT_PASSWORD_KEY)
+            )
+            form.addRow("Пароль TikTok:", self._inst_password)
+
+            self._inst_twofa = QLineEdit()
+            self._inst_twofa.setPlaceholderText("Секрет 2FA")
+            self._inst_twofa.setText(
+                _custom_data_str(self._custom_data, TT_2FA_KEY)
+            )
+            form.addRow("2FA TikTok:", self._inst_twofa)
         elif self._section == SECTION_GMAIL:
             self._gmail_login = QLineEdit()
             self._gmail_login.setPlaceholderText("email Gmail")
@@ -234,7 +274,7 @@ class ProfileAccountDataDialog(QDialog):
 
         root.addLayout(form)
 
-        if self._section == SECTION_INSTAGRAM:
+        if self._section in (SECTION_INSTAGRAM, SECTION_TIKTOK):
             btn_from_gmail = QPushButton("подставить логин и пароль от Gmail")
             btn_from_gmail.setObjectName("secondary")
             btn_from_gmail.setToolTip(
@@ -334,6 +374,15 @@ class ProfileAccountDataDialog(QDialog):
             assert self._inst_password is not None
             assert self._inst_twofa is not None
             return build_instagram_credentials_payload(
+                login=self._inst_login.text(),
+                password=self._inst_password.text(),
+                twofa=self._inst_twofa.text(),
+            )
+        if self._section == SECTION_TIKTOK:
+            assert self._inst_login is not None
+            assert self._inst_password is not None
+            assert self._inst_twofa is not None
+            return build_tiktok_credentials_payload(
                 login=self._inst_login.text(),
                 password=self._inst_password.text(),
                 twofa=self._inst_twofa.text(),

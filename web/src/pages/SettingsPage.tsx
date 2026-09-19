@@ -61,7 +61,11 @@ export function SettingsPage({
   const [users, setUsers] = useState<AuthUser[]>([]);
 
   const showYt = platform === "youtube" || platform === "yt_inst";
-  const showIg = platform === "instagram" || platform === "yt_inst";
+  const showIg =
+    platform === "instagram" ||
+    platform === "yt_inst" ||
+    platform === "tiktok";
+  const igKeyPrefix = platform === "tiktok" ? "tiktok" : "instagram";
 
   useEffect(() => {
     void (async () => {
@@ -108,9 +112,9 @@ export function SettingsPage({
         setYtApiKey(String(v["youtube/api_key"] ?? ""));
         setSearchOldest(Boolean(v["youtube/search_oldest_channel"] ?? false));
         setIgPauseHours(Number(v["upload_pause_hours"] ?? 3));
-        setIgTabs(Number(v["instagram/tabs_per_profile"] ?? 1));
-        setIgChecker(String(v["instagram/stats_checker_profile_id"] ?? ""));
-        const crop = String(v["instagram/crop_aspect"] ?? "original").trim().toLowerCase();
+        setIgTabs(Number(v[`${igKeyPrefix}/tabs_per_profile`] ?? 1));
+        setIgChecker(String(v[`${igKeyPrefix}/stats_checker_profile_id`] ?? ""));
+        const crop = String(v[`${igKeyPrefix}/crop_aspect`] ?? "original").trim().toLowerCase();
         setIgCrop(
           crop === "1:1" || crop === "9:16" || crop === "16:9" ? crop : "original",
         );
@@ -158,9 +162,11 @@ export function SettingsPage({
         values.upload_pause_minutes = Math.max(0, Math.floor(igPauseHours) * 60);
       }
       if (showIg) {
-        values["instagram/tabs_per_profile"] = igTabs;
-        values["instagram/stats_checker_profile_id"] = igChecker;
-        values["instagram/crop_aspect"] = igCrop;
+        values[`${igKeyPrefix}/tabs_per_profile`] = igTabs;
+        if (platform !== "tiktok") {
+          values[`${igKeyPrefix}/stats_checker_profile_id`] = igChecker;
+          values[`${igKeyPrefix}/crop_aspect`] = igCrop;
+        }
       }
       await api.patchSettings(values);
       const mePatch: { locale: string; password?: string } = { locale };
@@ -426,20 +432,26 @@ export function SettingsPage({
 
       {showIg ? (
         <section className="group stack">
-          <h3 className="group-title">Instagram</h3>
-          <label className="hint">{t("igCropAspect", locale)}</label>
-          <p className="hint">{t("igCropHint", locale)}</p>
-          <select
-            className="field"
-            style={{ maxWidth: 220 }}
-            value={igCrop}
-            onChange={(e) => setIgCrop(e.target.value)}
-          >
-            <option value="original">{t("igCropOriginal", locale)}</option>
-            <option value="1:1">1:1</option>
-            <option value="9:16">9:16</option>
-            <option value="16:9">16:9</option>
-          </select>
+          <h3 className="group-title">
+            {platform === "tiktok" ? "TikTok" : "Instagram"}
+          </h3>
+          {platform !== "tiktok" ? (
+            <>
+              <label className="hint">{t("igCropAspect", locale)}</label>
+              <p className="hint">{t("igCropHint", locale)}</p>
+              <select
+                className="field"
+                style={{ maxWidth: 220 }}
+                value={igCrop}
+                onChange={(e) => setIgCrop(e.target.value)}
+              >
+                <option value="original">{t("igCropOriginal", locale)}</option>
+                <option value="1:1">1:1</option>
+                <option value="9:16">9:16</option>
+                <option value="16:9">16:9</option>
+              </select>
+            </>
+          ) : null}
           <label className="hint">Пауза между заливами (часы)</label>
           <input
             className="field"
@@ -464,26 +476,30 @@ export function SettingsPage({
               />
             </>
           ) : null}
-          <label className="hint">Профиль для чека статистики</label>
-          <select
-            className="field"
-            value={igChecker}
-            onChange={(e) => setIgChecker(e.target.value)}
-          >
-            <option value="">— не выбран —</option>
-            {profiles.map((p) => (
-              <option key={p.id} value={p.id}>
-                {profileLabel(p)}
-              </option>
-            ))}
-            {igChecker && !profiles.some((p) => p.id === igChecker) ? (
-              <option value={igChecker}>{igChecker} (нет в списке)</option>
-            ) : null}
-          </select>
-          {profiles.length === 0 ? (
-            <p className="hint">
-              Список пуст — загрузите профили на вкладке «Профили».
-            </p>
+          {platform !== "tiktok" ? (
+            <>
+              <label className="hint">Профиль для чека статистики</label>
+              <select
+                className="field"
+                value={igChecker}
+                onChange={(e) => setIgChecker(e.target.value)}
+              >
+                <option value="">— не выбран —</option>
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {profileLabel(p)}
+                  </option>
+                ))}
+                {igChecker && !profiles.some((p) => p.id === igChecker) ? (
+                  <option value={igChecker}>{igChecker} (нет в списке)</option>
+                ) : null}
+              </select>
+              {profiles.length === 0 ? (
+                <p className="hint">
+                  Список пуст — загрузите профили на вкладке «Профили».
+                </p>
+              ) : null}
+            </>
           ) : null}
         </section>
       ) : null}

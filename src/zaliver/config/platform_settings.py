@@ -8,11 +8,13 @@ from zaliver.config.store import SettingsStore, ensure_settings_store
 
 PLATFORM_YOUTUBE = "youtube"
 PLATFORM_INSTAGRAM = "instagram"
+PLATFORM_TIKTOK = "tiktok"
 PLATFORM_YT_INST = "yt_inst"
 
 PLATFORM_CHOICES: tuple[tuple[str, str, str], ...] = (
     (PLATFORM_YOUTUBE, "YouTube", "Залив видео на YouTube"),
     (PLATFORM_INSTAGRAM, "Instagram", "Залив видео на Instagram"),
+    (PLATFORM_TIKTOK, "TikTok", "Залив видео на TikTok"),
     (
         PLATFORM_YT_INST,
         "Yt+Inst",
@@ -37,6 +39,8 @@ def normalize_platform(value: str | None) -> str:
     v = (value or "").strip().lower().replace("+", "_").replace("-", "_")
     if v in (PLATFORM_INSTAGRAM, "ig", "inst"):
         return PLATFORM_INSTAGRAM
+    if v in (PLATFORM_TIKTOK, "tt", "tik_tok"):
+        return PLATFORM_TIKTOK
     if v in (
         PLATFORM_YT_INST,
         "youtube_instagram",
@@ -52,6 +56,8 @@ def platform_display_name(platform: str) -> str:
     p = normalize_platform(platform)
     if p == PLATFORM_INSTAGRAM:
         return "Instagram"
+    if p == PLATFORM_TIKTOK:
+        return "TikTok"
     if p == PLATFORM_YT_INST:
         return "Yt+Inst"
     return "YouTube"
@@ -59,6 +65,10 @@ def platform_display_name(platform: str) -> str:
 
 def is_instagram_platform(platform: str | None) -> bool:
     return normalize_platform(platform) == PLATFORM_INSTAGRAM
+
+
+def is_tiktok_platform(platform: str | None) -> bool:
+    return normalize_platform(platform) == PLATFORM_TIKTOK
 
 
 def is_yt_inst_platform(platform: str | None) -> bool:
@@ -73,6 +83,10 @@ def platform_includes_youtube(platform: str | None) -> bool:
 def platform_includes_instagram(platform: str | None) -> bool:
     p = normalize_platform(platform)
     return p in (PLATFORM_INSTAGRAM, PLATFORM_YT_INST)
+
+
+def platform_includes_tiktok(platform: str | None) -> bool:
+    return normalize_platform(platform) == PLATFORM_TIKTOK
 
 
 def platform_settings_storage_id(platform: str | None) -> str:

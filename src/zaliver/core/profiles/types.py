@@ -18,6 +18,8 @@ ProfileJobKind = Literal[
     "availability",
     "instagram_register",
     "instagram_2fa",
+    "tiktok_register",
+    "tiktok_2fa",
     "channel_setup",
     "warmup",
     "promote",

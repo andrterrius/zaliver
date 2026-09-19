@@ -28,7 +28,9 @@ from zaliver.ui.profile_list_helpers import (
     profile_matches_tag_filter,
     profile_search_rank,
     profile_search_tokens,
+    profile_tiktok_ready_for_checker,
 )
+from zaliver.config.platform_settings import PLATFORM_TIKTOK
 from zaliver.ui.profile_tags_clear_dialog import (
     ProfileTagsFilterDialog,
     collect_all_tags_from_profiles,
@@ -51,36 +53,63 @@ class IgCheckerProfilePickDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Профиль для чека Instagram")
         self.setModal(True)
         self.resize(820, 640)
         self._selected_id = ""
         self._platform = platform
         self._upload_store = upload_store
         self._on_upload_pause_click = on_upload_pause_click
+        self._is_tiktok = str(platform or "").strip().lower() == PLATFORM_TIKTOK
 
         all_profiles = [p for p in profiles if isinstance(p, dict) and _profile_id(p)]
-        self._eligible = [p for p in all_profiles if profile_instagram_ready_for_checker(p)]
+        ready = (
+            profile_tiktok_ready_for_checker
+            if self._is_tiktok
+            else profile_instagram_ready_for_checker
+        )
+        self._eligible = [p for p in all_profiles if ready(p)]
         self._dlg_profiles = list(self._eligible)
         self._total = len(self._dlg_profiles)
 
         root = QVBoxLayout(self)
         root.setSpacing(10)
 
-        hint = QLabel(
-            "Выберите один профиль с залогиненным Instagram "
-            "(успешная проверка доступности или данные входа). "
-            "С его сессии пойдут запросы метрик."
-        )
+        if self._is_tiktok:
+            self.setWindowTitle("Профиль для чека TikTok")
+            hint = QLabel(
+                "Выберите один профиль антидетекта. "
+                "В его браузере откроются публичные страницы роликов "
+                "и снимутся просмотры, лайки и комментарии."
+            )
+            empty_text = (
+                "Нет профилей. Сначала загрузите список "
+                "(вкладка «Профили» → «Обновить»)."
+            )
+            reject_text = (
+                "У выбранного профиля нет ID — отметьте профиль из списка."
+            )
+        else:
+            self.setWindowTitle("Профиль для чека Instagram")
+            hint = QLabel(
+                "Выберите один профиль с залогиненным Instagram "
+                "(успешная проверка доступности или данные входа). "
+                "С его сессии пойдут запросы метрик."
+            )
+            empty_text = (
+                "Нет подходящих профилей. Сначала проверьте доступность Instagram "
+                "или заполните данные входа (inst_login / пароль)."
+            )
+            reject_text = (
+                "У выбранного профиля нет залогиненного Instagram "
+                "(нужна успешная проверка доступности или данные входа)."
+            )
+        self._reject_not_ready_text = reject_text
         hint.setObjectName("hint")
         hint.setWordWrap(True)
         root.addWidget(hint)
 
         if not self._dlg_profiles:
-            empty = QLabel(
-                "Нет подходящих профилей. Сначала проверьте доступность Instagram "
-                "или заполните данные входа (inst_login / пароль)."
-            )
+            empty = QLabel(empty_text)
             empty.setObjectName("hint")
             empty.setWordWrap(True)
             root.addWidget(empty)
@@ -244,12 +273,20 @@ class IgCheckerProfilePickDialog(QDialog):
             return
         by_id = {_profile_id(p): p for p in self._dlg_profiles}
         prof = by_id.get(pid)
-        if prof is None or not profile_instagram_ready_for_checker(prof):
+        ready = (
+            profile_tiktok_ready_for_checker
+            if getattr(self, "_is_tiktok", False)
+            else profile_instagram_ready_for_checker
+        )
+        if prof is None or not ready(prof):
             QMessageBox.warning(
                 self,
                 "Профиль для чека",
-                "У выбранного профиля нет залогиненного Instagram "
-                "(нужна успешная проверка доступности или данные входа).",
+                getattr(
+                    self,
+                    "_reject_not_ready_text",
+                    "Этот профиль нельзя использовать для чека.",
+                ),
             )
             return
         self._selected_id = pid

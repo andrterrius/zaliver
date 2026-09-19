@@ -18,6 +18,14 @@ GMAIL_AVAILABILITY_RESULT_TAGS: tuple[str, ...] = (
     GMAIL_AVAILABILITY_SUCCESS_TAG,
 )
 
+# Проверка доступности Gmail (TikTok, взаимоисключающие).
+TIKTOK_GMAIL_AVAILABILITY_ERROR_TAG = "ОШИБКА ПРОВЕРКИ GMAIL TikTok"
+TIKTOK_GMAIL_AVAILABILITY_SUCCESS_TAG = "УСПЕШНАЯ ПРОВЕРКА GMAIL TikTok"
+TIKTOK_GMAIL_AVAILABILITY_RESULT_TAGS: tuple[str, ...] = (
+    TIKTOK_GMAIL_AVAILABILITY_ERROR_TAG,
+    TIKTOK_GMAIL_AVAILABILITY_SUCCESS_TAG,
+)
+
 # Проверка доступности Instagram (взаимоисключающие).
 INSTAGRAM_AVAILABILITY_ERROR_TAG = "ОШИБКА ПРОВЕРКИ ДОСТУПНОСТИ Instagram"
 INSTAGRAM_AVAILABILITY_SUCCESS_TAG = "УСПЕШНАЯ ПРОВЕРКА ДОСТУПНОСТИ Instagram"
@@ -131,6 +139,64 @@ IG_LANGUAGE_CHANGE_RESULT_TAGS: tuple[str, ...] = (
     IG_LANGUAGE_CHANGE_SUCCESS_TAG,
 )
 
+# --- TikTok (копия Instagram-тегов, логика та же) ---
+TIKTOK_AVAILABILITY_ERROR_TAG = "ОШИБКА ПРОВЕРКИ ДОСТУПНОСТИ TikTok"
+TIKTOK_AVAILABILITY_SUCCESS_TAG = "УСПЕШНАЯ ПРОВЕРКА ДОСТУПНОСТИ TikTok"
+TIKTOK_AVAILABILITY_RESULT_TAGS: tuple[str, ...] = (
+    TIKTOK_AVAILABILITY_ERROR_TAG,
+    TIKTOK_AVAILABILITY_SUCCESS_TAG,
+)
+TT_REGISTER_ERROR_TAG = "ОШИБКА РЕГИСТРАЦИИ TikTok"
+TT_REGISTER_SMS_ERROR_TAG = "ОШИБКА АВТОРЕГА - SMS TikTok"
+TT_REGISTER_SUCCESS_TAG = "УСПЕШНАЯ РЕГИСТРАЦИЯ TikTok"
+TT_REGISTER_RESULT_TAGS: tuple[str, ...] = (
+    TT_REGISTER_ERROR_TAG,
+    TT_REGISTER_SMS_ERROR_TAG,
+    TT_REGISTER_SUCCESS_TAG,
+)
+TT_2FA_ERROR_TAG = "ОШИБКА ПОДКЛЮЧЕНИЯ 2FA TikTok"
+TT_2FA_SUCCESS_TAG = "УСПЕШНОЕ ПОДКЛЮЧЕНИЕ 2FA TikTok"
+TT_2FA_RESULT_TAGS: tuple[str, ...] = (
+    TT_2FA_ERROR_TAG,
+    TT_2FA_SUCCESS_TAG,
+)
+TT_AVATAR_CHANGE_ERROR_TAG = "ОШИБКА СМЕНЫ АВАТАРКИ TikTok"
+TT_AVATAR_CHANGE_SUCCESS_TAG = "УСПЕШНАЯ СМЕНА АВАТАРКИ TikTok"
+TT_AVATAR_CHANGE_RESULT_TAGS: tuple[str, ...] = (
+    TT_AVATAR_CHANGE_ERROR_TAG,
+    TT_AVATAR_CHANGE_SUCCESS_TAG,
+)
+TT_NAME_CHANGE_ERROR_TAG = "ОШИБКА СМЕНЫ ЮЗЕРНЕЙМА TikTok"
+TT_NAME_CHANGE_SUCCESS_TAG = "УСПЕШНАЯ СМЕНА ЮЗЕРНЕЙМА TikTok"
+TT_NAME_CHANGE_RESULT_TAGS: tuple[str, ...] = (
+    TT_NAME_CHANGE_ERROR_TAG,
+    TT_NAME_CHANGE_SUCCESS_TAG,
+)
+TT_WARMUP_ERROR_TAG = "ОШИБКА ПРОГРЕВА TikTok"
+TT_WARMUP_SUCCESS_TAG = "УСПЕШНЫЙ ПРОГРЕВ TikTok"
+TT_WARMUP_RESULT_TAGS: tuple[str, ...] = (
+    TT_WARMUP_ERROR_TAG,
+    TT_WARMUP_SUCCESS_TAG,
+)
+TT_PROMOTE_ERROR_TAG = "ОШИБКА ПРОДВИЖЕНИЯ TikTok"
+TT_PROMOTE_SUCCESS_TAG = "УСПЕШНОЕ ПРОДВИЖЕНИЕ TikTok"
+TT_PROMOTE_RESULT_TAGS: tuple[str, ...] = (
+    TT_PROMOTE_ERROR_TAG,
+    TT_PROMOTE_SUCCESS_TAG,
+)
+TT_LANGUAGE_CHANGE_ERROR_TAG = "ОШИБКА СМЕНЫ ЯЗЫКА TikTok"
+TT_LANGUAGE_CHANGE_SUCCESS_TAG = "УСПЕШНАЯ СМЕНА ЯЗЫКА TikTok"
+TT_LANGUAGE_CHANGE_RESULT_TAGS: tuple[str, ...] = (
+    TT_LANGUAGE_CHANGE_ERROR_TAG,
+    TT_LANGUAGE_CHANGE_SUCCESS_TAG,
+)
+TT_DESCRIPTION_FILL_ERROR_TAG = "ОШИБКА ЗАПОЛНЕНИЯ BIO TikTok"
+TT_DESCRIPTION_FILL_SUCCESS_TAG = "УСПЕШНОЕ ЗАПОЛНЕНИЕ BIO TikTok"
+TT_DESCRIPTION_FILL_RESULT_TAGS: tuple[str, ...] = (
+    TT_DESCRIPTION_FILL_ERROR_TAG,
+    TT_DESCRIPTION_FILL_SUCCESS_TAG,
+)
+
 # Фарм Cookie.
 COOKIE_FARM_ERROR_TAG = "ОШИБКА ФАРМА КУКИ"
 COOKIE_FARM_SUCCESS_TAG = "УСПЕШНО ЗАФАРМИЛ КУКИ"
@@ -177,11 +243,15 @@ UPLOAD_PREVIOUS_ERROR_TAG = "ОШИБКА ПРОШЛОГО ЗАЛИВА YouTube"
 # Результат последней попытки залива Instagram (взаимоисключающие).
 IG_UPLOAD_PREVIOUS_SUCCESS_TAG = "УСПЕШНЫЙ ПРОШЛЫЙ ЗАЛИВ Instagram"
 IG_UPLOAD_PREVIOUS_ERROR_TAG = "ОШИБКА ПРОШЛОГО ЗАЛИВА Instagram"
+TT_UPLOAD_PREVIOUS_SUCCESS_TAG = "УСПЕШНЫЙ ПРОШЛЫЙ ЗАЛИВ TikTok"
+TT_UPLOAD_PREVIOUS_ERROR_TAG = "ОШИБКА ПРОШЛОГО ЗАЛИВА TikTok"
 PREVIOUS_UPLOAD_RESULT_TAGS: tuple[str, ...] = (
     UPLOAD_PREVIOUS_SUCCESS_TAG,
     UPLOAD_PREVIOUS_ERROR_TAG,
     IG_UPLOAD_PREVIOUS_SUCCESS_TAG,
     IG_UPLOAD_PREVIOUS_ERROR_TAG,
+    TT_UPLOAD_PREVIOUS_SUCCESS_TAG,
+    TT_UPLOAD_PREVIOUS_ERROR_TAG,
 )
 
 # Три подряд неудачных залива на профиль.
@@ -232,37 +302,58 @@ ZALIVER_PROFILE_TAGS: tuple[str, ...] = (
     GMAIL_AVAILABILITY_SUCCESS_TAG,
     INSTAGRAM_AVAILABILITY_ERROR_TAG,
     INSTAGRAM_AVAILABILITY_SUCCESS_TAG,
+    TIKTOK_AVAILABILITY_ERROR_TAG,
+    TIKTOK_AVAILABILITY_SUCCESS_TAG,
+    TIKTOK_GMAIL_AVAILABILITY_ERROR_TAG,
+    TIKTOK_GMAIL_AVAILABILITY_SUCCESS_TAG,
     IG_REGISTER_ERROR_TAG,
     IG_REGISTER_SMS_ERROR_TAG,
     IG_REGISTER_SUCCESS_TAG,
+    TT_REGISTER_ERROR_TAG,
+    TT_REGISTER_SMS_ERROR_TAG,
+    TT_REGISTER_SUCCESS_TAG,
     IG_2FA_ERROR_TAG,
     IG_2FA_SUCCESS_TAG,
+    TT_2FA_ERROR_TAG,
+    TT_2FA_SUCCESS_TAG,
     AVATAR_CHANGE_ERROR_TAG,
     AVATAR_CHANGE_SUCCESS_TAG,
     IG_AVATAR_CHANGE_ERROR_TAG,
     IG_AVATAR_CHANGE_SUCCESS_TAG,
+    TT_AVATAR_CHANGE_ERROR_TAG,
+    TT_AVATAR_CHANGE_SUCCESS_TAG,
     NAME_CHANGE_ERROR_TAG,
     NAME_CHANGE_SUCCESS_TAG,
     IG_NAME_CHANGE_ERROR_TAG,
     IG_NAME_CHANGE_SUCCESS_TAG,
+    TT_NAME_CHANGE_ERROR_TAG,
+    TT_NAME_CHANGE_SUCCESS_TAG,
     WARMUP_ERROR_TAG,
     WARMUP_SUCCESS_TAG,
     IG_WARMUP_ERROR_TAG,
     IG_WARMUP_SUCCESS_TAG,
+    TT_WARMUP_ERROR_TAG,
+    TT_WARMUP_SUCCESS_TAG,
     PROMOTE_ERROR_TAG,
     PROMOTE_SUCCESS_TAG,
     IG_PROMOTE_ERROR_TAG,
     IG_PROMOTE_SUCCESS_TAG,
+    TT_PROMOTE_ERROR_TAG,
+    TT_PROMOTE_SUCCESS_TAG,
     LANGUAGE_CHANGE_ERROR_TAG,
     LANGUAGE_CHANGE_SUCCESS_TAG,
     IG_LANGUAGE_CHANGE_ERROR_TAG,
     IG_LANGUAGE_CHANGE_SUCCESS_TAG,
+    TT_LANGUAGE_CHANGE_ERROR_TAG,
+    TT_LANGUAGE_CHANGE_SUCCESS_TAG,
     COOKIE_FARM_ERROR_TAG,
     COOKIE_FARM_SUCCESS_TAG,
     DESCRIPTION_FILL_ERROR_TAG,
     DESCRIPTION_FILL_SUCCESS_TAG,
     IG_DESCRIPTION_FILL_ERROR_TAG,
     IG_DESCRIPTION_FILL_SUCCESS_TAG,
+    TT_DESCRIPTION_FILL_ERROR_TAG,
+    TT_DESCRIPTION_FILL_SUCCESS_TAG,
     LINK_FILL_ERROR_TAG,
     LINK_FILL_SUCCESS_TAG,
     VIDEO_TITLE_CHANGE_ERROR_TAG,
@@ -271,6 +362,8 @@ ZALIVER_PROFILE_TAGS: tuple[str, ...] = (
     UPLOAD_PREVIOUS_ERROR_TAG,
     IG_UPLOAD_PREVIOUS_SUCCESS_TAG,
     IG_UPLOAD_PREVIOUS_ERROR_TAG,
+    TT_UPLOAD_PREVIOUS_SUCCESS_TAG,
+    TT_UPLOAD_PREVIOUS_ERROR_TAG,
     UPLOAD_ERROR_3X_TAG,
     *_ZALIVER_PROFILE_TAGS_LEGACY,
 )
@@ -372,6 +465,38 @@ def apply_ig_register_result_tag(
     else:
         tag = IG_REGISTER_ERROR_TAG
     for other in IG_REGISTER_RESULT_TAGS:
+        if other == tag:
+            continue
+        try:
+            api.remove_profile_tag(pid, other)
+        except Exception:
+            pass
+    api.add_profile_tag(pid, tag)
+    return tag
+
+
+def apply_tt_register_result_tag(
+    api: object,
+    profile_id: str,
+    *,
+    success: bool,
+    sms_captcha: bool = False,
+) -> str:
+    """Результат авторега TikTok: успех / обычная ошибка / SMS-капча."""
+    from zaliver.antydetect.local_antidetect_api import LocalAntidetectHttpAPI
+
+    if not isinstance(api, LocalAntidetectHttpAPI):
+        raise TypeError("api must be LocalAntidetectHttpAPI")
+    pid = (profile_id or "").strip()
+    if not pid:
+        return ""
+    if success:
+        tag = TT_REGISTER_SUCCESS_TAG
+    elif sms_captcha:
+        tag = TT_REGISTER_SMS_ERROR_TAG
+    else:
+        tag = TT_REGISTER_ERROR_TAG
+    for other in TT_REGISTER_RESULT_TAGS:
         if other == tag:
             continue
         try:

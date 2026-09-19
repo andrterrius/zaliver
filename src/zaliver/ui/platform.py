@@ -16,14 +16,17 @@ from PyQt6.QtWidgets import (
 from zaliver.config.platform_settings import (
     PLATFORM_CHOICES,
     PLATFORM_INSTAGRAM,
+    PLATFORM_TIKTOK,
     PLATFORM_YOUTUBE,
     PLATFORM_YT_INST,
     PlatformSettings,
     is_instagram_platform,
+    is_tiktok_platform,
     is_yt_inst_platform,
     normalize_platform,
     platform_display_name,
     platform_includes_instagram,
+    platform_includes_tiktok,
     platform_includes_youtube,
 )
 
@@ -63,10 +66,61 @@ _BRAND_PRESERVE_PHRASES: tuple[str, ...] = (
 )
 
 
+_TIKTOK_BRAND_REPLACEMENTS: tuple[tuple[str, str], ...] = (
+    ("YouTube Studio", "TikTok"),
+    ("YouTube Data API v3", "TikTok API"),
+    ("YouTube Data API", "TikTok API"),
+    ("YoutubeDataApiError", "TikTokApiError"),
+    ("YOUTUBE_API_KEY", "TIKTOK_API_KEY"),
+    ("YouTube Shorts", "Тиктоков"),
+    ("Instagram Reels", "Тиктоков"),
+    ("studio.youtube.com", "tiktok.com"),
+    ("youtube.com", "tiktok.com"),
+    ("instagram.com", "tiktok.com"),
+    ("YouTube", "TikTok"),
+    ("Youtube", "TikTok"),
+    ("youtube", "tiktok"),
+    ("Instagram", "TikTok"),
+    ("instagram", "tiktok"),
+    ("Reels", "Тиктоков"),
+    ("Reel", "Тикток"),
+    ("Shorts", "Тиктоков"),
+    ("рилсов", "Тиктоков"),
+    ("рилса", "Тиктока"),
+    ("рилсе", "Тиктоке"),
+    ("рилсы", "Тиктоки"),
+    ("рилс", "Тикток"),
+)
+
+
+def content_kind_plural(platform: str) -> str:
+    """Reels / Shorts / Тиктоков — множественное для подписей UI."""
+    plat = normalize_platform(platform)
+    if plat == PLATFORM_TIKTOK:
+        return "Тиктоков"
+    if plat == PLATFORM_INSTAGRAM:
+        return "Reels"
+    return "Shorts"
+
+
+def content_kind_one(platform: str) -> str:
+    """Reel / Short / Тикток — единственное для подписей UI."""
+    plat = normalize_platform(platform)
+    if plat == PLATFORM_TIKTOK:
+        return "Тикток"
+    if plat == PLATFORM_INSTAGRAM:
+        return "Reel"
+    return "Short"
+
+
 def brand_text(text: str, platform: str) -> str:
-    """Подменить YouTube → Instagram в пользовательском тексте."""
-    if normalize_platform(platform) != PLATFORM_INSTAGRAM or not text:
+    """Подменить YouTube → Instagram / TikTok в пользовательском тексте."""
+    plat = normalize_platform(platform)
+    if plat not in (PLATFORM_INSTAGRAM, PLATFORM_TIKTOK) or not text:
         return text
+    replacements = (
+        _TIKTOK_BRAND_REPLACEMENTS if plat == PLATFORM_TIKTOK else _BRAND_REPLACEMENTS
+    )
     out = text
     preserved: list[tuple[str, str]] = []
     for i, phrase in enumerate(_BRAND_PRESERVE_PHRASES):
@@ -75,7 +129,7 @@ def brand_text(text: str, platform: str) -> str:
         token = f"\x00ZALIVER_KEEP_{i}\x00"
         preserved.append((token, phrase))
         out = out.replace(phrase, token)
-    for old, new in _BRAND_REPLACEMENTS:
+    for old, new in replacements:
         out = out.replace(old, new)
     for token, phrase in preserved:
         out = out.replace(token, phrase)
@@ -83,8 +137,8 @@ def brand_text(text: str, platform: str) -> str:
 
 
 def apply_platform_branding(root: QWidget, platform: str) -> None:
-    """Пройти по виджетам и заменить видимые строки YouTube → Instagram."""
-    if normalize_platform(platform) != PLATFORM_INSTAGRAM:
+    """Пройти по виджетам и заменить видимые строки под выбранную платформу."""
+    if normalize_platform(platform) not in (PLATFORM_INSTAGRAM, PLATFORM_TIKTOK):
         return
 
     def _set_text(getter, setter) -> None:
@@ -148,15 +202,20 @@ def apply_platform_branding(root: QWidget, platform: str) -> None:
 __all__ = [
     "PLATFORM_CHOICES",
     "PLATFORM_INSTAGRAM",
+    "PLATFORM_TIKTOK",
     "PLATFORM_YOUTUBE",
     "PLATFORM_YT_INST",
     "PlatformSettings",
     "apply_platform_branding",
     "brand_text",
+    "content_kind_one",
+    "content_kind_plural",
     "is_instagram_platform",
+    "is_tiktok_platform",
     "is_yt_inst_platform",
     "normalize_platform",
     "platform_display_name",
     "platform_includes_instagram",
+    "platform_includes_tiktok",
     "platform_includes_youtube",
 ]

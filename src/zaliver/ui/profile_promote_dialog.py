@@ -24,7 +24,12 @@ from zaliver.ui.channel_setup_helpers import (
     field_with_recent_picker,
     make_magic_wand_button,
 )
-from zaliver.ui.platform import PLATFORM_INSTAGRAM
+from zaliver.ui.platform import (
+    PLATFORM_INSTAGRAM,
+    PLATFORM_TIKTOK,
+    content_kind_one,
+    content_kind_plural,
+)
 
 _DEFAULT_PROMOTE_COMMENTS = (
     "nice!\n"
@@ -67,16 +72,38 @@ class ProfilePromoteDialog(QDialog):
         self.setWindowTitle("Продвижение")
         self.setModal(True)
         self.setMinimumWidth(460)
-        is_ig = (platform or "").strip().lower() == PLATFORM_INSTAGRAM
-        reel_word = "Reels" if is_ig else "Shorts"
-        reel_one = "Reel" if is_ig else "Short"
+        is_ig = (platform or "").strip().lower() in (
+            PLATFORM_INSTAGRAM,
+            PLATFORM_TIKTOK,
+        )
+        is_tt = (platform or "").strip().lower() == PLATFORM_TIKTOK
+        reel_word = content_kind_plural(platform)
+        reel_one = content_kind_one(platform)
 
         recent = [c for c in (recent_comments or []) if (c or "").strip()]
 
         root = QVBoxLayout(self)
         root.setSpacing(12)
 
-        if is_ig:
+        if is_tt:
+            hint = QLabel(
+                "1) TikTok — проверка, что сессия жива.\n"
+                "2) По ссылке открыть каждый залитый ролик (с просмотрами "
+                "у видимых профилей).\n"
+                "3) На странице Тиктока: опц. «Подписаться» рядом с ником, "
+                "лайк, комментарий — затем следующий из Тиктоков.\n"
+                "В профиль владельца не заходим."
+            )
+            subscribe_label = "Подписаться на профили"
+            subscribe_tip = (
+                "На каждом открытом из Тиктоков нажать «Подписаться» рядом "
+                "с ником автора (без перехода в профиль). "
+                "По умолчанию выключено."
+            )
+            comments_wand_tip = "Сгенерировать через ИИ — «Комментарии TikTok»"
+            comments_wand_title = "Комментарии TikTok"
+            comments_prompt_id = "builtin_youtube_comments"
+        elif is_ig:
             hint = QLabel(
                 "1) Instagram — проверка, что сессия жива.\n"
                 "2) По ссылке открыть каждый залитый рилс (с просмотрами "

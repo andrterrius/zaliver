@@ -1,4 +1,4 @@
-export type Platform = "youtube" | "instagram" | "yt_inst";
+export type Platform = "youtube" | "instagram" | "tiktok" | "yt_inst";
 
 const TOKEN_KEY = "zaliver_api_token";
 const BASE_KEY = "zaliver_api_base";

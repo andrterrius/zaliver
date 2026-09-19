@@ -12,10 +12,17 @@ from typing import Any
 from zaliver.instagram_upload.reels_upload import instagram_crop_aspect_from_settings
 from zaliver.config.platform_settings import (
     PLATFORM_INSTAGRAM,
+    PLATFORM_TIKTOK,
     PLATFORM_YOUTUBE,
     PLATFORM_YT_INST,
 )
-from zaliver.core.sinks import JobProgressSink
+from zaliver.antydetect.browser_concurrency import (
+    clamp_max_concurrent_browsers,
+    compute_instagram_tabs_per_profile,
+    compute_tiktok_tabs_per_profile,
+    instagram_tabs_per_profile_from_settings,
+    tiktok_tabs_per_profile_from_settings,
+)
 from zaliver.db.upload_store import upload_pause_from_settings
 from zaliver.stats_server_client import notify_uploaded_video
 
@@ -87,15 +94,17 @@ def _canonical_watch_url(video_id: str) -> str:
     return f"https://www.youtube.com/watch?v={vid}" if vid else ""
 
 
-def _extract_vid_url(one_res: Any, *, is_ig: bool) -> tuple[str, str]:
+def _extract_vid_url(
+    one_res: Any, *, is_ig: bool, is_tt: bool = False
+) -> tuple[str, str]:
     vid = ""
     url = ""
     if isinstance(one_res, dict):
         vid = str(one_res.get("video_id") or "").strip()
         url = str(one_res.get("url") or "").strip()
     if not vid and url:
-        if is_ig:
-            for marker in ("/reel/", "/p/"):
+        if is_ig or is_tt:
+            for marker in ("/reel/", "/p/", "/video/"):
                 if marker in url:
                     part = url.split(marker, 1)[1]
                     vid = part.split("/", 1)[0].split("?", 1)[0].strip()
@@ -108,14 +117,18 @@ def _extract_vid_url(one_res: Any, *, is_ig: bool) -> tuple[str, str]:
             except Exception:
                 pass
     if not url and vid:
-        if is_ig:
+        if is_tt:
+            url = f"https://www.tiktok.com/@/video/{vid}/"
+        elif is_ig:
             url = f"https://www.instagram.com/reel/{vid}/"
         else:
             url = _canonical_watch_url(vid)
     return vid, url
 
 
-def _confirm_instagram_result(upload_store: Any, res: Any) -> dict:
+def _confirm_instagram_result(
+    upload_store: Any, res: Any, *, platform: str = PLATFORM_INSTAGRAM
+) -> dict:
     ig_vid = ""
     ig_url = ""
     candidates: list[dict] = []
@@ -142,7 +155,7 @@ def _confirm_instagram_result(upload_store: Any, res: Any) -> dict:
         if upload_store is not None and upload_store.has_uploaded_video(
             video_id=c_vid,
             url=c_url,
-            platform=PLATFORM_INSTAGRAM,
+            platform=platform,
         ):
             skipped.append(c_vid or c_url)
             continue
@@ -150,7 +163,12 @@ def _confirm_instagram_result(upload_store: Any, res: Any) -> dict:
         break
     if chosen is None:
         raise RuntimeError(
-            "Instagram Reels: первое видео в профиле уже есть в базе залитых "
+            (
+                "Instagram Reels"
+                if platform == PLATFORM_INSTAGRAM
+                else "TikTok"
+            )
+            + ": первое видео в профиле уже есть в базе залитых "
             f"(video_id={ig_vid!r}, url={ig_url!r}, already={skipped!r}) "
             "— заливка не подтверждена."
         )
@@ -201,6 +219,8 @@ def run_upload_job(
 
     plat = (platform or "").strip().lower()
     is_instagram = plat == PLATFORM_INSTAGRAM
+    is_tiktok = plat == PLATFORM_TIKTOK
+    is_shortform = is_instagram or is_tiktok
     is_yt_inst = plat in {
         PLATFORM_YT_INST,
         "youtube_instagram",
@@ -224,39 +244,47 @@ def run_upload_job(
         if dt is not None:
             parsed_times.append(dt)
     parsed_times = sorted(parsed_times)
-    schedule_batch = len(parsed_times) if parsed_times and not is_instagram else 0
-    if is_instagram and schedule_times:
+    schedule_batch = len(parsed_times) if parsed_times and not is_shortform else 0
+    if is_shortform and schedule_times:
         sink.on_log(
-            "Instagram Reels: отложка Studio не поддерживается — публикуем сразу."
+            f"{'TikTok' if is_tiktok else 'Instagram Reels'}: "
+            "отложка Studio не поддерживается — публикуем сразу."
         )
 
-    pub_before = True if is_instagram else bool(publish_before_checks)
-    keep_title = False if is_instagram else bool(keep_studio_title)
+    pub_before = True if is_shortform else bool(publish_before_checks)
+    keep_title = False if is_shortform else bool(keep_studio_title)
     warmup_on = bool(schedule_warmup_shorts) and schedule_batch > 0
     warmup_reco = bool(schedule_warmup_shorts_recommendations)
     warmup_q = (schedule_warmup_search_query or "").strip()
     warmup_htag = (schedule_warmup_hashtag or "").strip()
     guser = (stats_server_username or "").strip()
     session_plat = PLATFORM_YT_INST if is_yt_inst else (
-        PLATFORM_INSTAGRAM if is_instagram else PLATFORM_YOUTUBE
+        PLATFORM_TIKTOK if is_tiktok else (
+            PLATFORM_INSTAGRAM if is_instagram else PLATFORM_YOUTUBE
+        )
     )
 
     pause_td = upload_pause_from_settings(settings)
     ig_keep_browser_open = pause_td.total_seconds() <= 0
     max_browsers = clamp_max_concurrent_browsers(max_concurrent)
-    ig_tabs_n = (
-        instagram_tabs_per_profile_from_settings(settings)
-        if (is_instagram or is_yt_inst)
-        else 1
-    )
+    ig_tabs_n = 1
+    if is_tiktok:
+        ig_tabs_n = tiktok_tabs_per_profile_from_settings(settings)
+    elif is_instagram or is_yt_inst:
+        ig_tabs_n = instagram_tabs_per_profile_from_settings(settings)
     ig_tabs_per_profile: dict[str, int] | None = None
     if (
-        is_instagram
+        is_shortform
         and ig_keep_browser_open
         and ig_tabs_n > 1
         and len(profile_ids) <= max_browsers
     ):
-        ig_tabs_per_profile = compute_instagram_tabs_per_profile(
+        compute_tabs = (
+            compute_tiktok_tabs_per_profile
+            if is_tiktok
+            else compute_instagram_tabs_per_profile
+        )
+        ig_tabs_per_profile = compute_tabs(
             profile_ids,
             ig_tabs_n,
             max_concurrent_browsers=max_browsers,
@@ -268,14 +296,15 @@ def run_upload_job(
                 f"{pid}×{n}" for pid, n in ig_tabs_per_profile.items()
             )
             sink.on_log(
-                "Instagram Reels: multi-tab — пауза 0, "
+                f"{'TikTok' if is_tiktok else 'Instagram Reels'}: multi-tab — пауза 0, "
                 f"вкладок на профиль={ig_tabs_n}, "
                 f"профилей ≤ лимита окон ({max_browsers}). "
                 f"Вкладки: {tabs_fmt}."
             )
-    elif is_instagram or is_yt_inst:
+    elif is_shortform or is_yt_inst:
         sink.on_log(
-            f"[upload] Instagram keep_browser_open={ig_keep_browser_open} "
+            f"[upload] {'TikTok' if is_tiktok else 'Instagram'} "
+            f"keep_browser_open={ig_keep_browser_open} "
             f"(pause={pause_td}, tabs={ig_tabs_n})"
         )
     elif ig_keep_browser_open:
@@ -284,11 +313,9 @@ def run_upload_job(
             f"(pause={pause_td})"
         )
 
-    ig_crop_aspect = (
-        instagram_crop_aspect_from_settings(settings)
-        if (is_instagram or is_yt_inst)
-        else "original"
-    )
+    ig_crop_aspect = "original"
+    if is_instagram or is_yt_inst:
+        ig_crop_aspect = instagram_crop_aspect_from_settings(settings)
     if is_instagram or is_yt_inst:
         sink.on_log(f"[upload] Instagram обрезка: {ig_crop_aspect}")
 
@@ -384,7 +411,8 @@ def run_upload_job(
         if rec_plat == PLATFORM_YT_INST:
             rec_plat = PLATFORM_YOUTUBE
         is_ig_rec = rec_plat == PLATFORM_INSTAGRAM
-        vid, url = _extract_vid_url(one_res, is_ig=is_ig_rec)
+        is_tt_rec = rec_plat == PLATFORM_TIKTOK
+        vid, url = _extract_vid_url(one_res, is_ig=is_ig_rec, is_tt=is_tt_rec)
         if not vid:
             raise RuntimeError(f"Empty video_id (res={one_res!r})")
         if not url:
@@ -392,7 +420,7 @@ def run_upload_job(
 
         sid = int(upload_session.id)
         stored_title = title or ""
-        if keep_title and not stored_title and not is_ig_rec:
+        if keep_title and not stored_title and not is_ig_rec and not is_tt_rec:
             stored_title = Path(video_path).stem
 
         with record_lock:
@@ -455,8 +483,12 @@ def run_upload_job(
             return
         try:
             from zaliver.antydetect.antic_open import close_instagram_keep_open_hub
+            from zaliver.antydetect.tiktok_open import close_tiktok_keep_open_hub
 
-            close_instagram_keep_open_hub(pid)
+            if is_tiktok:
+                close_tiktok_keep_open_hub(pid)
+            else:
+                close_instagram_keep_open_hub(pid)
         except Exception:
             pass
         kind_l = (kind or "local").strip().lower()
@@ -490,6 +522,10 @@ def run_upload_job(
             upload_instagram_reel_in_profile,
             upload_youtube_and_instagram_in_local_antidetect_profile,
             upload_youtube_and_instagram_in_profile,
+        )
+        from zaliver.antydetect.tiktok_open import (
+            upload_tiktok_reel_in_local_antidetect_profile,
+            upload_tiktok_reel_in_profile,
         )
 
         set_log_sink(sink.on_log)
@@ -631,7 +667,7 @@ def run_upload_job(
                 )
             return
 
-        if is_instagram:
+        if is_instagram or is_tiktok:
             multi_tab = bool(ig_tabs_per_profile)
             if multi_tab:
                 keep_open = True
@@ -666,26 +702,39 @@ def run_upload_job(
             if own:
                 from zaliver.antydetect.local_antidetect_api import local_api_token_scope
 
+                upload_fn = (
+                    upload_tiktok_reel_in_local_antidetect_profile
+                    if is_tiktok
+                    else upload_instagram_reel_in_local_antidetect_profile
+                )
                 with local_api_token_scope(token):
-                    res = upload_instagram_reel_in_local_antidetect_profile(
+                    res = upload_fn(
                         profile_id,
                         base_url=bu,
                         **kw,
                     )
             else:
-                res = upload_instagram_reel_in_profile(
+                upload_fn = (
+                    upload_tiktok_reel_in_profile
+                    if is_tiktok
+                    else upload_instagram_reel_in_profile
+                )
+                res = upload_fn(
                     profile_id,
                     local_token=token or None,
                     **kw,
                 )
-            confirmed = _confirm_instagram_result(upload_store, res)
+            rec_plat = PLATFORM_TIKTOK if is_tiktok else PLATFORM_INSTAGRAM
+            confirmed = _confirm_instagram_result(
+                upload_store, res, platform=rec_plat
+            )
             _record_one(
                 profile_id=profile_id,
                 video_path=task.video_path,
                 title=task_title,
                 description=task_desc,
                 one_res=confirmed,
-                record_platform=PLATFORM_INSTAGRAM,
+                record_platform=rec_plat,
             )
             return
 

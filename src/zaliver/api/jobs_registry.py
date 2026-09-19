@@ -22,6 +22,8 @@ class JobKind(str, Enum):
     AVAILABILITY = "availability"
     INSTAGRAM_REGISTER = "instagram_register"
     INSTAGRAM_2FA = "instagram_2fa"
+    TIKTOK_REGISTER = "tiktok_register"
+    TIKTOK_2FA = "tiktok_2fa"
     CHANNEL_SETUP = "channel_setup"
     WARMUP = "warmup"
     PROMOTE = "promote"

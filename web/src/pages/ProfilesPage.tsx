@@ -24,17 +24,36 @@ type JobModal =
   | "promote"
   | "cookie-farm";
 
-const JOB_BUTTONS: { path: string; label: string; igOnly?: boolean; modal?: JobModal }[] =
-  [
-    { path: "availability", label: "Проверить доступность" },
-    { path: "instagram-register", label: "Зарегать акки", igOnly: true },
-    { path: "instagram-2fa", label: "Подключить 2FA", igOnly: true },
+const JOB_BUTTONS: {
+  path: string;
+  label: string;
+  shortformOnly?: boolean;
+  hideOnTiktok?: boolean;
+  ttPath?: string;
+  modal?: JobModal;
+}[] = [
+  { path: "availability", label: "Проверить доступность" },
+  {
+    path: "instagram-register",
+    ttPath: "tiktok-register",
+    label: "Зарегать акки",
+    shortformOnly: true,
+    hideOnTiktok: true,
+  },
+  {
+    path: "instagram-2fa",
+    ttPath: "tiktok-2fa",
+    label: "Подключить 2FA",
+    shortformOnly: true,
+    hideOnTiktok: true,
+  },
     { path: "warmup", label: "Прогрев", modal: "warmup" },
-    { path: "promote", label: "Продвижение", modal: "promote" },
+    { path: "promote", label: "Продвижение", modal: "promote", hideOnTiktok: true },
     { path: "cookie-farm", label: "Фарм Cookie", modal: "cookie-farm" },
   ];
 
 export function ProfilesPage({ platform }: Props) {
+  const isShortform = platform === "instagram" || platform === "tiktok";
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [kind, setKind] = useState("local");
   const [baseUrl, setBaseUrl] = useState("");
@@ -189,7 +208,7 @@ export function ProfilesPage({ platform }: Props) {
 
   const confirmModal = () => {
     if (modal === "warmup") {
-      const isIg = platform === "instagram";
+      const isIg = isShortform;
       const tag = hashtag.trim().replace(/^#+/, "").replace(/\s+/g, "");
       const useHashtag = !isIg && tag.length > 0;
       void startJob("warmup", {
@@ -254,7 +273,11 @@ export function ProfilesPage({ platform }: Props) {
   };
 
   const title =
-    platform === "instagram" ? "Профили Instagram" : "Профили антидетекта";
+    isShortform
+      ? platform === "tiktok"
+        ? "Профили TikTok"
+        : "Профили Instagram"
+      : "Профили антидетекта";
 
   return (
     <div className="stack">
@@ -311,17 +334,25 @@ export function ProfilesPage({ platform }: Props) {
       </div>
 
       <div className="row" style={{ flexWrap: "wrap" }}>
-        {JOB_BUTTONS.filter((j) => !j.igOnly || platform === "instagram").map(
-          (j) => (
+        {JOB_BUTTONS.filter((j) => {
+          if (j.hideOnTiktok && platform === "tiktok") return false;
+          if (j.shortformOnly && !isShortform) return false;
+          return true;
+        }).map(
+          (j) => {
+            const path =
+              platform === "tiktok" && j.ttPath ? j.ttPath : j.path;
+            return (
             <button
-              key={j.path}
+              key={path}
               type="button"
               className="btn secondary"
-              onClick={() => onJobClick(j.path, j.modal)}
+              onClick={() => onJobClick(path, j.modal)}
             >
               {j.label}
             </button>
-          ),
+            );
+          },
         )}
       </div>
 
@@ -449,9 +480,11 @@ export function ProfilesPage({ platform }: Props) {
             <div className="page-header">
               <h3 className="group-title">
                 {modal === "warmup"
-                  ? platform === "instagram"
-                    ? "Прогрев Reels"
-                    : "Прогрев Shorts"
+                  ? platform === "tiktok"
+                    ? "Прогрев Тиктоков"
+                    : isShortform
+                      ? "Прогрев Reels"
+                      : "Прогрев Shorts"
                   : modal === "promote"
                     ? "Продвижение"
                     : "Фарм Cookie"}
@@ -519,7 +552,7 @@ export function ProfilesPage({ platform }: Props) {
                   checked={recs}
                   onChange={setRecs}
                 />
-                {platform !== "instagram" ? (
+                {!isShortform ? (
                   <>
                     <label className="hint">Хэштег (Shorts и горизонтальные)</label>
                     <input
@@ -536,10 +569,12 @@ export function ProfilesPage({ platform }: Props) {
                   value={searchQ}
                   onChange={(e) => setSearchQ(e.target.value)}
                   disabled={
-                    platform !== "instagram" && hashtag.trim().length > 0
+                    platform !== "instagram" &&
+                    platform !== "tiktok" &&
+                    hashtag.trim().length > 0
                   }
                 />
-                {platform !== "instagram" ? (
+                {!isShortform ? (
                   <>
                     <ToggleSwitch
                       label="Смотреть горизонтальные после Shorts"
@@ -589,7 +624,13 @@ export function ProfilesPage({ platform }: Props) {
                   checked={promoSubscribe}
                   onChange={setPromoSubscribe}
                 />
-                <label className="hint">Количество Shorts</label>
+                <label className="hint">
+                  {platform === "tiktok"
+                    ? "Количество Тиктоков"
+                    : isShortform
+                      ? "Количество Reels"
+                      : "Количество Shorts"}
+                </label>
                 <input
                   className="field"
                   type="number"

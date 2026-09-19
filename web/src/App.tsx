@@ -15,6 +15,7 @@ import { getStoredLocale, setStoredLocale, t, type Locale } from "./i18n";
 
 function platformLabel(platform: Platform): string {
   if (platform === "instagram") return "Instagram";
+  if (platform === "tiktok") return "TikTok";
   if (platform === "yt_inst") return "Yt+Inst";
   return "YouTube";
 }

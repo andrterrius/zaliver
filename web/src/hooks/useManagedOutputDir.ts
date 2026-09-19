@@ -12,7 +12,7 @@ export function useManagedOutputDir(kind: OutputKind, platform?: string) {
     void (async () => {
       try {
         const res = await api.getOutputDirs(
-          platform as "youtube" | "instagram" | "yt_inst" | undefined,
+          platform as "youtube" | "instagram" | "tiktok" | "yt_inst" | undefined,
         );
         if (!alive) return;
         setPath(res.dirs[kind] || "");

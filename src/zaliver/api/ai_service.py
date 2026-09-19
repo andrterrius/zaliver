@@ -40,11 +40,17 @@ def builtin_ids() -> frozenset[str]:
 
 
 def list_prompts(settings: Any, *, platform: str) -> list[PromptItem]:
-    from zaliver.config.platform_settings import is_instagram_platform
+    from zaliver.config.platform_settings import (
+        is_instagram_platform,
+        is_tiktok_platform,
+    )
 
     items: list[PromptItem] = []
     for pid, title, default_text in BUILTIN_PROMPTS:
-        if is_instagram_platform(platform) and pid in INSTAGRAM_HIDDEN_BUILTIN_IDS:
+        if (
+            (is_instagram_platform(platform) or is_tiktok_platform(platform))
+            and pid in INSTAGRAM_HIDDEN_BUILTIN_IDS
+        ):
             continue
         key = f"ai/prompts/{pid}/text"
         if settings.contains(key):

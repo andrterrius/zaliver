@@ -15,6 +15,7 @@ from zaliver.antydetect.local_antidetect_api import (
 from zaliver.core.profiles.credentials import (
     make_instagram_session_resolver,
     make_login_credentials_resolver,
+    make_tiktok_session_resolver,
 )
 from zaliver.core.profiles.settings import (
     CookieFarmSettings,
@@ -59,6 +60,14 @@ class ProfileJobsService:
             )
         if kind == "instagram_2fa":
             return self._run_instagram_2fa(
+                request, sink, register_cancel, on_tags_applied
+            )
+        if kind == "tiktok_register":
+            return self._run_tiktok_register(
+                request, sink, register_cancel, on_manual_captcha, on_tags_applied
+            )
+        if kind == "tiktok_2fa":
+            return self._run_tiktok_2fa(
                 request, sink, register_cancel, on_tags_applied
             )
         if kind == "channel_setup":
@@ -158,24 +167,33 @@ class ProfileJobsService:
             check_studio_availability_in_profile,
             set_log_sink,
         )
+        from zaliver.antydetect.tiktok_open import (
+            check_tiktok_availability_in_local_antidetect_profile,
+            check_tiktok_availability_in_profile,
+        )
         from zaliver.antydetect.profile_tags import (
             INSTAGRAM_AVAILABILITY_ERROR_TAG,
             INSTAGRAM_AVAILABILITY_SUCCESS_TAG,
             STUDIO_AVAILABILITY_ERROR_TAG,
             STUDIO_AVAILABILITY_SUCCESS_TAG,
+            TIKTOK_AVAILABILITY_ERROR_TAG,
+            TIKTOK_AVAILABILITY_SUCCESS_TAG,
         )
 
         set_log_sink(sink.on_log)
         kind_s = (req.antidetect_kind or "").strip()
-        is_ig = (req.platform or "").strip().lower() == "instagram"
+        plat = (req.platform or "").strip().lower()
+        is_ig = plat == "instagram"
+        is_tt = plat == "tiktok"
         login_creds = make_login_credentials_resolver(
             req.profiles_custom_data, platform=req.platform
         )
         ig_sess = make_instagram_session_resolver(req.profiles_custom_data)
+        tt_sess = make_tiktok_session_resolver(req.profiles_custom_data)
 
         def _check_one(pid: str) -> None:
-            if is_ig:
-                login, password, twofa = ig_sess(pid)
+            if is_ig or is_tt:
+                login, password, twofa = (ig_sess if is_ig else tt_sess)(pid)
                 creds = login_creds(pid)
                 kw = dict(
                     headless=req.headless,
@@ -185,16 +203,24 @@ class ProfileJobsService:
                     login_credentials=creds,
                 )
                 if is_own_antidetect_kind(kind_s):
-                    check_instagram_availability_in_local_antidetect_profile(
+                    fn = (
+                        check_instagram_availability_in_local_antidetect_profile
+                        if is_ig
+                        else check_tiktok_availability_in_local_antidetect_profile
+                    )
+                    fn(
                         pid,
                         base_url=self._require_own_base(kind_s, req.base_url),
                         remote_cdp=req.remote_cdp,
                         **kw,
                     )
                 else:
-                    check_instagram_availability_in_profile(
-                        pid, local_token=req.token or None, **kw
+                    fn = (
+                        check_instagram_availability_in_profile
+                        if is_ig
+                        else check_tiktok_availability_in_profile
                     )
+                    fn(pid, local_token=req.token or None, **kw)
                 return
             creds = login_creds(pid)
             yt_oldest = (req.yt_oldest_names.get(pid) or "").strip() or None
@@ -227,11 +253,15 @@ class ProfileJobsService:
         ok_tag = (
             INSTAGRAM_AVAILABILITY_SUCCESS_TAG
             if is_ig
+            else TIKTOK_AVAILABILITY_SUCCESS_TAG
+            if is_tt
             else STUDIO_AVAILABILITY_SUCCESS_TAG
         )
         err_tag = (
             INSTAGRAM_AVAILABILITY_ERROR_TAG
             if is_ig
+            else TIKTOK_AVAILABILITY_ERROR_TAG
+            if is_tt
             else STUDIO_AVAILABILITY_ERROR_TAG
         )
 
@@ -431,6 +461,180 @@ class ProfileJobsService:
             log_prefix="ig-2fa",
         )
 
+    def _run_tiktok_register(
+        self,
+        req: ProfileJobRequest,
+        sink: JobProgressSink,
+        register_cancel,
+        on_manual_captcha,
+        on_tags_applied,
+    ) -> ProfileJobResult:
+        from zaliver.antydetect.tiktok_open import (
+            register_tiktok_account_in_local_antidetect_profile,
+            register_tiktok_account_in_profile,
+        )
+        from zaliver.antydetect.antic_open import set_log_sink
+        from zaliver.antydetect.profile_tags import (
+            TT_REGISTER_ERROR_TAG,
+            TT_REGISTER_RESULT_TAGS,
+            TT_REGISTER_SMS_ERROR_TAG,
+            TT_REGISTER_SUCCESS_TAG,
+            apply_tt_register_result_tag,
+        )
+        from zaliver.tiktok_upload.register import TikTokSmsCaptchaError
+
+        set_log_sink(sink.on_log)
+        kind_s = (req.antidetect_kind or "").strip()
+        base_u = (req.base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
+        login_creds = make_login_credentials_resolver(
+            req.profiles_custom_data, platform="tiktok"
+        )
+
+        def _check_one(pid: str) -> None:
+            creds = login_creds(pid)
+
+            def _captcha() -> None:
+                if on_manual_captcha is not None:
+                    on_manual_captcha(pid)
+
+            if is_own_antidetect_kind(kind_s):
+                register_tiktok_account_in_local_antidetect_profile(
+                    pid,
+                    base_url=self._require_own_base(kind_s, req.base_url),
+                    headless=req.headless,
+                    login_credentials=creds,
+                    remote_cdp=req.remote_cdp,
+                    on_manual_captcha=_captcha,
+                )
+            else:
+                register_tiktok_account_in_profile(
+                    pid,
+                    local_token=req.token or None,
+                    headless=req.headless,
+                    login_credentials=creds,
+                    on_manual_captcha=_captcha,
+                )
+
+        def _on_done(pid: str, ok: bool, err: str) -> None:
+            if not is_own_antidetect_kind(kind_s):
+                return
+            sms = (not ok) and (
+                TikTokSmsCaptchaError.matches(err)
+                or TT_REGISTER_SMS_ERROR_TAG in (err or "")
+            )
+            try:
+                from zaliver.antydetect.local_antidetect_api import LocalAntidetectHttpAPI
+
+                api = LocalAntidetectHttpAPI(base_u)
+                try:
+                    tag = apply_tt_register_result_tag(
+                        api, pid, success=ok, sms_captcha=sms
+                    )
+                    sink.on_log(f"[tt-register] profile={pid} tag_set={tag!r}")
+                finally:
+                    api.close()
+                if on_tags_applied is not None:
+                    error_tag = (
+                        TT_REGISTER_SMS_ERROR_TAG if sms else TT_REGISTER_ERROR_TAG
+                    )
+                    on_tags_applied(
+                        pid,
+                        [
+                            {
+                                "success": ok,
+                                "success_tag": TT_REGISTER_SUCCESS_TAG,
+                                "error_tag": error_tag,
+                                "strip_tags": list(TT_REGISTER_RESULT_TAGS),
+                            }
+                        ],
+                    )
+            except Exception as te:
+                sink.on_log(f"[tt-register] profile={pid} tag_set_failed err={te!r}")
+
+        return self._run_checker(
+            profile_ids=req.profile_ids,
+            max_concurrent=req.max_concurrent,
+            check_one=_check_one,
+            on_profile_done=_on_done,
+            sink=sink,
+            register_cancel=register_cancel,
+            api_token=req.token or "",
+            log_prefix="tt-register",
+        )
+
+    def _run_tiktok_2fa(
+        self,
+        req: ProfileJobRequest,
+        sink: JobProgressSink,
+        register_cancel,
+        on_tags_applied,
+    ) -> ProfileJobResult:
+        from zaliver.antydetect.antic_open import set_log_sink
+        from zaliver.antydetect.tiktok_open import (
+            setup_tiktok_2fa_in_local_antidetect_profile,
+            setup_tiktok_2fa_in_profile,
+        )
+        from zaliver.antydetect.profile_tags import (
+            TT_2FA_ERROR_TAG,
+            TT_2FA_SUCCESS_TAG,
+        )
+
+        set_log_sink(sink.on_log)
+        kind_s = (req.antidetect_kind or "").strip()
+        login_creds = make_login_credentials_resolver(
+            req.profiles_custom_data, platform="tiktok"
+        )
+        tt_sess = make_tiktok_session_resolver(req.profiles_custom_data)
+
+        def _check_one(pid: str) -> None:
+            creds = login_creds(pid)
+            sess_login, sess_pwd, sess_2fa = tt_sess(pid)
+            if is_own_antidetect_kind(kind_s):
+                setup_tiktok_2fa_in_local_antidetect_profile(
+                    pid,
+                    base_url=self._require_own_base(kind_s, req.base_url),
+                    headless=req.headless,
+                    remote_cdp=req.remote_cdp,
+                    login_credentials=creds,
+                    session_login=sess_login,
+                    session_password=sess_pwd,
+                    session_twofa=sess_2fa,
+                    keep_open_on_error=False,
+                )
+            else:
+                setup_tiktok_2fa_in_profile(
+                    pid,
+                    local_token=req.token or None,
+                    headless=req.headless,
+                    login_credentials=creds,
+                    session_login=sess_login,
+                    session_password=sess_pwd,
+                    session_twofa=sess_2fa,
+                    keep_open_on_error=False,
+                )
+
+        def _on_done(pid: str, ok: bool, _err: str) -> None:
+            apply_result_tags(
+                kind=kind_s,
+                base_url=req.base_url,
+                profile_id=pid,
+                updates=[(ok, TT_2FA_SUCCESS_TAG, TT_2FA_ERROR_TAG)],
+                log=sink.on_log,
+                log_prefix="tt-2fa",
+                on_tags_applied=on_tags_applied,
+            )
+
+        return self._run_checker(
+            profile_ids=req.profile_ids,
+            max_concurrent=req.max_concurrent,
+            check_one=_check_one,
+            on_profile_done=_on_done,
+            sink=sink,
+            register_cancel=register_cancel,
+            api_token=req.token or "",
+            log_prefix="tt-2fa",
+        )
+
     def _run_warmup(
         self,
         req: ProfileJobRequest,
@@ -448,9 +652,11 @@ class ProfileJobsService:
 
         set_log_sink(sink.on_log)
         kind_s = (req.antidetect_kind or "").strip()
-        is_ig = (req.platform or "").strip().lower() == "instagram"
+        plat = (req.platform or "").strip().lower()
+        is_ig = plat == "instagram"
+        is_tt = plat == "tiktok"
 
-        if is_ig:
+        if is_ig or is_tt:
             settings = req.warmup_reels or ReelsWarmupSettings()
             return self._run_reels_warmup(
                 req, sink, register_cancel, on_tags_applied, settings, kind_s
@@ -544,15 +750,29 @@ class ProfileJobsService:
             warmup_instagram_reels_in_local_antidetect_profile,
             warmup_instagram_reels_in_profile,
         )
+        from zaliver.antydetect.tiktok_open import (
+            warmup_tiktok_reels_in_local_antidetect_profile,
+            warmup_tiktok_reels_in_profile,
+        )
         from zaliver.antydetect.profile_tags import (
             IG_WARMUP_ERROR_TAG,
             IG_WARMUP_SUCCESS_TAG,
+            TT_WARMUP_ERROR_TAG,
+            TT_WARMUP_SUCCESS_TAG,
         )
 
-        ig_sess = make_instagram_session_resolver(req.profiles_custom_data)
+        is_tt = (req.platform or "").strip().lower() == "tiktok"
+        sess = (
+            make_tiktok_session_resolver(req.profiles_custom_data)
+            if is_tt
+            else make_instagram_session_resolver(req.profiles_custom_data)
+        )
+        ok_tag = TT_WARMUP_SUCCESS_TAG if is_tt else IG_WARMUP_SUCCESS_TAG
+        err_tag = TT_WARMUP_ERROR_TAG if is_tt else IG_WARMUP_ERROR_TAG
+        log_prefix = "tt-warmup" if is_tt else "ig-warmup"
 
         def _one(pid: str) -> None:
-            login, password, twofa = ig_sess(pid)
+            login, password, twofa = sess(pid)
             warmup_kw = {
                 "session_login": login,
                 "session_password": password,
@@ -567,7 +787,12 @@ class ProfileJobsService:
                 "search_query": settings.reels_search_query,
             }
             if is_own_antidetect_kind(kind_s):
-                warmup_instagram_reels_in_local_antidetect_profile(
+                fn = (
+                    warmup_tiktok_reels_in_local_antidetect_profile
+                    if is_tt
+                    else warmup_instagram_reels_in_local_antidetect_profile
+                )
+                fn(
                     pid,
                     base_url=self._require_own_base(kind_s, req.base_url),
                     headless=req.headless,
@@ -575,7 +800,12 @@ class ProfileJobsService:
                     **warmup_kw,
                 )
             else:
-                warmup_instagram_reels_in_profile(
+                fn = (
+                    warmup_tiktok_reels_in_profile
+                    if is_tt
+                    else warmup_instagram_reels_in_profile
+                )
+                fn(
                     pid,
                     local_token=req.token or None,
                     headless=req.headless,
@@ -587,9 +817,9 @@ class ProfileJobsService:
                 kind=kind_s,
                 base_url=req.base_url,
                 profile_id=pid,
-                updates=[(ok, IG_WARMUP_SUCCESS_TAG, IG_WARMUP_ERROR_TAG)],
+                updates=[(ok, ok_tag, err_tag)],
                 log=sink.on_log,
-                log_prefix="ig-warmup",
+                log_prefix=log_prefix,
                 on_tags_applied=on_tags_applied,
             )
 
@@ -601,7 +831,7 @@ class ProfileJobsService:
             sink=sink,
             register_cancel=register_cancel,
             api_token=req.token or "",
-            log_prefix="ig-warmup",
+            log_prefix=log_prefix,
         )
 
     def _run_promote(
@@ -618,17 +848,25 @@ class ProfileJobsService:
             promote_youtube_videos_in_profile,
             set_log_sink,
         )
+        from zaliver.antydetect.tiktok_open import (
+            promote_tiktok_reels_in_local_antidetect_profile,
+            promote_tiktok_reels_in_profile,
+        )
         from zaliver.antydetect.profile_tags import (
             IG_PROMOTE_ERROR_TAG,
             IG_PROMOTE_SUCCESS_TAG,
             PROMOTE_ERROR_TAG,
             PROMOTE_SUCCESS_TAG,
+            TT_PROMOTE_ERROR_TAG,
+            TT_PROMOTE_SUCCESS_TAG,
         )
         from zaliver.youtube_upload.studio import PromotionTargetVideo as StudioPromoVideo
 
         set_log_sink(sink.on_log)
         kind_s = (req.antidetect_kind or "").strip()
-        is_ig = (req.platform or "").strip().lower() == "instagram"
+        plat = (req.platform or "").strip().lower()
+        is_ig = plat == "instagram"
+        is_tt = plat == "tiktok"
         settings = req.promote or PromoteSettings()
         videos_src = list(req.promote_videos or [])
         videos = [
@@ -651,17 +889,18 @@ class ProfileJobsService:
             "comments": list(settings.comments),
             "comment_probability_pct": settings.comment_probability_pct,
         }
-        if not is_ig:
+        if not is_ig and not is_tt:
             promote_kw["subscribe_probability_pct"] = 0.0
 
         login_creds = make_login_credentials_resolver(
             req.profiles_custom_data, platform=req.platform
         )
         ig_sess = make_instagram_session_resolver(req.profiles_custom_data)
+        tt_sess = make_tiktok_session_resolver(req.profiles_custom_data)
 
         def _one(pid: str) -> None:
-            if is_ig:
-                login, password, twofa = ig_sess(pid)
+            if is_ig or is_tt:
+                login, password, twofa = (ig_sess if is_ig else tt_sess)(pid)
                 ig_kw = {
                     **promote_kw,
                     "session_login": login,
@@ -669,7 +908,12 @@ class ProfileJobsService:
                     "session_twofa": twofa,
                 }
                 if is_own_antidetect_kind(kind_s):
-                    promote_instagram_reels_in_local_antidetect_profile(
+                    fn = (
+                        promote_instagram_reels_in_local_antidetect_profile
+                        if is_ig
+                        else promote_tiktok_reels_in_local_antidetect_profile
+                    )
+                    fn(
                         pid,
                         base_url=self._require_own_base(kind_s, req.base_url),
                         videos=videos,
@@ -678,7 +922,12 @@ class ProfileJobsService:
                         **ig_kw,
                     )
                 else:
-                    promote_instagram_reels_in_profile(
+                    fn = (
+                        promote_instagram_reels_in_profile
+                        if is_ig
+                        else promote_tiktok_reels_in_profile
+                    )
+                    fn(
                         pid,
                         videos=videos,
                         local_token=req.token or None,
@@ -716,6 +965,8 @@ class ProfileJobsService:
         def _on_done(pid: str, ok: bool, _err: str) -> None:
             if is_ig:
                 success_tag, error_tag = IG_PROMOTE_SUCCESS_TAG, IG_PROMOTE_ERROR_TAG
+            elif is_tt:
+                success_tag, error_tag = TT_PROMOTE_SUCCESS_TAG, TT_PROMOTE_ERROR_TAG
             else:
                 success_tag, error_tag = PROMOTE_SUCCESS_TAG, PROMOTE_ERROR_TAG
             apply_result_tags(
@@ -826,6 +1077,10 @@ class ProfileJobsService:
             setup_instagram_profile_in_local_antidetect_profile,
             setup_instagram_profile_in_profile,
         )
+        from zaliver.antydetect.tiktok_open import (
+            setup_tiktok_profile_in_local_antidetect_profile,
+            setup_tiktok_profile_in_profile,
+        )
         from zaliver.antydetect.profile_tags import (
             NAME_CHANGE_ERROR_TAG,
             NAME_CHANGE_SUCCESS_TAG,
@@ -834,7 +1089,9 @@ class ProfileJobsService:
 
         set_log_sink(sink.on_log)
         kind_s = (req.antidetect_kind or "").strip()
-        is_ig = (req.platform or "").strip().lower() == "instagram"
+        plat = (req.platform or "").strip().lower()
+        is_ig = plat == "instagram"
+        is_tt = plat == "tiktok"
         # Channel setup in desktop always uses a visible browser.
         headless = False
         by_id = {a.profile_id: a for a in req.channel_assignments if a.profile_id}
@@ -843,6 +1100,7 @@ class ProfileJobsService:
             req.profiles_custom_data, platform=req.platform
         )
         ig_sess = make_instagram_session_resolver(req.profiles_custom_data)
+        tt_sess = make_tiktok_session_resolver(req.profiles_custom_data)
         desc_lines = list(req.channel_description_lines or [])
         has_text = bool(
             (req.channel_description or "").strip()
@@ -897,16 +1155,21 @@ class ProfileJobsService:
                 if p.is_file():
                     avatar_path = p
 
-            if is_ig:
+            if is_ig or is_tt:
                 profile_description = _description_for(pid) if has_text else ""
                 channel_name = (
                     _expand(item.channel_name, pid) if item else ""
                 ) or None
                 skip_name = bool(item.skip_name_change) if item else False
                 ig_username = None if skip_name else channel_name
-                ig_login, ig_password, ig_twofa = ig_sess(pid)
+                ig_login, ig_password, ig_twofa = (ig_sess if is_ig else tt_sess)(pid)
                 if is_own_antidetect_kind(kind_s):
-                    setup_instagram_profile_in_local_antidetect_profile(
+                    fn = (
+                        setup_instagram_profile_in_local_antidetect_profile
+                        if is_ig
+                        else setup_tiktok_profile_in_local_antidetect_profile
+                    )
+                    fn(
                         pid,
                         description=profile_description or None,
                         avatar_path=avatar_path,
@@ -920,7 +1183,12 @@ class ProfileJobsService:
                         session_twofa=ig_twofa,
                     )
                 else:
-                    setup_instagram_profile_in_profile(
+                    fn = (
+                        setup_instagram_profile_in_profile
+                        if is_ig
+                        else setup_tiktok_profile_in_profile
+                    )
+                    fn(
                         pid,
                         description=profile_description or None,
                         avatar_path=avatar_path,

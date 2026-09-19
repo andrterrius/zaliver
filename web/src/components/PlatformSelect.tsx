@@ -14,10 +14,16 @@ const CHOICES: { id: Platform; name: string; hint: string; index: string }[] = [
     index: "02",
   },
   {
+    id: "tiktok",
+    name: "TikTok",
+    hint: "Залив видео на TikTok",
+    index: "03",
+  },
+  {
     id: "yt_inst",
     name: "Yt+Inst",
     hint: "Одно видео на YouTube и Instagram (2 вкладки)",
-    index: "03",
+    index: "04",
   },
 ];
 

@@ -286,6 +286,29 @@ def profile_instagram_ready_for_checker(profile: dict[str, object]) -> bool:
     return profile_has_instagram_account_data(profile)
 
 
+def profile_has_tiktok_account_data(profile: dict[str, object]) -> bool:
+    """В custom_data есть логин/пароль/2FA TikTok."""
+    from zaliver.core.profiles.account_data import (
+        TT_2FA_KEY,
+        TT_LOGIN_KEY,
+        TT_PASSWORD_KEY,
+    )
+
+    cd = _profile_custom_data(profile)
+    login = str(cd.get(TT_LOGIN_KEY) or "").strip()
+    password = str(cd.get(TT_PASSWORD_KEY) or "").strip()
+    twofa = str(cd.get(TT_2FA_KEY) or "").strip()
+    return bool(login or password or twofa)
+
+
+def profile_tiktok_ready_for_checker(profile: dict[str, object]) -> bool:
+    """
+    Чекер TikTok открывает публичные страницы в браузере антидетекта.
+    Не фильтруем по Instagram-тегам — в списке все профили с ID.
+    """
+    return bool(_profile_id(profile))
+
+
 def profile_has_yt_oldest_name(profile: dict[str, object]) -> bool:
     """В custom_data сохранено имя самого старого канала (yt_oldest_name)."""
     from zaliver.youtube_upload.google_login import YT_OLDEST_NAME_KEY

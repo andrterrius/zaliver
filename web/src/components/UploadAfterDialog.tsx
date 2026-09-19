@@ -54,7 +54,9 @@ function dialogTitle(mode: Mode, platform: Platform): string {
   const where =
     platform === "instagram"
       ? "Instagram"
-      : platform === "yt_inst"
+      : platform === "tiktok"
+        ? "TikTok"
+        : platform === "yt_inst"
         ? "YouTube / Instagram"
         : "YouTube";
   if (mode === "slicing") return `Загрузка в ${where} после нарезки`;
@@ -118,7 +120,7 @@ export function UploadAfterDialog({
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const isIg = platform === "instagram";
+  const isIg = platform === "instagram" || platform === "tiktok";
   const showYtOptions = !isIg;
 
   useEffect(() => {
@@ -315,7 +317,11 @@ export function UploadAfterDialog({
           {loading ? <p className="hint">Загрузка профилей…</p> : null}
 
           <label className="hint">
-            {isIg ? "Подпись" : "Название"}{" "}
+            {platform === "tiktok"
+              ? "Описание"
+              : isIg
+                ? "Подпись"
+                : "Название"}{" "}
             {!keepStudioTitle ? (
               <TitleVariablesHint onInsert={(tok) => setTitle((v) => v + tok)} />
             ) : null}
@@ -335,7 +341,9 @@ export function UploadAfterDialog({
                 keepStudioTitle
                   ? "Название не вводится — из Studio (настройки канала или имя файла)…"
                   : isIg
-                    ? "Подпись к Reels (необязательно). {date}, {profile}… Enter — новая строка"
+                    ? platform === "tiktok"
+                      ? "Описание к Тиктоков (необязательно). {date}, {profile}… Enter — новая строка"
+                      : "Подпись к Reels (необязательно). {date}, {profile}… Enter — новая строка"
                     : "Название ({date}, {profile}, {video}, {index}…). Enter — новая строка"
               }
               autoFocus={!keepStudioTitle}
@@ -578,12 +586,14 @@ export function UploadAfterDialog({
                   >
                     С ошибками в статусах
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => applySelectFilter("no_account_data")}
-                  >
-                    Без данных в учётке
-                  </button>
+                  {platform !== "tiktok" ? (
+                    <button
+                      type="button"
+                      onClick={() => applySelectFilter("no_account_data")}
+                    >
+                      Без данных в учётке
+                    </button>
+                  ) : null}
                   {!isIg ? (
                     <button
                       type="button"

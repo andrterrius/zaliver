@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from zaliver.ui.platform import PLATFORM_INSTAGRAM, normalize_platform
+from zaliver.ui.platform import PLATFORM_INSTAGRAM, PLATFORM_TIKTOK, normalize_platform
 
 _COLS = 3
 _PROMPT_H = 250
@@ -216,7 +216,7 @@ class AiTabPane(QWidget):
         return frozenset(pid for pid, _, _ in BUILTIN_PROMPTS)
 
     def _is_instagram(self) -> bool:
-        return self._platform == PLATFORM_INSTAGRAM
+        return self._platform in (PLATFORM_INSTAGRAM, PLATFORM_TIKTOK)
 
     def _visible_builtin_items(self) -> list[_PromptData]:
         if not self._is_instagram():

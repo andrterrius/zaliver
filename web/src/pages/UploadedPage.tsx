@@ -48,7 +48,8 @@ export function UploadedPage({ platform }: Props) {
   const [loading, setLoading] = useState(false);
   const [jobId, setJobId] = usePersistedJobId("stats_refresh");
   const { job } = useJobPoll(jobId);
-  const isIg = platform === "instagram";
+  const needsChecker = platform === "instagram";
+  const checkerKey = "instagram/stats_checker_profile_id";
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -58,16 +59,16 @@ export function UploadedPage({ platform }: Props) {
         api.listUploaded(sessionId === "" ? null : sessionId),
         api.listSessions(),
         api.getSettings(),
-        isIg
+        needsChecker
           ? api.listProfiles()
           : Promise.resolve({ profiles: [] as Profile[] }),
       ]);
       setItems(list);
       setSessions(sess);
-      if (isIg) {
+      if (needsChecker) {
         setProfiles(profRes.profiles || []);
         setCheckerProfileId(
-          String(settings.values["instagram/stats_checker_profile_id"] ?? ""),
+          String(settings.values[checkerKey] ?? ""),
         );
       }
     } catch (e) {
@@ -75,7 +76,7 @@ export function UploadedPage({ platform }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [sessionId, isIg]);
+  }, [sessionId, needsChecker]);
 
   useEffect(() => {
     void refresh();
@@ -139,20 +140,20 @@ export function UploadedPage({ platform }: Props) {
       return;
     }
     try {
-      if (isIg) {
+      if (needsChecker) {
         if (!checkerProfileId.trim()) {
           setError("Выберите профиль для чека статистики.");
           return;
         }
         await api.patchSettings({
-          "instagram/stats_checker_profile_id": checkerProfileId.trim(),
+          [checkerKey]: checkerProfileId.trim(),
         });
       }
       const body: Record<string, unknown> = {
         session_id: sessionId,
         video_ids: vids,
       };
-      if (isIg) {
+      if (needsChecker) {
         body.checker_profile_id = checkerProfileId.trim();
       }
       const res = await api.refreshUploadedStats(body);
@@ -248,7 +249,7 @@ export function UploadedPage({ platform }: Props) {
             <option value="time">Время</option>
           </select>
         </label>
-        {isIg ? (
+        {needsChecker ? (
           <label className="hint" style={{ flex: 1, minWidth: 240 }}>
             Аккаунт для чека
             <select
@@ -259,7 +260,7 @@ export function UploadedPage({ platform }: Props) {
                 setCheckerProfileId(id);
                 void api
                   .patchSettings({
-                    "instagram/stats_checker_profile_id": id,
+                    [checkerKey]: id,
                   })
                   .catch(() => {
                     /* keep local selection; save again on check */

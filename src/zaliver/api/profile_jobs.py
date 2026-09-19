@@ -14,6 +14,8 @@ from zaliver.api.schemas import (
     CookieFarmJobRequest,
     Instagram2FAJobRequest,
     InstagramRegisterJobRequest,
+    TikTok2FAJobRequest,
+    TikTokRegisterJobRequest,
     ProfileJobBaseRequest,
     PromoteJobRequest,
     WarmupJobRequest,
@@ -37,6 +39,8 @@ _KIND_MAP: dict[str, JobKind] = {
     "availability": JobKind.AVAILABILITY,
     "instagram_register": JobKind.INSTAGRAM_REGISTER,
     "instagram_2fa": JobKind.INSTAGRAM_2FA,
+    "tiktok_register": JobKind.TIKTOK_REGISTER,
+    "tiktok_2fa": JobKind.TIKTOK_2FA,
     "channel_setup": JobKind.CHANNEL_SETUP,
     "warmup": JobKind.WARMUP,
     "promote": JobKind.PROMOTE,
@@ -209,6 +213,34 @@ def start_instagram_2fa(
         state, body, kind="instagram_2fa", username=username, session_token=session_token
     )
     return _start(state, job_kind="instagram_2fa", request=req, owner=username)
+
+
+def start_tiktok_register(
+    state: AppState, body: TikTokRegisterJobRequest, *, username: str, session_token: str = ""
+):
+    _require_browser_jobs(state)
+    if state.platform_for_user(username) != "tiktok":
+        raise HTTPException(
+            status_code=400, detail="tiktok_register requires platform=tiktok"
+        )
+    req = _base_request(
+        state, body, kind="tiktok_register", username=username, session_token=session_token
+    )
+    return _start(state, job_kind="tiktok_register", request=req, owner=username)
+
+
+def start_tiktok_2fa(
+    state: AppState, body: TikTok2FAJobRequest, *, username: str, session_token: str = ""
+):
+    _require_browser_jobs(state)
+    if state.platform_for_user(username) != "tiktok":
+        raise HTTPException(
+            status_code=400, detail="tiktok_2fa requires platform=tiktok"
+        )
+    req = _base_request(
+        state, body, kind="tiktok_2fa", username=username, session_token=session_token
+    )
+    return _start(state, job_kind="tiktok_2fa", request=req, owner=username)
 
 
 def start_warmup(

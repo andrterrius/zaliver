@@ -154,6 +154,9 @@ from zaliver.youtube_upload.schedule_publish import (
 from zaliver.ui.uploaded_instagram_stats_refresh_worker import (
     UploadedInstagramStatsRefreshWorker,
 )
+from zaliver.ui.uploaded_tiktok_stats_refresh_worker import (
+    UploadedTikTokStatsRefreshWorker,
+)
 from zaliver.ui.uploaded_stats_refresh_worker import UploadedStatsRefreshWorker
 from zaliver.ui.widgets import (
     AnimatedProgressBar,
@@ -187,6 +190,7 @@ from zaliver.ui.title_variables_ui import (
 from zaliver.config.platform_settings import PlatformSettings
 from zaliver.ui.platform import (
     PLATFORM_INSTAGRAM,
+    PLATFORM_TIKTOK,
     PLATFORM_YOUTUBE,
     PLATFORM_YT_INST,
     apply_platform_branding,
@@ -1783,17 +1787,15 @@ class MainWindow(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         self._uploaded_ig_checker_value.setToolTip(
-            "Антидетект-профиль для чека метрик (instagrapi).\n"
-            "Лучше отдельный «читающий» аккаунт — не тот, с которого льёте.\n"
-            "Параллельный/агрессивный чек с тем же sessionid убивает вход "
-            "в браузере (Exceeded 30 redirects)."
+            "Антидетект-профиль для чека метрик Instagram (instagrapi-сессия).\n"
+            "Лучше отдельный «читающий» аккаунт — не тот, с которого льёте."
         )
         self._btn_uploaded_ig_checker_pick = QPushButton("Выбрать профиль")
         self._btn_uploaded_ig_checker_pick.setObjectName("secondary")
         self._btn_uploaded_ig_checker_pick.setAutoDefault(False)
         self._btn_uploaded_ig_checker_pick.setDefault(False)
         self._btn_uploaded_ig_checker_pick.setToolTip(
-            "Выбрать профиль с Instagram-сессией для чека.\n"
+            "Выбрать профиль с сессией для чека статистики.\n"
             "Рекомендуется отдельный аккаунт только для статистики."
         )
         self._btn_uploaded_ig_checker_pick.clicked.connect(
@@ -2396,7 +2398,7 @@ class MainWindow(QWidget):
         gy.addWidget(self._youtube_settings_status, 5, 0, 1, 2)
         # В Instagram API-ключ Data API не используется (статистика через сессию профиля).
         # Yt+Inst — оба раздела: YouTube и Instagram.
-        gb_yt.setVisible(self._platform != PLATFORM_INSTAGRAM)
+        gb_yt.setVisible(self._platform not in (PLATFORM_INSTAGRAM, PLATFORM_TIKTOK))
 
         gb_ig = QGroupBox("Instagram")
         self._gb_instagram_settings = gb_ig
@@ -2482,8 +2484,9 @@ class MainWindow(QWidget):
         gi.addWidget(_settings_save_row(self._btn_save_instagram), 3, 0, 1, 2)
         gi.addWidget(self._instagram_settings_status, 4, 0, 1, 2)
         gb_ig.setVisible(
-            self._platform in (PLATFORM_INSTAGRAM, PLATFORM_YT_INST)
+            self._platform in (PLATFORM_INSTAGRAM, PLATFORM_YT_INST, PLATFORM_TIKTOK)
         )
+        self._sync_instagram_crop_setting_visibility()
 
         gb_ai = QGroupBox("ИИ")
         gai = _compact_settings_grid(gb_ai)
@@ -3227,6 +3230,11 @@ class MainWindow(QWidget):
         finally:
             combo.blockSignals(False)
 
+    def _uploaded_checker_settings_key(self) -> str:
+        if self._platform == PLATFORM_TIKTOK:
+            return "tiktok/stats_checker_profile_id"
+        return "instagram/stats_checker_profile_id"
+
     def _uploaded_ig_checker_selected_id(self) -> str:
         return (getattr(self, "_uploaded_ig_checker_profile_id", "") or "").strip()
 
@@ -3234,7 +3242,7 @@ class MainWindow(QWidget):
         pid = (profile_id or "").strip()
         self._uploaded_ig_checker_profile_id = pid
         if pid:
-            self._settings.setValue("instagram/stats_checker_profile_id", pid)
+            self._settings.setValue(self._uploaded_checker_settings_key(), pid)
             try:
                 self._settings.sync()
             except Exception:
@@ -3306,12 +3314,13 @@ class MainWindow(QWidget):
             self._uploaded_ig_checker_row.setVisible(
                 self._platform == PLATFORM_INSTAGRAM
             )
-        # Если сохранённый id пропал из списка — оставляем id, но покажем без имени.
         saved = (
-            self._settings.value("instagram/stats_checker_profile_id", "", type=str)
+            self._settings.value(
+                self._uploaded_checker_settings_key(), "", type=str
+            )
             or ""
         ).strip()
-        if saved and not self._uploaded_ig_checker_selected_id():
+        if saved:
             self._uploaded_ig_checker_profile_id = saved
         self._refresh_uploaded_ig_checker_label()
         if self._platform == PLATFORM_INSTAGRAM and hasattr(
@@ -3320,6 +3329,13 @@ class MainWindow(QWidget):
             self._btn_uploaded_check.setToolTip(
                 "Запросить просмотры, лайки и комментарии через сессию "
                 "выбранного профиля (instagrapi, без API-ключа Meta)."
+            )
+        elif self._platform == PLATFORM_TIKTOK and hasattr(
+            self, "_btn_uploaded_check"
+        ):
+            self._btn_uploaded_check.setToolTip(
+                "Публичные HTTP-запросы к страницам роликов "
+                "(просмотры, лайки, комментарии), без профиля."
             )
 
     def _make_instagram_sessionid_provider(self, profile_id: str):
@@ -3418,6 +3434,10 @@ class MainWindow(QWidget):
                 sessionid_provider=self._make_instagram_sessionid_provider(pid),
                 proxy=self._instagram_checker_proxy_dsn(pid),
             )
+            self._stats_worker = worker
+            worker.log_line.connect(self._ui_log_line.emit)
+        elif self._platform == PLATFORM_TIKTOK:
+            worker = UploadedTikTokStatsRefreshWorker(vids)
             self._stats_worker = worker
             worker.log_line.connect(self._ui_log_line.emit)
         else:
@@ -4497,10 +4517,15 @@ class MainWindow(QWidget):
         btns.accepted.connect(dlg.accept)
         btns.rejected.connect(dlg.reject)
 
-        is_ig_upload = self._platform == PLATFORM_INSTAGRAM
+        is_ig_upload = self._platform in (PLATFORM_INSTAGRAM, PLATFORM_TIKTOK)
         desc_label = QLabel("Описание:")
+        title_field_label = QLabel(
+            "Описание:"
+            if self._platform == PLATFORM_TIKTOK
+            else ("Подпись:" if self._platform == PLATFORM_INSTAGRAM else "Название:")
+        )
         grid.addWidget(
-            QLabel("Название:"),
+            title_field_label,
             0,
             0,
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
@@ -4532,9 +4557,15 @@ class MainWindow(QWidget):
             ):
                 w.setVisible(False)
             title_edit.setPlaceholderText(
-                "Подпись к Reels (необязательно). "
+                "Описание к Тиктоков (необязательно). "
                 "Можно использовать переменные: {date}, {profile}, {video}, {index}… "
                 "Enter — новая строка."
+                if self._platform == PLATFORM_TIKTOK
+                else (
+                    "Подпись к Reels (необязательно). "
+                    "Можно использовать переменные: {date}, {profile}, {video}, {index}… "
+                    "Enter — новая строка."
+                )
             )
         elif self._platform == PLATFORM_YT_INST:
             title_edit.setPlaceholderText(
@@ -5212,14 +5243,15 @@ class MainWindow(QWidget):
 
     def _sync_profiles_platform_actions_visibility(self) -> None:
         is_ig = self._platform == PLATFORM_INSTAGRAM
+        is_tt = self._platform == PLATFORM_TIKTOK
         if hasattr(self, "_btn_profiles_register_accounts"):
             self._btn_profiles_register_accounts.setVisible(is_ig)
         if hasattr(self, "_btn_profiles_connect_2fa"):
             self._btn_profiles_connect_2fa.setVisible(is_ig)
-        # Продвижение: Shorts (YT) или Reels (IG).
         if hasattr(self, "_btn_profiles_promote"):
-            self._btn_profiles_promote.setVisible(True)
-        # Прогрев: Shorts (YT) или Reels (IG).
+            self._btn_profiles_promote.setVisible(not is_tt)
+        if hasattr(self, "_btn_profiles_import_accounts"):
+            self._btn_profiles_import_accounts.setVisible(not is_tt)
         if hasattr(self, "_btn_profiles_warmup"):
             self._btn_profiles_warmup.setVisible(True)
         if hasattr(self, "_uploaded_ig_checker_row"):
@@ -5319,6 +5351,11 @@ class MainWindow(QWidget):
         store = getattr(self._settings, "store", self._settings)
         return PlatformSettings(store, platform)
 
+    def _ig_like_settings_platform(self) -> str:
+        if self._platform == PLATFORM_TIKTOK:
+            return PLATFORM_TIKTOK
+        return PLATFORM_INSTAGRAM
+
     def _load_youtube_settings(self) -> None:
         if not hasattr(self, "_youtube_api_key"):
             return
@@ -5375,7 +5412,7 @@ class MainWindow(QWidget):
             return
         if not hasattr(self, "_instagram_upload_pause_minutes"):
             return
-        pause = self._upload_pause_between_uploads(PLATFORM_INSTAGRAM)
+        pause = self._upload_pause_between_uploads(self._ig_like_settings_platform())
         total_mins = max(0, int(round(pause.total_seconds() / 60.0)))
         hours, mins = divmod(total_mins, 60)
         hours = max(0, min(168, hours))
@@ -5388,20 +5425,29 @@ class MainWindow(QWidget):
         self._instagram_upload_pause_minutes.blockSignals(False)
         if hasattr(self, "_instagram_tabs_per_profile"):
             tabs_n = instagram_tabs_per_profile_from_settings(
-                self._settings_for(PLATFORM_INSTAGRAM)
+                self._settings_for(self._ig_like_settings_platform())
             )
             self._instagram_tabs_per_profile.blockSignals(True)
             self._instagram_tabs_per_profile.setValue(tabs_n)
             self._instagram_tabs_per_profile.blockSignals(False)
         if hasattr(self, "_instagram_crop_aspect"):
             crop = instagram_crop_aspect_from_settings(
-                self._settings_for(PLATFORM_INSTAGRAM)
+                self._settings_for(self._ig_like_settings_platform())
             )
             idx = self._instagram_crop_aspect.findData(crop)
             self._instagram_crop_aspect.blockSignals(True)
             self._instagram_crop_aspect.setCurrentIndex(idx if idx >= 0 else 0)
             self._instagram_crop_aspect.blockSignals(False)
+        self._sync_instagram_crop_setting_visibility()
         self._sync_instagram_tabs_setting_visibility()
+
+    def _sync_instagram_crop_setting_visibility(self) -> None:
+        """Обрезка только для Instagram / Yt+Inst, не для TikTok Studio."""
+        show = self._platform != PLATFORM_TIKTOK
+        if hasattr(self, "_instagram_crop_aspect"):
+            self._instagram_crop_aspect.setVisible(show)
+        if hasattr(self, "_instagram_crop_aspect_label"):
+            self._instagram_crop_aspect_label.setVisible(show)
 
     def _sync_instagram_tabs_setting_visibility(self, *_args) -> None:
         """Показывать «Вкладок на профиль» только при паузе 0 ч 0 мин."""
@@ -5450,14 +5496,21 @@ class MainWindow(QWidget):
         hours = max(0, min(168, int(self._instagram_upload_pause_hours.value())))
         mins = max(0, min(59, int(self._instagram_upload_pause_minutes.value())))
         total_mins = hours * 60 + mins
-        ig = self._settings_for(PLATFORM_INSTAGRAM)
+        ig = self._settings_for(self._ig_like_settings_platform())
         ig.setValue("upload_pause_minutes", total_mins)
         # Совместимость со старым ключом (целые часы).
         ig.setValue("upload_pause_hours", hours)
         tabs_n = self._instagram_tabs_per_profile_value()
-        ig.setValue(SETTINGS_KEY_INSTAGRAM_TABS_PER_PROFILE, tabs_n)
         crop = self._instagram_crop_aspect_value()
-        ig.setValue(SETTINGS_KEY_INSTAGRAM_CROP_ASPECT, crop)
+        if self._platform == PLATFORM_TIKTOK:
+            from zaliver.antydetect.browser_concurrency import (
+                SETTINGS_KEY_TIKTOK_TABS_PER_PROFILE,
+            )
+
+            ig.setValue(SETTINGS_KEY_TIKTOK_TABS_PER_PROFILE, tabs_n)
+        else:
+            ig.setValue(SETTINGS_KEY_INSTAGRAM_TABS_PER_PROFILE, tabs_n)
+            ig.setValue(SETTINGS_KEY_INSTAGRAM_CROP_ASPECT, crop)
         try:
             ig.sync()
         except Exception:
@@ -5475,8 +5528,13 @@ class MainWindow(QWidget):
             extra = ""
             if total_mins <= 0:
                 extra = f" Вкладок на профиль: {tabs_n}."
+            crop_txt = (
+                ""
+                if self._platform == PLATFORM_TIKTOK
+                else f" Обрезка: {crop}."
+            )
             self._instagram_settings_status.setText(
-                f"Пауза между видео сохранена: {short}.{extra} Обрезка: {crop}."
+                f"Пауза между видео сохранена: {short}.{extra}{crop_txt}"
             )
 
     def _sync_upload_pause_selection_labels(self) -> None:
@@ -5992,11 +6050,12 @@ class MainWindow(QWidget):
         )
         act_errors.triggered.connect(lambda: on_select_filter("with_errors"))
         select_menu.addSeparator()
-        act_no_account = select_menu.addAction("Без данных в учётке")
-        act_no_account.setToolTip(
-            "Профили без логина, пароля и 2FA YouTube в custom_data (свой антидетект)"
-        )
-        act_no_account.triggered.connect(lambda: on_select_filter("no_account_data"))
+        if self._platform != PLATFORM_TIKTOK:
+            act_no_account = select_menu.addAction("Без данных в учётке")
+            act_no_account.setToolTip(
+                "Профили без логина, пароля и 2FA YouTube в custom_data (свой антидетект)"
+            )
+            act_no_account.triggered.connect(lambda: on_select_filter("no_account_data"))
         act_no_oldest = select_menu.addAction("Без определённого старейшего канала")
         act_no_oldest.setToolTip(
             "Профили, для которых ещё не сохранён yt_oldest_name после проверки каналов"
@@ -6212,7 +6271,9 @@ class MainWindow(QWidget):
         kind = (
             self._antidetect_kind()
         )
-        show_account = _is_own_antidetect_kind(kind if isinstance(kind, str) else "")
+        show_account = _is_own_antidetect_kind(
+            kind if isinstance(kind, str) else ""
+        ) and self._platform != PLATFORM_TIKTOK
         show_preview = isinstance(kind, str) and kind.strip() == "remote"
         is_ig = self._platform == PLATFORM_INSTAGRAM
         account_btn_text = "Данные Insta" if is_ig else "Данные учетки"
@@ -6486,20 +6547,26 @@ class MainWindow(QWidget):
             INSTAGRAM_AVAILABILITY_SUCCESS_TAG,
             STUDIO_AVAILABILITY_ERROR_TAG,
             STUDIO_AVAILABILITY_SUCCESS_TAG,
+            TIKTOK_AVAILABILITY_ERROR_TAG,
+            TIKTOK_AVAILABILITY_SUCCESS_TAG,
         )
 
         set_log_sink(self._ui_log_line.emit)
         kind_s = (kind or "").strip()
         base_u = (base_url or "").strip() or DEFAULT_LOCAL_API_BASE_URL
-        is_instagram = self._platform == PLATFORM_INSTAGRAM
+        is_instagram = self._platform in (PLATFORM_INSTAGRAM, PLATFORM_TIKTOK)
         success_tag = (
             INSTAGRAM_AVAILABILITY_SUCCESS_TAG
-            if is_instagram
+            if self._platform == PLATFORM_INSTAGRAM
+            else TIKTOK_AVAILABILITY_SUCCESS_TAG
+            if self._platform == PLATFORM_TIKTOK
             else STUDIO_AVAILABILITY_SUCCESS_TAG
         )
         error_tag = (
             INSTAGRAM_AVAILABILITY_ERROR_TAG
-            if is_instagram
+            if self._platform == PLATFORM_INSTAGRAM
+            else TIKTOK_AVAILABILITY_ERROR_TAG
+            if self._platform == PLATFORM_TIKTOK
             else STUDIO_AVAILABILITY_ERROR_TAG
         )
 
@@ -6515,26 +6582,57 @@ class MainWindow(QWidget):
                         raise LocalAntidetectError(
                             f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
                         )
-                    check_instagram_availability_in_local_antidetect_profile(
-                        pid,
-                        base_url=u,
-                        headless=headless,
-                        remote_cdp=remote_cdp,
-                        session_login=sess_login,
-                        session_password=sess_pwd,
-                        session_twofa=sess_2fa,
-                        login_credentials=creds,
-                    )
+                    if self._platform == PLATFORM_TIKTOK:
+                        from zaliver.antydetect.tiktok_open import (
+                            check_tiktok_availability_in_local_antidetect_profile as _tt_av_local,
+                        )
+
+                        _tt_av_local(
+                            pid,
+                            base_url=u,
+                            headless=headless,
+                            remote_cdp=remote_cdp,
+                            session_login=sess_login,
+                            session_password=sess_pwd,
+                            session_twofa=sess_2fa,
+                            login_credentials=creds,
+                        )
+                    else:
+                        check_instagram_availability_in_local_antidetect_profile(
+                            pid,
+                            base_url=u,
+                            headless=headless,
+                            remote_cdp=remote_cdp,
+                            session_login=sess_login,
+                            session_password=sess_pwd,
+                            session_twofa=sess_2fa,
+                            login_credentials=creds,
+                        )
                 else:
-                    check_instagram_availability_in_profile(
-                        pid,
-                        local_token=token or None,
-                        headless=headless,
-                        session_login=sess_login,
-                        session_password=sess_pwd,
-                        session_twofa=sess_2fa,
-                        login_credentials=creds,
-                    )
+                    if self._platform == PLATFORM_TIKTOK:
+                        from zaliver.antydetect.tiktok_open import (
+                            check_tiktok_availability_in_profile as _tt_av,
+                        )
+
+                        _tt_av(
+                            pid,
+                            local_token=token or None,
+                            headless=headless,
+                            session_login=sess_login,
+                            session_password=sess_pwd,
+                            session_twofa=sess_2fa,
+                            login_credentials=creds,
+                        )
+                    else:
+                        check_instagram_availability_in_profile(
+                            pid,
+                            local_token=token or None,
+                            headless=headless,
+                            session_login=sess_login,
+                            session_password=sess_pwd,
+                            session_twofa=sess_2fa,
+                            login_credentials=creds,
+                        )
                 return
 
             creds = self._profile_login_credentials(pid)
@@ -6729,22 +6827,49 @@ class MainWindow(QWidget):
                     raise LocalAntidetectError(
                         f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
                     )
-                register_instagram_account_in_local_antidetect_profile(
-                    pid,
-                    base_url=u,
-                    headless=headless,
-                    login_credentials=creds,
-                    remote_cdp=remote_cdp,
-                    on_manual_captcha=_on_manual_captcha,
-                )
+                if self._platform == PLATFORM_TIKTOK:
+                    from zaliver.antydetect.tiktok_open import (
+                        register_tiktok_account_in_local_antidetect_profile,
+                    )
+
+                    register_tiktok_account_in_local_antidetect_profile(
+                        pid,
+                        base_url=u,
+                        headless=headless,
+                        login_credentials=creds,
+                        remote_cdp=remote_cdp,
+                        on_manual_captcha=_on_manual_captcha,
+                    )
+                else:
+                    register_instagram_account_in_local_antidetect_profile(
+                        pid,
+                        base_url=u,
+                        headless=headless,
+                        login_credentials=creds,
+                        remote_cdp=remote_cdp,
+                        on_manual_captcha=_on_manual_captcha,
+                    )
             else:
-                register_instagram_account_in_profile(
-                    pid,
-                    local_token=token or None,
-                    headless=headless,
-                    login_credentials=creds,
-                    on_manual_captcha=_on_manual_captcha,
-                )
+                if self._platform == PLATFORM_TIKTOK:
+                    from zaliver.antydetect.tiktok_open import (
+                        register_tiktok_account_in_profile,
+                    )
+
+                    register_tiktok_account_in_profile(
+                        pid,
+                        local_token=token or None,
+                        headless=headless,
+                        login_credentials=creds,
+                        on_manual_captcha=_on_manual_captcha,
+                    )
+                else:
+                    register_instagram_account_in_profile(
+                        pid,
+                        local_token=token or None,
+                        headless=headless,
+                        login_credentials=creds,
+                        on_manual_captcha=_on_manual_captcha,
+                    )
 
         def _on_profile_done(pid: str, ok: bool, err: str) -> None:
             if not _is_own_antidetect_kind(kind_s):
@@ -7139,7 +7264,7 @@ class MainWindow(QWidget):
         has_video_title_fill = tab.has_video_default_title()
         has_customization = tab.has_profile_customization()
         change_language = tab.change_language_before_edit()
-        is_ig = self._platform == PLATFORM_INSTAGRAM
+        is_ig = self._platform in (PLATFORM_INSTAGRAM, PLATFORM_TIKTOK)
 
         if has_video_title_fill and not is_ig:
             show_youtube_title_warnings(
@@ -7377,7 +7502,7 @@ class MainWindow(QWidget):
             return None
 
         def _setup_one(pid: str) -> None:
-            is_ig = self._platform == PLATFORM_INSTAGRAM
+            is_ig = self._platform in (PLATFORM_INSTAGRAM, PLATFORM_TIKTOK)
             item = by_id.get(pid)
             png = item.get("avatar_png") if item else None
             avatar_path: Path | None = None
@@ -7554,7 +7679,7 @@ class MainWindow(QWidget):
                 VIDEO_TITLE_CHANGE_SUCCESS_TAG,
             )
 
-            is_ig = self._platform == PLATFORM_INSTAGRAM
+            is_ig = self._platform in (PLATFORM_INSTAGRAM, PLATFORM_TIKTOK)
             updates: list[tuple[bool, str, str]] = []
             if change_language:
                 if is_ig:
@@ -7932,15 +8057,30 @@ class MainWindow(QWidget):
 
     def _prompt_reels_warmup_settings(self) -> ReelsWarmupSettings | None:
         dlg = QDialog(self)
-        dlg.setWindowTitle("Прогрев Instagram Reels")
+        dlg.setWindowTitle(
+            "Прогрев Тиктоков"
+            if self._platform == PLATFORM_TIKTOK
+            else "Прогрев Instagram Reels"
+        )
         dlg.setModal(True)
         dlg.setMinimumWidth(420)
         v = QVBoxLayout(dlg)
 
+        is_tt = self._platform == PLATFORM_TIKTOK
+        word = "Тиктоков" if is_tt else "Reels"
+        one = "Тикток" if is_tt else "Reel"
         hint = QLabel(
-            "Для каждого отмеченного профиля: главная Instagram, при необходимости "
-            "вход в аккаунт, затем лента /reels/ или поиск по ключевому слову. "
-            "На каждом рилсе с заданной вероятностью ставится лайк и/или подписка."
+            (
+                "Для каждого отмеченного профиля: главная TikTok, при необходимости "
+                "вход в аккаунт, затем лента For You или поиск по ключевому слову. "
+                "На каждом из Тиктоков с заданной вероятностью ставится лайк и/или подписка."
+            )
+            if is_tt
+            else (
+                "Для каждого отмеченного профиля: главная Instagram, при необходимости "
+                "вход в аккаунт, затем лента /reels/ или поиск по ключевому слову. "
+                "На каждом рилсе с заданной вероятностью ставится лайк и/или подписка."
+            )
         )
         hint.setWordWrap(True)
         hint.setObjectName("hint")
@@ -7950,7 +8090,7 @@ class MainWindow(QWidget):
         count_spin = QSpinBox()
         count_spin.setRange(1, 9999)
         count_spin.setValue(15)
-        form.addRow("Количество просмотренных Reels:", count_spin)
+        form.addRow(f"Количество просмотренных {word}:", count_spin)
 
         like_spin = QDoubleSpinBox()
         like_spin.setRange(0.0, 100.0)
@@ -7983,10 +8123,10 @@ class MainWindow(QWidget):
         watch_range_row.addStretch()
         watch_range_w = QWidget()
         watch_range_w.setLayout(watch_range_row)
-        watch_range_lbl = QLabel("Длительность просмотра Reel:")
+        watch_range_lbl = QLabel(f"Длительность просмотра {one}:")
         form.addRow(watch_range_lbl, watch_range_w)
 
-        watch_full_cb = QCheckBox("Смотреть каждый Reel до конца")
+        watch_full_cb = QCheckBox(f"Смотреть каждый {one} до конца")
         watch_full_cb.setChecked(True)
         watch_full_cb.setToolTip(
             "Дождаться конца ролика, затем листать дальше. "
@@ -8001,12 +8141,20 @@ class MainWindow(QWidget):
         watch_full_cb.toggled.connect(_sync_watch_mode)
         _sync_watch_mode(watch_full_cb.isChecked())
 
-        reels_recommend_cb = QCheckBox("Рекомендации Reels")
+        reels_recommend_cb = QCheckBox(f"Рекомендации {word}")
         reels_recommend_cb.setChecked(True)
         reels_recommend_cb.setToolTip(
-            "Открыть ленту рекомендаций /reels/. Если снять галочку — "
-            "укажите запрос: открывается /explore/search/keyword/, "
-            "первый рилс в сетке, далее листание вправо."
+            (
+                "Открыть ленту рекомендаций For You. Если снять галочку — "
+                "укажите запрос: открывается поиск TikTok, "
+                "первый ролик в сетке, далее листание."
+            )
+            if is_tt
+            else (
+                "Открыть ленту рекомендаций /reels/. Если снять галочку — "
+                "укажите запрос: открывается /explore/search/keyword/, "
+                "первый рилс в сетке, далее листание вправо."
+            )
         )
         form.addRow("", reels_recommend_cb)
 
@@ -8042,13 +8190,14 @@ class MainWindow(QWidget):
         v.addLayout(row)
 
         def _try_accept() -> None:
+            dlg_title = dlg.windowTitle()
             if (
                 not watch_full_cb.isChecked()
                 and watch_min_spin.value() > watch_max_spin.value()
             ):
                 QMessageBox.warning(
                     dlg,
-                    "Прогрев Instagram Reels",
+                    dlg_title,
                     "Минимальная длительность просмотра не может быть "
                     "больше максимальной.",
                 )
@@ -8059,9 +8208,9 @@ class MainWindow(QWidget):
             ):
                 QMessageBox.warning(
                     dlg,
-                    "Прогрев Instagram Reels",
-                    "Укажите поисковый запрос для прогрева Reels "
-                    "или включите «Рекомендации Reels».",
+                    dlg_title,
+                    f"Укажите поисковый запрос для прогрева {word} "
+                    f"или включите «Рекомендации {word}».",
                 )
                 return
             dlg.accept()
@@ -8083,8 +8232,12 @@ class MainWindow(QWidget):
         )
 
     def _start_profiles_warmup(self) -> None:
-        is_ig = self._platform == PLATFORM_INSTAGRAM
-        title = "Прогрев Reels" if is_ig else "Прогрев Shorts"
+        is_ig = self._platform in (PLATFORM_INSTAGRAM, PLATFORM_TIKTOK)
+        title = (
+            "Прогрев Тиктоков"
+            if self._platform == PLATFORM_TIKTOK
+            else ("Прогрев Reels" if is_ig else "Прогрев Shorts")
+        )
         if self._profiles_warmup_running:
             QMessageBox.information(
                 self,
@@ -8150,16 +8303,21 @@ class MainWindow(QWidget):
                     f"{warmup_settings.watch_max_s} с"
                 )
             )
+            kind_label = (
+                "Тиктоков"
+                if self._platform == PLATFORM_TIKTOK
+                else "Reels"
+            )
             self._append_log(
                 f"[warmup] Старт для {len(profile_ids)} профилей "
-                f"(Reels: {warmup_settings.reels_count}, "
+                f"({kind_label}: {warmup_settings.reels_count}, "
                 f"просмотр {watch_note}, "
                 f"лайк {warmup_settings.like_probability_pct:g}%, "
                 f"подписка {warmup_settings.follow_probability_pct:g}%"
                 + (
-                    ", Reels: рекомендации"
+                    f", {kind_label}: рекомендации"
                     if warmup_settings.reels_recommendations
-                    else f", Reels: поиск «{warmup_settings.reels_search_query}»"
+                    else f", {kind_label}: поиск «{warmup_settings.reels_search_query}»"
                 )
                 + f", {headless_label}, до {max_concurrent} параллельно)…"
             )
@@ -8371,20 +8529,45 @@ class MainWindow(QWidget):
                     raise LocalAntidetectError(
                         f"Укажите базовый URL {_own_antidetect_api_label(kind_s)} API в настройках."
                     )
-                warmup_instagram_reels_in_local_antidetect_profile(
-                    pid,
-                    base_url=u,
-                    headless=headless,
-                    remote_cdp=remote_cdp,
-                    **warmup_kw,
-                )
+                if self._platform == PLATFORM_TIKTOK:
+                    from zaliver.antydetect.tiktok_open import (
+                        warmup_tiktok_reels_in_local_antidetect_profile,
+                    )
+
+                    warmup_tiktok_reels_in_local_antidetect_profile(
+                        pid,
+                        base_url=u,
+                        headless=headless,
+                        remote_cdp=remote_cdp,
+                        **warmup_kw,
+                    )
+                else:
+                    warmup_instagram_reels_in_local_antidetect_profile(
+                        pid,
+                        base_url=u,
+                        headless=headless,
+                        remote_cdp=remote_cdp,
+                        **warmup_kw,
+                    )
             else:
-                warmup_instagram_reels_in_profile(
-                    pid,
-                    local_token=token or None,
-                    headless=headless,
-                    **warmup_kw,
-                )
+                if self._platform == PLATFORM_TIKTOK:
+                    from zaliver.antydetect.tiktok_open import (
+                        warmup_tiktok_reels_in_profile,
+                    )
+
+                    warmup_tiktok_reels_in_profile(
+                        pid,
+                        local_token=token or None,
+                        headless=headless,
+                        **warmup_kw,
+                    )
+                else:
+                    warmup_instagram_reels_in_profile(
+                        pid,
+                        local_token=token or None,
+                        headless=headless,
+                        **warmup_kw,
+                    )
 
         def _on_progress(done: int, total: int, profile_id: str) -> None:
             self._studio_warmup_progress.emit(done, total, profile_id)
@@ -8467,7 +8650,7 @@ class MainWindow(QWidget):
             return
 
         targets: list = []
-        is_ig = self._platform == PLATFORM_INSTAGRAM
+        is_ig = self._platform in (PLATFORM_INSTAGRAM, PLATFORM_TIKTOK)
         from zaliver.youtube_upload.studio import PromotionTargetVideo
 
         if is_ig:
@@ -8630,7 +8813,7 @@ class MainWindow(QWidget):
 
         set_log_sink(self._ui_log_line.emit)
         kind_s = (kind or "").strip()
-        is_ig = self._platform == PLATFORM_INSTAGRAM
+        is_ig = self._platform in (PLATFORM_INSTAGRAM, PLATFORM_TIKTOK)
         promote_kw = {
             "subscribe_to_channels": promote_settings.subscribe_to_channels,
             "shorts_count": promote_settings.shorts_count,
@@ -8974,16 +9157,25 @@ class MainWindow(QWidget):
                 return None
             if self._platform == PLATFORM_INSTAGRAM:
                 return gmail_or_yt_credentials_from_custom_data(cd)
+            if self._platform == PLATFORM_TIKTOK:
+                return gmail_or_yt_credentials_from_custom_data(cd)
             return credentials_from_custom_data(cd)
         return None
 
     def _instagram_session_credentials(self, profile_id: str) -> tuple[str, str, str]:
         """Логин/пароль/2FA для re-login Instagram (не регистрация)."""
-        from zaliver.instagram_upload.instagram_availability import (
-            session_login_from_custom_data,
-            session_password_from_custom_data,
-            session_twofa_from_custom_data,
-        )
+        if self._platform == PLATFORM_TIKTOK:
+            from zaliver.tiktok_upload.tiktok_availability import (
+                session_login_from_custom_data,
+                session_password_from_custom_data,
+                session_twofa_from_custom_data,
+            )
+        else:
+            from zaliver.instagram_upload.instagram_availability import (
+                session_login_from_custom_data,
+                session_password_from_custom_data,
+                session_twofa_from_custom_data,
+            )
 
         pid = (profile_id or "").strip()
         for p in self._profiles_raw or []:
@@ -9817,9 +10009,13 @@ class MainWindow(QWidget):
     ) -> None:
         pid = (profile_id or "").strip()
         label = (
-            "Прогрев Reels"
-            if self._platform == PLATFORM_INSTAGRAM
-            else "Прогрев Shorts"
+            "Прогрев Тиктоков"
+            if self._platform == PLATFORM_TIKTOK
+            else (
+                "Прогрев Reels"
+                if self._platform == PLATFORM_INSTAGRAM
+                else "Прогрев Shorts"
+            )
         )
         self._profiles_status.setText(
             f"{label}: {current} / {total}"
@@ -9831,9 +10027,13 @@ class MainWindow(QWidget):
         self._sync_profiles_tab_action_buttons()
         total = int(ok_n) + int(fail_n)
         label = (
-            "Прогрев Reels"
-            if self._platform == PLATFORM_INSTAGRAM
-            else "Прогрев Shorts"
+            "Прогрев Тиктоков"
+            if self._platform == PLATFORM_TIKTOK
+            else (
+                "Прогрев Reels"
+                if self._platform == PLATFORM_INSTAGRAM
+                else "Прогрев Shorts"
+            )
         )
         self._profiles_status.setText(
             f"{label} завершён: успешно {ok_n}, с ошибкой {fail_n} "
@@ -11566,7 +11766,10 @@ class MainWindow(QWidget):
             headless = bool(
                 self._settings.value("antydetect/dolphin_headless", True, type=bool)
             )
-        is_instagram_upload = self._platform == PLATFORM_INSTAGRAM
+        is_instagram_upload = self._platform in (
+            PLATFORM_INSTAGRAM,
+            PLATFORM_TIKTOK,
+        )
         is_yt_inst_upload = self._platform == PLATFORM_YT_INST
         # Пауза 0: keep-open для Instagram, Yt+Inst и YouTube.
         ig_keep_browser_open = (
@@ -11620,6 +11823,8 @@ class MainWindow(QWidget):
 
         if is_yt_inst_upload:
             upload_platform_label = "Yt+Inst"
+        elif self._platform == PLATFORM_TIKTOK:
+            upload_platform_label = "TikToks"
         elif is_instagram_upload:
             upload_platform_label = "Instagram Reels"
         else:
@@ -11697,9 +11902,10 @@ class MainWindow(QWidget):
         ig_crop_aspect = (
             self._instagram_crop_aspect_value()
             if (is_instagram_upload or is_yt_inst_upload)
+            and self._platform != PLATFORM_TIKTOK
             else DEFAULT_INSTAGRAM_CROP_ASPECT
         )
-        if is_instagram_upload or is_yt_inst_upload:
+        if (is_instagram_upload or is_yt_inst_upload) and self._platform != PLATFORM_TIKTOK:
             self._append_session_log(
                 f"Instagram: обрезка при заливе — {ig_crop_aspect}."
             )
@@ -12308,18 +12514,41 @@ class MainWindow(QWidget):
                     crop_aspect=ig_crop_aspect,
                 )
                 if _is_own_antidetect_kind(kind):
-                    res = upload_instagram_reel_in_local_antidetect_profile(
-                        profile_id,
-                        base_url=(base_url or "").strip(),
-                        remote_cdp=remote_cdp,
-                        **ig_kw,
-                    )
+                    if self._platform == PLATFORM_TIKTOK:
+                        from zaliver.antydetect.tiktok_open import (
+                            upload_tiktok_reel_in_local_antidetect_profile,
+                        )
+
+                        res = upload_tiktok_reel_in_local_antidetect_profile(
+                            profile_id,
+                            base_url=(base_url or "").strip(),
+                            remote_cdp=remote_cdp,
+                            **ig_kw,
+                        )
+                    else:
+                        res = upload_instagram_reel_in_local_antidetect_profile(
+                            profile_id,
+                            base_url=(base_url or "").strip(),
+                            remote_cdp=remote_cdp,
+                            **ig_kw,
+                        )
                 else:
-                    res = upload_instagram_reel_in_profile(
-                        profile_id,
-                        local_token=token or None,
-                        **ig_kw,
-                    )
+                    if self._platform == PLATFORM_TIKTOK:
+                        from zaliver.antydetect.tiktok_open import (
+                            upload_tiktok_reel_in_profile,
+                        )
+
+                        res = upload_tiktok_reel_in_profile(
+                            profile_id,
+                            local_token=token or None,
+                            **ig_kw,
+                        )
+                    else:
+                        res = upload_instagram_reel_in_profile(
+                            profile_id,
+                            local_token=token or None,
+                            **ig_kw,
+                        )
                 # После залива: первое Reel в сетке. В multi-tab параллельные
                 # вкладки могут уже записать соседние ролики — берём первый
                 # из топ-5, которого ещё нет в базе.

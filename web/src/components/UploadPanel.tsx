@@ -33,6 +33,9 @@ export function UploadPanel({
   const [jobId, setJobId] = usePersistedJobId("upload");
   const { job } = useJobPoll(jobId);
   const { recent, refresh: refreshRecent } = useRecentValues(platform, open);
+  const isIg = platform === "instagram" || platform === "tiktok";
+  const titleLabel =
+    platform === "tiktok" ? "Описание" : platform === "instagram" ? "Подпись" : "Название";
 
   useEffect(() => {
     void (async () => {
@@ -133,7 +136,7 @@ export function UploadPanel({
       {error ? <div className="error-banner">{error}</div> : null}
       <p className="hint">Видео: {videoPaths.length}</p>
       <label className="hint">
-        Название <TitleVariablesHint onInsert={(t) => setTitle((v) => v + t)} />
+        {titleLabel} <TitleVariablesHint onInsert={(t) => setTitle((v) => v + t)} />
       </label>
       <FieldWithRecent recent={recent.upload_titles} onSelect={setTitle}>
         <textarea
@@ -141,16 +144,26 @@ export function UploadPanel({
           rows={3}
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          placeholder="Название ({date}, {index}…). Enter — новая строка"
+          placeholder={
+            platform === "tiktok"
+              ? "Описание ({date}, {index}…). Enter — новая строка"
+              : platform === "instagram"
+                ? "Подпись ({date}, {index}…). Enter — новая строка"
+                : "Название ({date}, {index}…). Enter — новая строка"
+          }
         />
       </FieldWithRecent>
-      <label className="hint">Описание</label>
-      <textarea
-        className="field"
-        value={description}
-        onChange={(e) => setDescription(e.target.value)}
-        rows={3}
-      />
+      {isIg ? null : (
+        <>
+          <label className="hint">Описание</label>
+          <textarea
+            className="field"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            rows={3}
+          />
+        </>
+      )}
       <label className="hint">Параллельных браузеров</label>
       <input
         className="field"

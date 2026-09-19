@@ -20,7 +20,7 @@ class PlatformResponse(BaseModel):
 
 
 class PlatformUpdate(BaseModel):
-    platform: Literal["youtube", "instagram", "yt_inst"]
+    platform: Literal["youtube", "instagram", "tiktok", "yt_inst"]
 
 
 class SettingsGetResponse(BaseModel):
@@ -255,6 +255,14 @@ class InstagramRegisterJobRequest(ProfileJobBaseRequest):
 
 
 class Instagram2FAJobRequest(ProfileJobBaseRequest):
+    pass
+
+
+class TikTokRegisterJobRequest(ProfileJobBaseRequest):
+    pass
+
+
+class TikTok2FAJobRequest(ProfileJobBaseRequest):
     pass
 
 

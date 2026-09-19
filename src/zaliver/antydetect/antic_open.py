@@ -1170,6 +1170,11 @@ def _page_objects_from_connected_browser(browser):
             # Предпочитаем Instagram blank/чужим вкладкам (проверка IG).
             page = pg
             continue
+        if "tiktok.com" in url:
+            page = pg
+            continue
+        if url.startswith("chrome-error:") or "chromewebdata" in url:
+            continue
         if url in ("about:blank", "about:srcdoc", ""):
             if blank is None:
                 blank = pg

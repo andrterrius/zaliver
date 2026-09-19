@@ -43,7 +43,7 @@ from zaliver.ui.channel_setup_helpers import (
     make_magic_wand_button,
     recent_picker_has_items,
 )
-from zaliver.ui.platform import PLATFORM_INSTAGRAM, normalize_platform
+from zaliver.ui.platform import PLATFORM_INSTAGRAM, PLATFORM_TIKTOK, normalize_platform
 from zaliver.ui.title_variables_ui import make_variables_hint_button
 from zaliver.ui.widgets import AnimatedProgressBar, ToggleSwitch
 
@@ -132,7 +132,7 @@ class ChannelEditTabPane(QWidget):
         self._refresh_assignment()
 
     def _is_instagram(self) -> bool:
-        return self._platform == PLATFORM_INSTAGRAM
+        return self._platform in (PLATFORM_INSTAGRAM, PLATFORM_TIKTOK)
 
     def _names_section_title(self) -> str:
         return "Юзернейм" if self._is_instagram() else "Название канала"

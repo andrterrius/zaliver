@@ -4,6 +4,7 @@ from __future__ import annotations
 
 SECTION_YOUTUBE = "youtube"
 SECTION_INSTAGRAM = "instagram"
+SECTION_TIKTOK = "tiktok"
 SECTION_GMAIL = "gmail"
 
 YT_LOGIN_KEY = "yt_login"
@@ -14,6 +15,10 @@ YT_OLDEST_NAME_KEY = "yt_oldest_name"
 INST_LOGIN_KEY = "inst_login"
 INST_PASSWORD_KEY = "inst_password"
 INST_2FA_KEY = "inst_2fa"
+
+TT_LOGIN_KEY = "tt_login"
+TT_PASSWORD_KEY = "tt_password"
+TT_2FA_KEY = "tt_2fa"
 
 GMAIL_LOGIN_KEY = "gmail_login"
 GMAIL_PASSWORD_KEY = "gmail_password"
@@ -49,6 +54,20 @@ def build_instagram_credentials_payload(
         INST_LOGIN_KEY: (login or "").strip(),
         INST_PASSWORD_KEY: password or "",
         INST_2FA_KEY: (twofa or "").strip(),
+    }
+
+
+def build_tiktok_credentials_payload(
+    *,
+    login: str,
+    password: str,
+    twofa: str = "",
+) -> dict[str, str]:
+    """Только TikTok-поля — merge не затирает yt_* / inst_* / gmail_*."""
+    return {
+        TT_LOGIN_KEY: (login or "").strip(),
+        TT_PASSWORD_KEY: password or "",
+        TT_2FA_KEY: (twofa or "").strip(),
     }
 
 

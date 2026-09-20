@@ -17,13 +17,32 @@ def _normalize_platform(value: str | None) -> str:
         return "tiktok"
     if v in ("yt_inst", "youtube_instagram", "youtube_inst", "ytinstagram", "yt_ig"):
         return "yt_inst"
+    if v in (
+        "yt_inst_tt",
+        "yt_inst_tiktok",
+        "inst_yt_tiktok",
+        "instagram_youtube_tiktok",
+        "iyt",
+        "ytigtt",
+    ):
+        return "yt_inst_tt"
     return "youtube"
 
 
 def _storage_platform(value: str | None) -> str:
-    """Platform id for uploaded_videos rows (never yt_inst)."""
+    """Platform id for uploaded_videos rows (never combined session ids)."""
     plat = _normalize_platform(value)
-    return "youtube" if plat == "yt_inst" else plat
+    if plat in ("yt_inst", "yt_inst_tt"):
+        return "youtube"
+    return plat
+
+
+def _combined_video_plats(plat: str) -> tuple[str, ...] | None:
+    if plat == "yt_inst":
+        return ("youtube", "instagram")
+    if plat == "yt_inst_tt":
+        return ("youtube", "instagram", "tiktok")
+    return None
 
 
 def _video_platform_sql_filter(platform: str | None) -> tuple[str, tuple[str, ...]]:
@@ -32,8 +51,10 @@ def _video_platform_sql_filter(platform: str | None) -> tuple[str, tuple[str, ..
     Yt+Inst sessions store rows as youtube and/or instagram.
     """
     plat = _normalize_platform(platform)
-    if plat == "yt_inst":
-        return "platform IN (?, ?)", ("youtube", "instagram")
+    combined = _combined_video_plats(plat)
+    if combined:
+        ph = ", ".join("?" for _ in combined)
+        return f"platform IN ({ph})", combined
     return "platform = ?", (plat,)
 
 
@@ -42,8 +63,10 @@ def _video_platform_sql_filter_aliased(
 ) -> tuple[str, tuple[str, ...]]:
     plat = _normalize_platform(platform)
     col = f"{alias}.platform"
-    if plat == "yt_inst":
-        return f"{col} IN (?, ?)", ("youtube", "instagram")
+    combined = _combined_video_plats(plat)
+    if combined:
+        ph = ", ".join("?" for _ in combined)
+        return f"{col} IN ({ph})", combined
     return f"{col} = ?", (plat,)
 
 
@@ -819,8 +842,8 @@ class UploadStore:
         lim = max(1, int(limit))
         plat = _normalize_platform(platform)
         # Yt+Inst: названия с обеих площадок (YouTube + Instagram).
-        plats: tuple[str, ...] = (
-            ("youtube", "instagram") if plat == "yt_inst" else (_storage_platform(plat),)
+        plats: tuple[str, ...] = _combined_video_plats(plat) or (
+            _storage_platform(plat),
         )
         ph = ",".join("?" for _ in plats)
         with self._connect() as con:
@@ -854,8 +877,8 @@ class UploadStore:
     def remember_upload_title(self, title: str, *, platform: str = "youtube") -> None:
         """Запомнить название после подтверждения диалога залива."""
         plat = _normalize_platform(platform)
-        targets: tuple[str, ...] = (
-            ("youtube", "instagram") if plat == "yt_inst" else (_storage_platform(plat),)
+        targets: tuple[str, ...] = _combined_video_plats(plat) or (
+            _storage_platform(plat),
         )
         for one in targets:
             self._remember_recent_text_value(
@@ -1195,7 +1218,7 @@ class UploadStore:
         lim = max(1, int(limit))
         plat = _normalize_platform(platform)
         with self._connect() as con:
-            if plat in ("youtube", "instagram"):
+            if plat in ("youtube", "instagram", "tiktok"):
                 rows = con.execute(
                     """
                     SELECT
@@ -1208,7 +1231,7 @@ class UploadStore:
                     FROM upload_sessions s
                     WHERE s.platform = ?
                        OR (
-                            s.platform = 'yt_inst'
+                            s.platform IN ('yt_inst', 'yt_inst_tt')
                             AND EXISTS (
                                 SELECT 1 FROM uploaded_videos v
                                 WHERE v.session_id = s.id AND v.platform = ?
@@ -1314,7 +1337,7 @@ class UploadStore:
         plat_sql, plat_binds = _video_platform_sql_filter_aliased(platform)
         session_filter = ""
         session_binds: tuple[str, ...] = ()
-        if plat == "yt_inst":
+        if plat in ("yt_inst", "yt_inst_tt"):
             session_filter = " AND s.platform = ?"
             session_binds = (plat,)
         with self._connect() as con:
@@ -1445,16 +1468,18 @@ class UploadStore:
         ph = ",".join("?" for _ in ids)
         plat = _normalize_platform(platform)
         with self._connect() as con:
-            if plat == "yt_inst":
+            combined = _combined_video_plats(plat)
+            if combined:
+                plat_ph = ",".join("?" for _ in combined)
                 rows = con.execute(
                     f"""
                     SELECT profile_id, MAX(uploaded_at) AS last_at
                     FROM uploaded_videos
-                    WHERE platform IN ('youtube', 'instagram')
+                    WHERE platform IN ({plat_ph})
                       AND profile_id IN ({ph})
                     GROUP BY profile_id;
                     """,
-                    (*ids,),
+                    (*combined, *ids),
                 ).fetchall()
             else:
                 rows = con.execute(
@@ -1684,7 +1709,7 @@ class UploadStore:
             changed = 0
             # Yt+Inst: сдвигаем последние заливки обеих площадок, иначе пауза может
             # остаться из-за второй платформы после сброса только одного ряда.
-            plats = ("youtube", "instagram") if plat == "yt_inst" else (plat,)
+            plats = _combined_video_plats(plat) or (plat,)
             for one in plats:
                 con.execute(
                     """

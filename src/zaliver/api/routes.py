@@ -403,7 +403,7 @@ def build_router() -> APIRouter:
         request: Request,
         platform: str | None = Query(
             default=None,
-            description="Override platform (youtube|instagram|tiktok|yt_inst)",
+            description="Override platform (youtube|instagram|tiktok|yt_inst|yt_inst_tt)",
         ),
     ) -> OutputDirsResponse:
         st = _state(request)

@@ -20,7 +20,7 @@ class PlatformResponse(BaseModel):
 
 
 class PlatformUpdate(BaseModel):
-    platform: Literal["youtube", "instagram", "tiktok", "yt_inst"]
+    platform: Literal["youtube", "instagram", "tiktok", "yt_inst", "yt_inst_tt"]
 
 
 class SettingsGetResponse(BaseModel):

@@ -15,6 +15,7 @@ from zaliver.config.platform_settings import (
     PLATFORM_TIKTOK,
     PLATFORM_YOUTUBE,
     PLATFORM_YT_INST,
+    PLATFORM_YT_INST_TT,
 )
 from zaliver.antydetect.browser_concurrency import (
     clamp_max_concurrent_browsers,
@@ -226,6 +227,12 @@ def run_upload_job(
         "youtube_instagram",
         "yt+inst",
     }
+    is_yt_inst_tt = plat in {
+        PLATFORM_YT_INST_TT,
+        "yt_inst_tiktok",
+        "inst_yt_tiktok",
+    }
+    is_combined = is_yt_inst or is_yt_inst_tt
     paths = [p for p in video_paths if (p or "").strip()]
     streaming = bool(await_more_videos)
     if not paths and not streaming:
@@ -258,9 +265,13 @@ def run_upload_job(
     warmup_q = (schedule_warmup_search_query or "").strip()
     warmup_htag = (schedule_warmup_hashtag or "").strip()
     guser = (stats_server_username or "").strip()
-    session_plat = PLATFORM_YT_INST if is_yt_inst else (
-        PLATFORM_TIKTOK if is_tiktok else (
-            PLATFORM_INSTAGRAM if is_instagram else PLATFORM_YOUTUBE
+    session_plat = (
+        PLATFORM_YT_INST_TT if is_yt_inst_tt else (
+            PLATFORM_YT_INST if is_yt_inst else (
+                PLATFORM_TIKTOK if is_tiktok else (
+                    PLATFORM_INSTAGRAM if is_instagram else PLATFORM_YOUTUBE
+                )
+            )
         )
     )
 
@@ -270,7 +281,7 @@ def run_upload_job(
     ig_tabs_n = 1
     if is_tiktok:
         ig_tabs_n = tiktok_tabs_per_profile_from_settings(settings)
-    elif is_instagram or is_yt_inst:
+    elif is_instagram or is_combined:
         ig_tabs_n = instagram_tabs_per_profile_from_settings(settings)
     ig_tabs_per_profile: dict[str, int] | None = None
     if (
@@ -301,7 +312,7 @@ def run_upload_job(
                 f"профилей ≤ лимита окон ({max_browsers}). "
                 f"Вкладки: {tabs_fmt}."
             )
-    elif is_shortform or is_yt_inst:
+    elif is_shortform or is_combined:
         sink.on_log(
             f"[upload] {'TikTok' if is_tiktok else 'Instagram'} "
             f"keep_browser_open={ig_keep_browser_open} "
@@ -314,9 +325,9 @@ def run_upload_job(
         )
 
     ig_crop_aspect = "original"
-    if is_instagram or is_yt_inst:
+    if is_instagram or is_combined:
         ig_crop_aspect = instagram_crop_aspect_from_settings(settings)
-    if is_instagram or is_yt_inst:
+    if is_instagram or is_combined:
         sink.on_log(f"[upload] Instagram обрезка: {ig_crop_aspect}")
 
     planned = max(int(planned_videos or 0), len(paths), 1)
@@ -336,6 +347,8 @@ def run_upload_job(
 
     success_lock = threading.Lock()
     yt_inst_pending_delete: set[str] = set()
+    yt_inst_pending_remaining: dict[str, int] = {}
+    combined_followups: dict[str, int | None] = {"n": None}
     record_lock = threading.Lock()
     mgr_holder: dict[str, Any] = {"mgr": None}
     consumed_file = str(ready_consumed_path or "").strip()
@@ -359,18 +372,44 @@ def run_upload_job(
         _consume_ready(video_path)
 
     def _maybe_delete_after_success(
-        video_path: str, *, record_platform: str | None = None
+        video_path: str,
+        *,
+        record_platform: str | None = None,
+        remaining_after_youtube: int | None = None,
     ) -> None:
         path = str(video_path or "").strip()
         if not path:
             return
         plat = (record_platform or "").strip().lower()
-        if is_yt_inst and plat == PLATFORM_YOUTUBE:
+        if is_combined and plat == PLATFORM_YOUTUBE:
+            n_left = remaining_after_youtube
+            if n_left is None:
+                n_left = combined_followups.get("n")
+            if n_left is None:
+                n_left = 2 if is_yt_inst_tt else 1
+            try:
+                n_left = int(n_left)
+            except (TypeError, ValueError):
+                n_left = 1
             with success_lock:
-                yt_inst_pending_delete.add(path)
-            return
-        with success_lock:
-            yt_inst_pending_delete.discard(path)
+                if n_left <= 0:
+                    yt_inst_pending_delete.discard(path)
+                    yt_inst_pending_remaining.pop(path, None)
+                else:
+                    yt_inst_pending_delete.add(path)
+                    yt_inst_pending_remaining[path] = n_left
+                    return
+        elif is_combined:
+            with success_lock:
+                left = int(yt_inst_pending_remaining.get(path, 1)) - 1
+                if left > 0:
+                    yt_inst_pending_remaining[path] = left
+                    return
+                yt_inst_pending_remaining.pop(path, None)
+                yt_inst_pending_delete.discard(path)
+        else:
+            with success_lock:
+                yt_inst_pending_delete.discard(path)
         if delete_after_upload:
             _delete_output_now(path)
         else:
@@ -384,7 +423,13 @@ def run_upload_job(
             with success_lock:
                 pending = path in yt_inst_pending_delete
                 if pending:
-                    yt_inst_pending_delete.discard(path)
+                    left = int(yt_inst_pending_remaining.get(path, 1)) - 1
+                    if left > 0:
+                        yt_inst_pending_remaining[path] = left
+                        pending = False
+                    else:
+                        yt_inst_pending_remaining.pop(path, None)
+                        yt_inst_pending_delete.discard(path)
             if delete_after_upload and pending:
                 _delete_output_now(path)
             else:
@@ -408,7 +453,7 @@ def run_upload_job(
             return
 
         rec_plat = (record_platform or session_plat or "").strip() or PLATFORM_YOUTUBE
-        if rec_plat == PLATFORM_YT_INST:
+        if rec_plat in (PLATFORM_YT_INST, PLATFORM_YT_INST_TT):
             rec_plat = PLATFORM_YOUTUBE
         is_ig_rec = rec_plat == PLATFORM_INSTAGRAM
         is_tt_rec = rec_plat == PLATFORM_TIKTOK
@@ -515,6 +560,7 @@ def run_upload_job(
 
     def upload_one(profile_id: str, task: Any, tab_index: int = 0) -> None:
         from zaliver.antydetect.antic_open import (
+            CombinedPlatformUnavailableError,
             open_google_in_local_antidetect_profile,
             open_google_in_profile,
             set_log_sink,
@@ -546,7 +592,27 @@ def run_upload_job(
         task_desc = task.description or description
         mgr_now = mgr_holder.get("mgr")
 
-        if is_yt_inst:
+        if is_combined:
+            skip_youtube = bool(
+                mgr_now is not None
+                and mgr_now.is_platform_disabled(profile_id, "youtube")
+            )
+            skip_instagram = bool(
+                mgr_now is not None
+                and mgr_now.is_platform_disabled(profile_id, "instagram")
+            )
+            skip_tiktok = bool(
+                mgr_now is not None
+                and mgr_now.is_platform_disabled(profile_id, "tiktok")
+            )
+            if skip_youtube and skip_instagram and (not is_yt_inst_tt or skip_tiktok):
+                raise RuntimeError(
+                    "Yt+Inst: все площадки профиля недоступны в этой сессии"
+                )
+            combined_followups["n"] = (
+                (0 if skip_instagram else 1)
+                + (1 if is_yt_inst_tt and not skip_tiktok else 0)
+            )
             keep_open = bool(ig_keep_browser_open) and (
                 mgr_now.should_keep_browser_open(profile_id)
                 if mgr_now is not None
@@ -612,15 +678,79 @@ def run_upload_job(
                     f"[upload] Yt+Inst: Instagram ошибка (pipeline) — "
                     f"{type(err).__name__}: {err}"
                 )
-                mgr_now = mgr_holder.get("mgr")
-                if mgr_now is not None:
-                    try:
-                        mgr_now.exclude_profile_this_session(
-                            profile_id,
-                            reason=f"instagram_error:{type(err).__name__}",
+                if not isinstance(err, CombinedPlatformUnavailableError):
+                    mgr_now = mgr_holder.get("mgr")
+                    if mgr_now is not None:
+                        try:
+                            mgr_now.disable_platform_this_session(
+                                profile_id,
+                                "instagram",
+                                reason=f"{type(err).__name__}: {err}",
+                                active_platforms=(
+                                    ["youtube", "instagram", "tiktok"]
+                                    if is_yt_inst_tt
+                                    else ["youtube", "instagram"]
+                                ),
+                            )
+                        except Exception:
+                            pass
+                paths_to_drop = [str(task.video_path or "").strip()]
+                if sched_batch:
+                    for item in sched_batch:
+                        paths_to_drop.append(
+                            str(getattr(item, "video_path", "") or "").strip()
                         )
-                    except Exception:
-                        pass
+                _delete_yt_inst_pending(paths_to_drop)
+
+            def _on_tt(one_res: dict) -> None:
+                tt_batch = []
+                if isinstance(one_res, dict):
+                    raw_tt_batch = one_res.get("batch_results")
+                    if isinstance(raw_tt_batch, list):
+                        tt_batch = raw_tt_batch
+                if tt_batch and sched_batch:
+                    for item, item_res in zip(sched_batch, tt_batch):
+                        confirmed = _confirm_instagram_result(
+                            upload_store, item_res, platform=PLATFORM_TIKTOK
+                        )
+                        _record_one(
+                            profile_id=profile_id,
+                            video_path=item.video_path,
+                            title=item.title,
+                            description=item.description,
+                            one_res=confirmed,
+                            record_platform=PLATFORM_TIKTOK,
+                        )
+                else:
+                    confirmed = _confirm_instagram_result(
+                        upload_store, one_res, platform=PLATFORM_TIKTOK
+                    )
+                    _record_one(
+                        profile_id=profile_id,
+                        video_path=task.video_path,
+                        title=task_title,
+                        description=task_desc,
+                        one_res=confirmed,
+                        record_platform=PLATFORM_TIKTOK,
+                    )
+
+            def _on_tt_error(err: BaseException) -> None:
+                sink.on_log(
+                    f"[upload] Inst+Yt+TikTok: TikTok ошибка (pipeline) — "
+                    f"{type(err).__name__}: {err}"
+                )
+                if not isinstance(err, CombinedPlatformUnavailableError):
+                    mgr_now = mgr_holder.get("mgr")
+                    if mgr_now is not None:
+                        try:
+                            mgr_now.disable_platform_this_session(
+                                profile_id,
+                                "tiktok",
+                                reason=f"{type(err).__name__}: {err}",
+                                active_platforms=["youtube", "instagram", "tiktok"],
+                            )
+                        except Exception:
+                            pass
                 paths_to_drop = [str(task.video_path or "").strip()]
                 if sched_batch:
                     for item in sched_batch:
@@ -649,22 +779,66 @@ def run_upload_job(
                 on_instagram_success=_on_ig,
                 on_instagram_error=_on_ig_error,
                 crop_aspect=ig_crop_aspect,
+                include_tiktok=bool(is_yt_inst_tt),
+                skip_youtube=skip_youtube,
+                skip_instagram=skip_instagram,
+                skip_tiktok=skip_tiktok,
             )
+            if is_yt_inst_tt:
+                kw["on_tiktok_success"] = _on_tt
+                kw["on_tiktok_error"] = _on_tt_error
+            if skip_youtube:
+                seed_paths = [str(task.video_path or "").strip()]
+                if sched_batch:
+                    for item in sched_batch:
+                        seed_paths.append(
+                            str(getattr(item, "video_path", "") or "").strip()
+                        )
+                follow_n = int(combined_followups.get("n") or 0)
+                for sp in seed_paths:
+                    if not sp:
+                        continue
+                    _maybe_delete_after_success(
+                        sp,
+                        record_platform=PLATFORM_YOUTUBE,
+                        remaining_after_youtube=follow_n,
+                    )
             if own:
                 from zaliver.antydetect.local_antidetect_api import local_api_token_scope
 
                 with local_api_token_scope(token):
-                    upload_youtube_and_instagram_in_local_antidetect_profile(
+                    res = upload_youtube_and_instagram_in_local_antidetect_profile(
                         profile_id,
                         base_url=bu,
                         **kw,
                     )
             else:
-                upload_youtube_and_instagram_in_profile(
+                res = upload_youtube_and_instagram_in_profile(
                     profile_id,
                     local_token=token or None,
                     **kw,
                 )
+            yt_part = res.get("youtube") if isinstance(res, dict) else None
+            if not skip_youtube and not isinstance(yt_part, dict):
+                mgr_after = mgr_holder.get("mgr")
+                if mgr_after is not None:
+                    try:
+                        mgr_after.disable_platform_this_session(
+                            profile_id,
+                            "youtube",
+                            reason=str(
+                                (res or {}).get("youtube_error")
+                                if isinstance(res, dict)
+                                else "youtube_error"
+                            ),
+                            active_platforms=(
+                                ["youtube", "instagram", "tiktok"]
+                                if is_yt_inst_tt
+                                else ["youtube", "instagram"]
+                            ),
+                        )
+                    except Exception:
+                        pass
             return
 
         if is_instagram or is_tiktok:

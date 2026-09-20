@@ -249,6 +249,10 @@ def close_instagram_keep_open_hub(profile_id: str) -> None:
         drain_yt_inst_ig_pipeline(pid, timeout_s=3600.0)
     except Exception as e:
         _log(f"Yt+Inst: drain IG pipeline перед close: {e!r}")
+    try:
+        drain_yt_inst_tt_pipeline(pid, timeout_s=3600.0)
+    except Exception as e:
+        _log(f"Inst+Yt+TikTok: drain TT pipeline перед close: {e!r}")
     with _IG_KEEP_OPEN_META_GUARD:
         meta = _IG_KEEP_OPEN_META.pop(pid, None)
     if not meta:
@@ -431,6 +435,183 @@ def _ig_new_page_background(context, *, seed_page=None, url: str = "about:blank"
     if ig_now:
         return ig_now[0]
     return context.new_page()
+
+
+def _combined_tiktok_pages(context) -> list:
+    out: list = []
+    for pg in _ig_alive_context_pages(context):
+        if "tiktok.com" in _ig_page_url_lower(pg):
+            out.append(pg)
+    return out
+
+
+def _new_page_background_for_host(
+    context, *, seed_page=None, url: str, host: str
+):
+    """Фоновая вкладка под host (tiktok.com и т.п.), без IG-short-circuit."""
+    host_l = (host or "").strip().lower()
+    existing = [
+        pg
+        for pg in _ig_alive_context_pages(context)
+        if host_l and host_l in _ig_page_url_lower(pg)
+    ]
+    if existing:
+        return existing[0]
+
+    seed = seed_page
+    if seed is None:
+        alive = _ig_alive_context_pages(context)
+        seed = alive[0] if alive else None
+    if seed is None:
+        page = context.new_page()
+        try:
+            from zaliver.instagram_upload.register import _navigate_page_to
+
+            _navigate_page_to(page, url, label="combined tab", keep_in_background=True)
+        except Exception:
+            pass
+        return page
+
+    before_ids = {id(p) for p in _ig_alive_context_pages(context)}
+    want_url = (url or "about:blank").strip() or "about:blank"
+    cdp = None
+
+    def _find_new_page():
+        for p in _ig_alive_context_pages(context):
+            if id(p) not in before_ids:
+                return p
+        return None
+
+    def _host_pages():
+        return [
+            pg
+            for pg in _ig_alive_context_pages(context)
+            if host_l and host_l in _ig_page_url_lower(pg)
+        ]
+
+    try:
+        cdp = context.new_cdp_session(seed)
+        params: dict = {"url": want_url, "background": True}
+        try:
+            info = cdp.send("Target.getTargetInfo")
+            ti = (info or {}).get("targetInfo") if isinstance(info, dict) else None
+            if isinstance(ti, dict):
+                bcid = ti.get("browserContextId")
+                if bcid:
+                    params["browserContextId"] = bcid
+        except Exception:
+            pass
+        cdp.send("Target.createTarget", params)
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            found = _find_new_page()
+            if found is not None:
+                return found
+            hosted = _host_pages()
+            if hosted:
+                return hosted[0]
+            time.sleep(0.1)
+        found = _find_new_page()
+        if found is not None:
+            return found
+        hosted = _host_pages()
+        if hosted:
+            return hosted[0]
+    except Exception as e:
+        _log(f"combined: createTarget {host_l}: {e!r}")
+        found = _find_new_page()
+        if found is not None:
+            return found
+        hosted = _host_pages()
+        if hosted:
+            return hosted[0]
+    finally:
+        if cdp is not None:
+            try:
+                cdp.detach()
+            except Exception:
+                pass
+    hosted = _host_pages()
+    if hosted:
+        return hosted[0]
+    return context.new_page()
+
+
+def _ensure_one_tiktok_tab(context, *, seed_page=None, refocus_youtube: bool = True):
+    """Ровно одна вкладка TikTok в фоне (третья вкладка Inst+Yt+TikTok)."""
+    from zaliver.tiktok_upload.register import TIKTOK_URL
+    from zaliver.instagram_upload.register import _navigate_page_to
+
+    def _refocus_youtube() -> None:
+        if not refocus_youtube:
+            return
+        if seed_page is not None and _page_still_open(seed_page):
+            _bring_studio_tab_to_front(seed_page, log_label="Inst+Yt+TikTok")
+
+    tt_pages = _combined_tiktok_pages(context)
+    if tt_pages:
+        chosen = tt_pages[0]
+        for extra in tt_pages[1:]:
+            try:
+                extra.close()
+            except Exception:
+                pass
+        _log(
+            "Inst+Yt+TikTok: используем уже открытую вкладку TikTok "
+            f"url={_ig_page_url_lower(chosen)!r}"
+        )
+        _refocus_youtube()
+        return chosen
+
+    blank_pages = _ig_reusable_blank_pages(context)
+    for blank in blank_pages:
+        if seed_page is not None and blank is seed_page:
+            continue
+        try:
+            _navigate_page_to(
+                blank,
+                TIKTOK_URL,
+                label="Inst+Yt+TikTok TT tab",
+                keep_in_background=True,
+            )
+            _log("Inst+Yt+TikTok: blank-вкладка превращена в TikTok (фон).")
+            _refocus_youtube()
+            return blank
+        except Exception as e:
+            _log(f"Inst+Yt+TikTok: не удалось открыть TT на blank: {e!r}")
+
+    page = _new_page_background_for_host(
+        context, seed_page=seed_page, url=TIKTOK_URL, host="tiktok.com"
+    )
+    try:
+        cur = (page.url or "").strip().lower()
+    except Exception:
+        cur = ""
+    if "tiktok.com" not in cur:
+        try:
+            _navigate_page_to(
+                page,
+                TIKTOK_URL,
+                label="Inst+Yt+TikTok TT tab",
+                keep_in_background=True,
+            )
+        except Exception as e:
+            _log(f"Inst+Yt+TikTok: goto TikTok: {e!r}")
+    else:
+        _log("Inst+Yt+TikTok: вкладка TikTok открыта в фоне.")
+    tt_pages = _combined_tiktok_pages(context)
+    chosen = page
+    if tt_pages:
+        chosen = page if page in tt_pages else tt_pages[0]
+        for extra in tt_pages:
+            if extra is chosen:
+                continue
+            try:
+                extra.close()
+            except Exception:
+                pass
+    _refocus_youtube()
+    return chosen
 
 
 def _ig_preopen_sibling_tabs(context, tabs_per_profile: int, meta: dict | None) -> None:
@@ -4881,7 +5062,7 @@ def set_youtube_interface_language_in_local_antidetect_profile(
 
 
 class CombinedPlatformUploadError(Exception):
-    """Оба залива (YouTube и Instagram) завершились ошибкой."""
+    """Залив на всех площадках комбинации завершился ошибкой."""
 
     def __init__(
         self,
@@ -4889,10 +5070,16 @@ class CombinedPlatformUploadError(Exception):
         *,
         youtube_error: BaseException | None = None,
         instagram_error: BaseException | None = None,
+        tiktok_error: BaseException | None = None,
     ) -> None:
         super().__init__(message)
         self.youtube_error = youtube_error
         self.instagram_error = instagram_error
+        self.tiktok_error = tiktok_error
+
+
+class CombinedPlatformUnavailableError(Exception):
+    """Площадка отключена до конца сессии — очередь pipeline пропущена."""
 
 
 def _browser_cdp_alive(browser) -> bool:
@@ -5028,7 +5215,7 @@ def _pick_non_instagram_page(context, *, prefer=None):
     other = None
     for pg in _ig_alive_context_pages(context):
         url = _ig_page_url_lower(pg)
-        if "instagram.com" in url:
+        if "instagram.com" in url or "tiktok.com" in url:
             continue
         if "studio.youtube.com" in url:
             studio = pg
@@ -5221,6 +5408,7 @@ class _YtInstIgPipeline:
         self._idle = threading.Event()
         self._idle.set()
         self._stop = threading.Event()
+        self._unavailable = threading.Event()
         self._thread = threading.Thread(
             target=self._worker,
             name=f"yt-inst-ig-{self.profile_id[:12] or 'x'}",
@@ -5239,6 +5427,12 @@ class _YtInstIgPipeline:
     def enqueue(self, job: _YtInstIgJob) -> None:
         self._idle.clear()
         self._q.put(job)
+
+    def mark_unavailable(self) -> None:
+        self._unavailable.set()
+
+    def is_unavailable(self) -> bool:
+        return self._unavailable.is_set()
 
     def wait_idle(self, *, timeout_s: float = 3600.0) -> None:
         if not self._idle.wait(timeout=max(1.0, float(timeout_s))):
@@ -5271,6 +5465,10 @@ class _YtInstIgPipeline:
             self._idle.clear()
             signaled = False
             try:
+                if self._unavailable.is_set():
+                    raise CombinedPlatformUnavailableError(
+                        "Instagram недоступен до конца сессии — очередь пропущена."
+                    )
                 if not self._cdp_endpoints:
                     raise DolphinAntyError(
                         "Yt+Inst Instagram: пустой CDP endpoint."
@@ -5378,6 +5576,8 @@ class _YtInstIgPipeline:
                     _stop_playwright_driver(pw)
             except Exception as e:
                 job.error = e
+                if not isinstance(e, CombinedPlatformUnavailableError):
+                    self._unavailable.set()
                 _log(
                     f"Yt+Inst: Instagram — ошибка (pipeline) "
                     f"profile={self.profile_id!r}. {type(e).__name__}: {e!r}"
@@ -5457,6 +5657,271 @@ def _yt_inst_ig_pipeline_busy(profile_id: str) -> bool:
         return False
     with _YT_INST_IG_PIPELINES_GUARD:
         pipe = _YT_INST_IG_PIPELINES.get(pid)
+    if pipe is None:
+        return False
+    try:
+        return not pipe._idle.is_set()
+    except Exception:
+        return False
+
+
+_YT_INST_TT_PIPELINES: dict[str, "_YtInstTtPipeline"] = {}
+_YT_INST_TT_PIPELINES_GUARD = threading.Lock()
+
+
+class _YtInstTtPipeline:
+    """Серийная очередь TikTok на профиль (параллельно с YouTube и Instagram)."""
+
+    def __init__(
+        self,
+        profile_id: str,
+        *,
+        cdp_endpoints: tuple[str, ...],
+        session_login: str = "",
+        session_password: str = "",
+        session_twofa: str = "",
+    ) -> None:
+        self.profile_id = (profile_id or "").strip()
+        self._cdp_endpoints = tuple(
+            e.strip() for e in cdp_endpoints if (e or "").strip()
+        )
+        self._session_login = session_login
+        self._session_password = session_password
+        self._session_twofa = session_twofa
+        self._q: queue.Queue[_YtInstIgJob | None] = queue.Queue()
+        self._idle = threading.Event()
+        self._idle.set()
+        self._stop = threading.Event()
+        self._unavailable = threading.Event()
+        self._thread = threading.Thread(
+            target=self._worker,
+            name=f"yt-inst-tt-{self.profile_id[:12] or 'x'}",
+            daemon=True,
+        )
+        self._thread.start()
+        _log(
+            f"Inst+Yt+TikTok: TT pipeline стартовал profile_id={self.profile_id!r}."
+        )
+
+    def update_endpoints(self, cdp_endpoints: tuple[str, ...]) -> None:
+        cleaned = tuple(e.strip() for e in cdp_endpoints if (e or "").strip())
+        if cleaned:
+            self._cdp_endpoints = cleaned
+
+    def enqueue(self, job: _YtInstIgJob) -> None:
+        self._idle.clear()
+        self._q.put(job)
+
+    def mark_unavailable(self) -> None:
+        self._unavailable.set()
+
+    def is_unavailable(self) -> bool:
+        return self._unavailable.is_set()
+
+    def wait_idle(self, *, timeout_s: float = 3600.0) -> None:
+        if not self._idle.wait(timeout=max(1.0, float(timeout_s))):
+            raise TimeoutError(
+                f"TT pipeline не освободился за {timeout_s:.0f} с "
+                f"(profile={self.profile_id!r})"
+            )
+
+    def shutdown(self, *, timeout_s: float = 120.0) -> None:
+        self._stop.set()
+        try:
+            self._q.put_nowait(None)
+        except Exception:
+            pass
+        self._thread.join(timeout=max(1.0, float(timeout_s)))
+
+    def _worker(self) -> None:
+        from zaliver.tiktok_upload.reels_upload import run_tiktok_reels_upload
+
+        while not self._stop.is_set():
+            try:
+                job = self._q.get(timeout=0.5)
+            except queue.Empty:
+                if self._q.empty():
+                    self._idle.set()
+                continue
+            if job is None:
+                self._idle.set()
+                break
+            self._idle.clear()
+            signaled = False
+            try:
+                if self._unavailable.is_set():
+                    raise CombinedPlatformUnavailableError(
+                        "TikTok недоступен до конца сессии — очередь пропущена."
+                    )
+                if not self._cdp_endpoints:
+                    raise DolphinAntyError(
+                        "Inst+Yt+TikTok TikTok: пустой CDP endpoint."
+                    )
+                pw = sync_playwright().start()
+                _browser = None
+                try:
+                    _browser, context, _seed = _playwright_page_from_cdp(
+                        pw, self._cdp_endpoints
+                    )
+                    tt_page = None
+                    deadline = time.monotonic() + 60.0
+                    while time.monotonic() < deadline:
+                        pages = _combined_tiktok_pages(context)
+                        if pages:
+                            tt_page = pages[0]
+                            break
+                        time.sleep(0.2)
+                    if tt_page is None:
+                        try:
+                            tt_page = _ensure_one_tiktok_tab(
+                                context,
+                                seed_page=_seed,
+                                refocus_youtube=False,
+                            )
+                        except Exception as open_e:
+                            _log(
+                                f"Inst+Yt+TikTok: pipeline не смог открыть TT: {open_e!r}"
+                            )
+                            tt_page = None
+                    if tt_page is not None:
+                        if "tiktok.com" not in _ig_page_url_lower(tt_page):
+                            tt_page = None
+                    if tt_page is None or not _page_still_open(tt_page):
+                        raise RuntimeError(
+                            "Нет вкладки TikTok для pipeline-залива"
+                        )
+                    batch_results: list = []
+                    for idx, (vp, tt, dd) in enumerate(job.items, start=1):
+                        if not (vp or "").strip():
+                            continue
+                        _log(
+                            f"Inst+Yt+TikTok: TikTok queue "
+                            f"{idx}/{len(job.items)} "
+                            f"profile={self.profile_id!r}…"
+                        )
+                        one = run_tiktok_reels_upload(
+                            tt_page,
+                            video_path=vp,
+                            title=tt,
+                            description=dd,
+                            session_login=self._session_login,
+                            session_password=self._session_password,
+                            session_twofa=self._session_twofa,
+                            profile_id=self.profile_id or None,
+                            top_reels_scan=1,
+                            keep_in_background=True,
+                            wait_youtube_before_done=job.youtube_done,
+                        )
+                        batch_results.append(one)
+                    if not batch_results:
+                        raise RuntimeError(
+                            "TikTok: нет результата pipeline-залива"
+                        )
+                    if len(batch_results) == 1:
+                        job.result = batch_results[0]
+                    else:
+                        out = dict(batch_results[-1])
+                        out["batch_results"] = list(batch_results)
+                        job.result = out
+                    _log(
+                        f"Inst+Yt+TikTok: TikTok — успех (pipeline) "
+                        f"profile={self.profile_id!r}."
+                    )
+                    if job.on_success is not None and job.result is not None:
+                        try:
+                            job.on_success(job.result)
+                        except Exception as cb_e:
+                            _log(
+                                f"Inst+Yt+TikTok: on_tiktok_success: {cb_e!r}"
+                            )
+                finally:
+                    job.done.set()
+                    signaled = True
+                    try:
+                        self._q.task_done()
+                    except Exception:
+                        pass
+                    if self._q.empty():
+                        self._idle.set()
+                    _close_playwright_browser(_browser, shared_cdp=True)
+                    _stop_playwright_driver(pw)
+            except Exception as e:
+                job.error = e
+                if not isinstance(e, CombinedPlatformUnavailableError):
+                    self._unavailable.set()
+                _log(
+                    f"Inst+Yt+TikTok: TikTok — ошибка (pipeline) "
+                    f"profile={self.profile_id!r}. {type(e).__name__}: {e!r}"
+                )
+                if job.on_error is not None:
+                    try:
+                        job.on_error(e)
+                    except Exception:
+                        pass
+            finally:
+                if not signaled:
+                    job.done.set()
+                    try:
+                        self._q.task_done()
+                    except Exception:
+                        pass
+                    if self._q.empty():
+                        self._idle.set()
+
+
+def _get_yt_inst_tt_pipeline(
+    profile_id: str,
+    *,
+    cdp_endpoints: tuple[str, ...],
+    session_login: str = "",
+    session_password: str = "",
+    session_twofa: str = "",
+) -> _YtInstTtPipeline:
+    pid = (profile_id or "").strip() or "_unknown"
+    with _YT_INST_TT_PIPELINES_GUARD:
+        pipe = _YT_INST_TT_PIPELINES.get(pid)
+        if pipe is None or not pipe._thread.is_alive():
+            pipe = _YtInstTtPipeline(
+                pid,
+                cdp_endpoints=cdp_endpoints,
+                session_login=session_login,
+                session_password=session_password,
+                session_twofa=session_twofa,
+            )
+            _YT_INST_TT_PIPELINES[pid] = pipe
+        else:
+            pipe.update_endpoints(cdp_endpoints)
+            if session_login:
+                pipe._session_login = session_login
+            if session_password:
+                pipe._session_password = session_password
+            if session_twofa:
+                pipe._session_twofa = session_twofa
+        return pipe
+
+
+def drain_yt_inst_tt_pipeline(
+    profile_id: str, *, timeout_s: float = 3600.0
+) -> None:
+    pid = (profile_id or "").strip()
+    if not pid:
+        return
+    with _YT_INST_TT_PIPELINES_GUARD:
+        pipe = _YT_INST_TT_PIPELINES.pop(pid, None)
+    if pipe is None:
+        return
+    try:
+        pipe.wait_idle(timeout_s=timeout_s)
+    finally:
+        pipe.shutdown(timeout_s=min(120.0, max(5.0, float(timeout_s))))
+
+
+def _yt_inst_tt_pipeline_busy(profile_id: str) -> bool:
+    pid = (profile_id or "").strip()
+    if not pid:
+        return False
+    with _YT_INST_TT_PIPELINES_GUARD:
+        pipe = _YT_INST_TT_PIPELINES.get(pid)
     if pipe is None:
         return False
     try:
@@ -5595,63 +6060,124 @@ def _run_youtube_and_instagram_parallel(
     on_instagram_success: Callable[[dict], None] | None = None,
     on_instagram_error: Callable[[BaseException], None] | None = None,
     crop_aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT,
+    include_tiktok: bool = False,
+    tt_session_login: str = "",
+    tt_session_password: str = "",
+    tt_session_twofa: str = "",
+    on_tiktok_success: Callable[[dict], None] | None = None,
+    on_tiktok_error: Callable[[BaseException], None] | None = None,
+    skip_youtube: bool = False,
+    skip_instagram: bool = False,
+    skip_tiktok: bool = False,
 ) -> dict:
     """
-    Вкладка 1 — YouTube, вкладка 2 — Instagram (отдельный CDP / pipeline).
+    Вкладка 1 — YouTube, вкладка 2 — Instagram, опционально вкладка 3 — TikTok.
 
     wait_for_instagram=False (pause 0 / keep-open на тот же профиль):
       после успеха YouTube сразу возвращаемся — можно брать следующее видео
-      из очереди; Instagram догоняет тем же роликом через pipeline.
-    wait_for_instagram=True: ждём Instagram перед возвратом.
+      из очереди; Instagram/TikTok догоняют тем же роликом через pipeline.
+    wait_for_instagram=True: ждём Instagram (и TikTok) перед возвратом.
     """
+    combo = "Inst+Yt+TikTok" if include_tiktok else "Yt+Inst"
+    do_youtube = not bool(skip_youtube)
+    do_instagram = not bool(skip_instagram)
+    do_tiktok = bool(include_tiktok) and not bool(skip_tiktok)
     yt_page = _pick_non_instagram_page(context, prefer=page)
     if yt_page is None:
         yt_page = page
 
     # Сначала Instagram-вкладка — до долгого Studio / channel-appeal.
-    try:
-        ig_busy = _yt_inst_ig_pipeline_busy(profile_id)
-        ig_tab = _ensure_one_instagram_tab(
-            context,
-            seed_page=yt_page,
-            refocus_youtube=not ig_busy,
-        )
+    if do_instagram:
         try:
-            ig_url = (ig_tab.url or "").strip() if ig_tab is not None else ""
-        except Exception:
-            ig_url = ""
-        _log(
-            "Yt+Inst: вкладки готовы — 1=YouTube, 2=Instagram "
-            f"(url={ig_url!r}, pipeline / параллельный залив)."
-        )
-    except Exception as e:
-        _log(f"Yt+Inst: заранее открыть Instagram не удалось: {e!r}")
-        # Не открываем вторую вкладку через new_page, если IG уже есть
-        # (гонка createTarget / частичный успех).
-        ig_existing = _ig_instagram_pages(context)
-        if ig_existing:
-            _log(
-                "Yt+Inst: Instagram уже есть после ошибки ensure — "
-                "новую вкладку не открываем."
+            ig_busy = _yt_inst_ig_pipeline_busy(profile_id)
+            ig_tab = _ensure_one_instagram_tab(
+                context,
+                seed_page=yt_page,
+                refocus_youtube=not ig_busy,
             )
-            if not _yt_inst_ig_pipeline_busy(profile_id):
-                _bring_studio_tab_to_front(yt_page, log_label="Yt+Inst")
-        else:
             try:
-                from zaliver.instagram_upload.register import (
-                    INSTAGRAM_URL,
-                    _navigate_page_to,
+                ig_url = (ig_tab.url or "").strip() if ig_tab is not None else ""
+            except Exception:
+                ig_url = ""
+            _log(
+                f"{combo}: вкладки готовы — 1=YouTube, 2=Instagram "
+                f"(url={ig_url!r}, pipeline / параллельный залив)."
+            )
+        except Exception as e:
+            _log(f"Yt+Inst: заранее открыть Instagram не удалось: {e!r}")
+            # Не открываем вторую вкладку через new_page, если IG уже есть
+            # (гонка createTarget / частичный успех).
+            ig_existing = _ig_instagram_pages(context)
+            if ig_existing:
+                _log(
+                    "Yt+Inst: Instagram уже есть после ошибки ensure — "
+                    "новую вкладку не открываем."
                 )
-
-                ig_tab = context.new_page()
-                _navigate_page_to(ig_tab, INSTAGRAM_URL, label="Yt+Inst IG fallback")
-                _log("Yt+Inst: Instagram открыт через new_page() fallback.")
                 if not _yt_inst_ig_pipeline_busy(profile_id):
                     _bring_studio_tab_to_front(yt_page, log_label="Yt+Inst")
-            except Exception as e2:
-                _log(
-                    f"Yt+Inst: fallback new_page Instagram тоже не удался: {e2!r}"
-                )
+            else:
+                try:
+                    from zaliver.instagram_upload.register import (
+                        INSTAGRAM_URL,
+                        _navigate_page_to,
+                    )
+
+                    ig_tab = context.new_page()
+                    _navigate_page_to(ig_tab, INSTAGRAM_URL, label="Yt+Inst IG fallback")
+                    _log("Yt+Inst: Instagram открыт через new_page() fallback.")
+                    if not _yt_inst_ig_pipeline_busy(profile_id):
+                        _bring_studio_tab_to_front(yt_page, log_label="Yt+Inst")
+                except Exception as e2:
+                    _log(
+                        f"{combo}: fallback new_page Instagram тоже не удался: {e2!r}"
+                    )
+    else:
+        _log(f"{combo}: Instagram пропущен (площадка недоступна в этой сессии).")
+        try:
+            pipe = _YT_INST_IG_PIPELINES.get((profile_id or "").strip() or "_unknown")
+            if pipe is not None:
+                pipe.mark_unavailable()
+        except Exception:
+            pass
+
+    if do_tiktok:
+        try:
+            tt_busy = _yt_inst_tt_pipeline_busy(profile_id)
+            tt_tab = _ensure_one_tiktok_tab(
+                context,
+                seed_page=yt_page,
+                refocus_youtube=not tt_busy and not _yt_inst_ig_pipeline_busy(profile_id),
+            )
+            try:
+                tt_url = (tt_tab.url or "").strip() if tt_tab is not None else ""
+            except Exception:
+                tt_url = ""
+            _log(
+                f"{combo}: вкладка 3=TikTok "
+                f"(url={tt_url!r}, pipeline / параллельный залив)."
+            )
+        except Exception as e:
+            _log(f"{combo}: заранее открыть TikTok не удалось: {e!r}")
+            if not _combined_tiktok_pages(context):
+                try:
+                    from zaliver.tiktok_upload.register import TIKTOK_URL
+                    from zaliver.instagram_upload.register import _navigate_page_to
+
+                    tt_tab = context.new_page()
+                    _navigate_page_to(
+                        tt_tab, TIKTOK_URL, label=f"{combo} TT fallback"
+                    )
+                    _log(f"{combo}: TikTok открыт через new_page() fallback.")
+                except Exception as e2:
+                    _log(f"{combo}: fallback new_page TikTok тоже не удался: {e2!r}")
+    elif include_tiktok:
+        _log(f"{combo}: TikTok пропущен (площадка недоступна в этой сессии).")
+        try:
+            pipe = _YT_INST_TT_PIPELINES.get((profile_id or "").strip() or "_unknown")
+            if pipe is not None:
+                pipe.mark_unavailable()
+        except Exception:
+            pass
 
     ig_items: list[tuple[str, str, str]] = []
     if scheduled_batch:
@@ -5674,7 +6200,7 @@ def _run_youtube_and_instagram_parallel(
 
     ig_job: _YtInstIgJob | None = None
     yt_done_event = threading.Event()
-    if ig_items:
+    if do_instagram and ig_items:
         pipe = _get_yt_inst_ig_pipeline(
             profile_id,
             cdp_endpoints=cdp_endpoints,
@@ -5691,65 +6217,91 @@ def _run_youtube_and_instagram_parallel(
         )
         pipe.enqueue(ig_job)
         _log(
-            "Yt+Inst: Instagram поставлен в pipeline "
+            f"{combo}: Instagram поставлен в pipeline "
+            f"({len(ig_items)} шт., wait={wait_for_instagram})."
+        )
+
+    tt_job: _YtInstIgJob | None = None
+    if do_tiktok and ig_items:
+        tt_pipe = _get_yt_inst_tt_pipeline(
+            profile_id,
+            cdp_endpoints=cdp_endpoints,
+            session_login=tt_session_login,
+            session_password=tt_session_password,
+            session_twofa=tt_session_twofa,
+        )
+        tt_job = _YtInstIgJob(
+            items=ig_items,
+            on_success=on_tiktok_success,
+            on_error=on_tiktok_error,
+            youtube_done=yt_done_event,
+        )
+        tt_pipe.enqueue(tt_job)
+        _log(
+            f"{combo}: TikTok поставлен в pipeline "
             f"({len(ig_items)} шт., wait={wait_for_instagram})."
         )
 
     yt_res = None
     yt_err: BaseException | None = None
     try:
-        # Если уже channel-appeal — не уходим в долгий скан каналов / «Создать».
-        from zaliver.youtube_upload.studio import (
-            YoutubeStudioError as _YoutubeStudioError,
-            _studio_channel_removed_page_visible,
-            _studio_handle_channel_removed_if_present,
-        )
-
-        if _studio_channel_removed_page_visible(yt_page):
-            _log(
-                "Yt+Inst: YouTube уже на channel-appeal — "
-                "быстрая попытка сменить канал, иначе пропускаем YT."
-            )
-            _studio_handle_channel_removed_if_present(yt_page)
-            if _studio_channel_removed_page_visible(yt_page):
-                raise _YoutubeStudioError(
-                    "YouTube Studio: открыта страница апелляции "
-                    "(channel-appeal) — канал удалён или заблокирован."
-                )
-
-        _log("Yt+Inst: залив YouTube (вкладка 1)…")
-        # Не перехватываем фокус, пока Instagram ещё на /reels/ и т.п. —
-        # Studio через CDP работает и в фоне.
-        if _yt_inst_ig_pipeline_busy(profile_id):
-            _log(
-                "Yt+Inst: Instagram ещё в pipeline — "
-                "фокус на Studio не переключаем."
-            )
+        if not do_youtube:
+            _log(f"{combo}: YouTube пропущен (площадка недоступна в этой сессии).")
         else:
-            _bring_studio_tab_to_front(yt_page, log_label="Yt+Inst")
-        yt_res = _run_profile_studio_upload(
-            page=yt_page,
-            browser=browser,
-            zaliver_db_path=zaliver_db_path,
-            video_path=video_path,
-            title=title,
-            description=description,
-            publish_before_checks=publish_before_checks,
-            keep_studio_title=keep_studio_title,
-            schedule_publish_at=schedule_publish_at,
-            scheduled_batch=scheduled_batch,
-            stats_server_username=stats_server_username,
-            studio_kw=studio_kw,
-        )
-        _log("Yt+Inst: YouTube — успех.")
-        if on_youtube_success is not None and isinstance(yt_res, dict):
-            try:
-                on_youtube_success(yt_res)
-            except Exception as cb_e:
-                _log(f"Yt+Inst: on_youtube_success: {cb_e!r}")
-                # Запись/уведомление обязательны — считаем залив YT сорванным.
-                yt_err = cb_e
-                yt_res = None
+            # Если уже channel-appeal — не уходим в долгий скан каналов / «Создать».
+            from zaliver.youtube_upload.studio import (
+                YoutubeStudioError as _YoutubeStudioError,
+                _studio_channel_removed_page_visible,
+                _studio_handle_channel_removed_if_present,
+            )
+
+            if _studio_channel_removed_page_visible(yt_page):
+                _log(
+                    "Yt+Inst: YouTube уже на channel-appeal — "
+                    "быстрая попытка сменить канал, иначе пропускаем YT."
+                )
+                _studio_handle_channel_removed_if_present(yt_page)
+                if _studio_channel_removed_page_visible(yt_page):
+                    raise _YoutubeStudioError(
+                        "YouTube Studio: открыта страница апелляции "
+                        "(channel-appeal) — канал удалён или заблокирован."
+                    )
+
+            _log("Yt+Inst: залив YouTube (вкладка 1)…")
+            # Не перехватываем фокус, пока Instagram ещё на /reels/ и т.п. —
+            # Studio через CDP работает и в фоне.
+            if _yt_inst_ig_pipeline_busy(profile_id) or (
+                include_tiktok and _yt_inst_tt_pipeline_busy(profile_id)
+            ):
+                _log(
+                    f"{combo}: Instagram/TikTok ещё в pipeline — "
+                    "фокус на Studio не переключаем."
+                )
+            else:
+                _bring_studio_tab_to_front(yt_page, log_label=combo)
+            yt_res = _run_profile_studio_upload(
+                page=yt_page,
+                browser=browser,
+                zaliver_db_path=zaliver_db_path,
+                video_path=video_path,
+                title=title,
+                description=description,
+                publish_before_checks=publish_before_checks,
+                keep_studio_title=keep_studio_title,
+                schedule_publish_at=schedule_publish_at,
+                scheduled_batch=scheduled_batch,
+                stats_server_username=stats_server_username,
+                studio_kw=studio_kw,
+            )
+            _log("Yt+Inst: YouTube — успех.")
+            if on_youtube_success is not None and isinstance(yt_res, dict):
+                try:
+                    on_youtube_success(yt_res)
+                except Exception as cb_e:
+                    _log(f"Yt+Inst: on_youtube_success: {cb_e!r}")
+                    # Запись/уведомление обязательны — считаем залив YT сорванным.
+                    yt_err = cb_e
+                    yt_res = None
     except Exception as e:
         yt_err = e
         _log(
@@ -5778,7 +6330,7 @@ def _run_youtube_and_instagram_parallel(
     if ig_job is not None:
         # Pause 0 + успех YT: не ждём IG — следующее видео можно брать сразу.
         # Иначе (закрываем браузер / YT ошибка) — дожидаемся текущего IG.
-        should_wait = bool(wait_for_instagram) or yt_res is None
+        should_wait = bool(wait_for_instagram)
         if should_wait:
             if not ig_job.done.wait(timeout=3600.0):
                 ig_err = TimeoutError(
@@ -5794,32 +6346,70 @@ def _run_youtube_and_instagram_parallel(
         else:
             instagram_pending = True
             _log(
-                "Yt+Inst: YouTube готов — не ждём Instagram "
+                f"{combo}: YouTube готов — не ждём Instagram "
                 "(pause 0 / keep-open, IG догонит в pipeline)."
             )
 
-    if yt_res is None and ig_res is None and not instagram_pending:
+    tt_res = None
+    tt_err: BaseException | None = None
+    tiktok_pending = False
+    if tt_job is not None:
+        should_wait_tt = bool(wait_for_instagram)
+        if should_wait_tt:
+            if not tt_job.done.wait(timeout=3600.0):
+                tt_err = TimeoutError(
+                    "TikTok upload не завершился за 3600 с"
+                )
+            else:
+                tt_res = tt_job.result
+                tt_err = tt_job.error
+                if tt_res is None and tt_err is None:
+                    tt_err = RuntimeError(
+                        "TikTok: нет результата pipeline-залива"
+                    )
+        else:
+            tiktok_pending = True
+            _log(
+                f"{combo}: YouTube готов — не ждём TikTok "
+                "(pause 0 / keep-open, TT догонит в pipeline)."
+            )
+
+    if (
+        yt_res is None
+        and ig_res is None
+        and tt_res is None
+        and not instagram_pending
+        and not tiktok_pending
+    ):
         parts = []
         if yt_err is not None:
             parts.append(f"YouTube: {yt_err}")
         if ig_err is not None:
             parts.append(f"Instagram: {ig_err}")
+        if tt_err is not None:
+            parts.append(f"TikTok: {tt_err}")
         detail = "; ".join(parts) if parts else "нет результата"
         raise CombinedPlatformUploadError(
-            f"Yt+Inst: обе площадки не залиты ({detail})",
+            f"{combo}: площадки не залиты ({detail})",
             youtube_error=yt_err,
             instagram_error=ig_err,
+            tiktok_error=tt_err,
         )
 
     out: dict = {
         "youtube": yt_res,
         "instagram": ig_res,
+        "tiktok": tt_res,
         "instagram_pending": instagram_pending,
+        "tiktok_pending": tiktok_pending,
         "youtube_error": (
             f"{type(yt_err).__name__}: {yt_err}" if yt_err is not None else None
         ),
         "instagram_error": (
             f"{type(ig_err).__name__}: {ig_err}" if ig_err is not None else None
+        ),
+        "tiktok_error": (
+            f"{type(tt_err).__name__}: {tt_err}" if tt_err is not None else None
         ),
     }
     if isinstance(yt_res, dict):
@@ -5830,6 +6420,9 @@ def _run_youtube_and_instagram_parallel(
     elif isinstance(ig_res, dict):
         out["video_id"] = ig_res.get("video_id")
         out["url"] = ig_res.get("url")
+    elif isinstance(tt_res, dict):
+        out["video_id"] = tt_res.get("video_id")
+        out["url"] = tt_res.get("url")
     return out
 
 
@@ -5858,8 +6451,17 @@ def _run_youtube_then_instagram_session(
     on_instagram_success: Callable[[dict], None] | None = None,
     on_instagram_error: Callable[[BaseException], None] | None = None,
     crop_aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT,
+    include_tiktok: bool = False,
+    tt_session_login: str = "",
+    tt_session_password: str = "",
+    tt_session_twofa: str = "",
+    on_tiktok_success: Callable[[dict], None] | None = None,
+    on_tiktok_error: Callable[[BaseException], None] | None = None,
+    skip_youtube: bool = False,
+    skip_instagram: bool = False,
+    skip_tiktok: bool = False,
 ) -> dict:
-    """Совместимая обёртка → параллельный / pipeline залив YT+Inst."""
+    """Совместимая обёртка → параллельный / pipeline залив YT+Inst[+TT]."""
     return _run_youtube_and_instagram_parallel(
         browser=browser,
         context=context,
@@ -5884,6 +6486,15 @@ def _run_youtube_then_instagram_session(
         on_instagram_success=on_instagram_success,
         on_instagram_error=on_instagram_error,
         crop_aspect=crop_aspect,
+        include_tiktok=include_tiktok,
+        tt_session_login=tt_session_login,
+        tt_session_password=tt_session_password,
+        tt_session_twofa=tt_session_twofa,
+        on_tiktok_success=on_tiktok_success,
+        on_tiktok_error=on_tiktok_error,
+        skip_youtube=skip_youtube,
+        skip_instagram=skip_instagram,
+        skip_tiktok=skip_tiktok,
     )
 
 
@@ -5969,6 +6580,15 @@ def upload_youtube_and_instagram_in_profile(
     on_instagram_success=None,
     on_instagram_error=None,
     crop_aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT,
+    include_tiktok: bool = False,
+    tt_session_login: str = "",
+    tt_session_password: str = "",
+    tt_session_twofa: str = "",
+    on_tiktok_success=None,
+    on_tiktok_error=None,
+    skip_youtube: bool = False,
+    skip_instagram: bool = False,
+    skip_tiktok: bool = False,
 ) -> dict:
     """
     Dolphin: один профиль, 2 вкладки — YouTube Studio затем Instagram Reels.
@@ -6069,6 +6689,15 @@ def upload_youtube_and_instagram_in_profile(
                     on_instagram_success=on_instagram_success,
                     on_instagram_error=on_instagram_error,
                     crop_aspect=crop_aspect,
+                    include_tiktok=include_tiktok,
+                    tt_session_login=tt_session_login,
+                    tt_session_password=tt_session_password,
+                    tt_session_twofa=tt_session_twofa,
+                    on_tiktok_success=on_tiktok_success,
+                    on_tiktok_error=on_tiktok_error,
+                    skip_youtube=skip_youtube,
+                    skip_instagram=skip_instagram,
+                    skip_tiktok=skip_tiktok,
                 )
                 if keep_open:
                     _log(
@@ -6089,7 +6718,7 @@ def upload_youtube_and_instagram_in_profile(
             release_before_stop=keep_open,
         )
     except CombinedPlatformUploadError as e:
-        if (video_path or "").strip():
+        if (video_path or "").strip() and not skip_instagram:
             _log("Yt+Inst: fallback — отдельный залив Instagram…")
             try:
                 try:
@@ -6178,6 +6807,10 @@ def upload_youtube_and_instagram_in_profile(
                 drain_yt_inst_ig_pipeline(profile_id)
             except Exception as de:
                 _log(f"Dolphin: Yt+Inst drain IG: {de!r}")
+            try:
+                drain_yt_inst_tt_pipeline(profile_id)
+            except Exception as de:
+                _log(f"Dolphin: Inst+Yt+TikTok drain TT: {de!r}")
             clear_dolphin_keep_open_cdp(profile_id)
             try:
                 api.stop_profile(profile_id)
@@ -6222,6 +6855,15 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
     on_instagram_success=None,
     on_instagram_error=None,
     crop_aspect: str = DEFAULT_INSTAGRAM_CROP_ASPECT,
+    include_tiktok: bool = False,
+    tt_session_login: str = "",
+    tt_session_password: str = "",
+    tt_session_twofa: str = "",
+    on_tiktok_success=None,
+    on_tiktok_error=None,
+    skip_youtube: bool = False,
+    skip_instagram: bool = False,
+    skip_tiktok: bool = False,
 ) -> dict:
     """
     Локальный антидетект: один профиль, 2 вкладки — YouTube затем Instagram.
@@ -6249,6 +6891,9 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
     login = (session_login or "").strip()
     pwd = (session_password or "").strip()
     twofa = (session_twofa or "").strip()
+    tt_login = (tt_session_login or "").strip()
+    tt_pwd = (tt_session_password or "").strip()
+    tt_twofa = (tt_session_twofa or "").strip()
     bu = (base_url or "").strip() or "http://127.0.0.1:18765"
     try:
         if not pwd or not login:
@@ -6265,6 +6910,24 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
                     twofa = loaded_twofa
             except Exception as e:
                 _log(f"Local antidetect: custom_data Instagram: {e!r}")
+        if include_tiktok and (not tt_pwd or not tt_login):
+            try:
+                from zaliver.antydetect.tiktok_open import (
+                    _tiktok_session_creds_from_profile_dict,
+                )
+
+                prof = api.get_profile(profile_id)
+                loaded_tt_login, loaded_tt_pwd, loaded_tt_twofa = (
+                    _tiktok_session_creds_from_profile_dict(prof)
+                )
+                if not tt_login:
+                    tt_login = loaded_tt_login
+                if not tt_pwd:
+                    tt_pwd = loaded_tt_pwd
+                if not tt_twofa:
+                    tt_twofa = loaded_tt_twofa
+            except Exception as e:
+                _log(f"Local antidetect: custom_data TikTok: {e!r}")
 
         ws_url = ""
         with _profile_launch_lock(profile_id):
@@ -6401,6 +7064,15 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
                         on_instagram_success=on_instagram_success,
                         on_instagram_error=on_instagram_error,
                         crop_aspect=crop_aspect,
+                        include_tiktok=include_tiktok,
+                        tt_session_login=tt_login,
+                        tt_session_password=tt_pwd,
+                        tt_session_twofa=tt_twofa,
+                        on_tiktok_success=on_tiktok_success,
+                        on_tiktok_error=on_tiktok_error,
+                        skip_youtube=skip_youtube,
+                        skip_instagram=skip_instagram,
+                        skip_tiktok=skip_tiktok,
                     )
                     if keep_open:
                         _log(
@@ -6434,7 +7106,7 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
             if not keep_open:
                 unregister_local_session(profile_id=profile_id)
     except CombinedPlatformUploadError as e:
-        if (video_path or "").strip():
+        if (video_path or "").strip() and not skip_instagram:
             _log("Yt+Inst: fallback — отдельный залив Instagram…")
             if session_id:
                 try:
@@ -6490,6 +7162,10 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
                 drain_yt_inst_ig_pipeline(profile_id)
             except Exception as de:
                 _log(f"Local antidetect: Yt+Inst drain IG: {de!r}")
+            try:
+                drain_yt_inst_tt_pipeline(profile_id)
+            except Exception as de:
+                _log(f"Local antidetect: Inst+Yt+TikTok drain TT: {de!r}")
             if session_id:
                 try:
                     api.stop_session(session_id)

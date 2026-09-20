@@ -17,6 +17,7 @@ function platformLabel(platform: Platform): string {
   if (platform === "instagram") return "Instagram";
   if (platform === "tiktok") return "TikTok";
   if (platform === "yt_inst") return "Yt+Inst";
+  if (platform === "yt_inst_tt") return "Inst+Yt+TikTok";
   return "YouTube";
 }
 

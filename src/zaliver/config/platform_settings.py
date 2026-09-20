@@ -10,6 +10,7 @@ PLATFORM_YOUTUBE = "youtube"
 PLATFORM_INSTAGRAM = "instagram"
 PLATFORM_TIKTOK = "tiktok"
 PLATFORM_YT_INST = "yt_inst"
+PLATFORM_YT_INST_TT = "yt_inst_tt"
 
 PLATFORM_CHOICES: tuple[tuple[str, str, str], ...] = (
     (PLATFORM_YOUTUBE, "YouTube", "Залив видео на YouTube"),
@@ -19,6 +20,11 @@ PLATFORM_CHOICES: tuple[tuple[str, str, str], ...] = (
         PLATFORM_YT_INST,
         "Yt+Inst",
         "Одно видео на YouTube и Instagram (2 вкладки)",
+    ),
+    (
+        PLATFORM_YT_INST_TT,
+        "Inst+Yt+TikTok",
+        "Одно видео на Instagram, YouTube и TikTok (3 вкладки)",
     ),
 )
 
@@ -49,6 +55,15 @@ def normalize_platform(value: str | None) -> str:
         "yt_ig",
     ):
         return PLATFORM_YT_INST
+    if v in (
+        PLATFORM_YT_INST_TT,
+        "yt_inst_tiktok",
+        "inst_yt_tiktok",
+        "instagram_youtube_tiktok",
+        "iyt",
+        "ytigtt",
+    ):
+        return PLATFORM_YT_INST_TT
     return PLATFORM_YOUTUBE
 
 
@@ -60,6 +75,8 @@ def platform_display_name(platform: str) -> str:
         return "TikTok"
     if p == PLATFORM_YT_INST:
         return "Yt+Inst"
+    if p == PLATFORM_YT_INST_TT:
+        return "Inst+Yt+TikTok"
     return "YouTube"
 
 
@@ -75,18 +92,27 @@ def is_yt_inst_platform(platform: str | None) -> bool:
     return normalize_platform(platform) == PLATFORM_YT_INST
 
 
+def is_yt_inst_tt_platform(platform: str | None) -> bool:
+    return normalize_platform(platform) == PLATFORM_YT_INST_TT
+
+
+def is_combined_upload_platform(platform: str | None) -> bool:
+    return normalize_platform(platform) in (PLATFORM_YT_INST, PLATFORM_YT_INST_TT)
+
+
 def platform_includes_youtube(platform: str | None) -> bool:
     p = normalize_platform(platform)
-    return p in (PLATFORM_YOUTUBE, PLATFORM_YT_INST)
+    return p in (PLATFORM_YOUTUBE, PLATFORM_YT_INST, PLATFORM_YT_INST_TT)
 
 
 def platform_includes_instagram(platform: str | None) -> bool:
     p = normalize_platform(platform)
-    return p in (PLATFORM_INSTAGRAM, PLATFORM_YT_INST)
+    return p in (PLATFORM_INSTAGRAM, PLATFORM_YT_INST, PLATFORM_YT_INST_TT)
 
 
 def platform_includes_tiktok(platform: str | None) -> bool:
-    return normalize_platform(platform) == PLATFORM_TIKTOK
+    p = normalize_platform(platform)
+    return p in (PLATFORM_TIKTOK, PLATFORM_YT_INST_TT)
 
 
 def platform_settings_storage_id(platform: str | None) -> str:
@@ -98,7 +124,7 @@ def platform_settings_storage_id(platform: str | None) -> str:
     PlatformSettings(store, youtube|instagram) explicitly when in yt_inst mode.
     """
     p = normalize_platform(platform)
-    if p == PLATFORM_YT_INST:
+    if p in (PLATFORM_YT_INST, PLATFORM_YT_INST_TT):
         return PLATFORM_YOUTUBE
     return p
 

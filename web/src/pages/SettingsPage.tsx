@@ -60,10 +60,14 @@ export function SettingsPage({
   const [newUserPass, setNewUserPass] = useState("");
   const [users, setUsers] = useState<AuthUser[]>([]);
 
-  const showYt = platform === "youtube" || platform === "yt_inst";
+  const showYt =
+    platform === "youtube" ||
+    platform === "yt_inst" ||
+    platform === "yt_inst_tt";
   const showIg =
     platform === "instagram" ||
     platform === "yt_inst" ||
+    platform === "yt_inst_tt" ||
     platform === "tiktok";
   const igKeyPrefix = platform === "tiktok" ? "tiktok" : "instagram";
 

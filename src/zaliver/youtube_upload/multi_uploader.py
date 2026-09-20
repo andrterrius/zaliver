@@ -76,9 +76,10 @@ class MultiProfileUploader:
     - Per-profile cooldown: wait at least `cooldown_s` from *start time* of previous upload
       in this run (для multi-tab профиля cooldown между вкладками отключён), and optionally
       `profile_upload_pause_remaining_s` (e.g. DB «Пауза 3 ч»).
-    - Errors re-queue the same video onto another profile. After a failed upload
-      the profile is skipped for the rest of this run (`exclude_profile_this_session`)
-      — we do not open it again in this session.
+    - Errors re-queue the same video onto another profile. After a failed
+      single-platform upload the profile is skipped for the rest of this run
+      (`exclude_profile_this_session`). Combined Yt+Inst[+TikTok]: падает
+      только площадка (`disable_platform_this_session`), профиль остаётся.
     - stop() requests graceful shutdown; workers finish current upload and exit.
     - Waiting for a concurrency slot uses short acquire timeouts so stop() is honored
       (plain Semaphore.acquire() would ignore threading.Event).
@@ -183,6 +184,7 @@ class MultiProfileUploader:
         self._held_slot_lock = threading.Lock()
         self._session_skip_lock = threading.Lock()
         self._session_skip_profiles: set[str] = set()
+        self._session_skip_platforms: dict[str, set[str]] = {}
         self._workers: list[threading.Thread] = []
         self._dispatcher: threading.Thread | None = None
 
@@ -324,6 +326,56 @@ class MultiProfileUploader:
             f"исключён до конца сессии{note}"
         )
         return True
+
+    def disable_platform_this_session(
+        self,
+        profile_id: str,
+        platform: str,
+        *,
+        reason: str = "",
+        active_platforms: list[str] | tuple[str, ...] | None = None,
+    ) -> bool:
+        """Отключить одну площадку профиля; остальные продолжают залив.
+
+        Если все активные площадки отключены — исключаем профиль целиком.
+        """
+        pid = (profile_id or "").strip()
+        plat = (platform or "").strip().lower()
+        if not pid or not plat:
+            return False
+        with self._session_skip_lock:
+            skipped = self._session_skip_platforms.setdefault(pid, set())
+            newly = plat not in skipped
+            if newly:
+                skipped.add(plat)
+            all_dead = False
+            if active_platforms:
+                act = [
+                    (p or "").strip().lower()
+                    for p in active_platforms
+                    if (p or "").strip()
+                ]
+                all_dead = bool(act) and all(p in skipped for p in act)
+        if newly:
+            note = f" reason={reason!r}" if (reason or "").strip() else ""
+            self._log(
+                f"[{_ts()}] [upload] profile={pid} площадка {plat} "
+                f"недоступна до конца сессии{note} — остальные продолжаются"
+            )
+        if all_dead:
+            self.exclude_profile_this_session(
+                pid,
+                reason=(reason or f"all_platforms_unavailable:{plat}")[:240],
+            )
+        return newly
+
+    def is_platform_disabled(self, profile_id: str, platform: str) -> bool:
+        pid = (profile_id or "").strip()
+        plat = (platform or "").strip().lower()
+        if not pid or not plat:
+            return False
+        with self._session_skip_lock:
+            return plat in self._session_skip_platforms.get(pid, set())
 
     def _is_profile_skipped(self, profile_id: str) -> bool:
         pid = (profile_id or "").strip()

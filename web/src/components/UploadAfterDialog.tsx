@@ -58,6 +58,8 @@ function dialogTitle(mode: Mode, platform: Platform): string {
         ? "TikTok"
         : platform === "yt_inst"
         ? "YouTube / Instagram"
+        : platform === "yt_inst_tt"
+        ? "Instagram / YouTube / TikTok"
         : "YouTube";
   if (mode === "slicing") return `Загрузка в ${where} после нарезки`;
   if (mode === "stitching") return `Загрузка в ${where} после склейки`;

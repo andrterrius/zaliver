@@ -122,11 +122,22 @@ _GOT_IT_BTN_RE = re.compile(
 )
 _CHECKING_PROGRESS_RE = re.compile(
     r"checking in progress|"
-    r"checking copyright|"
+    r"copyright check in progress|"
+    r"checking copyright.{0,40}progress|"
     r"проверк[аи].{0,40}процессе|"
     r"ид[её]т проверка|"
     r"проверка выполняется|"
-    r"проверяем",
+    r"проверяем(?:\s|$)",
+    re.I,
+)
+_CHECKING_OK_RE = re.compile(
+    r"проблем не обнаружено|"
+    r"проблем не найдено|"
+    r"нарушений не обнаружено|"
+    r"no (?:issues|problems) (?:found|detected)|"
+    r"no copyright (?:issues|problems)|"
+    r"copyright check (?:passed|complete)|"
+    r"didn['’]?t find (?:any )?(?:issues|problems)",
     re.I,
 )
 _POST_BTN_RE = re.compile(
@@ -2933,19 +2944,21 @@ def _wait_studio_details(page, *, timeout_s: float = 300.0) -> None:
     )
 
 
-def _copyright_check_in_progress(page) -> bool:
+def _visible_text_match_count(page, pattern: re.Pattern[str], *, limit: int = 8) -> int:
     try:
-        loc = page.get_by_text(_CHECKING_PROGRESS_RE)
+        loc = page.get_by_text(pattern)
         n = int(loc.count())
     except Exception:
-        return False
-    for i in range(min(n, 8)):
+        return 0
+    shown_n = 0
+    for i in range(min(n, limit)):
         el = loc.nth(i)
         try:
             if el.is_visible(timeout=80):
-                return True
+                shown_n += 1
+                continue
         except Exception:
-            continue
+            pass
         try:
             shown = el.evaluate(
                 """(node) => {
@@ -2958,30 +2971,54 @@ def _copyright_check_in_progress(page) -> bool:
                 }"""
             )
             if shown:
-                return True
+                shown_n += 1
         except Exception:
             continue
-    return False
+    return shown_n
+
+
+def _copyright_check_in_progress(page) -> bool:
+    return _visible_text_match_count(page, _CHECKING_PROGRESS_RE) > 0
+
+
+def _copyright_checks_passed(page) -> bool:
+    """«Проблем не обнаружено» по проверке музыки и/или контента."""
+    return _visible_text_match_count(page, _CHECKING_OK_RE) > 0
 
 
 def _wait_copyright_checks_done(page, *, timeout_s: float = 1_200.0) -> None:
-    """Ждём исчезновения «Checking in progress…» (30 с / 10 мин)."""
+    """Ждём «Проблем не обнаружено» / конец Checking in progress, затем сразу Post."""
     started = time.monotonic()
     logged = False
     deadline = started + max(30.0, float(timeout_s))
     while time.monotonic() < deadline:
         _dismiss_studio_modals(page)
-        if not _copyright_check_in_progress(page):
+        passed = _copyright_checks_passed(page)
+        in_progress = _copyright_check_in_progress(page)
+        if passed and not in_progress:
+            _log(
+                "TikToks upload: проверка музыки/контента — "
+                "проблем не обнаружено, публикуем."
+            )
+            return
+        if passed and in_progress:
+            if not logged:
+                logged = True
+                _log(
+                    "TikToks upload: часть проверок прошла — "
+                    "ждём остальные (Checking in progress)…"
+                )
+        elif not in_progress:
             if logged:
                 _log("TikToks upload: проверка музыки/контента завершена.")
             return
-        if not logged:
+        elif not logged:
             logged = True
-            _log("TikToks upload: ждём окончание Checking in progress…")
+            _log("TikToks upload: ждём окончание проверки музыки/контента…")
         try:
-            page.wait_for_timeout(800)
+            page.wait_for_timeout(400)
         except Exception:
-            time.sleep(0.8)
+            time.sleep(0.4)
     raise TikTokReelsUploadError(
         "Не дождались окончания проверки музыки/контента перед Post."
     )
@@ -3107,7 +3144,8 @@ def run_tiktok_reels_upload(
 
     Возвращает dict: video_id, url, title, description, candidate_reels.
     ``on_new_post_clicked`` — сразу после клика Upload.
-    ``wait_youtube_before_done`` — не жать Post, пока YouTube не завершится.
+    ``wait_youtube_before_done`` — оставлен для совместимости; Post жмём
+    сразу после «Проблем не обнаружено», не ждём YouTube.
     """
     upload_file = _validate_video_file_path(video_path)
     caption = (title or "").strip() or (description or "").strip()
@@ -3162,12 +3200,6 @@ def run_tiktok_reels_upload(
     _dismiss_studio_modals(page)
     _fill_caption(page, caption)
     _wait_copyright_checks_done(page)
-    if wait_youtube_before_done is not None:
-        _log("TikToks upload: ждём завершения YouTube перед Post…")
-        if not wait_youtube_before_done.wait(timeout=3_600.0):
-            _log("TikToks upload: таймаут ожидания YouTube — продолжаем Post.")
-        else:
-            _log("TikToks upload: YouTube готов — Post.")
     _click_studio_post(page)
     scan_n = max(1, int(top_reels_scan or 1))
     urls = _collect_posted_tiktok_urls(page, limit=scan_n)

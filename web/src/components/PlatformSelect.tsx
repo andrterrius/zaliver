@@ -25,6 +25,12 @@ const CHOICES: { id: Platform; name: string; hint: string; index: string }[] = [
     hint: "Одно видео на YouTube и Instagram (2 вкладки)",
     index: "04",
   },
+  {
+    id: "yt_inst_tt",
+    name: "Inst+Yt+TikTok",
+    hint: "Одно видео на Instagram, YouTube и TikTok (3 вкладки)",
+    index: "05",
+  },
 ];
 
 type Props = {

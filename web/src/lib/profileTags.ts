@@ -94,7 +94,7 @@ export function profileHasTagError(tags: unknown[]): boolean {
 
 export function profileHasAccountData(
   customData: Record<string, unknown> | undefined,
-  platform: "youtube" | "instagram" | "tiktok" | "yt_inst",
+  platform: "youtube" | "instagram" | "tiktok" | "yt_inst" | "yt_inst_tt",
 ): boolean {
   const cd = customData || {};
   if (platform === "instagram") {

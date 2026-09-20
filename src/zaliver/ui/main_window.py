@@ -193,6 +193,7 @@ from zaliver.ui.platform import (
     PLATFORM_TIKTOK,
     PLATFORM_YOUTUBE,
     PLATFORM_YT_INST,
+    PLATFORM_YT_INST_TT,
     apply_platform_branding,
     brand_text,
     normalize_platform,
@@ -982,6 +983,7 @@ class MainWindow(QWidget):
         self._upload_delete_after_enabled = False
         # Yt+Inst: пути, успешно залитые на YouTube, ждут конца Instagram перед удалением.
         self._upload_yt_inst_pending_delete: set[str] = set()
+        self._upload_yt_inst_pending_remaining: dict[str, int] = {}
         self._upload_success_lock = threading.Lock()
         self._upload_manager = None
         self._upload_streaming_active = False
@@ -2231,7 +2233,7 @@ class MainWindow(QWidget):
         settings_hint = QLabel(
             "Настройки своего антидетекта (локальный HTTP API) "
             "и параметры обработки видео (GPU, потоки, ffmpeg)."
-            if self._platform != PLATFORM_YT_INST
+            if self._platform not in (PLATFORM_YT_INST, PLATFORM_YT_INST_TT)
             else "Общие настройки антидетекта и ИИ, плюс разделы YouTube и Instagram "
             "(параметры берутся из настроек соответствующих платформ). "
             "Параметры обработки видео (GPU, потоки, ffmpeg) — общие для уникализации и нарезки."
@@ -2484,7 +2486,7 @@ class MainWindow(QWidget):
         gi.addWidget(_settings_save_row(self._btn_save_instagram), 3, 0, 1, 2)
         gi.addWidget(self._instagram_settings_status, 4, 0, 1, 2)
         gb_ig.setVisible(
-            self._platform in (PLATFORM_INSTAGRAM, PLATFORM_YT_INST, PLATFORM_TIKTOK)
+            self._platform in (PLATFORM_INSTAGRAM, PLATFORM_YT_INST, PLATFORM_YT_INST_TT, PLATFORM_TIKTOK)
         )
         self._sync_instagram_crop_setting_visibility()
 
@@ -3860,6 +3862,7 @@ class MainWindow(QWidget):
         *,
         record_platform: str | None = None,
         yt_inst_upload: bool = False,
+        remaining_after_youtube: int | None = None,
     ) -> None:
         """Удалить файл сразу после успеха; для Yt+Inst — после Instagram."""
         path = str(video_path or "").strip()
@@ -3868,11 +3871,32 @@ class MainWindow(QWidget):
         plat = (record_platform or "").strip().lower()
         # YouTube в Yt+Inst ещё нужен Instagram (pipeline / pause 0) — не трогаем.
         if yt_inst_upload and plat == PLATFORM_YOUTUBE:
+            n_left = remaining_after_youtube
+            if n_left is None:
+                n_left = 2 if self._platform == PLATFORM_YT_INST_TT else 1
+            try:
+                n_left = int(n_left)
+            except (TypeError, ValueError):
+                n_left = 1
             with self._upload_success_lock:
-                self._upload_yt_inst_pending_delete.add(path)
-            return
-        with self._upload_success_lock:
-            self._upload_yt_inst_pending_delete.discard(path)
+                if n_left <= 0:
+                    self._upload_yt_inst_pending_delete.discard(path)
+                    self._upload_yt_inst_pending_remaining.pop(path, None)
+                else:
+                    self._upload_yt_inst_pending_delete.add(path)
+                    self._upload_yt_inst_pending_remaining[path] = n_left
+                    return
+        elif yt_inst_upload:
+            with self._upload_success_lock:
+                left = int(self._upload_yt_inst_pending_remaining.get(path, 1)) - 1
+                if left > 0:
+                    self._upload_yt_inst_pending_remaining[path] = left
+                    return
+                self._upload_yt_inst_pending_remaining.pop(path, None)
+                self._upload_yt_inst_pending_delete.discard(path)
+        else:
+            with self._upload_success_lock:
+                self._upload_yt_inst_pending_delete.discard(path)
         if getattr(self, "_upload_delete_after_enabled", False):
             self._delete_output_video_after_upload(path)
         else:
@@ -3888,7 +3912,15 @@ class MainWindow(QWidget):
             with self._upload_success_lock:
                 pending = path in self._upload_yt_inst_pending_delete
                 if pending:
-                    self._upload_yt_inst_pending_delete.discard(path)
+                    left = int(
+                        self._upload_yt_inst_pending_remaining.get(path, 1)
+                    ) - 1
+                    if left > 0:
+                        self._upload_yt_inst_pending_remaining[path] = left
+                        pending = False
+                    else:
+                        self._upload_yt_inst_pending_remaining.pop(path, None)
+                        self._upload_yt_inst_pending_delete.discard(path)
             if delete_on and pending:
                 self._delete_output_video_after_upload(path)
             else:
@@ -4566,6 +4598,12 @@ class MainWindow(QWidget):
                     "Можно использовать переменные: {date}, {profile}, {video}, {index}… "
                     "Enter — новая строка."
                 )
+            )
+        elif self._platform == PLATFORM_YT_INST_TT:
+            title_edit.setPlaceholderText(
+                "Название YouTube / подпись Instagram и TikTok. "
+                "Переменные: {date}, {profile}, {video}, {index}… "
+                "Enter — новая строка."
             )
         elif self._platform == PLATFORM_YT_INST:
             title_edit.setPlaceholderText(
@@ -5386,7 +5424,7 @@ class MainWindow(QWidget):
         YouTube и Instagram — свои значения; Yt+Inst — пауза Instagram.
         """
         plat = normalize_platform(platform or self._platform)
-        if plat == PLATFORM_YT_INST:
+        if plat in (PLATFORM_YT_INST, PLATFORM_YT_INST_TT):
             plat = PLATFORM_INSTAGRAM
         return upload_pause_from_settings(self._settings_for(plat))
 
@@ -5466,7 +5504,7 @@ class MainWindow(QWidget):
 
     def _instagram_tabs_per_profile_value(self) -> int:
         # Instagram / Yt+Inst: из UI настроек; иначе — из namespace Instagram.
-        if self._platform in (PLATFORM_INSTAGRAM, PLATFORM_YT_INST) and hasattr(
+        if self._platform in (PLATFORM_INSTAGRAM, PLATFORM_YT_INST, PLATFORM_YT_INST_TT) and hasattr(
             self, "_instagram_tabs_per_profile"
         ):
             return clamp_instagram_tabs_per_profile(
@@ -5477,7 +5515,7 @@ class MainWindow(QWidget):
         )
 
     def _instagram_crop_aspect_value(self) -> str:
-        if self._platform in (PLATFORM_INSTAGRAM, PLATFORM_YT_INST) and hasattr(
+        if self._platform in (PLATFORM_INSTAGRAM, PLATFORM_YT_INST, PLATFORM_YT_INST_TT) and hasattr(
             self, "_instagram_crop_aspect"
         ):
             raw = self._instagram_crop_aspect.currentData()
@@ -9162,6 +9200,27 @@ class MainWindow(QWidget):
             return credentials_from_custom_data(cd)
         return None
 
+    def _tiktok_session_credentials(self, profile_id: str) -> tuple[str, str, str]:
+        from zaliver.tiktok_upload.tiktok_availability import (
+            session_login_from_custom_data,
+            session_password_from_custom_data,
+            session_twofa_from_custom_data,
+        )
+
+        pid = (profile_id or "").strip()
+        for p in self._profiles_raw or []:
+            if _profile_id(p) != pid:
+                continue
+            cd = p.get("custom_data")
+            if not isinstance(cd, dict):
+                return "", "", ""
+            return (
+                session_login_from_custom_data(cd),
+                session_password_from_custom_data(cd),
+                session_twofa_from_custom_data(cd),
+            )
+        return "", "", ""
+
     def _instagram_session_credentials(self, profile_id: str) -> tuple[str, str, str]:
         """Логин/пароль/2FA для re-login Instagram (не регистрация)."""
         if self._platform == PLATFORM_TIKTOK:
@@ -11770,7 +11829,8 @@ class MainWindow(QWidget):
             PLATFORM_INSTAGRAM,
             PLATFORM_TIKTOK,
         )
-        is_yt_inst_upload = self._platform == PLATFORM_YT_INST
+        is_yt_inst_upload = self._platform in (PLATFORM_YT_INST, PLATFORM_YT_INST_TT)
+        is_yt_inst_tt_upload = self._platform == PLATFORM_YT_INST_TT
         # Пауза 0: keep-open для Instagram, Yt+Inst и YouTube.
         ig_keep_browser_open = (
             self._upload_pause_between_uploads().total_seconds() <= 0
@@ -11821,7 +11881,9 @@ class MainWindow(QWidget):
             for_both=is_yt_inst_upload,
         )
 
-        if is_yt_inst_upload:
+        if is_yt_inst_tt_upload:
+            upload_platform_label = "Inst+Yt+TikTok"
+        elif is_yt_inst_upload:
             upload_platform_label = "Yt+Inst"
         elif self._platform == PLATFORM_TIKTOK:
             upload_platform_label = "TikToks"
@@ -11852,6 +11914,7 @@ class MainWindow(QWidget):
         self._upload_delete_after_enabled = upload_req.delete_after_upload
         with self._upload_success_lock:
             self._upload_yt_inst_pending_delete.clear()
+            self._upload_yt_inst_pending_remaining.clear()
         self._sync_toolbar_for_upload_phase()
         self._upload_cancel_kind = (kind or "").strip()
         self._upload_cancel_dolphin_token = token
@@ -11929,6 +11992,7 @@ class MainWindow(QWidget):
 
         def _upload_one(profile_id: str, task: VideoTask, tab_index: int = 0) -> None:
             from zaliver.antydetect.antic_open import (
+                CombinedPlatformUnavailableError,
                 open_google_in_local_antidetect_profile,
                 open_google_in_profile,
                 set_log_sink,
@@ -11955,6 +12019,7 @@ class MainWindow(QWidget):
                 video_path=task.video_path,
                 index=_next_upload_var_index(),
             )
+            combined_followups: dict[str, int | None] = {"n": None}
 
             def _record_one(
                 *,
@@ -11966,17 +12031,18 @@ class MainWindow(QWidget):
                 record_platform: str | None = None,
             ) -> None:
                 plat = (record_platform or self._platform or "").strip() or PLATFORM_YOUTUBE
-                if plat == PLATFORM_YT_INST:
+                if plat in (PLATFORM_YT_INST, PLATFORM_YT_INST_TT):
                     plat = PLATFORM_YOUTUBE
                 is_ig_rec = plat == PLATFORM_INSTAGRAM
+                is_tt_rec = plat == PLATFORM_TIKTOK
                 vid = ""
                 url = ""
                 if isinstance(one_res, dict):
                     vid = str(one_res.get("video_id") or "").strip()
                     url = str(one_res.get("url") or "").strip()
                 if not vid and url:
-                    if is_ig_rec:
-                        for marker in ("/reel/", "/p/"):
+                    if is_ig_rec or is_tt_rec:
+                        for marker in ("/reel/", "/p/", "/video/"):
                             if marker in url:
                                 part = url.split(marker, 1)[1]
                                 vid = part.split("/", 1)[0].split("?", 1)[0].strip()
@@ -11993,7 +12059,9 @@ class MainWindow(QWidget):
                 if not vid:
                     raise RuntimeError(f"Empty video_id (res={one_res!r})")
                 if not url:
-                    if is_ig_rec:
+                    if is_tt_rec:
+                        url = f"https://www.tiktok.com/@/video/{vid}/"
+                    elif is_ig_rec:
                         url = f"https://www.instagram.com/reel/{vid}/"
                     else:
                         url = _studio_canonical_watch_url(vid)
@@ -12005,7 +12073,7 @@ class MainWindow(QWidget):
                     raise RuntimeError("upload_session is not set (sid=0)")
 
                 stored_title = title or ""
-                if keep_studio_title and not stored_title and not is_ig_rec:
+                if keep_studio_title and not stored_title and not is_ig_rec and not is_tt_rec:
                     stored_title = Path(video_path).stem
 
                 self._upload_store.add_uploaded_video(
@@ -12027,7 +12095,7 @@ class MainWindow(QWidget):
                     )
                     if guser and not stats_notified:
                         scheduled_unix = None
-                        if not is_ig_rec:
+                        if not is_ig_rec and not is_tt_rec:
                             sched_dt = parse_msk_datetime(schedule_publish_at)
                             if sched_dt is not None:
                                 scheduled_unix = int(sched_dt.timestamp())
@@ -12071,9 +12139,12 @@ class MainWindow(QWidget):
                     video_path,
                     record_platform=plat,
                     yt_inst_upload=is_yt_inst_upload,
+                    remaining_after_youtube=combined_followups.get("n"),
                 )
 
-            def _confirm_instagram_result(res, *, multi_tab: bool = False) -> dict | None:
+            def _confirm_instagram_result(
+                res, *, multi_tab: bool = False, platform: str = PLATFORM_INSTAGRAM
+            ) -> dict | None:
                 ig_vid = ""
                 ig_url = ""
                 candidates: list[dict] = []
@@ -12102,7 +12173,7 @@ class MainWindow(QWidget):
                     if self._upload_store.has_uploaded_video(
                         video_id=c_vid,
                         url=c_url,
-                        platform=PLATFORM_INSTAGRAM,
+                        platform=platform,
                     ):
                         skipped.append(c_vid or c_url)
                         continue
@@ -12142,6 +12213,29 @@ class MainWindow(QWidget):
                 return {"video_id": ig_vid, "url": ig_url}
 
             if is_yt_inst_upload:
+                mgr_now = mgr_holder.get("mgr")
+                skip_youtube = bool(
+                    mgr_now is not None
+                    and mgr_now.is_platform_disabled(profile_id, "youtube")
+                )
+                skip_instagram = bool(
+                    mgr_now is not None
+                    and mgr_now.is_platform_disabled(profile_id, "instagram")
+                )
+                skip_tiktok = bool(
+                    mgr_now is not None
+                    and mgr_now.is_platform_disabled(profile_id, "tiktok")
+                )
+                if skip_youtube and skip_instagram and (
+                    not is_yt_inst_tt_upload or skip_tiktok
+                ):
+                    raise RuntimeError(
+                        "Yt+Inst: все площадки профиля недоступны в этой сессии"
+                    )
+                combined_followups["n"] = (
+                    (0 if skip_instagram else 1)
+                    + (1 if is_yt_inst_tt_upload and not skip_tiktok else 0)
+                )
                 creds = self._profile_login_credentials(profile_id)
                 yt_oldest = self._profile_yt_oldest_name(profile_id) or None
                 search_oldest = self._youtube_search_oldest_channel()
@@ -12328,6 +12422,7 @@ class MainWindow(QWidget):
                             pass
 
                 def _on_yt_inst_ig_error(err: BaseException) -> None:
+                    skipped = isinstance(err, CombinedPlatformUnavailableError)
                     try:
                         self._ui_log_line.emit(
                             f"[upload] Yt+Inst: Instagram ошибка (pipeline) — "
@@ -12335,16 +12430,27 @@ class MainWindow(QWidget):
                         )
                     except Exception:
                         pass
-                    try:
-                        self._set_previous_upload_result_tag(
-                            profile_id=profile_id,
-                            success=False,
-                            kind=kind,
-                            base_url=base_url,
-                            for_instagram=True,
-                        )
-                    except Exception:
-                        pass
+                    if not skipped:
+                        try:
+                            self._disable_combined_upload_platform(
+                                profile_id,
+                                "instagram",
+                                include_tiktok=is_yt_inst_tt_upload,
+                                reason=f"{type(err).__name__}: {err}",
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            self._set_previous_upload_result_tag(
+                                profile_id=profile_id,
+                                success=False,
+                                kind=kind,
+                                base_url=base_url,
+                                for_instagram=True,
+                                exclude_session=False,
+                            )
+                        except Exception:
+                            pass
                     # YouTube уже залит — файл больше не нужен Instagram.
                     paths_to_drop = [str(task.video_path or "").strip()]
                     if task.scheduled_batch:
@@ -12353,6 +12459,97 @@ class MainWindow(QWidget):
                                 str(getattr(item, "video_path", "") or "").strip()
                             )
                     self._delete_yt_inst_pending_outputs(paths_to_drop)
+
+                def _record_yt_inst_tiktok(tt_part) -> None:
+                    try:
+                        tt_batch = []
+                        if isinstance(tt_part, dict):
+                            raw_tt_batch = tt_part.get("batch_results")
+                            if isinstance(raw_tt_batch, list):
+                                tt_batch = raw_tt_batch
+                        if tt_batch and task.scheduled_batch:
+                            items_for_record = (
+                                resolved_scheduled_batch or task.scheduled_batch
+                            )
+                            for item, item_res in zip(items_for_record, tt_batch):
+                                confirmed = _confirm_instagram_result(
+                                    item_res, platform=PLATFORM_TIKTOK
+                                )
+                                _record_one(
+                                    video_path=item.video_path,
+                                    title=item.title,
+                                    description=item.description,
+                                    one_res=confirmed,
+                                    record_platform=PLATFORM_TIKTOK,
+                                )
+                        else:
+                            confirmed = _confirm_instagram_result(
+                                tt_part, platform=PLATFORM_TIKTOK
+                            )
+                            _record_one(
+                                video_path=task.video_path,
+                                title=resolved_title,
+                                description=resolved_description,
+                                one_res=confirmed,
+                                record_platform=PLATFORM_TIKTOK,
+                            )
+                        try:
+                            self._ui_log_line.emit(
+                                "[upload] Inst+Yt+TikTok: TikTok сохранён в залитые."
+                            )
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        try:
+                            self._ui_log_line.emit(
+                                f"[upload] Inst+Yt+TikTok: запись TikTok не удалась: {e!r}"
+                            )
+                        except Exception:
+                            pass
+
+                def _on_yt_inst_tt_error(err: BaseException) -> None:
+                    skipped = isinstance(err, CombinedPlatformUnavailableError)
+                    try:
+                        self._ui_log_line.emit(
+                            f"[upload] Inst+Yt+TikTok: TikTok ошибка (pipeline) — "
+                            f"{type(err).__name__}: {err}"
+                        )
+                    except Exception:
+                        pass
+                    if not skipped:
+                        try:
+                            self._disable_combined_upload_platform(
+                                profile_id,
+                                "tiktok",
+                                include_tiktok=True,
+                                reason=f"{type(err).__name__}: {err}",
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            self._set_previous_upload_result_tag(
+                                profile_id=profile_id,
+                                success=False,
+                                kind=kind,
+                                base_url=base_url,
+                                for_tiktok=True,
+                                exclude_session=False,
+                            )
+                        except Exception:
+                            pass
+                    paths_to_drop = [str(task.video_path or "").strip()]
+                    if task.scheduled_batch:
+                        for item in task.scheduled_batch:
+                            paths_to_drop.append(
+                                str(getattr(item, "video_path", "") or "").strip()
+                            )
+                    self._delete_yt_inst_pending_outputs(paths_to_drop)
+
+                tt_login, tt_pwd, tt_2fa = ("", "", "")
+                if is_yt_inst_tt_upload:
+                    tt_login, tt_pwd, tt_2fa = self._tiktok_session_credentials(
+                        profile_id
+                    )
 
                 combined_kw = dict(
                     headless=headless,
@@ -12375,8 +12572,38 @@ class MainWindow(QWidget):
                     on_instagram_success=_record_yt_inst_instagram,
                     on_instagram_error=_on_yt_inst_ig_error,
                     crop_aspect=ig_crop_aspect,
+                    include_tiktok=bool(is_yt_inst_tt_upload),
+                    tt_session_login=tt_login,
+                    tt_session_password=tt_pwd,
+                    tt_session_twofa=tt_2fa,
+                    on_tiktok_success=(
+                        _record_yt_inst_tiktok if is_yt_inst_tt_upload else None
+                    ),
+                    on_tiktok_error=(
+                        _on_yt_inst_tt_error if is_yt_inst_tt_upload else None
+                    ),
+                    skip_youtube=skip_youtube,
+                    skip_instagram=skip_instagram,
+                    skip_tiktok=skip_tiktok,
                     **warmup_kw,
                 )
+                if skip_youtube:
+                    seed_paths = [str(task.video_path or "").strip()]
+                    if task.scheduled_batch:
+                        for item in task.scheduled_batch:
+                            seed_paths.append(
+                                str(getattr(item, "video_path", "") or "").strip()
+                            )
+                    follow_n = int(combined_followups.get("n") or 0)
+                    for sp in seed_paths:
+                        if not sp:
+                            continue
+                        self._maybe_delete_output_after_upload_success(
+                            sp,
+                            record_platform=PLATFORM_YOUTUBE,
+                            yt_inst_upload=True,
+                            remaining_after_youtube=follow_n,
+                        )
                 if _is_own_antidetect_kind(kind):
                     res = upload_youtube_and_instagram_in_local_antidetect_profile(
                         profile_id,
@@ -12407,20 +12634,32 @@ class MainWindow(QWidget):
                     else ""
                 )
 
-                yt_ok = isinstance(yt_part, dict)
-                ig_ok = isinstance(ig_part, dict) or (
-                    # Уже записан через on_instagram_success в pipeline
-                    # при wait_for_instagram — ig_part в res; при pending — ещё нет.
-                    False
+                tt_part = res.get("tiktok") if isinstance(res, dict) else None
+                tt_pending = bool(
+                    isinstance(res, dict) and res.get("tiktok_pending")
                 )
-                # YouTube уже записан в on_youtube_success; IG — в callback или ниже.
+                tt_err_s = (
+                    str(res.get("tiktok_error") or "").strip()
+                    if isinstance(res, dict)
+                    else ""
+                )
+                tt_ok = isinstance(tt_part, dict)
+
+                yt_ok = isinstance(yt_part, dict)
+                ig_ok = isinstance(ig_part, dict) or False
                 if isinstance(ig_part, dict) and not ig_pending:
-                    # Двойная запись не нужна, если callback уже сработал при wait.
-                    # При wait_for_instagram callback уже вызван из pipeline —
-                    # ig_ok отмечаем по наличию результата без повторной записи.
                     ig_ok = True
 
-                if not yt_ok:
+                if not yt_ok and not skip_youtube:
+                    try:
+                        self._disable_combined_upload_platform(
+                            profile_id,
+                            "youtube",
+                            include_tiktok=is_yt_inst_tt_upload,
+                            reason=yt_err_s or "youtube_error",
+                        )
+                    except Exception:
+                        pass
                     try:
                         self._set_previous_upload_result_tag(
                             profile_id=profile_id,
@@ -12428,18 +12667,29 @@ class MainWindow(QWidget):
                             kind=kind,
                             base_url=base_url,
                             for_instagram=False,
+                            exclude_session=False,
                         )
                     except Exception:
                         pass
 
-                if not yt_ok and not ig_ok and not ig_pending:
+                if (
+                    not yt_ok
+                    and not ig_ok
+                    and not ig_pending
+                    and not tt_ok
+                    and not tt_pending
+                ):
                     parts = []
                     if yt_err_s:
                         parts.append(f"YouTube: {yt_err_s}")
                     if ig_err_s:
                         parts.append(f"Instagram: {ig_err_s}")
+                    if tt_err_s:
+                        parts.append(f"TikTok: {tt_err_s}")
                     detail = "; ".join(parts) if parts else "нет результата"
-                    raise RuntimeError(f"Yt+Inst: обе площадки не залиты ({detail})")
+                    raise RuntimeError(
+                        f"Yt+Inst: площадки не залиты ({detail})"
+                    )
                 if yt_ok and ig_pending:
                     try:
                         self._ui_log_line.emit(
@@ -12860,6 +13110,7 @@ class MainWindow(QWidget):
                 with self._upload_success_lock:
                     leftover = list(self._upload_yt_inst_pending_delete)
                     self._upload_yt_inst_pending_delete.clear()
+                    self._upload_yt_inst_pending_remaining.clear()
                 if getattr(self, "_upload_delete_after_enabled", False):
                     for video_path in leftover:
                         self._delete_output_video_after_upload(video_path)
@@ -13235,6 +13486,31 @@ class MainWindow(QWidget):
         except Exception:
             pass
 
+    def _disable_combined_upload_platform(
+        self,
+        profile_id: str,
+        platform: str,
+        *,
+        include_tiktok: bool = False,
+        reason: str = "",
+    ) -> None:
+        mgr = getattr(self, "_upload_manager", None)
+        disable = getattr(mgr, "disable_platform_this_session", None)
+        if not callable(disable):
+            return
+        active = ["youtube", "instagram"]
+        if include_tiktok:
+            active.append("tiktok")
+        try:
+            disable(
+                profile_id,
+                platform,
+                reason=reason,
+                active_platforms=active,
+            )
+        except Exception:
+            pass
+
     def _set_previous_upload_result_tag(
         self,
         *,
@@ -13243,10 +13519,14 @@ class MainWindow(QWidget):
         kind: str,
         base_url: str,
         for_instagram: bool = False,
+        for_tiktok: bool = False,
+        exclude_session: bool = True,
     ) -> None:
         from zaliver.antydetect.profile_tags import (
             IG_UPLOAD_PREVIOUS_ERROR_TAG,
             IG_UPLOAD_PREVIOUS_SUCCESS_TAG,
+            TT_UPLOAD_PREVIOUS_ERROR_TAG,
+            TT_UPLOAD_PREVIOUS_SUCCESS_TAG,
             UPLOAD_PREVIOUS_ERROR_TAG,
             UPLOAD_PREVIOUS_SUCCESS_TAG,
         )
@@ -13254,13 +13534,16 @@ class MainWindow(QWidget):
         pid = (profile_id or "").strip()
         if not pid:
             return
-        if for_instagram:
+        if for_tiktok:
+            success_tag = TT_UPLOAD_PREVIOUS_SUCCESS_TAG
+            error_tag = TT_UPLOAD_PREVIOUS_ERROR_TAG
+        elif for_instagram:
             success_tag = IG_UPLOAD_PREVIOUS_SUCCESS_TAG
             error_tag = IG_UPLOAD_PREVIOUS_ERROR_TAG
         else:
             success_tag = UPLOAD_PREVIOUS_SUCCESS_TAG
             error_tag = UPLOAD_PREVIOUS_ERROR_TAG
-        if not success:
+        if not success and exclude_session:
             self._exclude_profile_from_current_upload_session(
                 pid, reason=error_tag
             )

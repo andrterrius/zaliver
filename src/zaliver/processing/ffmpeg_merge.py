@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import contextvars
 import json
 import os
+from datetime import datetime, timedelta, timezone
 import random
 import re
 import shutil
@@ -698,6 +698,7 @@ def run_ffmpeg(
     exe = resolve_ffmpeg_executable()
     if not exe:
         raise RuntimeError("ffmpeg не найден")
+    args = _with_video_metadata(list(args))
     max_retries = max(0, int(resource_retries))
     total_attempts = max_retries + 1
     last_err: Optional[BaseException] = None
@@ -973,10 +974,141 @@ FILE_COMPRESSION_CHOICES: tuple[tuple[str, str, int, int], ...] = (
 )
 DEFAULT_FILE_COMPRESSION_ID = "none"
 
-_encode_quality: contextvars.ContextVar[tuple[int, int, int]] = contextvars.ContextVar(
-    "zaliver_encode_quality",
-    default=(1, 1, 100),
+VIDEO_METADATA_CHOICES: tuple[tuple[str, str], ...] = (
+    ("none", "Нет"),
+    ("rayban", "Ray-Ban"),
+    ("iphone", "iPhone"),
+    ("samsung", "Samsung"),
+    ("xiaomi", "Xiaomi"),
+    ("windows", "Windows"),
+    ("macos", "macOS"),
 )
+DEFAULT_VIDEO_METADATA_ID = "none"
+
+def _random_capture_time() -> str:
+    """Позавчера, вчера или сегодня, время случайное. Сегодня — не позже текущего момента."""
+    now = datetime.now().astimezone().replace(microsecond=0)
+    start = (now - timedelta(days=random.choice((0, 1, 2)))).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    if start.date() == now.date():
+        end = now
+    else:
+        end = start.replace(hour=23, minute=59, second=59)
+    span = int((end - start).total_seconds())
+    picked = start + timedelta(seconds=random.randint(0, max(0, span)))
+    if picked > now:
+        picked = now
+    utc = picked.astimezone(timezone.utc).replace(tzinfo=None)
+    return utc.strftime("%Y-%m-%dT%H:%M:%S+0000")
+
+
+class _VideoMetaTemplate:
+    """container mov → brand qt; mp4 → brand как у Android/Windows."""
+
+    def __init__(
+        self,
+        *,
+        container: str,
+        brand: str,
+        tags: tuple[tuple[str, str], ...],
+        video_handler: str,
+        audio_handler: str,
+    ) -> None:
+        self.container = container
+        self.brand = brand
+        self.tags = tags
+        self.video_handler = video_handler
+        self.audio_handler = audio_handler
+
+
+# Ключи сверены с тем, что ExifTool читает у реальных роликов:
+# iPhone/macOS/Ray-Ban — com.apple.quicktime.* и ftyp qt;
+# Samsung — author + Android 15 + smta-подобные ключи, ftyp mp42;
+# Xiaomi — com.android.manufacturer/model;
+# Windows Camera — mp42 без Apple-ключей, handler VideoHandler.
+_VIDEO_META_TEMPLATES: dict[str, _VideoMetaTemplate] = {
+    "rayban": _VideoMetaTemplate(
+        container="mov",
+        brand="qt",
+        video_handler="Core Media Video",
+        audio_handler="Core Media Audio",
+        tags=(
+            ("com.apple.quicktime.copyright", "Meta AI"),
+            (
+                "com.apple.quicktime.comment",
+                "app=Meta AI&device=Ray-Ban Meta Smart Glasses 2"
+                "&id=DA3B9696-741F-485F-A8F0-B80686FCD",
+            ),
+            ("com.apple.quicktime.model", "Ray-Ban Meta Smart Glasses 2"),
+            ("com.apple.quicktime.description", "4V0ZW25"),
+        ),
+    ),
+    "iphone": _VideoMetaTemplate(
+        container="mov",
+        brand="qt",
+        video_handler="Core Media Video",
+        audio_handler="Core Media Audio",
+        tags=(
+            ("com.apple.quicktime.make", "Apple"),
+            ("com.apple.quicktime.model", "iPhone 16 Pro"),
+            ("com.apple.quicktime.software", "18.6.2"),
+        ),
+    ),
+    "samsung": _VideoMetaTemplate(
+        container="mp4",
+        brand="mp42",
+        video_handler="VideoHandle",
+        audio_handler="SoundHandle",
+        tags=(
+            ("author", "Galaxy S24 Ultra"),
+            ("com.android.version", "15"),
+            ("com.android.manufacturer", "Samsung"),
+            ("com.android.model", "SM-S928B"),
+            ("com.android.capture.fps", "30"),
+            ("com.samsung.android.utc_offset", "+0300"),
+        ),
+    ),
+    "xiaomi": _VideoMetaTemplate(
+        container="mp4",
+        brand="mp42",
+        video_handler="VideoHandle",
+        audio_handler="SoundHandle",
+        tags=(
+            ("com.android.version", "15"),
+            ("com.android.manufacturer", "Xiaomi"),
+            ("com.android.model", "23127PN0CG"),
+            ("com.android.capture.fps", "30"),
+        ),
+    ),
+    "windows": _VideoMetaTemplate(
+        container="mp4",
+        brand="mp42",
+        video_handler="VideoHandler",
+        audio_handler="SoundHandler",
+        tags=(
+            ("software", "Windows Camera"),
+            ("comment", "Recorded with Windows Camera"),
+        ),
+    ),
+    "macos": _VideoMetaTemplate(
+        container="mov",
+        brand="qt",
+        video_handler="Core Media Video",
+        audio_handler="Core Media Audio",
+        tags=(
+            ("com.apple.quicktime.make", "Apple"),
+            ("com.apple.quicktime.model", "MacBook Pro"),
+            ("com.apple.quicktime.software", "macOS 15.6.1"),
+        ),
+    ),
+}
+
+_video_metadata_state: str = DEFAULT_VIDEO_METADATA_ID
+
+# Обычные переменные, не ContextVar: финальная склейка идёт в других потоках,
+# а ContextVar туда не копируется и настройки терялись.
+_encode_quality_state: tuple[int, int, int] = (1, 1, 100)
 
 
 def file_compression_quality(key: str | None) -> tuple[int, int, int]:
@@ -989,20 +1121,137 @@ def file_compression_quality(key: str | None) -> tuple[int, int, int]:
 
 
 def set_file_compression(key: str | None) -> tuple[int, int, int]:
+    global _encode_quality_state
     quality = file_compression_quality(key)
-    _encode_quality.set(quality)
+    _encode_quality_state = quality
     return quality
 
 
 def current_encode_quality() -> tuple[int, int, int]:
-    return _encode_quality.get()
+    return _encode_quality_state
 
 
 def apply_file_compression_from_options(options: dict | None) -> tuple[int, int, int]:
     raw = None
+    meta = None
     if isinstance(options, dict):
         raw = options.get("file_compression")
+        meta = options.get("video_metadata")
+    set_video_metadata(None if meta is None else str(meta))
     return set_file_compression(None if raw is None else str(raw))
+
+
+def set_video_metadata(key: str | None) -> str:
+    global _video_metadata_state
+    wanted = (key or DEFAULT_VIDEO_METADATA_ID).strip().lower()
+    if wanted not in {cid for cid, _label in VIDEO_METADATA_CHOICES}:
+        wanted = DEFAULT_VIDEO_METADATA_ID
+    _video_metadata_state = wanted
+    return wanted
+
+
+def video_metadata_output_args() -> list[str]:
+    """Аргументы ffmpeg перед именем выходного файла. Пусто, если метаданные выключены."""
+    template = _VIDEO_META_TEMPLATES.get(_video_metadata_state)
+    if template is None:
+        return []
+    created = _random_capture_time()
+    args = [
+        "-map_metadata",
+        "-1",
+        "-f",
+        template.container,
+        "-brand",
+        template.brand,
+        "-metadata",
+        f"creation_time={created}",
+    ]
+    for key, value in template.tags:
+        args.extend(["-metadata", f"{key}={value}"])
+    if template.container == "mov":
+        args.extend(["-metadata", f"com.apple.quicktime.creationdate={created}"])
+    args.extend(
+        [
+            "-metadata:s:v:0",
+            "language=und",
+            "-metadata:s:v:0",
+            f"handler_name={template.video_handler}",
+            "-metadata:s:a:0",
+            "language=und",
+            "-metadata:s:a:0",
+            f"handler_name={template.audio_handler}",
+        ]
+    )
+    return args
+
+
+def stamp_output_video_metadata(path: str, log: LogFn = None) -> None:
+    """Переписать уже готовый ролик контейнером и полями выбранного шаблона."""
+    if _video_metadata_state not in _VIDEO_META_TEMPLATES:
+        return
+    src = Path(path)
+    if not src.is_file():
+        return
+    tmp = src.with_name(f"{src.stem}._zaliver_meta{src.suffix}")
+    try:
+        if tmp.exists():
+            tmp.unlink()
+    except OSError:
+        pass
+    try:
+        run_ffmpeg(
+            [
+                "-i",
+                str(src),
+                "-map",
+                "0",
+                "-c",
+                "copy",
+                "-map_metadata:s",
+                "-1",
+                "-fflags",
+                "+bitexact",
+                "-movflags",
+                "+use_metadata_tags+faststart",
+                str(tmp),
+            ],
+            log=log,
+        )
+        tmp.replace(src)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _with_video_metadata(args: list[str]) -> list[str]:
+    extra = video_metadata_output_args()
+    if not extra or not args:
+        return args
+    out = args[-1]
+    if Path(out).suffix.lower() not in {".mp4", ".mov", ".m4v"}:
+        return args
+    merged: list[str] = []
+    saw_movflags = False
+    i = 0
+    while i < len(args) - 1:
+        if args[i] == "-movflags" and i + 1 < len(args) - 1:
+            val = args[i + 1]
+            if "use_metadata_tags" not in val:
+                val = f"{val}+use_metadata_tags"
+            merged.extend(["-movflags", val])
+            saw_movflags = True
+            i += 2
+            continue
+        merged.append(args[i])
+        i += 1
+    if not saw_movflags:
+        extra = ["-movflags", "+use_metadata_tags+faststart", *extra]
+    merged.extend(extra)
+    merged.append(out)
+    return merged
 
 
 def libx264_encode_args_for_target(

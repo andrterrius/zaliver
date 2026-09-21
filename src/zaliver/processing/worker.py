@@ -17,6 +17,8 @@ from zaliver.processing.ffmpeg_merge import (
     current_encode_quality,
     pick_best_h264_encoder,
     set_file_compression,
+    set_video_metadata,
+    video_metadata_output_args,
     resolve_ffmpeg_executable,
 )
 from zaliver.processing.ffmpeg_gpu import (
@@ -257,6 +259,8 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
     raw_compression = task.get("file_compression")
     if raw_compression is not None:
         set_file_compression(str(raw_compression))
+    if task.get("video_metadata") is not None:
+        set_video_metadata(str(task.get("video_metadata")))
     crf, gpu_cq, vt_q = current_encode_quality()
     enc, enc_args = pick_best_h264_encoder(
         prefer_gpu=use_gpu,
@@ -352,6 +356,12 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
             ]
             if emoji_argv:
                 cmd.append("-shortest")
+            meta_args = video_metadata_output_args()
+            if meta_args:
+                mov_idx = cmd.index("-movflags")
+                if "use_metadata_tags" not in cmd[mov_idx + 1]:
+                    cmd[mov_idx + 1] = f"{cmd[mov_idx + 1]}+use_metadata_tags"
+                cmd.extend(meta_args)
             cmd.append(part_path)
 
             try:

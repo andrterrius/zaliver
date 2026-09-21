@@ -187,6 +187,7 @@ def run_uniquify_lite(
 
     apply_file_compression_from_options(options)
     file_compression = str(options.get("file_compression") or "none")
+    video_metadata = str(options.get("video_metadata") or "none")
     log("uniquify_lite: без multiprocessing (стабильный Windows API).")
     ready_buf = buffer_from_options(options)
     if ready_buf is not None:
@@ -268,6 +269,7 @@ def run_uniquify_lite(
                 "fps": float(info.fps),
                 "use_gpu": use_gpu,
                 "file_compression": file_compression,
+                "video_metadata": video_metadata,
                 "target_video_bps": tvb,
                 "text_overlay": job_overlay,
                 "total_frames": int(info.frame_count),

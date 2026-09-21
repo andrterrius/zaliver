@@ -161,6 +161,7 @@ from zaliver.processing.ffmpeg_merge import (
     is_background_music_failure,
     merge_segments_with_source_audio,
     mux_video_audio,
+    stamp_output_video_metadata,
     mux_video_background_music,
     apply_file_compression_from_options,
     pick_best_h264_encoder,
@@ -411,6 +412,7 @@ def _run_whole_file_finalize(
                     av_tmp.replace(j.outp)
                 except OSError:
                     pass
+                stamp_output_video_metadata(str(j.outp), log=log)
                 finalize_ok = True
             finally:
                 try:
@@ -422,6 +424,7 @@ def _run_whole_file_finalize(
             try:
                 if video_only.is_file():
                     video_only.replace(j.outp)
+                    stamp_output_video_metadata(str(j.outp), log=log)
                     finalize_ok = True
             except OSError:
                 pass
@@ -538,6 +541,7 @@ def _run_chunked_finalize(
         else:
             _skip_job_finalize_error(j, e, log=log, n_jobs=n_jobs)
     if finalize_ok and not j.finalize_error:
+        stamp_output_video_metadata(str(j.outp), log=log)
         wd_path = j.chunk_work_dir
         if wd_path is not None:
             try:
@@ -707,6 +711,7 @@ class ProcessingService:
                 options
             )
             file_compression = str(options.get("file_compression") or "none")
+            video_metadata = str(options.get("video_metadata") or "none")
             copies_per_file = max(1, int(options.get("copies_per_file", 1)))
             plan: List[Tuple[Path, Path, VideoInfo, int, int, Optional[int]]] = []
             try:
@@ -1120,6 +1125,7 @@ class ProcessingService:
                         "use_gpu": use_gpu,
                         "target_video_bps": j.target_video_bps,
                         "file_compression": file_compression,
+                        "video_metadata": video_metadata,
                         "text_overlay": scaled_overlay(j),
                         "total_frames": int(j.info.frame_count),
                     }
@@ -1354,6 +1360,7 @@ class ProcessingService:
                                 "use_gpu": use_gpu,
                                 "target_video_bps": j.target_video_bps,
                                 "file_compression": file_compression,
+                        "video_metadata": video_metadata,
                                 "text_overlay": scaled_overlay,
                                 "total_frames": int(j.info.frame_count),
                             }
@@ -1373,6 +1380,7 @@ class ProcessingService:
                                 "use_gpu": use_gpu,
                                 "target_video_bps": j.target_video_bps,
                                 "file_compression": file_compression,
+                        "video_metadata": video_metadata,
                                 "text_overlay": scaled_overlay,
                                 "total_frames": int(j.info.frame_count),
                             }

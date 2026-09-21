@@ -28,6 +28,7 @@ from zaliver.processing.ffmpeg_merge import (
     current_encode_quality,
     pick_best_h264_encoder,
     run_ffmpeg,
+    stamp_output_video_metadata,
 )
 from zaliver.processing.ffmpeg_probe import (
     estimate_target_video_bps,
@@ -2786,6 +2787,10 @@ def generate_video_from_segment(
 
     # Очищаем
     shutil.rmtree(temp_dir, ignore_errors=True)
+    try:
+        stamp_output_video_metadata(output_video, log=log)
+    except Exception as e:
+        _log(f"    Метаданные не записались: {e}", log)
 
     return output_video
 

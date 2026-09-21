@@ -689,7 +689,10 @@ class SlicingTabPane(QWidget):
         self.text_overlay_from_middle.toggled.connect(self.save_settings)
         tp.addWidget(self.text_overlay_from_middle)
         self.text_overlay_edit = QPlainTextEdit()
-        self.text_overlay_edit.setPlaceholderText("Текст для наложения…")
+        self.text_overlay_edit.setPlaceholderText(
+            "Текст для наложения… Новая строка — Enter"
+        )
+        self.text_overlay_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.text_overlay_edit.setMaximumHeight(72)
         self.text_overlay_edit.textChanged.connect(self._on_text_overlay_edit_changed)
         btn_text_wand = make_magic_wand_button(

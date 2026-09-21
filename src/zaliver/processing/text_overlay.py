@@ -612,6 +612,17 @@ def line_pixel_width(
     return int(last_x + fm.horizontalAdvance(last_ch))
 
 
+def explicit_text_lines(text: str) -> List[str]:
+    """Строки только по Enter. Длинная строка не переносится по ширине кадра."""
+    raw = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not raw:
+        return []
+    out = [paragraph.strip() for paragraph in raw.split("\n")]
+    while out and out[-1] == "":
+        out.pop()
+    return out
+
+
 def wrap_text_lines(
     text: str,
     font_size: int,
@@ -621,31 +632,8 @@ def wrap_text_lines(
     *,
     bold: bool = True,
 ) -> List[str]:
-    raw = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not raw:
-        return []
-    max_w = max(20, int(max_width_px))
-    out: list[str] = []
-    for paragraph in raw.split("\n"):
-        p = paragraph.strip()
-        if not p:
-            out.append("")
-            continue
-        words = p.split()
-        if not words:
-            continue
-        line = words[0]
-        for word in words[1:]:
-            trial = f"{line} {word}"
-            if line_pixel_width(trial, font_size, font_path, letter_spacing, bold=bold) <= max_w:
-                line = trial
-            else:
-                out.append(line)
-                line = word
-        out.append(line)
-    while out and out[-1] == "":
-        out.pop()
-    return out
+    del font_size, max_width_px, font_path, letter_spacing, bold
+    return explicit_text_lines(text)
 
 
 def measure_text_block(
@@ -854,36 +842,8 @@ def approx_wrap_text_lines(
     *,
     bold: bool = True,
 ) -> List[str]:
-    raw = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not raw:
-        return []
-    max_w = max(20, int(max_width_px))
-    out: list[str] = []
-    for paragraph in raw.split("\n"):
-        p = paragraph.strip()
-        if not p:
-            out.append("")
-            continue
-        words = p.split()
-        if not words:
-            continue
-        line = words[0]
-        for word in words[1:]:
-            trial = f"{line} {word}"
-            if (
-                approx_line_pixel_width(
-                    trial, font_size, letter_spacing, font_path, bold=bold
-                )
-                <= max_w
-            ):
-                line = trial
-            else:
-                out.append(line)
-                line = word
-        out.append(line)
-    while out and out[-1] == "":
-        out.pop()
-    return out
+    del font_size, max_width_px, letter_spacing, font_path, bold
+    return explicit_text_lines(text)
 
 
 def compute_scaled_overlay_approx(
@@ -943,8 +903,7 @@ def compute_scaled_overlay_approx(
     cy = settings.anchor_y * vh
     x = int(round(cx - block_w / 2))
     y = int(round(cy - block_h / 2))
-    x = max(0, min(x, max(0, vw - block_w)))
-    y = max(0, min(y, max(0, vh - block_h)))
+    x, y = _place_overlay_origin(x, y, block_w, block_h, vw, vh)
     return ScaledTextOverlay(
         lines=lines,
         x=x,
@@ -1000,9 +959,7 @@ def compute_scaled_overlay(
     ref_w, ref_h = settings.reference_size()
     font_bold = bool(settings.font_bold)
     font_path = effective_font_path(settings.custom_font_path, bold=font_bold)
-    # Перенос — как в предпросмотре (референс 9:16/16:9 + font_size из UI).
-    # Иначе при другом аспекте исходника шрифт масштабируется по высоте, а
-    # max_width по ширине кадра → лишние переносы на финале.
+    # Перенос только по Enter в тексте, не по ширине кадра.
     max_w_ref = max(20, int(round(settings.max_width_frac * ref_w)))
     lines = wrap_text_lines(
         text,
@@ -1034,8 +991,7 @@ def compute_scaled_overlay(
     cy = settings.anchor_y * vh
     x = int(round(cx - block_w / 2))
     y = int(round(cy - block_h / 2))
-    x = max(0, min(x, max(0, vw - block_w)))
-    y = max(0, min(y, max(0, vh - block_h)))
+    x, y = _place_overlay_origin(x, y, block_w, block_h, vw, vh)
     return ScaledTextOverlay(
         lines=lines,
         x=x,
@@ -1055,6 +1011,18 @@ def compute_scaled_overlay(
         from_middle=bool(settings.from_middle),
         enable_after_sec=None,
     )
+
+
+def _place_overlay_origin(
+    x: int, y: int, block_w: int, block_h: int, vw: int, vh: int
+) -> Tuple[int, int]:
+    """Держит блок в кадре, пока он помещается. Если шире или выше — остаётся на якоре и вылезает за край."""
+    if block_w <= vw:
+        x = max(0, min(int(x), vw - int(block_w)))
+    if block_h <= vh:
+        y = max(0, min(int(y), vh - int(block_h)))
+    return int(x), int(y)
+
 
 def _ffmpeg_escape_path(path: str) -> str:
     return path.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")

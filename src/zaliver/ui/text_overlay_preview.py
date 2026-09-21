@@ -277,6 +277,7 @@ class TextOverlayPreviewWidget(QWidget):
         self._anim_frame = 0
         self._bg_video_path: str | None = None
         self._bg_pixmap: QPixmap | None = None
+        self._aspect_key: float | None = None
         self._text_visible = True
         self._playing = False
         self._play_worker: _PreviewVideoWorker | None = None
@@ -356,6 +357,7 @@ class TextOverlayPreviewWidget(QWidget):
             self.playbackChanged.emit(False)
         if restore_still and self._bg_video_path:
             self._bg_pixmap = load_video_frame_pixmap(self._bg_video_path)
+            self._note_content_aspect()
             self.update()
         if self._text_visible:
             self._start_animation()
@@ -373,6 +375,7 @@ class TextOverlayPreviewWidget(QWidget):
         if img.isNull():
             return
         self._bg_pixmap = QPixmap.fromImage(img.copy())
+        self._note_content_aspect()
         self._anim_frame += 1
         self.update()
 
@@ -438,6 +441,7 @@ class TextOverlayPreviewWidget(QWidget):
                 return
             self._bg_video_path = None
             self._bg_pixmap = None
+            self._note_content_aspect()
             self._sync_play_button()
             self.update()
             return
@@ -462,6 +466,7 @@ class TextOverlayPreviewWidget(QWidget):
         self._sync_play_button()
         self.update()
         self._bg_pixmap = load_video_frame_pixmap(resolved)
+        self._note_content_aspect()
         self.update()
 
     def _on_anim_tick(self) -> None:
@@ -572,11 +577,29 @@ class TextOverlayPreviewWidget(QWidget):
             return REF_HORIZONTAL
         return REF_VERTICAL
 
+    def _content_aspect(self) -> float:
+        """Пропорции исходного кадра. Без ролика — референс 9:16 или 16:9."""
+        bg = self._bg_pixmap
+        if bg is not None and not bg.isNull() and bg.width() > 0 and bg.height() > 0:
+            return bg.width() / float(bg.height())
+        ref_w, ref_h = self._ref_size()
+        if ref_h <= 0:
+            return 9.0 / 16.0
+        return ref_w / float(ref_h)
+
+    def _note_content_aspect(self) -> None:
+        key = round(self._content_aspect(), 4)
+        if key == self._aspect_key:
+            return
+        self._aspect_key = key
+        self._relayout()
+
     def _frame_geometry(self) -> tuple[float, float, float, float]:
         w = max(40.0, float(self.width()) - 16.0)
         h = max(40.0, float(self.height()) - 16.0)
-        ref_w, ref_h = self._ref_size()
-        aspect = ref_w / ref_h
+        aspect = self._content_aspect()
+        if aspect <= 0:
+            aspect = 9.0 / 16.0
         if w / h > aspect:
             fh = h
             fw = fh * aspect
@@ -592,7 +615,10 @@ class TextOverlayPreviewWidget(QWidget):
         max_w = max(20, int(round(self._max_width_frac * ref_w)))
         self._font_path = effective_font_path(self._custom_font_path, bold=self._font_bold)
         _, _, fw, fh = self._frame_geometry()
-        scale = fh / self._ref_size()[1] if fh > 0 else 1.0
+        # Тот же коэффициент, что у наложения: font * (video_h / ref_h),
+        # а кадр превью — это video, уменьшенный до fh. Итог: font * fh / ref_h.
+        ref_h = self._ref_size()[1]
+        scale = fh / ref_h if fh > 0 and ref_h > 0 else 1.0
         self._lines = wrap_text_lines(
             self._text,
             self._font_size,
@@ -694,7 +720,7 @@ class TextOverlayPreviewWidget(QWidget):
             scaled = bg.scaled(
                 max(1, int(round(fw))),
                 max(1, int(round(fh))),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
             px = fx + (fw - scaled.width()) / 2.0

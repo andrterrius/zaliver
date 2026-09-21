@@ -1884,24 +1884,50 @@ def _read_caption_text(area) -> str:
         return ""
 
 
-def _type_caption_via_keyboard(page, area, text: str) -> None:
-    """
-    Ввод подписи как у пользователя: Enter между строками.
-    Поле должно быть уже пустым. Пустые строки — braille blank (U+2800).
-    """
-    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+def _focus_caption_without_scroll(area) -> None:
+    area.evaluate(
+        """(el) => {
+            try { el.focus({ preventScroll: true }); }
+            catch (_) { try { el.focus(); } catch (__) {} }
+        }"""
+    )
+
+
+def _paste_caption_text(page, area, text: str) -> None:
+    """Вставить описание целиком, без посимвольного тайпинга (он скроллит Studio)."""
+    _focus_caption_without_scroll(area)
     try:
-        _dom_click(area)
+        page.wait_for_timeout(40)
     except Exception:
-        area.click(timeout=8_000)
-    page.wait_for_timeout(40)
-    for i, line in enumerate(lines):
-        if i > 0:
-            page.keyboard.press("Enter")
-            page.wait_for_timeout(20)
-        chunk = line if line else BLANK_LINE_BRAILLE
-        page.keyboard.type(chunk, delay=0)
-        page.wait_for_timeout(10)
+        time.sleep(0.04)
+    try:
+        area.evaluate(
+            """(el, value) => {
+                try { el.focus({ preventScroll: true }); } catch (_) { el.focus(); }
+                let dt = null;
+                try { dt = new DataTransfer(); dt.setData('text/plain', value); } catch (_) {}
+                let ev;
+                try {
+                    ev = new ClipboardEvent('paste', {
+                        bubbles: true,
+                        cancelable: true,
+                        clipboardData: dt || undefined,
+                    });
+                } catch (_) {
+                    ev = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
+                }
+                if (dt && !ev.clipboardData) {
+                    try { Object.defineProperty(ev, 'clipboardData', { value: dt }); } catch (__) {}
+                }
+                el.dispatchEvent(ev);
+            }""",
+            text,
+        )
+    except Exception:
+        pass
+    if _caption_field_is_empty(_read_caption_text(area)):
+        _focus_caption_without_scroll(area)
+        page.keyboard.insert_text(text)
 
 
 def _caption_gaps_preserved(wanted: str, got: str) -> bool:
@@ -2124,52 +2150,34 @@ def _fill_caption(
             return False
         if _ok(_read_caption_text(area)):
             return True
-        _log("TikToks upload: поле описания пустое — пишем нужный текст.")
+        _log("TikToks upload: поле описания пустое — вставляем текст целиком.")
 
-        gaps = blank_line_gap_count(text)
-        if gaps:
-            _log(
-                f"TikToks upload: в описании {gaps} пустых строк — "
-                "ввод через клавиатуру (Enter + U+2800)."
-            )
-
-        # 1) Как в YouTube Studio: клик → ввод в пустое поле.
-        try:
-            _type_caption_via_keyboard(page, area, text)
-            page.wait_for_timeout(200)
-            got = _read_caption_text(area)
-            if _ok(got):
-                _log(
-                    f"TikToks upload: описание задано через клавиатуру "
-                    f"({len(text)} символов, пустых строк={gaps})."
-                )
-                return True
-            _log(
-                "TikToks upload: после клавиатуры описание не совпало "
-                f"(got={got!r}) — очищаем и повтор."
-            )
-        except Exception as e:
-            _log(f"TikToks upload: клавиатурный ввод описания не удался: {e!r}")
-
-        # 2) Повтор клавиатуры ещё раз (иногда редактор «съедает» первый Enter).
-        try:
+        def _try_paste() -> bool:
             if not _ready_empty_to_write():
                 return False
             if _ok(_read_caption_text(area)):
                 return True
-            _type_caption_via_keyboard(page, area, text)
-            page.wait_for_timeout(250)
+            _paste_caption_text(page, area, text)
+            page.wait_for_timeout(200)
             got = _read_caption_text(area)
             if _ok(got):
                 _log(
-                    f"TikToks upload: описание задано через клавиатуру (повтор, "
-                    f"{len(text)} символов)."
+                    f"TikToks upload: описание вставлено целиком "
+                    f"({len(text)} символов)."
                 )
                 return True
-        except Exception as e:
-            _log(f"TikToks upload: повтор клавиатуры: {e!r}")
+            _log(
+                "TikToks upload: после вставки описание не совпало "
+                f"(got={got!r})."
+            )
+            return False
 
-        # 3) JS fallback (textarea / когда keyboard недоступен).
+        try:
+            if _try_paste():
+                return True
+        except Exception as e:
+            _log(f"TikToks upload: вставка описания не удалась: {e!r}")
+
         try:
             if not _ready_empty_to_write():
                 return False
@@ -2179,101 +2187,14 @@ def _fill_caption(
             page.wait_for_timeout(200)
             got = _read_caption_text(area)
             if _ok(got):
-                _log(f"TikToks upload: описание задано через JS ({len(text)} символов).")
-                return True
-            _log(
-                "TikToks upload: JS-описание не совпало "
-                f"(got={got!r})."
-            )
-        except Exception as e:
-            _log(f"TikToks upload: JS-ввод описания не удался: {e!r}")
-
-        try:
-            if not _ready_empty_to_write():
-                return False
-            if _ok(_read_caption_text(area)):
-                return True
-            area.fill(text, timeout=16_000)
-            page.wait_for_timeout(300)
-            got = _read_caption_text(area)
-            if _ok(got):
                 _log(
-                    f"TikToks upload: описание задано через fill "
+                    f"TikToks upload: описание вставлено через JS "
                     f"({len(text)} символов)."
                 )
                 return True
-            _log(f"TikToks upload: fill-описание не совпало (got={got!r}).")
+            _log(f"TikToks upload: JS-описание не совпало (got={got!r}).")
         except Exception as e:
-            _log(f"TikToks upload: не удалось ввести описание: {e!r}")
-        return False
-
-        gaps = blank_line_gap_count(text)
-        if gaps:
-            _log(
-                f"TikToks upload: в описании {gaps} пустых строк — "
-                "ввод через клавиатуру (Enter + U+2800)."
-            )
-
-        # 1) Как в YouTube Studio: клик → Control+A → Backspace → ввод.
-        try:
-            _type_caption_via_keyboard(page, area, text)
-            page.wait_for_timeout(200)
-            got = _read_caption_text(area)
-            if _ok(got):
-                _log(
-                    f"TikToks upload: описание задано через клавиатуру "
-                    f"({len(text)} символов, пустых строк={gaps})."
-                )
-                return True
-            _log(
-                "TikToks upload: после клавиатуры описание не совпало "
-                f"(got={got!r}) — повтор / JS."
-            )
-        except Exception as e:
-            _log(f"TikToks upload: клавиатурный ввод описания не удался: {e!r}")
-
-        # 2) Повтор клавиатуры ещё раз (иногда редактор «съедает» первый Enter).
-        try:
-            _type_caption_via_keyboard(page, area, text)
-            page.wait_for_timeout(250)
-            got = _read_caption_text(area)
-            if _ok(got):
-                _log(
-                    f"TikToks upload: описание задано через клавиатуру (повтор, "
-                    f"{len(text)} символов)."
-                )
-                return True
-        except Exception as e:
-            _log(f"TikToks upload: повтор клавиатуры: {e!r}")
-
-        # 3) JS fallback (textarea / когда keyboard недоступен).
-        try:
-            _js_set_caption(area, text)
-            page.wait_for_timeout(200)
-            got = _read_caption_text(area)
-            if _ok(got):
-                _log(f"TikToks upload: описание задано через JS ({len(text)} символов).")
-                return True
-            _log(
-                "TikToks upload: JS-описание не совпало "
-                f"(got={got!r})."
-            )
-        except Exception as e:
-            _log(f"TikToks upload: JS-ввод описания не удался: {e!r}")
-
-        try:
-            area.fill(text, timeout=16_000)
-            page.wait_for_timeout(300)
-            got = _read_caption_text(area)
-            if _ok(got):
-                _log(
-                    f"TikToks upload: описание задано через fill "
-                    f"({len(text)} символов)."
-                )
-                return True
-            _log(f"TikToks upload: fill-описание не совпало (got={got!r}).")
-        except Exception as e:
-            _log(f"TikToks upload: не удалось ввести описание: {e!r}")
+            _log(f"TikToks upload: JS-вставка описания не удалась: {e!r}")
         return False
     except Exception as e:
         _log(f"TikToks upload: не удалось ввести описание: {e!r}")

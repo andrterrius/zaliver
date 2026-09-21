@@ -20,7 +20,7 @@ def _normalize_sar_block() -> str:
 def _final_scale_block(w_out: int, h_out: int) -> str:
     """Финальный кадр без растягивания + явный SAR 1:1 для плееров."""
     return (
-        f"scale={w_out}:{h_out}:force_original_aspect_ratio=decrease:flags=bilinear,"
+        f"scale={w_out}:{h_out}:force_original_aspect_ratio=decrease:flags=lanczos,"
         f"pad={w_out}:{h_out}:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
     )
 
@@ -28,7 +28,7 @@ def _final_scale_block(w_out: int, h_out: int) -> str:
 def _fit_scale_pad(w: int, h: int) -> str:
     """Fit into w×h without stretching; letterbox/pillarbox with black if needed."""
     return (
-        f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=bilinear,"
+        f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos,"
         f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black"
     )
 
@@ -39,7 +39,7 @@ def _scale_pct_block(w: int, h: int, scale_pct: float) -> str:
         return ""
     nw = max(2, _even_dim(int(round(w * f))))
     nh = max(2, _even_dim(int(round(h * f))))
-    sc = f"scale={nw}:{nh}:flags=bilinear"
+    sc = f"scale={nw}:{nh}:flags=lanczos"
     if nw >= w and nh >= h:
         x0 = max(0, (nw - w) // 2)
         y0 = max(0, (nh - h) // 2)

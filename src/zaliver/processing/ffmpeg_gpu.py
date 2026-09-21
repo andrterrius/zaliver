@@ -87,8 +87,8 @@ def _scale_pct_cuda(w: int, h: int, scale_pct: float) -> Tuple[str, bool]:
     if nw >= w and nh >= h:
         x0 = max(0, (nw - w) // 2)
         y0 = max(0, (nh - h) // 2)
-        return f"scale_cuda={nw}:{nh},crop={w}:{h}:{x0}:{y0}", False
-    return f"scale_cuda={nw}:{nh}", True
+        return f"scale_cuda={nw}:{nh}:interp_algo=lanczos,crop={w}:{h}:{x0}:{y0}", False
+    return f"scale_cuda={nw}:{nh}:interp_algo=lanczos", True
 
 
 def _scale_pct_qsv(w: int, h: int, scale_pct: float) -> Tuple[str, bool]:

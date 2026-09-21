@@ -24,8 +24,16 @@ from zaliver.processing.ffmpeg_gpu import (
     is_gpu_filter_fallback_error,
     resolve_gpu_pipeline,
 )
-from zaliver.processing.ffmpeg_merge import pick_best_h264_encoder, run_ffmpeg
-from zaliver.processing.ffmpeg_probe import ffprobe_json, probe_media_duration_seconds
+from zaliver.processing.ffmpeg_merge import (
+    current_encode_quality,
+    pick_best_h264_encoder,
+    run_ffmpeg,
+)
+from zaliver.processing.ffmpeg_probe import (
+    estimate_target_video_bps,
+    ffprobe_json,
+    probe_media_duration_seconds,
+)
 from zaliver.processing.text_overlay import (
     ScaledTextOverlay,
     TextOverlaySettings,
@@ -49,9 +57,9 @@ DEFAULT_SLICE_FPS = 30
 DEFAULT_SLICE_FPS_MODE = "30"
 SLICE_SCENE_BATCH_SIZE = 5
 SLICE_GPU_MAX_CONCURRENT_BATCHES = 2
-SLICE_ENCODE_CRF = 16
-SLICE_ENCODE_GPU_CQ = 19
-SLICE_ENCODE_VIDEOTOOLBOX_Q = 75
+SLICE_ENCODE_CRF = 1
+SLICE_ENCODE_GPU_CQ = 1
+SLICE_ENCODE_VIDEOTOOLBOX_Q = 100
 
 
 def _popen_flags() -> int:
@@ -1106,7 +1114,7 @@ def _scene_input_args(
 def _cpu_scale_pad_chain(width: int, height: int) -> str:
     pad = f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
     return (
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
         f"{pad},setsar=1,format=yuv420p"
     )
 
@@ -1137,7 +1145,7 @@ def _scene_filter_chain(
         )
     if gpu_pipeline.name == "cuda":
         return (
-            f"[{input_index}:v]scale_cuda={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"[{input_index}:v]scale_cuda={width}:{height}:force_original_aspect_ratio=decrease:interp_algo=lanczos,"
             f"hwdownload,format=nv12,fps={fps},"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,"
             f"{tail}"
@@ -1310,6 +1318,21 @@ def _encode_args_for_scenes(
     return input_args, [filter_complex], total_frames, global_hw
 
 
+def _bitrate_from_clips(scene_clips: list[dict]) -> Optional[int]:
+    """Highest probed video bitrate among the clips used in this render."""
+    best: Optional[int] = None
+    seen: set[str] = set()
+    for frag in scene_clips:
+        path = str(frag.get("path") or "")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        bps = estimate_target_video_bps(path)
+        if bps and (best is None or bps > best):
+            best = int(bps)
+    return best
+
+
 def _run_scene_encode(
     input_args: list[str],
     filter_parts: list[str],
@@ -1319,13 +1342,12 @@ def _run_scene_encode(
     fps: int | float,
     prefer_gpu: bool,
     global_hw_args: list[str] | None = None,
+    target_video_bps: Optional[int] = None,
     log: Optional[LogCallback] = None,
 ) -> None:
     enc, enc_args = pick_best_h264_encoder(
         prefer_gpu=bool(prefer_gpu),
-        crf=SLICE_ENCODE_CRF,
-        gpu_cq=SLICE_ENCODE_GPU_CQ,
-        videotoolbox_q=SLICE_ENCODE_VIDEOTOOLBOX_Q,
+        target_video_bps=target_video_bps,
     )
     tail = [
         '-map', '[outv]',
@@ -1372,10 +1394,8 @@ def _render_with_gpu_fallback(
 ) -> None:
     enc, _ = pick_best_h264_encoder(
         prefer_gpu=bool(prefer_gpu),
-        crf=SLICE_ENCODE_CRF,
-        gpu_cq=SLICE_ENCODE_GPU_CQ,
-        videotoolbox_q=SLICE_ENCODE_VIDEOTOOLBOX_Q,
     )
+    source_bps = _bitrate_from_clips(scene_clips)
     pipelines: list[GpuPipeline | None] = []
     if prefer_gpu:
         pipe = resolve_gpu_pipeline(prefer_gpu=True, encoder=enc)
@@ -1407,9 +1427,11 @@ def _render_with_gpu_fallback(
             )
             if log is not None:
                 where = "GPU" if pipeline is not None else "CPU"
+                q_crf, q_cq, _q_vt = current_encode_quality()
+                rate_note = f", CQ {q_cq}" if pipeline is not None else f", CRF {q_crf}"
                 _log(
                     f"    Кодирование ffmpeg ({enc}, {where}, "
-                    f"~{dur_est:.1f}с видео, {total_frames} кадров)… "
+                    f"~{dur_est:.1f}с видео, {total_frames} кадров{rate_note})… "
                     f"на слабом CPU может занять несколько минут — "
                     f"лог будет обновляться, пока идёт encode.",
                     log,
@@ -1422,6 +1444,7 @@ def _render_with_gpu_fallback(
                 fps=fps,
                 prefer_gpu=prefer_gpu,
                 global_hw_args=global_hw,
+                target_video_bps=source_bps,
                 log=log,
             )
             return

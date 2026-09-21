@@ -9,12 +9,11 @@ from pathlib import Path
 from typing import Optional
 
 from zaliver.processing.ffmpeg_merge import pick_best_h264_encoder, run_ffmpeg
-from zaliver.processing.slicing import (
-    SLICE_ENCODE_CRF,
-    SLICE_ENCODE_GPU_CQ,
-    SLICE_ENCODE_VIDEOTOOLBOX_Q,
+from zaliver.processing.ffmpeg_probe import (
+    estimate_target_video_bps,
+    probe_media_duration_seconds,
+    probe_video_stream,
 )
-from zaliver.processing.ffmpeg_probe import probe_media_duration_seconds, probe_video_stream
 from zaliver.processing.text_overlay import ScaledTextOverlay, build_text_overlay_filters
 from zaliver.processing.worker import _filter_complex_argv
 
@@ -60,9 +59,7 @@ def apply_text_overlay_to_video(
     tmp = out_p.with_name(f"{out_p.stem}._zaliver_overlay{out_p.suffix}")
     enc, enc_args = pick_best_h264_encoder(
         prefer_gpu=bool(prefer_gpu),
-        crf=SLICE_ENCODE_CRF,
-        gpu_cq=SLICE_ENCODE_GPU_CQ,
-        videotoolbox_q=SLICE_ENCODE_VIDEOTOOLBOX_Q,
+        target_video_bps=estimate_target_video_bps(input_path),
     )
     filter_script: Path | None = None
     try:

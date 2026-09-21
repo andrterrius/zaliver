@@ -118,7 +118,7 @@ class UniquifyJobRequest(BaseModel):
     saturation_enabled: bool = True
     crop_jitter_enabled: bool = False
     scale_enabled: bool = True
-    noise_enabled: bool = True
+    noise_enabled: bool = False
     seed_enabled: bool = False
     playback_speed_enabled: bool = True
     audio_chorus_enabled: bool = False

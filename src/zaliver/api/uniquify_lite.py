@@ -17,6 +17,7 @@ from typing import Any, Callable, Optional
 
 from zaliver.processing.chunking import probe_video
 from zaliver.processing.ffmpeg_merge import (
+    apply_file_compression_from_options,
     ffmpeg_drawtext_missing_user_message,
     ffmpeg_has_drawtext,
     mux_video_audio,
@@ -184,6 +185,8 @@ def run_uniquify_lite(
     if text_overlay_enabled and not ffmpeg_has_drawtext():
         return False, ffmpeg_drawtext_missing_user_message()
 
+    apply_file_compression_from_options(options)
+    file_compression = str(options.get("file_compression") or "none")
     log("uniquify_lite: без multiprocessing (стабильный Windows API).")
     ready_buf = buffer_from_options(options)
     if ready_buf is not None:
@@ -264,6 +267,7 @@ def run_uniquify_lite(
                 "height": int(info.height),
                 "fps": float(info.fps),
                 "use_gpu": use_gpu,
+                "file_compression": file_compression,
                 "target_video_bps": tvb,
                 "text_overlay": job_overlay,
                 "total_frames": int(info.frame_count),

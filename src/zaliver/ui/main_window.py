@@ -206,6 +206,8 @@ from zaliver.title_variables import (
 )
 
 from zaliver.processing.ffmpeg_merge import (
+    DEFAULT_FILE_COMPRESSION_ID,
+    FILE_COMPRESSION_CHOICES,
     MACOS_BREW_FFMPEG_FORMULA,
     check_ffmpeg_tools,
     macos_ffmpeg_needs_full_install,
@@ -1567,6 +1569,9 @@ class MainWindow(QWidget):
         self.fx_noise_enabled = _fx_enable(
             "Применять шум. Выкл. — без шума."
         )
+        self.fx_noise_enabled.blockSignals(True)
+        self.fx_noise_enabled.setChecked(False)
+        self.fx_noise_enabled.blockSignals(False)
         self.audio_speed = _fx_enable(
             "Применять скорость видео+аудио. Выкл. — скорость 1.0×."
         )
@@ -2584,6 +2589,37 @@ class MainWindow(QWidget):
         gp.addWidget(self.use_gpu_finalize, 3, 0, 1, 2)
         gp.addWidget(gpu_hint, 4, 0, 1, 2)
 
+        self.file_compression = QComboBox()
+        for cid, label, _crf, _vt in FILE_COMPRESSION_CHOICES:
+            self.file_compression.addItem(label, cid)
+        saved_compression = str(
+            self._settings.value(
+                "encode/file_compression",
+                DEFAULT_FILE_COMPRESSION_ID,
+                type=str,
+            )
+            or DEFAULT_FILE_COMPRESSION_ID
+        )
+        compression_idx = self.file_compression.findData(saved_compression)
+        self.file_compression.setCurrentIndex(
+            compression_idx if compression_idx >= 0 else 0
+        )
+        self.file_compression.setToolTip(
+            "Степень сжатия выходного видео. «Без сжатия» — CRF 1."
+        )
+        self.file_compression.currentIndexChanged.connect(
+            lambda *_: self._save_folder_settings()
+        )
+        compression_hint = QLabel(
+            "Для уникализации, нарезки и склейки этой платформы. "
+            "Меньше сжатие — больше файл."
+        )
+        compression_hint.setObjectName("hint")
+        compression_hint.setWordWrap(True)
+        gp.addWidget(QLabel("Сжатие файла:"), 5, 0)
+        gp.addWidget(self.file_compression, 5, 1)
+        gp.addWidget(compression_hint, 6, 0, 1, 2)
+
         self.slice_fps_mode = QComboBox()
         self.slice_fps_mode.addItem("30 fps", "30")
         self.slice_fps_mode.addItem("60 fps", "60")
@@ -2607,9 +2643,9 @@ class MainWindow(QWidget):
         )
         fps_hint.setObjectName("hint")
         fps_hint.setWordWrap(True)
-        gp.addWidget(QLabel("FPS нарезки:"), 5, 0)
-        gp.addWidget(self.slice_fps_mode, 5, 1)
-        gp.addWidget(fps_hint, 6, 0, 1, 2)
+        gp.addWidget(QLabel("FPS нарезки:"), 7, 0)
+        gp.addWidget(self.slice_fps_mode, 7, 1)
+        gp.addWidget(fps_hint, 8, 0, 1, 2)
 
         self.thread_slider = SmoothSlider(Qt.Orientation.Horizontal)
         self.thread_slider.setMinimum(1)
@@ -2619,7 +2655,7 @@ class MainWindow(QWidget):
         self.thread_label = QLabel()
         self._update_thread_label(self.thread_slider.value())
         self.thread_slider.valueChanged.connect(self._update_thread_label)
-        gp.addWidget(QLabel("Потоков процессов:"), 7, 0, Qt.AlignmentFlag.AlignVCenter)
+        gp.addWidget(QLabel("Потоков процессов:"), 9, 0, Qt.AlignmentFlag.AlignVCenter)
         thr_row = QHBoxLayout()
         thr_row.setSpacing(8)
         thr_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
@@ -2627,7 +2663,7 @@ class MainWindow(QWidget):
         thr_row.addWidget(self.thread_label, 0, Qt.AlignmentFlag.AlignVCenter)
         w_thr = QWidget()
         w_thr.setLayout(thr_row)
-        gp.addWidget(w_thr, 7, 1, Qt.AlignmentFlag.AlignVCenter)
+        gp.addWidget(w_thr, 9, 1, Qt.AlignmentFlag.AlignVCenter)
 
         settings_l.addWidget(settings_title)
         settings_l.addWidget(settings_hint)
@@ -5096,17 +5132,22 @@ class MainWindow(QWidget):
         if not hasattr(self, "fx_brightness_enabled"):
             return
         pairs = [
-            ("fx_brightness_enabled", self.fx_brightness_enabled),
-            ("fx_contrast_enabled", self.fx_contrast_enabled),
-            ("fx_saturation_enabled", self.fx_saturation_enabled),
-            ("fx_scale_enabled", self.fx_scale_enabled),
-            ("fx_noise_enabled", self.fx_noise_enabled),
-            ("playback_speed_enabled", self.audio_speed),
+            ("fx_brightness_enabled", self.fx_brightness_enabled, True),
+            ("fx_contrast_enabled", self.fx_contrast_enabled, True),
+            ("fx_saturation_enabled", self.fx_saturation_enabled, True),
+            ("fx_scale_enabled", self.fx_scale_enabled, True),
+            ("fx_noise_enabled", self.fx_noise_enabled, False),
+            ("playback_speed_enabled", self.audio_speed, True),
         ]
         self._fx_loading = True
         try:
-            for key, cb in pairs:
-                cb.setChecked(bool(self._settings.value(key, True, type=bool)))
+            # Раньше шум включался сам и записывался в настройки. Один раз выключаем.
+            if not bool(self._settings.value("fx_noise_default_off", False, type=bool)):
+                self.fx_noise_enabled.setChecked(False)
+                self._settings.setValue("fx_noise_enabled", False)
+                self._settings.setValue("fx_noise_default_off", True)
+            for key, cb, default in pairs:
+                cb.setChecked(bool(self._settings.value(key, default, type=bool)))
         finally:
             self._fx_loading = False
         self._sync_fx_enable_slider_states()
@@ -5128,6 +5169,14 @@ class MainWindow(QWidget):
         if hasattr(self, "use_gpu_finalize"):
             self._settings.setValue(
                 "use_gpu_finalize_enabled", bool(self.use_gpu_finalize.isChecked())
+            )
+        if hasattr(self, "file_compression"):
+            self._settings.setValue(
+                "encode/file_compression",
+                str(
+                    self.file_compression.currentData()
+                    or DEFAULT_FILE_COMPRESSION_ID
+                ),
             )
         if hasattr(self, "slice_fps_mode"):
             self._settings.setValue(
@@ -11119,7 +11168,7 @@ class MainWindow(QWidget):
 
     def _sync_fx_enable_slider_states(self) -> None:
         """Галочки всегда активны; слайдеры — по включению эффекта."""
-        if not hasattr(self, "fx_brightness_enabled"):
+        if not hasattr(self, "fx_brightness_enabled") or not hasattr(self, "rb_noise"):
             return
         pairs = [
             (self.fx_brightness_enabled, self.rb_brightness),
@@ -11140,6 +11189,9 @@ class MainWindow(QWidget):
             "num_workers": int(self.thread_slider.value()),
             "use_gpu": bool(self.use_gpu.isChecked()),
             "use_gpu_finalize": bool(self.use_gpu_finalize.isChecked()),
+            "file_compression": str(
+                self.file_compression.currentData() or DEFAULT_FILE_COMPRESSION_ID
+            ),
         }
         if for_slicing:
             out["slice_fps_mode"] = str(

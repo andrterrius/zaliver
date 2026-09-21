@@ -14,7 +14,9 @@ from typing import Any, Dict, Optional
 from zaliver.processing.fd_limit import raise_fd_limit_soft
 from zaliver.processing.ffmpeg_merge import (
     libx264_encode_args_for_target,
+    current_encode_quality,
     pick_best_h264_encoder,
+    set_file_compression,
     resolve_ffmpeg_executable,
 )
 from zaliver.processing.ffmpeg_gpu import (
@@ -252,8 +254,16 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
             tb_i = None
     if tb_i is not None and tb_i <= 0:
         tb_i = None
+    raw_compression = task.get("file_compression")
+    if raw_compression is not None:
+        set_file_compression(str(raw_compression))
+    crf, gpu_cq, vt_q = current_encode_quality()
     enc, enc_args = pick_best_h264_encoder(
-        prefer_gpu=use_gpu, target_video_bps=tb_i
+        prefer_gpu=use_gpu,
+        target_video_bps=tb_i,
+        crf=crf,
+        gpu_cq=gpu_cq,
+        videotoolbox_q=vt_q,
     )
 
     graph_common = dict(
@@ -290,7 +300,7 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
     if use_gpu and enc != "libx264":
         # Last resort if GPU encoder OOMs (common with AMF + heavy overlays).
         attempts.append(
-            ("cpu", None, [], "libx264", libx264_encode_args_for_target(tb_i))
+            ("cpu", None, [], "libx264", libx264_encode_args_for_target(tb_i, crf=crf))
         )
 
     filter_script: Path | None = None

@@ -18,6 +18,7 @@ from zaliver.processing.ffmpeg_merge import (
     check_ffmpeg_tools,
     ffmpeg_drawtext_missing_user_message,
     ffmpeg_has_drawtext,
+    apply_file_compression_from_options,
     pick_best_h264_encoder,
 )
 from zaliver.processing.gpu_detect import detect_gpus, format_gpu_list
@@ -408,6 +409,7 @@ class SlicingService:
             edge_exclude = float(options.get("edge_exclude", DEFAULT_EDGE_EXCLUDE))
             use_gpu = bool(options.get("use_gpu", False))
             use_gpu_finalize = bool(options.get("use_gpu_finalize", False))
+            apply_file_compression_from_options(options)
             slice_fps_mode = str(
                 options.get("slice_fps_mode", DEFAULT_SLICE_FPS_MODE) or DEFAULT_SLICE_FPS_MODE
             )

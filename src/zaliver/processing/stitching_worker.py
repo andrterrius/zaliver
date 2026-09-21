@@ -15,6 +15,7 @@ from zaliver.processing.ffmpeg_merge import (
     check_ffmpeg_tools,
     ffmpeg_drawtext_missing_user_message,
     ffmpeg_has_drawtext,
+    apply_file_compression_from_options,
     pick_best_h264_encoder,
 )
 from zaliver.processing.gpu_detect import detect_gpus, format_gpu_list
@@ -332,6 +333,7 @@ class StitchingService:
             num_workers = max(1, int(options.get("num_workers", 1)))
             use_gpu = bool(options.get("use_gpu", False))
             use_gpu_finalize = bool(options.get("use_gpu_finalize", False))
+            apply_file_compression_from_options(options)
             stitch_fps_mode = str(
                 options.get("slice_fps_mode")
                 or options.get("stitch_fps_mode")

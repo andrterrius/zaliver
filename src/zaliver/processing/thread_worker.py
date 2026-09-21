@@ -162,6 +162,7 @@ from zaliver.processing.ffmpeg_merge import (
     merge_segments_with_source_audio,
     mux_video_audio,
     mux_video_background_music,
+    apply_file_compression_from_options,
     pick_best_h264_encoder,
     sync_ffmpeg_env_for_children,
 )
@@ -702,6 +703,10 @@ class ProcessingService:
                 )
                 return
 
+            encode_crf, _encode_cq, _encode_vt = apply_file_compression_from_options(
+                options
+            )
+            file_compression = str(options.get("file_compression") or "none")
             copies_per_file = max(1, int(options.get("copies_per_file", 1)))
             plan: List[Tuple[Path, Path, VideoInfo, int, int, Optional[int]]] = []
             try:
@@ -712,6 +717,9 @@ class ProcessingService:
                             f"{p.name}: в файле нет кадров (frame_count=0)."
                         )
                     tvb = estimate_target_video_bps(str(p))
+                    log(
+                        f"{p.name}: {inf.width}×{inf.height}, кодирование CRF {encode_crf}"
+                    )
                     for ci in range(1, copies_per_file + 1):
                         outp = out_dir / _unique_output_filename(p.stem)
                         plan.append((p, outp, inf, ci, copies_per_file, tvb))
@@ -1111,6 +1119,7 @@ class ProcessingService:
                         "fps": j.info.fps,
                         "use_gpu": use_gpu,
                         "target_video_bps": j.target_video_bps,
+                        "file_compression": file_compression,
                         "text_overlay": scaled_overlay(j),
                         "total_frames": int(j.info.frame_count),
                     }
@@ -1344,6 +1353,7 @@ class ProcessingService:
                                 "fps": j.info.fps,
                                 "use_gpu": use_gpu,
                                 "target_video_bps": j.target_video_bps,
+                                "file_compression": file_compression,
                                 "text_overlay": scaled_overlay,
                                 "total_frames": int(j.info.frame_count),
                             }
@@ -1362,6 +1372,7 @@ class ProcessingService:
                                 "fps": j.info.fps,
                                 "use_gpu": use_gpu,
                                 "target_video_bps": j.target_video_bps,
+                                "file_compression": file_compression,
                                 "text_overlay": scaled_overlay,
                                 "total_frames": int(j.info.frame_count),
                             }

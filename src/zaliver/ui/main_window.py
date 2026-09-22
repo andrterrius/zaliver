@@ -3961,36 +3961,45 @@ class MainWindow(QWidget):
         yt_inst_upload: bool = False,
         remaining_after_youtube: int | None = None,
     ) -> None:
-        """Удалить файл сразу после успеха; для Yt+Inst — после Instagram."""
+        """Удалить файл после успеха. Yt+Inst / 3 площадки — только когда закончила последняя."""
         path = str(video_path or "").strip()
         if not path:
             return
         plat = (record_platform or "").strip().lower()
-        # YouTube в Yt+Inst ещё нужен Instagram (pipeline / pause 0) — не трогаем.
-        if yt_inst_upload and plat == PLATFORM_YOUTUBE:
-            n_left = remaining_after_youtube
-            if n_left is None:
-                n_left = 2 if self._platform == PLATFORM_YT_INST_TT else 1
-            try:
-                n_left = int(n_left)
-            except (TypeError, ValueError):
-                n_left = 1
+        if yt_inst_upload:
             with self._upload_success_lock:
-                if n_left <= 0:
-                    self._upload_yt_inst_pending_delete.discard(path)
-                    self._upload_yt_inst_pending_remaining.pop(path, None)
-                else:
-                    self._upload_yt_inst_pending_delete.add(path)
-                    self._upload_yt_inst_pending_remaining[path] = n_left
-                    return
-        elif yt_inst_upload:
-            with self._upload_success_lock:
+                if path not in self._upload_yt_inst_pending_remaining:
+                    n_left = remaining_after_youtube
+                    if n_left is None:
+                        n_left = 2 if self._platform == PLATFORM_YT_INST_TT else 1
+                    try:
+                        n_left = int(n_left)
+                    except (TypeError, ValueError):
+                        n_left = 1
+                    # Этот вызов — одно завершение; n_left — сколько площадок ещё впереди,
+                    # если счётчик не зарегистрировали до старта.
+                    if plat == PLATFORM_YOUTUBE:
+                        self._upload_yt_inst_pending_remaining[path] = max(0, n_left) + 1
+                    else:
+                        self._upload_yt_inst_pending_remaining[path] = max(1, n_left + 1)
                 left = int(self._upload_yt_inst_pending_remaining.get(path, 1)) - 1
                 if left > 0:
                     self._upload_yt_inst_pending_remaining[path] = left
-                    return
-                self._upload_yt_inst_pending_remaining.pop(path, None)
-                self._upload_yt_inst_pending_delete.discard(path)
+                    self._upload_yt_inst_pending_delete.add(path)
+                    hold = True
+                else:
+                    self._upload_yt_inst_pending_remaining.pop(path, None)
+                    self._upload_yt_inst_pending_delete.discard(path)
+                    hold = False
+            if hold:
+                try:
+                    self._ui_log_line.emit(
+                        f"[upload] Файл пока не удаляем ({Path(path).name}): "
+                        f"ещё {left} площадок."
+                    )
+                except Exception:
+                    pass
+                return
         else:
             with self._upload_success_lock:
                 self._upload_yt_inst_pending_delete.discard(path)
@@ -4000,7 +4009,7 @@ class MainWindow(QWidget):
             self._release_ready_buffer_slot(path)
 
     def _delete_yt_inst_pending_outputs(self, video_paths: list[str]) -> None:
-        """Удалить файлы Yt+Inst, когда Instagram закончил (ошибка / отмена)."""
+        """Списать одну площадку. Файл удаляется, только когда счётчик дошёл до нуля."""
         delete_on = bool(getattr(self, "_upload_delete_after_enabled", False))
         for video_path in video_paths:
             path = str(video_path or "").strip()
@@ -4330,7 +4339,7 @@ class MainWindow(QWidget):
         schedule_btns.addStretch()
         schedule_times_layout.addLayout(schedule_btns)
         schedule_hint = QLabel(
-            "Интервал между временами — не менее 5 часов. "
+            "Интервал между временами любой. "
             "Сначала все видео на одном профиле (по одному на каждое время), затем следующий профиль."
         )
         schedule_hint.setObjectName("hint")
@@ -12368,6 +12377,21 @@ class MainWindow(QWidget):
                     (0 if skip_instagram else 1)
                     + (1 if is_yt_inst_tt_upload and not skip_tiktok else 0)
                 )
+                _armed_paths = [str(task.video_path or "").strip()]
+                if task.scheduled_batch:
+                    for _item in task.scheduled_batch:
+                        _armed_paths.append(
+                            str(getattr(_item, "video_path", "") or "").strip()
+                        )
+                _active_platforms = (
+                    (0 if skip_youtube else 1) + int(combined_followups["n"] or 0)
+                )
+                with self._upload_success_lock:
+                    for _sp in _armed_paths:
+                        if not _sp or _active_platforms <= 0:
+                            continue
+                        self._upload_yt_inst_pending_delete.add(_sp)
+                        self._upload_yt_inst_pending_remaining[_sp] = _active_platforms
                 creds = self._profile_login_credentials(profile_id)
                 yt_oldest = self._profile_yt_oldest_name(profile_id) or None
                 search_oldest = self._youtube_search_oldest_channel()
@@ -12583,7 +12607,8 @@ class MainWindow(QWidget):
                             )
                         except Exception:
                             pass
-                    # YouTube уже залит — файл больше не нужен Instagram.
+                    # Одна площадка закончила (ошибка). Файл удаляем только
+                    # когда счётчик остальных тоже дойдёт до нуля.
                     paths_to_drop = [str(task.video_path or "").strip()]
                     if task.scheduled_batch:
                         for item in task.scheduled_batch:
@@ -12719,23 +12744,6 @@ class MainWindow(QWidget):
                     skip_tiktok=skip_tiktok,
                     **warmup_kw,
                 )
-                if skip_youtube:
-                    seed_paths = [str(task.video_path or "").strip()]
-                    if task.scheduled_batch:
-                        for item in task.scheduled_batch:
-                            seed_paths.append(
-                                str(getattr(item, "video_path", "") or "").strip()
-                            )
-                    follow_n = int(combined_followups.get("n") or 0)
-                    for sp in seed_paths:
-                        if not sp:
-                            continue
-                        self._maybe_delete_output_after_upload_success(
-                            sp,
-                            record_platform=PLATFORM_YOUTUBE,
-                            yt_inst_upload=True,
-                            remaining_after_youtube=follow_n,
-                        )
                 if _is_own_antidetect_kind(kind):
                     res = upload_youtube_and_instagram_in_local_antidetect_profile(
                         profile_id,
@@ -12783,6 +12791,13 @@ class MainWindow(QWidget):
                     ig_ok = True
 
                 if not yt_ok and not skip_youtube:
+                    yt_fail_paths = [str(task.video_path or "").strip()]
+                    if task.scheduled_batch:
+                        for item in task.scheduled_batch:
+                            yt_fail_paths.append(
+                                str(getattr(item, "video_path", "") or "").strip()
+                            )
+                    self._delete_yt_inst_pending_outputs(yt_fail_paths)
                     try:
                         self._disable_combined_upload_platform(
                             profile_id,

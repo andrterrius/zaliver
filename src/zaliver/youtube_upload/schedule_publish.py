@@ -15,7 +15,6 @@ try:
         MSK = timezone(timedelta(hours=3))
 except ImportError:
     MSK = timezone(timedelta(hours=3))
-_MIN_SCHEDULE_GAP = timedelta(hours=5)
 _YT_TIME_STEP_MIN = 15
 
 
@@ -183,20 +182,10 @@ def validate_schedule_times(
     if not times:
         return "Укажите хотя бы одно время отложенной публикации."
     cur = now or datetime.now(tz=MSK)
-    normalized: list[datetime] = []
     for t in times:
         dt = parse_msk_datetime(t)
         if dt is None:
             return "Некорректное время отложенной публикации."
         if dt <= cur + timedelta(minutes=1):
             return "Время отложенной публикации должно быть в будущем (МСК)."
-        normalized.append(dt)
-    ordered = sorted(normalized)
-    for i in range(1, len(ordered)):
-        if ordered[i] - ordered[i - 1] < _MIN_SCHEDULE_GAP:
-            gap_h = int(_MIN_SCHEDULE_GAP.total_seconds() // 3600)
-            return (
-                f"Между временами отложенной публикации нужен интервал "
-                f"не менее {gap_h} часов."
-            )
     return None

@@ -381,29 +381,26 @@ def run_upload_job(
         if not path:
             return
         plat = (record_platform or "").strip().lower()
-        if is_combined and plat == PLATFORM_YOUTUBE:
-            n_left = remaining_after_youtube
-            if n_left is None:
-                n_left = combined_followups.get("n")
-            if n_left is None:
-                n_left = 2 if is_yt_inst_tt else 1
-            try:
-                n_left = int(n_left)
-            except (TypeError, ValueError):
-                n_left = 1
+        if is_combined:
             with success_lock:
-                if n_left <= 0:
-                    yt_inst_pending_delete.discard(path)
-                    yt_inst_pending_remaining.pop(path, None)
-                else:
-                    yt_inst_pending_delete.add(path)
-                    yt_inst_pending_remaining[path] = n_left
-                    return
-        elif is_combined:
-            with success_lock:
+                if path not in yt_inst_pending_remaining:
+                    n_left = remaining_after_youtube
+                    if n_left is None:
+                        n_left = combined_followups.get("n")
+                    if n_left is None:
+                        n_left = 2 if is_yt_inst_tt else 1
+                    try:
+                        n_left = int(n_left)
+                    except (TypeError, ValueError):
+                        n_left = 1
+                    if plat == PLATFORM_YOUTUBE:
+                        yt_inst_pending_remaining[path] = max(0, n_left) + 1
+                    else:
+                        yt_inst_pending_remaining[path] = max(1, n_left + 1)
                 left = int(yt_inst_pending_remaining.get(path, 1)) - 1
                 if left > 0:
                     yt_inst_pending_remaining[path] = left
+                    yt_inst_pending_delete.add(path)
                     return
                 yt_inst_pending_remaining.pop(path, None)
                 yt_inst_pending_delete.discard(path)
@@ -613,6 +610,21 @@ def run_upload_job(
                 (0 if skip_instagram else 1)
                 + (1 if is_yt_inst_tt and not skip_tiktok else 0)
             )
+            _armed_paths = [str(task.video_path or "").strip()]
+            if sched_batch:
+                for _item in sched_batch:
+                    _armed_paths.append(
+                        str(getattr(_item, "video_path", "") or "").strip()
+                    )
+            _active_platforms = (0 if skip_youtube else 1) + int(
+                combined_followups["n"] or 0
+            )
+            with success_lock:
+                for _sp in _armed_paths:
+                    if not _sp or _active_platforms <= 0:
+                        continue
+                    yt_inst_pending_delete.add(_sp)
+                    yt_inst_pending_remaining[_sp] = _active_platforms
             keep_open = bool(ig_keep_browser_open) and (
                 mgr_now.should_keep_browser_open(profile_id)
                 if mgr_now is not None
@@ -787,22 +799,6 @@ def run_upload_job(
             if is_yt_inst_tt:
                 kw["on_tiktok_success"] = _on_tt
                 kw["on_tiktok_error"] = _on_tt_error
-            if skip_youtube:
-                seed_paths = [str(task.video_path or "").strip()]
-                if sched_batch:
-                    for item in sched_batch:
-                        seed_paths.append(
-                            str(getattr(item, "video_path", "") or "").strip()
-                        )
-                follow_n = int(combined_followups.get("n") or 0)
-                for sp in seed_paths:
-                    if not sp:
-                        continue
-                    _maybe_delete_after_success(
-                        sp,
-                        record_platform=PLATFORM_YOUTUBE,
-                        remaining_after_youtube=follow_n,
-                    )
             if own:
                 from zaliver.antydetect.local_antidetect_api import local_api_token_scope
 
@@ -820,6 +816,13 @@ def run_upload_job(
                 )
             yt_part = res.get("youtube") if isinstance(res, dict) else None
             if not skip_youtube and not isinstance(yt_part, dict):
+                yt_fail_paths = [str(task.video_path or "").strip()]
+                if sched_batch:
+                    for item in sched_batch:
+                        yt_fail_paths.append(
+                            str(getattr(item, "video_path", "") or "").strip()
+                        )
+                _delete_yt_inst_pending(yt_fail_paths)
                 mgr_after = mgr_holder.get("mgr")
                 if mgr_after is not None:
                     try:

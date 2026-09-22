@@ -207,8 +207,10 @@ from zaliver.title_variables import (
 
 from zaliver.processing.ffmpeg_merge import (
     DEFAULT_FILE_COMPRESSION_ID,
+    DEFAULT_OUTPUT_QUALITY_ID,
     DEFAULT_VIDEO_METADATA_ID,
     FILE_COMPRESSION_CHOICES,
+    OUTPUT_QUALITY_CHOICES,
     VIDEO_METADATA_CHOICES,
     MACOS_BREW_FFMPEG_FORMULA,
     check_ffmpeg_tools,
@@ -2618,9 +2620,40 @@ class MainWindow(QWidget):
         )
         compression_hint.setObjectName("hint")
         compression_hint.setWordWrap(True)
-        gp.addWidget(QLabel("Сжатие файла:"), 5, 0)
-        gp.addWidget(self.file_compression, 5, 1)
-        gp.addWidget(compression_hint, 6, 0, 1, 2)
+        gp.addWidget(QLabel("Сжатие файла:"), 7, 0)
+        gp.addWidget(self.file_compression, 7, 1)
+        gp.addWidget(compression_hint, 8, 0, 1, 2)
+
+        self.output_quality = QComboBox()
+        for qid, label, _short in OUTPUT_QUALITY_CHOICES:
+            self.output_quality.addItem(label, qid)
+        saved_quality = str(
+            self._settings.value(
+                "encode/output_quality",
+                DEFAULT_OUTPUT_QUALITY_ID,
+                type=str,
+            )
+            or DEFAULT_OUTPUT_QUALITY_ID
+        )
+        quality_idx = self.output_quality.findData(saved_quality)
+        self.output_quality.setCurrentIndex(quality_idx if quality_idx >= 0 else 0)
+        self.output_quality.setToolTip(
+            "Короткая сторона кадра. У горизонтального ролика это высота, "
+            "у вертикального — ширина. Длинная сторона 16:9, для 3:4 и 4:3 — 4:3."
+        )
+        self.output_quality.currentIndexChanged.connect(
+            lambda *_: self._save_folder_settings()
+        )
+        quality_hint = QLabel(
+            "Для уникализации, нарезки и склейки этой платформы. "
+            "Пропорции сохраняются. У 3:4 и 4:3 полос нет, у остальных "
+            "пустое место закрывается чёрным сверху и снизу."
+        )
+        quality_hint.setObjectName("hint")
+        quality_hint.setWordWrap(True)
+        gp.addWidget(QLabel("Качество видео:"), 5, 0)
+        gp.addWidget(self.output_quality, 5, 1)
+        gp.addWidget(quality_hint, 6, 0, 1, 2)
 
         self.video_metadata = QComboBox()
         for mid, label in VIDEO_METADATA_CHOICES:
@@ -2642,8 +2675,8 @@ class MainWindow(QWidget):
         self.video_metadata.currentIndexChanged.connect(
             lambda *_: self._save_folder_settings()
         )
-        gp.addWidget(QLabel("Метаданные видео:"), 7, 0)
-        gp.addWidget(self.video_metadata, 7, 1)
+        gp.addWidget(QLabel("Метаданные видео:"), 9, 0)
+        gp.addWidget(self.video_metadata, 9, 1)
 
         self.slice_fps_mode = QComboBox()
         self.slice_fps_mode.addItem("30 fps", "30")
@@ -2668,9 +2701,9 @@ class MainWindow(QWidget):
         )
         fps_hint.setObjectName("hint")
         fps_hint.setWordWrap(True)
-        gp.addWidget(QLabel("FPS нарезки:"), 8, 0)
-        gp.addWidget(self.slice_fps_mode, 8, 1)
-        gp.addWidget(fps_hint, 9, 0, 1, 2)
+        gp.addWidget(QLabel("FPS нарезки:"), 10, 0)
+        gp.addWidget(self.slice_fps_mode, 10, 1)
+        gp.addWidget(fps_hint, 11, 0, 1, 2)
 
         self.thread_slider = SmoothSlider(Qt.Orientation.Horizontal)
         self.thread_slider.setMinimum(1)
@@ -2680,7 +2713,7 @@ class MainWindow(QWidget):
         self.thread_label = QLabel()
         self._update_thread_label(self.thread_slider.value())
         self.thread_slider.valueChanged.connect(self._update_thread_label)
-        gp.addWidget(QLabel("Потоков процессов:"), 10, 0, Qt.AlignmentFlag.AlignVCenter)
+        gp.addWidget(QLabel("Потоков процессов:"), 12, 0, Qt.AlignmentFlag.AlignVCenter)
         thr_row = QHBoxLayout()
         thr_row.setSpacing(8)
         thr_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
@@ -2688,7 +2721,7 @@ class MainWindow(QWidget):
         thr_row.addWidget(self.thread_label, 0, Qt.AlignmentFlag.AlignVCenter)
         w_thr = QWidget()
         w_thr.setLayout(thr_row)
-        gp.addWidget(w_thr, 10, 1, Qt.AlignmentFlag.AlignVCenter)
+        gp.addWidget(w_thr, 12, 1, Qt.AlignmentFlag.AlignVCenter)
 
         settings_l.addWidget(settings_title)
         settings_l.addWidget(settings_hint)
@@ -5194,6 +5227,14 @@ class MainWindow(QWidget):
         if hasattr(self, "use_gpu_finalize"):
             self._settings.setValue(
                 "use_gpu_finalize_enabled", bool(self.use_gpu_finalize.isChecked())
+            )
+        if hasattr(self, "output_quality"):
+            self._settings.setValue(
+                "encode/output_quality",
+                str(
+                    self.output_quality.currentData()
+                    or DEFAULT_OUTPUT_QUALITY_ID
+                ),
             )
         if hasattr(self, "file_compression"):
             self._settings.setValue(
@@ -11221,6 +11262,9 @@ class MainWindow(QWidget):
             "use_gpu_finalize": bool(self.use_gpu_finalize.isChecked()),
             "file_compression": str(
                 self.file_compression.currentData() or DEFAULT_FILE_COMPRESSION_ID
+            ),
+            "output_quality": str(
+                self.output_quality.currentData() or DEFAULT_OUTPUT_QUALITY_ID
             ),
             "video_metadata": str(
                 self.video_metadata.currentData() or DEFAULT_VIDEO_METADATA_ID

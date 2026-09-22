@@ -974,6 +974,20 @@ FILE_COMPRESSION_CHOICES: tuple[tuple[str, str, int, int], ...] = (
 )
 DEFAULT_FILE_COMPRESSION_ID = "none"
 
+# id, label, короткая сторона кадра. 0 — не менять размер исходника.
+# Длинная сторона = короткая × 16/9; какая из них ширина, решает ориентация.
+OUTPUT_QUALITY_CHOICES: tuple[tuple[str, str, int], ...] = (
+    ("source", "Исходное", 0),
+    ("480", "480", 480),
+    ("720", "720", 720),
+    ("1080", "1080", 1080),
+    ("1440", "2K", 1440),
+    ("2160", "4K", 2160),
+)
+DEFAULT_OUTPUT_QUALITY_ID = "source"
+
+_output_quality_state: str = DEFAULT_OUTPUT_QUALITY_ID
+
 VIDEO_METADATA_CHOICES: tuple[tuple[str, str], ...] = (
     ("none", "Нет"),
     ("rayban", "Ray-Ban"),
@@ -1131,13 +1145,78 @@ def current_encode_quality() -> tuple[int, int, int]:
     return _encode_quality_state
 
 
+def output_quality_short_side(key: str | None) -> int:
+    """Короткая сторона выбранного качества. 0 — оставить размер исходника."""
+    wanted = (key or DEFAULT_OUTPUT_QUALITY_ID).strip()
+    for cid, _label, short in OUTPUT_QUALITY_CHOICES:
+        if cid == wanted:
+            return int(short)
+    return 0
+
+
+def set_output_quality(key: str | None) -> str:
+    global _output_quality_state
+    wanted = (key or DEFAULT_OUTPUT_QUALITY_ID).strip()
+    if wanted not in {cid for cid, _label, _short in OUTPUT_QUALITY_CHOICES}:
+        wanted = DEFAULT_OUTPUT_QUALITY_ID
+    _output_quality_state = wanted
+    return wanted
+
+
+def current_output_quality() -> str:
+    return _output_quality_state
+
+
+def _even_frame_side(value: int) -> int:
+    side = int(value)
+    if side % 2:
+        side += 1
+    return max(2, side)
+
+
+def _long_side_for_frame(width: int, height: int, short: int) -> int:
+    """16:9 по умолчанию, 4:3 / 3:4 если исходник уже такого соотношения."""
+    long_src = max(int(width), int(height))
+    short_src = max(1, min(int(width), int(height)))
+    ratio = long_src / short_src
+    factor = 4 / 3 if abs(ratio - (4 / 3)) <= 0.06 else 16 / 9
+    return _even_frame_side(int(round(short * factor)))
+
+
+def frame_size_for_quality(
+    width: int, height: int, key: str | None = None
+) -> tuple[int, int]:
+    """Холст под качество: короткая сторона из настройки.
+
+    Длинная сторона — 16:9, а для кадра около 3:4 или 4:3 — 4:3, чтобы не было полос.
+    Вертикальный ролик (высота больше ширины) получает короткую сторону как ширину.
+    Исходник мельче выбранного качества увеличивается. Пропорции сохраняются,
+    пустая высота у других соотношений закрывается чёрным сверху и снизу.
+    """
+    w = _even_frame_side(int(width) - (int(width) % 2))
+    h = _even_frame_side(int(height) - (int(height) % 2))
+    short = output_quality_short_side(
+        current_output_quality() if key is None else key
+    )
+    if short <= 0:
+        return w, h
+    short = _even_frame_side(short)
+    long_side = _long_side_for_frame(w, h, short)
+    if h > w:
+        return short, long_side
+    return long_side, short
+
+
 def apply_file_compression_from_options(options: dict | None) -> tuple[int, int, int]:
     raw = None
     meta = None
+    quality = None
     if isinstance(options, dict):
         raw = options.get("file_compression")
         meta = options.get("video_metadata")
+        quality = options.get("output_quality")
     set_video_metadata(None if meta is None else str(meta))
+    set_output_quality(None if quality is None else str(quality))
     return set_file_compression(None if raw is None else str(raw))
 
 
@@ -1419,16 +1498,35 @@ def _write_concat_demuxer_list(segment_paths: List[str], list_path: str) -> None
 
 
 def _concat_reencode_vf(segment_paths: List[str]) -> Tuple[str, float]:
-    """Фильтр нормализации кадра при перекодировании concat (без растягивания)."""
+    """Фильтр нормализации кадра при перекодировании concat (без растягивания).
+
+    Холст — кадр с максимальной площадью среди фрагментов, чтобы 1080 не
+    ужимался до размера первого 720p-ролика.
+    """
     from zaliver.processing.ffmpeg_probe import probe_video_stream
 
-    w, h, fps, _, _ = probe_video_stream(segment_paths[0])
-    w = max(2, w - (w % 2))
-    h = max(2, h - (h % 2))
-    vf = (
-        f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos,"
-        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
-    )
+    w, h, fps = 0, 0, 0.0
+    best_area = -1
+    first_error: Optional[BaseException] = None
+    for path in segment_paths:
+        try:
+            pw, ph, pfps, _, _ = probe_video_stream(path)
+        except (OSError, RuntimeError, ValueError) as exc:
+            if first_error is None:
+                first_error = exc
+            continue
+        area = int(pw) * int(ph)
+        if area > best_area:
+            best_area = area
+            w, h, fps = int(pw), int(ph), float(pfps)
+    if best_area < 0:
+        if first_error is not None:
+            raise first_error
+        raise RuntimeError("concat: не удалось прочитать размер кадра")
+    w, h = frame_size_for_quality(w, h, current_output_quality())
+    from zaliver.processing.ffmpeg_vf import _final_scale_block
+
+    vf = _final_scale_block(w, h)
     return vf, float(fps) if fps > 1e-6 else 30.0
 
 

@@ -17,10 +17,18 @@ def _normalize_sar_block() -> str:
     return "scale=iw*sar:ih,setsar=1"
 
 
-def _final_scale_block(w_out: int, h_out: int) -> str:
-    """Финальный кадр без растягивания + явный SAR 1:1 для плееров."""
+def _fit_inside_scale(w: int, h: int) -> str:
+    """Вписать в w×h с увеличением, если исходник мельче. Пропорции сохраняются."""
     return (
-        f"scale={w_out}:{h_out}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"scale=w='trunc(iw*min({int(w)}/iw\\,{int(h)}/ih)/2)*2'"
+        f":h='trunc(ih*min({int(w)}/iw\\,{int(h)}/ih)/2)*2':flags=lanczos"
+    )
+
+
+def _final_scale_block(w_out: int, h_out: int) -> str:
+    """Вписать в кадр. Незаполненная высота закрывается чёрным сверху и снизу."""
+    return (
+        f"{_fit_inside_scale(w_out, h_out)},"
         f"pad={w_out}:{h_out}:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
     )
 
@@ -28,7 +36,7 @@ def _final_scale_block(w_out: int, h_out: int) -> str:
 def _fit_scale_pad(w: int, h: int) -> str:
     """Fit into w×h without stretching; letterbox/pillarbox with black if needed."""
     return (
-        f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"{_fit_inside_scale(w, h)},"
         f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black"
     )
 

@@ -26,6 +26,8 @@ from zaliver.processing.ffmpeg_gpu import (
 )
 from zaliver.processing.ffmpeg_merge import (
     current_encode_quality,
+    current_output_quality,
+    frame_size_for_quality,
     pick_best_h264_encoder,
     run_ffmpeg,
     stamp_output_video_metadata,
@@ -1113,11 +1115,9 @@ def _scene_input_args(
 
 
 def _cpu_scale_pad_chain(width: int, height: int) -> str:
-    pad = f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
-    return (
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
-        f"{pad},setsar=1,format=yuv420p"
-    )
+    from zaliver.processing.ffmpeg_vf import _final_scale_block
+
+    return f"{_final_scale_block(width, height)},format=yuv420p"
 
 
 def _scene_filter_chain(
@@ -1146,16 +1146,14 @@ def _scene_filter_chain(
         )
     if gpu_pipeline.name == "cuda":
         return (
-            f"[{input_index}:v]scale_cuda={width}:{height}:force_original_aspect_ratio=decrease:interp_algo=lanczos,"
-            f"hwdownload,format=nv12,fps={fps},"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,"
+            f"[{input_index}:v]hwdownload,format=nv12,fps={fps},"
+            f"{_cpu_scale_pad_chain(width, height)},"
             f"{tail}"
         )
     if gpu_pipeline.name == "qsv":
         return (
-            f"[{input_index}:v]scale_qsv={width}:{height},"
-            f"hwdownload,format=nv12,fps={fps},"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,"
+            f"[{input_index}:v]hwdownload,format=nv12,fps={fps},"
+            f"{_cpu_scale_pad_chain(width, height)},"
             f"{tail}"
         )
     return (
@@ -2553,11 +2551,21 @@ def generate_video_from_segment(
 
     width, height, size_source = size_info
     width, height = ensure_even_dimensions(width, height)
-    _log(
-        f"    Размер итогового видео: {width}x{height} "
-        f"(как у {os.path.basename(size_source)})",
-        log,
-    )
+    sized_w, sized_h = frame_size_for_quality(width, height, current_output_quality())
+    if (sized_w, sized_h) != (width, height):
+        _log(
+            f"    Размер итогового видео: {sized_w}x{sized_h} "
+            f"(качество {current_output_quality()}, ориентация как у "
+            f"{os.path.basename(size_source)})",
+            log,
+        )
+    else:
+        _log(
+            f"    Размер итогового видео: {width}x{height} "
+            f"(как у {os.path.basename(size_source)})",
+            log,
+        )
+    width, height = sized_w, sized_h
 
     stitch_transition = str(segment.get("stitch_transition") or "cut").strip().lower()
     stitch_overlap = max(0.0, float(segment.get("stitch_transition_duration") or 0.0))

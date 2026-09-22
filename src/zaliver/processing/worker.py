@@ -15,6 +15,7 @@ from zaliver.processing.fd_limit import raise_fd_limit_soft
 from zaliver.processing.ffmpeg_merge import (
     libx264_encode_args_for_target,
     current_encode_quality,
+    frame_size_for_quality,
     pick_best_h264_encoder,
     set_file_compression,
     set_video_metadata,
@@ -210,8 +211,7 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
     h = int(task["height"])
     fps = float(task["fps"])
     use_gpu = bool(task.get("use_gpu", False))
-    w_out = max(2, w - (w % 2))
-    h_out = max(2, h - (h % 2))
+    w_out, h_out = frame_size_for_quality(w, h, task.get("output_quality"))
 
     out_p = Path(task["output_path"]).expanduser()
     try:

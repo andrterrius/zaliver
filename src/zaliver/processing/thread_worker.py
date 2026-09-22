@@ -164,6 +164,7 @@ from zaliver.processing.ffmpeg_merge import (
     stamp_output_video_metadata,
     mux_video_background_music,
     apply_file_compression_from_options,
+    frame_size_for_quality,
     pick_best_h264_encoder,
     sync_ffmpeg_env_for_children,
 )
@@ -711,6 +712,7 @@ class ProcessingService:
                 options
             )
             file_compression = str(options.get("file_compression") or "none")
+            output_quality = str(options.get("output_quality") or "source")
             video_metadata = str(options.get("video_metadata") or "none")
             copies_per_file = max(1, int(options.get("copies_per_file", 1)))
             plan: List[Tuple[Path, Path, VideoInfo, int, int, Optional[int]]] = []
@@ -1092,9 +1094,10 @@ class ProcessingService:
                     if not j.text_overlay:
                         return None
                     toc = TextOverlaySettings.from_dict(j.text_overlay)
-                    scaled = compute_scaled_overlay_for_api(
-                        toc, j.info.width, j.info.height
+                    out_w, out_h = frame_size_for_quality(
+                        j.info.width, j.info.height, output_quality
                     )
+                    scaled = compute_scaled_overlay_for_api(toc, out_w, out_h)
                     return scaled.to_dict() if scaled else None
 
                 for j in jobs:
@@ -1125,6 +1128,7 @@ class ProcessingService:
                         "use_gpu": use_gpu,
                         "target_video_bps": j.target_video_bps,
                         "file_compression": file_compression,
+                        "output_quality": output_quality,
                         "video_metadata": video_metadata,
                         "text_overlay": scaled_overlay(j),
                         "total_frames": int(j.info.frame_count),
@@ -1334,9 +1338,10 @@ class ProcessingService:
                         if not j.text_overlay:
                             return None
                         toc = TextOverlaySettings.from_dict(j.text_overlay)
-                        scaled = compute_scaled_overlay_for_api(
-                            toc, j.info.width, j.info.height
+                        out_w, out_h = frame_size_for_quality(
+                            j.info.width, j.info.height, output_quality
                         )
+                        scaled = compute_scaled_overlay_for_api(toc, out_w, out_h)
                         return scaled.to_dict() if scaled else None
 
                     def _submit_task(meta: _PoolTaskMeta) -> None:
@@ -1360,7 +1365,8 @@ class ProcessingService:
                                 "use_gpu": use_gpu,
                                 "target_video_bps": j.target_video_bps,
                                 "file_compression": file_compression,
-                        "video_metadata": video_metadata,
+                                "output_quality": output_quality,
+                                "video_metadata": video_metadata,
                                 "text_overlay": scaled_overlay,
                                 "total_frames": int(j.info.frame_count),
                             }
@@ -1380,7 +1386,8 @@ class ProcessingService:
                                 "use_gpu": use_gpu,
                                 "target_video_bps": j.target_video_bps,
                                 "file_compression": file_compression,
-                        "video_metadata": video_metadata,
+                                "output_quality": output_quality,
+                                "video_metadata": video_metadata,
                                 "text_overlay": scaled_overlay,
                                 "total_frames": int(j.info.frame_count),
                             }

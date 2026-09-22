@@ -18,6 +18,7 @@ from typing import Any, Callable, Optional
 from zaliver.processing.chunking import probe_video
 from zaliver.processing.ffmpeg_merge import (
     apply_file_compression_from_options,
+    frame_size_for_quality,
     ffmpeg_drawtext_missing_user_message,
     ffmpeg_has_drawtext,
     mux_video_audio,
@@ -187,6 +188,7 @@ def run_uniquify_lite(
 
     apply_file_compression_from_options(options)
     file_compression = str(options.get("file_compression") or "none")
+    output_quality = str(options.get("output_quality") or "source")
     video_metadata = str(options.get("video_metadata") or "none")
     log("uniquify_lite: без multiprocessing (стабильный Windows API).")
     ready_buf = buffer_from_options(options)
@@ -248,12 +250,15 @@ def run_uniquify_lite(
             if tvb:
                 log(f"{tag}: видео ~{tvb / 1_000_000:.2f} Мбит/с")
 
+            out_w, out_h = frame_size_for_quality(
+                int(info.width), int(info.height), output_quality
+            )
             job_overlay = None
             if text_overlay_enabled:
                 job_overlay = _scaled_text_overlay_for_job(
                     raw_text_overlay if isinstance(raw_text_overlay, dict) else None,
-                    width=int(info.width),
-                    height=int(info.height),
+                    width=out_w,
+                    height=out_h,
                 )
 
             task = {
@@ -269,6 +274,7 @@ def run_uniquify_lite(
                 "fps": float(info.fps),
                 "use_gpu": use_gpu,
                 "file_compression": file_compression,
+                "output_quality": output_quality,
                 "video_metadata": video_metadata,
                 "target_video_bps": tvb,
                 "text_overlay": job_overlay,

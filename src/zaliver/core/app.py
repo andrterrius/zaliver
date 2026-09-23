@@ -39,6 +39,7 @@ class ZaliverCore:
         settings_store: SettingsStore | Any | None = None,
         video_store: VideoStore | None = None,
         upload_store: UploadStore | None = None,
+        storage_platform: str | None = None,
     ) -> ZaliverCore:
         store = ensure_settings_store(settings_store)
         plat = normalize_platform(platform)
@@ -46,7 +47,9 @@ class ZaliverCore:
         uploads = upload_store or UploadStore(db_path=videos.db_path)
         return cls(
             platform=plat,
-            settings=PlatformSettings(store, plat),
+            settings=PlatformSettings(
+                store, plat, storage_platform=storage_platform
+            ),
             videos=videos,
             uploads=uploads,
         )

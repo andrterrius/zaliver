@@ -1322,3 +1322,9 @@ QLabel#platformCardHint {
 QPushButton#platformCardBtn {
     min-height: 22px;
 }
+
+QCheckBox#platformCardCheck {
+    color: #e2e8f0;
+    font-size: 13px;
+    spacing: 8px;
+}

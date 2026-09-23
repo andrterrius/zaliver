@@ -321,7 +321,129 @@ def _ig_reusable_blank_pages(context) -> list:
     return out
 
 
-def _ig_new_page_background(context, *, seed_page=None, url: str = "about:blank"):
+def _browser_context_id_for_target(cdp, *, page_scoped: bool, seed_page) -> str | None:
+    """browserContextId профиля, чтобы новая вкладка не уехала в чужое окно."""
+    if page_scoped:
+        try:
+            info = cdp.send("Target.getTargetInfo")
+            ti = (info or {}).get("targetInfo") if isinstance(info, dict) else None
+            if isinstance(ti, dict):
+                bcid = ti.get("browserContextId")
+                if isinstance(bcid, str) and bcid:
+                    return bcid
+        except Exception:
+            return None
+        return None
+    try:
+        data = cdp.send("Target.getTargets")
+    except Exception:
+        return None
+    infos = data.get("targetInfos") if isinstance(data, dict) else None
+    if not isinstance(infos, list):
+        return None
+    pages = [ti for ti in infos if isinstance(ti, dict) and ti.get("type") == "page"]
+    seed_url = _ig_page_url_lower(seed_page) if seed_page is not None else ""
+    if seed_url:
+        for ti in pages:
+            url = str(ti.get("url") or "").strip().lower()
+            if url and (url == seed_url or seed_url in url or url in seed_url):
+                bcid = ti.get("browserContextId")
+                if isinstance(bcid, str) and bcid:
+                    return bcid
+    for ti in pages:
+        bcid = ti.get("browserContextId")
+        if isinstance(bcid, str) and bcid:
+            return bcid
+    return None
+
+
+def _create_target_in_background(
+    context, seed_page, url: str, *, background: bool = True
+) -> str | None:
+    """
+    Новая вкладка через browser-level CDP.
+
+    Сессия на уже открытой вкладке включает Page domain. Если эта вкладка
+    к моменту вызова уже догрузилась (так бывает, когда одна площадка выключена),
+    Chromium оставляет на ней спиннер навсегда. Сессия браузера вкладку не трогает.
+    """
+    want_url = (url or "about:blank").strip() or "about:blank"
+    browser = None
+    try:
+        browser = context.browser
+    except Exception:
+        browser = None
+    cdp = None
+    page_scoped = False
+    try:
+        if browser is not None:
+            try:
+                cdp = browser.new_browser_cdp_session()
+            except Exception as e:
+                _log(
+                    f"combined: browser CDP недоступен ({e!r}) — "
+                    "сессия уже открытой вкладки."
+                )
+                cdp = None
+        if cdp is None:
+            if seed_page is None:
+                raise RuntimeError("нет вкладки для createTarget")
+            cdp = context.new_cdp_session(seed_page)
+            page_scoped = True
+        params: dict = {"url": want_url, "background": bool(background)}
+        bcid = _browser_context_id_for_target(
+            cdp, page_scoped=page_scoped, seed_page=seed_page
+        )
+        if bcid:
+            params["browserContextId"] = bcid
+        created = cdp.send("Target.createTarget", params)
+        tid = None
+        if isinstance(created, dict):
+            raw = created.get("targetId")
+            if isinstance(raw, str) and raw.strip():
+                tid = raw.strip()
+        return tid
+    finally:
+        if cdp is not None:
+            try:
+                cdp.detach()
+            except Exception:
+                pass
+
+
+def _close_created_target(context, target_id: str | None) -> None:
+    """Убрать вкладку createTarget, которую Playwright так и не увидел.
+
+    Иначе она остаётся в браузере со спиннером, а рабочая открывается второй.
+    """
+    tid = (target_id or "").strip()
+    if not tid:
+        return
+    browser = None
+    try:
+        browser = context.browser
+    except Exception:
+        browser = None
+    if browser is None:
+        return
+    cdp = None
+    try:
+        cdp = browser.new_browser_cdp_session()
+        cdp.send("Target.closeTarget", {"targetId": tid})
+        _log(f"combined: закрыт непривязанный createTarget targetId={tid!r}.")
+    except Exception as e:
+        _log(f"combined: не удалось закрыть createTarget {tid!r}: {e!r}")
+    finally:
+        if cdp is not None:
+            try:
+                cdp.detach()
+            except Exception:
+                pass
+
+
+def _ig_new_page_background(
+    context, *, seed_page=None, url: str = "about:blank", background: bool = True
+):
     """
     Новая вкладка БЕЗ переключения на неё (CDP Target.createTarget background=true).
     Fallback: context.new_page() — в Chrome обычно активирует вкладку.
@@ -342,8 +464,6 @@ def _ig_new_page_background(context, *, seed_page=None, url: str = "about:blank"
 
     before_ids = {id(p) for p in _ig_alive_context_pages(context)}
     want_url = (url or "about:blank").strip() or "about:blank"
-    cdp = None
-    target_id: str | None = None
 
     def _find_new_page():
         for p in _ig_alive_context_pages(context):
@@ -351,42 +471,12 @@ def _ig_new_page_background(context, *, seed_page=None, url: str = "about:blank"
                 return p
         return None
 
-    def _close_orphan_target(session, tid: str | None) -> None:
-        if session is None or not tid:
-            return
-        try:
-            session.send("Target.closeTarget", {"targetId": tid})
-            _log(
-                "Instagram Reels: закрыт orphan createTarget "
-                f"(targetId={tid!r})."
-            )
-        except Exception as e:
-            _log(
-                f"Instagram Reels: не удалось закрыть orphan createTarget: {e!r}"
-            )
-
+    target_id: str | None = None
     try:
-        cdp = context.new_cdp_session(seed)
-        params: dict = {
-            "url": want_url,
-            "background": True,
-        }
-        try:
-            info = cdp.send("Target.getTargetInfo")
-            ti = (info or {}).get("targetInfo") if isinstance(info, dict) else None
-            if isinstance(ti, dict):
-                bcid = ti.get("browserContextId")
-                if bcid:
-                    params["browserContextId"] = bcid
-        except Exception:
-            pass
-
         # Только sync CDP в том же потоке, что sync_playwright (не Thread!).
-        created = cdp.send("Target.createTarget", params)
-        if isinstance(created, dict):
-            tid = created.get("targetId")
-            if isinstance(tid, str) and tid.strip():
-                target_id = tid.strip()
+        target_id = _create_target_in_background(
+            context, seed, want_url, background=background
+        )
 
         # background createTarget часто появляется в context.pages с задержкой —
         # НЕ закрываем targetId (это и была живая вкладка Instagram).
@@ -403,10 +493,8 @@ def _ig_new_page_background(context, *, seed_page=None, url: str = "about:blank"
 
         _log(
             "Instagram Reels: CDP createTarget ещё не в context.pages "
-            f"(targetId={target_id!r}) — fallback new_page() без closeTarget."
+            f"(targetId={target_id!r})."
         )
-        # closeTarget здесь нельзя: гасит единственную IG-вкладку, потом
-        # pipeline видит только Studio и browser.close() убивал YouTube.
         found = _find_new_page()
         if found is not None:
             return found
@@ -424,16 +512,23 @@ def _ig_new_page_background(context, *, seed_page=None, url: str = "about:blank"
         ig_now = _ig_instagram_pages(context)
         if ig_now:
             return ig_now[0]
-    finally:
-        if cdp is not None:
-            try:
-                cdp.detach()
-            except Exception:
-                pass
 
     ig_now = _ig_instagram_pages(context)
     if ig_now:
         return ig_now[0]
+    found = _find_new_page()
+    if found is not None:
+        return found
+    if target_id:
+        _log(
+            "Instagram Reels: createTarget не попал в context.pages "
+            f"(targetId={target_id!r}) — закрываем его, чтобы не осталась вторая вкладка."
+        )
+        _close_created_target(context, target_id)
+        ig_now = _ig_instagram_pages(context)
+        if ig_now:
+            return ig_now[0]
+        raise RuntimeError("вкладка Instagram не появилась в context.pages")
     return context.new_page()
 
 
@@ -446,7 +541,7 @@ def _combined_tiktok_pages(context) -> list:
 
 
 def _new_page_background_for_host(
-    context, *, seed_page=None, url: str, host: str
+    context, *, seed_page=None, url: str, host: str, background: bool = True
 ):
     """Фоновая вкладка под host (tiktok.com и т.п.), без IG-short-circuit."""
     host_l = (host or "").strip().lower()
@@ -474,7 +569,6 @@ def _new_page_background_for_host(
 
     before_ids = {id(p) for p in _ig_alive_context_pages(context)}
     want_url = (url or "about:blank").strip() or "about:blank"
-    cdp = None
 
     def _find_new_page():
         for p in _ig_alive_context_pages(context):
@@ -489,19 +583,11 @@ def _new_page_background_for_host(
             if host_l and host_l in _ig_page_url_lower(pg)
         ]
 
+    target_id: str | None = None
     try:
-        cdp = context.new_cdp_session(seed)
-        params: dict = {"url": want_url, "background": True}
-        try:
-            info = cdp.send("Target.getTargetInfo")
-            ti = (info or {}).get("targetInfo") if isinstance(info, dict) else None
-            if isinstance(ti, dict):
-                bcid = ti.get("browserContextId")
-                if bcid:
-                    params["browserContextId"] = bcid
-        except Exception:
-            pass
-        cdp.send("Target.createTarget", params)
+        target_id = _create_target_in_background(
+            context, seed, want_url, background=background
+        )
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
             found = _find_new_page()
@@ -525,19 +611,28 @@ def _new_page_background_for_host(
         hosted = _host_pages()
         if hosted:
             return hosted[0]
-    finally:
-        if cdp is not None:
-            try:
-                cdp.detach()
-            except Exception:
-                pass
     hosted = _host_pages()
     if hosted:
         return hosted[0]
+    found = _find_new_page()
+    if found is not None:
+        return found
+    if target_id:
+        _log(
+            f"combined: createTarget {host_l} не попал в context.pages "
+            f"(targetId={target_id!r}) — закрываем его и открываем вкладку через new_page()."
+        )
+        _close_created_target(context, target_id)
     return context.new_page()
 
 
-def _ensure_one_tiktok_tab(context, *, seed_page=None, refocus_youtube: bool = True):
+def _ensure_one_tiktok_tab(
+    context,
+    *,
+    seed_page=None,
+    refocus_youtube: bool = True,
+    foreground: bool = False,
+):
     """Ровно одна вкладка TikTok в фоне (третья вкладка Inst+Yt+TikTok)."""
     from zaliver.tiktok_upload.register import TIKTOK_URL
     from zaliver.instagram_upload.register import _navigate_page_to
@@ -560,7 +655,13 @@ def _ensure_one_tiktok_tab(context, *, seed_page=None, refocus_youtube: bool = T
             "Inst+Yt+TikTok: используем уже открытую вкладку TikTok "
             f"url={_ig_page_url_lower(chosen)!r}"
         )
-        _refocus_youtube()
+        if foreground:
+            try:
+                _finish_tab_load(chosen, TIKTOK_URL, label="IG+TT TikTok")
+            except Exception as e:
+                _log(f"IG+TT: догрузка TikTok: {e!r}")
+        else:
+            _refocus_youtube()
         return chosen
 
     blank_pages = _ig_reusable_blank_pages(context)
@@ -568,33 +669,70 @@ def _ensure_one_tiktok_tab(context, *, seed_page=None, refocus_youtube: bool = T
         if seed_page is not None and blank is seed_page:
             continue
         try:
-            _navigate_page_to(
-                blank,
-                TIKTOK_URL,
-                label="Inst+Yt+TikTok TT tab",
-                keep_in_background=True,
-            )
+            if foreground:
+                _finish_tab_load(blank, TIKTOK_URL, label="IG+TT TikTok")
+            else:
+                _navigate_page_to(
+                    blank,
+                    TIKTOK_URL,
+                    label="Inst+Yt+TikTok TT tab",
+                    keep_in_background=True,
+                )
             _log("Inst+Yt+TikTok: blank-вкладка превращена в TikTok (фон).")
-            _refocus_youtube()
+            if not foreground:
+                _refocus_youtube()
             return blank
         except Exception as e:
             _log(f"Inst+Yt+TikTok: не удалось открыть TT на blank: {e!r}")
 
+    # Без YouTube createTarget открывает вкладку, которую Playwright не видит:
+    # в браузере она крутится бесконечно, а следом new_page открывает вторую.
+    if foreground:
+        page = context.new_page()
+        try:
+            _navigate_page_to(
+                page,
+                TIKTOK_URL,
+                label="IG+TT TikTok",
+                keep_in_background=False,
+            )
+        except Exception as e:
+            _log(f"IG+TT: goto TikTok: {e!r}")
+        tt_pages = _combined_tiktok_pages(context)
+        chosen = page
+        if tt_pages:
+            chosen = page if page in tt_pages else tt_pages[0]
+            for extra in tt_pages:
+                if extra is chosen:
+                    continue
+                try:
+                    extra.close()
+                except Exception:
+                    pass
+        return chosen
+
     page = _new_page_background_for_host(
-        context, seed_page=seed_page, url=TIKTOK_URL, host="tiktok.com"
+        context,
+        seed_page=seed_page,
+        url=TIKTOK_URL,
+        host="tiktok.com",
+        background=not foreground,
     )
     try:
         cur = (page.url or "").strip().lower()
     except Exception:
         cur = ""
-    if "tiktok.com" not in cur:
+    if foreground or "tiktok.com" not in cur:
         try:
-            _navigate_page_to(
-                page,
-                TIKTOK_URL,
-                label="Inst+Yt+TikTok TT tab",
-                keep_in_background=True,
-            )
+            if foreground:
+                _finish_tab_load(page, TIKTOK_URL, label="IG+TT TikTok")
+            else:
+                _navigate_page_to(
+                    page,
+                    TIKTOK_URL,
+                    label="Inst+Yt+TikTok TT tab",
+                    keep_in_background=True,
+                )
         except Exception as e:
             _log(f"Inst+Yt+TikTok: goto TikTok: {e!r}")
     else:
@@ -610,7 +748,8 @@ def _ensure_one_tiktok_tab(context, *, seed_page=None, refocus_youtube: bool = T
                 extra.close()
             except Exception:
                 pass
-    _refocus_youtube()
+    if not foreground:
+        _refocus_youtube()
     return chosen
 
 
@@ -5099,8 +5238,32 @@ def _page_still_open(page) -> bool:
         return False
 
 
+def _finish_tab_load(page, url: str, *, label: str) -> None:
+    """Догрузить вкладку основной сессией Playwright и снять зависший спиннер.
+
+    Фоновый createTarget, пока единственная страница ещё грузится, оставляет
+    спиннер навсегда. Так происходит только у пары Instagram+TikTok: без
+    YouTube некому догрузить первую вкладку отдельным переходом на Studio.
+    """
+    try:
+        page.bring_to_front()
+    except Exception:
+        pass
+    try:
+        page.evaluate("() => window.stop()")
+    except Exception as e:
+        _log(f"{label}: window.stop: {e!r}")
+    from zaliver.instagram_upload.register import _navigate_page_to
+
+    _navigate_page_to(page, url, label=label, keep_in_background=False)
+
+
 def _ensure_one_instagram_tab(
-    context, *, seed_page=None, refocus_youtube: bool = True
+    context,
+    *,
+    seed_page=None,
+    refocus_youtube: bool = True,
+    foreground: bool = False,
 ):
     """
     Ровно одна вкладка Instagram в фоне: без перехвата фокуса у YouTube.
@@ -5141,7 +5304,13 @@ def _ensure_one_instagram_tab(
             f"url={_ig_page_url_lower(chosen)!r}"
         )
         _close_orphan_blanks(keep=(seed_page, chosen))
-        _refocus_youtube()
+        if foreground:
+            try:
+                _finish_tab_load(chosen, INSTAGRAM_URL, label="IG+TT Instagram")
+            except Exception as e:
+                _log(f"IG+TT: догрузка Instagram: {e!r}")
+        else:
+            _refocus_youtube()
         return chosen
 
     blank_pages = _ig_reusable_blank_pages(context)
@@ -5149,15 +5318,19 @@ def _ensure_one_instagram_tab(
         if seed_page is not None and blank is seed_page:
             continue
         try:
-            _navigate_page_to(
-                blank,
-                INSTAGRAM_URL,
-                label="Yt+Inst IG tab",
-                keep_in_background=True,
-            )
+            if foreground:
+                _finish_tab_load(blank, INSTAGRAM_URL, label="IG+TT Instagram")
+            else:
+                _navigate_page_to(
+                    blank,
+                    INSTAGRAM_URL,
+                    label="Yt+Inst IG tab",
+                    keep_in_background=True,
+                )
             _log("Yt+Inst: blank-вкладка превращена в Instagram (фон).")
             _close_orphan_blanks(keep=(seed_page, blank))
-            _refocus_youtube()
+            if not foreground:
+                _refocus_youtube()
             return blank
         except Exception as e:
             _log(f"Yt+Inst: не удалось открыть IG на blank: {e!r}")
@@ -5165,20 +5338,26 @@ def _ensure_one_instagram_tab(
     # Сразу Instagram URL — не about:blank (иначе при fallback new_page
     # остаётся orphan blank + IG).
     page = _ig_new_page_background(
-        context, seed_page=seed_page, url=INSTAGRAM_URL
+        context,
+        seed_page=seed_page,
+        url=INSTAGRAM_URL,
+        background=not foreground,
     )
     try:
         cur = (page.url or "").strip().lower()
     except Exception:
         cur = ""
-    if "instagram.com" not in cur:
+    if foreground or "instagram.com" not in cur:
         try:
-            _navigate_page_to(
-                page,
-                INSTAGRAM_URL,
-                label="Yt+Inst IG tab",
-                keep_in_background=True,
-            )
+            if foreground:
+                _finish_tab_load(page, INSTAGRAM_URL, label="IG+TT Instagram")
+            else:
+                _navigate_page_to(
+                    page,
+                    INSTAGRAM_URL,
+                    label="Yt+Inst IG tab",
+                    keep_in_background=True,
+                )
         except Exception as e:
             _log(f"Yt+Inst: goto Instagram на вкладке: {e!r}")
     else:
@@ -5202,7 +5381,8 @@ def _ensure_one_instagram_tab(
                 pass
 
     _close_orphan_blanks(keep=(seed_page, chosen))
-    _refocus_youtube()
+    if not foreground:
+        _refocus_youtube()
     return chosen
 
 
@@ -5407,8 +5587,13 @@ class _YtInstIgPipeline:
         self._q: queue.Queue[_YtInstIgJob | None] = queue.Queue()
         self._idle = threading.Event()
         self._idle.set()
+        self._inflight = 0
+        self._inflight_lock = threading.Lock()
         self._stop = threading.Event()
         self._unavailable = threading.Event()
+        self._pending_pw: list = []
+        self._cdp_ready = threading.Event()
+        self._spinner_gate: threading.Event | None = None
         self._thread = threading.Thread(
             target=self._worker,
             name=f"yt-inst-ig-{self.profile_id[:12] or 'x'}",
@@ -5425,14 +5610,47 @@ class _YtInstIgPipeline:
             self._cdp_endpoints = cleaned
 
     def enqueue(self, job: _YtInstIgJob) -> None:
-        self._idle.clear()
+        with self._inflight_lock:
+            self._inflight += 1
+            self._idle.clear()
         self._q.put(job)
+
+    def arm_spinner_gate(self) -> None:
+        self._cdp_ready = threading.Event()
+        self._spinner_gate = threading.Event()
+
+    def note_cdp_ready(self) -> None:
+        ready = getattr(self, "_cdp_ready", None)
+        if isinstance(ready, threading.Event):
+            ready.set()
+
+    def wait_cdp_ready(self, timeout_s: float = 25.0) -> bool:
+        ready = getattr(self, "_cdp_ready", None)
+        if not isinstance(ready, threading.Event):
+            return True
+        return ready.wait(timeout=max(1.0, float(timeout_s)))
+
+    def release_spinner_gate(self) -> None:
+        gate = getattr(self, "_spinner_gate", None)
+        if isinstance(gate, threading.Event):
+            gate.set()
+
+    def wait_spinner_gate(self, timeout_s: float = 60.0) -> None:
+        gate = getattr(self, "_spinner_gate", None)
+        if isinstance(gate, threading.Event):
+            gate.wait(timeout=max(1.0, float(timeout_s)))
 
     def mark_unavailable(self) -> None:
         self._unavailable.set()
 
     def is_unavailable(self) -> bool:
         return self._unavailable.is_set()
+
+    def _note_job_finished(self) -> None:
+        with self._inflight_lock:
+            self._inflight = max(0, self._inflight - 1)
+            if self._inflight == 0 and self._q.empty():
+                self._idle.set()
 
     def wait_idle(self, *, timeout_s: float = 3600.0) -> None:
         if not self._idle.wait(timeout=max(1.0, float(timeout_s))):
@@ -5456,13 +5674,16 @@ class _YtInstIgPipeline:
             try:
                 job = self._q.get(timeout=0.5)
             except queue.Empty:
-                if self._q.empty():
-                    self._idle.set()
+                with self._inflight_lock:
+                    if self._inflight == 0 and self._q.empty():
+                        self._idle.set()
                 continue
             if job is None:
+                for pending in self._pending_pw:
+                    _stop_playwright_driver(pending)
+                self._pending_pw.clear()
                 self._idle.set()
                 break
-            self._idle.clear()
             signaled = False
             try:
                 if self._unavailable.is_set():
@@ -5479,6 +5700,8 @@ class _YtInstIgPipeline:
                     _browser, context, _seed = _playwright_page_from_cdp(
                         pw, self._cdp_endpoints
                     )
+                    self.note_cdp_ready()
+                    self.wait_spinner_gate()
                     ig_page = None
                     deadline = time.monotonic() + 60.0
                     while time.monotonic() < deadline:
@@ -5570,10 +5793,8 @@ class _YtInstIgPipeline:
                         self._q.task_done()
                     except Exception:
                         pass
-                    if self._q.empty():
-                        self._idle.set()
                     _close_playwright_browser(_browser, shared_cdp=True)
-                    _stop_playwright_driver(pw)
+                    self._pending_pw.append(pw)
             except Exception as e:
                 job.error = e
                 if not isinstance(e, CombinedPlatformUnavailableError):
@@ -5594,8 +5815,7 @@ class _YtInstIgPipeline:
                         self._q.task_done()
                     except Exception:
                         pass
-                    if self._q.empty():
-                        self._idle.set()
+                self._note_job_finished()
 
 
 def _get_yt_inst_ig_pipeline(
@@ -5691,8 +5911,13 @@ class _YtInstTtPipeline:
         self._q: queue.Queue[_YtInstIgJob | None] = queue.Queue()
         self._idle = threading.Event()
         self._idle.set()
+        self._inflight = 0
+        self._inflight_lock = threading.Lock()
         self._stop = threading.Event()
         self._unavailable = threading.Event()
+        self._pending_pw: list = []
+        self._cdp_ready = threading.Event()
+        self._spinner_gate: threading.Event | None = None
         self._thread = threading.Thread(
             target=self._worker,
             name=f"yt-inst-tt-{self.profile_id[:12] or 'x'}",
@@ -5709,14 +5934,47 @@ class _YtInstTtPipeline:
             self._cdp_endpoints = cleaned
 
     def enqueue(self, job: _YtInstIgJob) -> None:
-        self._idle.clear()
+        with self._inflight_lock:
+            self._inflight += 1
+            self._idle.clear()
         self._q.put(job)
+
+    def arm_spinner_gate(self) -> None:
+        self._cdp_ready = threading.Event()
+        self._spinner_gate = threading.Event()
+
+    def note_cdp_ready(self) -> None:
+        ready = getattr(self, "_cdp_ready", None)
+        if isinstance(ready, threading.Event):
+            ready.set()
+
+    def wait_cdp_ready(self, timeout_s: float = 25.0) -> bool:
+        ready = getattr(self, "_cdp_ready", None)
+        if not isinstance(ready, threading.Event):
+            return True
+        return ready.wait(timeout=max(1.0, float(timeout_s)))
+
+    def release_spinner_gate(self) -> None:
+        gate = getattr(self, "_spinner_gate", None)
+        if isinstance(gate, threading.Event):
+            gate.set()
+
+    def wait_spinner_gate(self, timeout_s: float = 60.0) -> None:
+        gate = getattr(self, "_spinner_gate", None)
+        if isinstance(gate, threading.Event):
+            gate.wait(timeout=max(1.0, float(timeout_s)))
 
     def mark_unavailable(self) -> None:
         self._unavailable.set()
 
     def is_unavailable(self) -> bool:
         return self._unavailable.is_set()
+
+    def _note_job_finished(self) -> None:
+        with self._inflight_lock:
+            self._inflight = max(0, self._inflight - 1)
+            if self._inflight == 0 and self._q.empty():
+                self._idle.set()
 
     def wait_idle(self, *, timeout_s: float = 3600.0) -> None:
         if not self._idle.wait(timeout=max(1.0, float(timeout_s))):
@@ -5740,13 +5998,16 @@ class _YtInstTtPipeline:
             try:
                 job = self._q.get(timeout=0.5)
             except queue.Empty:
-                if self._q.empty():
-                    self._idle.set()
+                with self._inflight_lock:
+                    if self._inflight == 0 and self._q.empty():
+                        self._idle.set()
                 continue
             if job is None:
+                for pending in self._pending_pw:
+                    _stop_playwright_driver(pending)
+                self._pending_pw.clear()
                 self._idle.set()
                 break
-            self._idle.clear()
             signaled = False
             try:
                 if self._unavailable.is_set():
@@ -5763,6 +6024,8 @@ class _YtInstTtPipeline:
                     _browser, context, _seed = _playwright_page_from_cdp(
                         pw, self._cdp_endpoints
                     )
+                    self.note_cdp_ready()
+                    self.wait_spinner_gate()
                     tt_page = None
                     deadline = time.monotonic() + 60.0
                     while time.monotonic() < deadline:
@@ -5841,10 +6104,8 @@ class _YtInstTtPipeline:
                         self._q.task_done()
                     except Exception:
                         pass
-                    if self._q.empty():
-                        self._idle.set()
                     _close_playwright_browser(_browser, shared_cdp=True)
-                    _stop_playwright_driver(pw)
+                    self._pending_pw.append(pw)
             except Exception as e:
                 job.error = e
                 if not isinstance(e, CombinedPlatformUnavailableError):
@@ -5865,8 +6126,7 @@ class _YtInstTtPipeline:
                         self._q.task_done()
                     except Exception:
                         pass
-                    if self._q.empty():
-                        self._idle.set()
+                self._note_job_finished()
 
 
 def _get_yt_inst_tt_pipeline(
@@ -6078,30 +6338,47 @@ def _run_youtube_and_instagram_parallel(
       из очереди; Instagram/TikTok догоняют тем же роликом через pipeline.
     wait_for_instagram=True: ждём Instagram (и TikTok) перед возвратом.
     """
-    combo = "Inst+Yt+TikTok" if include_tiktok else "Yt+Inst"
     do_youtube = not bool(skip_youtube)
     do_instagram = not bool(skip_instagram)
     do_tiktok = bool(include_tiktok) and not bool(skip_tiktok)
-    yt_page = _pick_non_instagram_page(context, prefer=page)
+    # Пара Instagram+TikTok без Studio оставляет спиннер. Вкладку открываем,
+    # алгоритм залива YouTube не запускаем.
+    hold_youtube_tab = bool(do_youtube or (do_instagram and do_tiktok))
+    combo = "+".join(
+        name
+        for name, enabled in (
+            ("Instagram", do_instagram),
+            ("YouTube", do_youtube),
+            ("TikTok", do_tiktok),
+        )
+        if enabled
+    ) or "Залив"
+    social_pair = bool(hold_youtube_tab and not do_youtube)
+    if social_pair:
+        yt_page = _ensure_studio_tab_for_social(context, prefer=page)
+    else:
+        yt_page = _pick_non_instagram_page(context, prefer=page)
     if yt_page is None:
         yt_page = page
 
     # Сначала Instagram-вкладка — до долгого Studio / channel-appeal.
+    # Тот же порядок, что при трёх галочках: createTarget, затем new_page.
     if do_instagram:
         try:
             ig_busy = _yt_inst_ig_pipeline_busy(profile_id)
             ig_tab = _ensure_one_instagram_tab(
                 context,
                 seed_page=yt_page,
-                refocus_youtube=not ig_busy,
+                refocus_youtube=bool(hold_youtube_tab) and not ig_busy,
+                foreground=not hold_youtube_tab,
             )
             try:
                 ig_url = (ig_tab.url or "").strip() if ig_tab is not None else ""
             except Exception:
                 ig_url = ""
             _log(
-                f"{combo}: вкладки готовы — 1=YouTube, 2=Instagram "
-                f"(url={ig_url!r}, pipeline / параллельный залив)."
+                f"{combo}: вкладки готовы — {combo} "
+                f"(instagram={ig_url!r}, pipeline / параллельный залив)."
             )
         except Exception as e:
             _log(f"Yt+Inst: заранее открыть Instagram не удалось: {e!r}")
@@ -6113,7 +6390,7 @@ def _run_youtube_and_instagram_parallel(
                     "Yt+Inst: Instagram уже есть после ошибки ensure — "
                     "новую вкладку не открываем."
                 )
-                if not _yt_inst_ig_pipeline_busy(profile_id):
+                if hold_youtube_tab and not _yt_inst_ig_pipeline_busy(profile_id):
                     _bring_studio_tab_to_front(yt_page, log_label="Yt+Inst")
             else:
                 try:
@@ -6124,8 +6401,16 @@ def _run_youtube_and_instagram_parallel(
 
                     ig_tab = context.new_page()
                     _navigate_page_to(ig_tab, INSTAGRAM_URL, label="Yt+Inst IG fallback")
+                    for extra in _ig_instagram_pages(context):
+                        if extra is ig_tab:
+                            continue
+                        try:
+                            extra.close()
+                            _log("Yt+Inst: закрыта лишняя вкладка Instagram.")
+                        except Exception:
+                            pass
                     _log("Yt+Inst: Instagram открыт через new_page() fallback.")
-                    if not _yt_inst_ig_pipeline_busy(profile_id):
+                    if hold_youtube_tab and not _yt_inst_ig_pipeline_busy(profile_id):
                         _bring_studio_tab_to_front(yt_page, log_label="Yt+Inst")
                 except Exception as e2:
                     _log(
@@ -6145,8 +6430,13 @@ def _run_youtube_and_instagram_parallel(
             tt_busy = _yt_inst_tt_pipeline_busy(profile_id)
             tt_tab = _ensure_one_tiktok_tab(
                 context,
-                seed_page=yt_page,
-                refocus_youtube=not tt_busy and not _yt_inst_ig_pipeline_busy(profile_id),
+                seed_page=yt_page if hold_youtube_tab else (
+                    _ig_instagram_pages(context)[:1] or [yt_page]
+                )[0],
+                refocus_youtube=bool(hold_youtube_tab)
+                and not tt_busy
+                and not _yt_inst_ig_pipeline_busy(profile_id),
+                foreground=not hold_youtube_tab,
             )
             try:
                 tt_url = (tt_tab.url or "").strip() if tt_tab is not None else ""
@@ -6179,6 +6469,21 @@ def _run_youtube_and_instagram_parallel(
         except Exception:
             pass
 
+    _close_disabled_platform_tabs(
+        context,
+        do_youtube=hold_youtube_tab,
+        do_instagram=do_instagram,
+        do_tiktok=do_tiktok,
+    )
+    _focus_combined_upload_tab(
+        context,
+        do_youtube=hold_youtube_tab,
+        do_instagram=do_instagram,
+        do_tiktok=do_tiktok,
+        yt_page=yt_page,
+        log_label=combo,
+    )
+
     ig_items: list[tuple[str, str, str]] = []
     if scheduled_batch:
         for item in scheduled_batch:
@@ -6200,6 +6505,8 @@ def _run_youtube_and_instagram_parallel(
 
     ig_job: _YtInstIgJob | None = None
     yt_done_event = threading.Event()
+    pipe = None
+    tt_pipe = None
     if do_instagram and ig_items:
         pipe = _get_yt_inst_ig_pipeline(
             profile_id,
@@ -6246,7 +6553,27 @@ def _run_youtube_and_instagram_parallel(
     yt_err: BaseException | None = None
     try:
         if not do_youtube:
-            _log(f"{combo}: YouTube пропущен (площадка недоступна в этой сессии).")
+            if hold_youtube_tab and _page_still_open(yt_page):
+                _log(
+                    f"{combo}: YouTube выключен — только открываем Studio, "
+                    "без залива видео."
+                )
+                try:
+                    from zaliver.youtube_upload.studio import (
+                        _studio_goto_studio_if_needed,
+                    )
+
+                    _bring_studio_tab_to_front(yt_page, log_label=combo)
+                    _studio_goto_studio_if_needed(
+                        yt_page,
+                        login_credentials=(studio_kw or {}).get("login_credentials"),
+                    )
+                except Exception as e:
+                    _log(f"{combo}: открытие Studio без залива: {e!r}")
+            else:
+                _log(
+                    f"{combo}: YouTube выключен, залив на Studio не запускается."
+                )
         else:
             # Если уже channel-appeal — не уходим в долгий скан каналов / «Создать».
             from zaliver.youtube_upload.studio import (
@@ -6320,7 +6647,10 @@ def _run_youtube_and_instagram_parallel(
     finally:
         # Разрешаем IG Done /reels/ только после конца YouTube этого ролика.
         yt_done_event.set()
-        _log("Yt+Inst: сигнал YouTube готов (для IG Done /reels/).")
+        if do_youtube:
+            _log(f"{combo}: сигнал YouTube готов (для IG Done /reels/).")
+        else:
+            _log(f"{combo}: YouTube выключен, залив на Studio не запускался.")
     # Не возвращаем фокус на Studio, пока Instagram ещё в pipeline —
     # иначе зависает навигация на /reels/.
 
@@ -6328,51 +6658,35 @@ def _run_youtube_and_instagram_parallel(
     ig_err: BaseException | None = None
     instagram_pending = False
     if ig_job is not None:
-        # Pause 0 + успех YT: не ждём IG — следующее видео можно брать сразу.
-        # Иначе (закрываем браузер / YT ошибка) — дожидаемся текущего IG.
-        should_wait = bool(wait_for_instagram)
-        if should_wait:
-            if not ig_job.done.wait(timeout=3600.0):
-                ig_err = TimeoutError(
-                    "Instagram upload не завершился за 3600 с"
-                )
-            else:
-                ig_res = ig_job.result
-                ig_err = ig_job.error
-                if ig_res is None and ig_err is None:
-                    ig_err = RuntimeError(
-                        "Instagram: нет результата pipeline-залива"
-                    )
-        else:
-            instagram_pending = True
-            _log(
-                f"{combo}: YouTube готов — не ждём Instagram "
-                "(pause 0 / keep-open, IG догонит в pipeline)."
+        # Всегда ждём вкладку Instagram этого ролика. Иначе при паузе 0
+        # очередь считает залив законченным и закрывает браузер.
+        if not ig_job.done.wait(timeout=3600.0):
+            ig_err = TimeoutError(
+                "Instagram upload не завершился за 3600 с"
             )
+        else:
+            ig_res = ig_job.result
+            ig_err = ig_job.error
+            if ig_res is None and ig_err is None:
+                ig_err = RuntimeError(
+                    "Instagram: нет результата pipeline-залива"
+                )
 
     tt_res = None
     tt_err: BaseException | None = None
     tiktok_pending = False
     if tt_job is not None:
-        should_wait_tt = bool(wait_for_instagram)
-        if should_wait_tt:
-            if not tt_job.done.wait(timeout=3600.0):
-                tt_err = TimeoutError(
-                    "TikTok upload не завершился за 3600 с"
-                )
-            else:
-                tt_res = tt_job.result
-                tt_err = tt_job.error
-                if tt_res is None and tt_err is None:
-                    tt_err = RuntimeError(
-                        "TikTok: нет результата pipeline-залива"
-                    )
-        else:
-            tiktok_pending = True
-            _log(
-                f"{combo}: YouTube готов — не ждём TikTok "
-                "(pause 0 / keep-open, TT догонит в pipeline)."
+        if not tt_job.done.wait(timeout=3600.0):
+            tt_err = TimeoutError(
+                "TikTok upload не завершился за 3600 с"
             )
+        else:
+            tt_res = tt_job.result
+            tt_err = tt_job.error
+            if tt_res is None and tt_err is None:
+                tt_err = RuntimeError(
+                    "TikTok: нет результата pipeline-залива"
+                )
 
     if (
         yt_res is None
@@ -6424,6 +6738,273 @@ def _run_youtube_and_instagram_parallel(
         out["video_id"] = tt_res.get("video_id")
         out["url"] = tt_res.get("url")
     return out
+
+
+def _combined_launch_start_url(
+    *,
+    skip_youtube: bool,
+    skip_instagram: bool,
+    skip_tiktok: bool,
+    include_tiktok: bool,
+) -> str:
+    """Стартовая вкладка.
+
+    Пара Instagram+TikTok тоже стартует со Studio: без этой вкладки
+    браузер оставляет спиннер. Залив на YouTube от этого не включается.
+    """
+    ig_and_tt = (not skip_instagram) and bool(include_tiktok) and (not skip_tiktok)
+    if not skip_youtube or ig_and_tt:
+        return "https://studio.youtube.com/"
+    if not skip_instagram:
+        return "https://www.instagram.com/"
+    if include_tiktok and not skip_tiktok:
+        return "https://www.tiktok.com/"
+    return "about:blank"
+
+
+def _reload_tabs_after_extra_cdp(context) -> None:
+    """Ещё один переход после второго CDP-подключения.
+
+    Новое подключение Playwright включает индикатор загрузки на уже
+    открытых вкладках. Пока YouTube сам заливается, его переход гасит
+    спиннер. Без залива YouTube этого перехода нет, и вкладки крутятся.
+    """
+    for pg in _ig_alive_context_pages(context):
+        try:
+            url = (pg.url or "").strip()
+        except Exception:
+            continue
+        low = url.lower()
+        if not url or low.startswith("about:") or low.startswith("chrome"):
+            continue
+        try:
+            pg.goto(url, wait_until="commit", timeout=20_000)
+        except Exception as e:
+            _log(f"IG+TT: повторный переход для спиннера {url!r}: {e!r}")
+    ig_pages = _ig_instagram_pages(context)
+    if ig_pages:
+        try:
+            ig_pages[0].bring_to_front()
+        except Exception:
+            pass
+    _log("IG+TT: вкладки обновлены после подключения залива.")
+
+
+def _open_ig_tt_with_studio(context, *, prefer=None, label: str = "IG+TT"):
+    """Studio + Instagram + TikTok только через new_page/goto, без createTarget.
+
+    createTarget при выключенном заливе YouTube оставляет вкладку, которую
+    Playwright не подхватывает, и в браузере она крутится бесконечно.
+    """
+    from zaliver.instagram_upload.register import INSTAGRAM_URL, _navigate_page_to
+    from zaliver.tiktok_upload.register import TIKTOK_URL
+
+    def _open(url: str, *, host: str, tab_label: str, pages: list):
+        page = pages[0] if pages else context.new_page()
+        _navigate_page_to(
+            page, url, label=tab_label, keep_in_background=False
+        )
+        return page
+
+    studio = _ensure_studio_tab_for_social(context, prefer=prefer)
+    try:
+        _navigate_page_to(
+            studio,
+            "https://studio.youtube.com/",
+            label=f"{label} Studio",
+            keep_in_background=False,
+        )
+    except Exception as e:
+        _log(f"{label}: Studio: {e!r}")
+    try:
+        _open(
+            INSTAGRAM_URL,
+            host="instagram.com",
+            tab_label=f"{label} Instagram",
+            pages=_ig_instagram_pages(context),
+        )
+    except Exception as e:
+        _log(f"{label}: Instagram: {e!r}")
+    try:
+        _open(
+            TIKTOK_URL,
+            host="tiktok.com",
+            tab_label=f"{label} TikTok",
+            pages=_combined_tiktok_pages(context),
+        )
+    except Exception as e:
+        _log(f"{label}: TikTok: {e!r}")
+    try:
+        if _page_still_open(studio):
+            studio.bring_to_front()
+    except Exception:
+        pass
+    _log(
+        f"{label}: Studio, Instagram и TikTok открыты обычным переходом. "
+        "Залив YouTube не запускается."
+    )
+    return studio
+
+
+def _ensure_studio_tab_for_social(context, *, prefer=None):
+    """Вкладка Studio для пары Instagram+TikTok, без запуска залива."""
+    page = _pick_non_instagram_page(context, prefer=prefer)
+    if page is not None and _page_still_open(page):
+        url = _ig_page_url_lower(page)
+        if "instagram.com" not in url and "tiktok.com" not in url:
+            if "studio.youtube.com" not in url and "youtube.com" not in url:
+                try:
+                    from zaliver.instagram_upload.register import _navigate_page_to
+
+                    _navigate_page_to(
+                        page,
+                        "https://studio.youtube.com/",
+                        label="Studio без залива",
+                        keep_in_background=False,
+                    )
+                except Exception as e:
+                    _log(f"IG+TT: переход на Studio: {e!r}")
+            return page
+    from zaliver.instagram_upload.register import _navigate_page_to
+
+    page = context.new_page()
+    try:
+        _navigate_page_to(
+            page,
+            "https://studio.youtube.com/",
+            label="Studio без залива",
+            keep_in_background=False,
+        )
+    except Exception as e:
+        _log(f"IG+TT: не удалось открыть Studio: {e!r}")
+    return page
+
+
+def _close_pages_matching(context, *needles: str) -> None:
+    for pg in list(getattr(context, "pages", []) or []):
+        try:
+            if pg.is_closed():
+                continue
+            url = (pg.url or "").lower()
+        except Exception:
+            continue
+        if any(n in url for n in needles):
+            try:
+                pg.close()
+            except Exception:
+                pass
+
+
+def _page_is_disabled_platform(
+    url: str, *, do_youtube: bool, do_instagram: bool, do_tiktok: bool
+) -> bool:
+    if (not do_youtube) and "youtube.com" in url:
+        return True
+    if (not do_instagram) and "instagram.com" in url:
+        return True
+    if (not do_tiktok) and "tiktok.com" in url:
+        return True
+    return False
+
+
+def _enabled_platform_url(
+    *, do_youtube: bool, do_instagram: bool, do_tiktok: bool
+) -> str:
+    if do_instagram:
+        return "https://www.instagram.com/"
+    if do_tiktok:
+        return "https://www.tiktok.com/"
+    if do_youtube:
+        return "https://studio.youtube.com/"
+    return "about:blank"
+
+
+def _close_disabled_platform_tabs(
+    context, *, do_youtube: bool, do_instagram: bool, do_tiktok: bool
+) -> None:
+    """Закрыть выключенные площадки только когда остаётся другая вкладка.
+
+    Закрытие единственной ещё грузящейся вкладки заставляет Chrome открыть
+    новую, и спиннер на ней уже не заканчивается.
+    """
+    alive = _ig_alive_context_pages(context)
+    doomed: list = []
+    keep: list = []
+    for pg in alive:
+        if _page_is_disabled_platform(
+            _ig_page_url_lower(pg),
+            do_youtube=do_youtube,
+            do_instagram=do_instagram,
+            do_tiktok=do_tiktok,
+        ):
+            doomed.append(pg)
+        else:
+            keep.append(pg)
+    if not doomed:
+        return
+    if not keep:
+        survivor = doomed.pop(0)
+        target = _enabled_platform_url(
+            do_youtube=do_youtube,
+            do_instagram=do_instagram,
+            do_tiktok=do_tiktok,
+        )
+        try:
+            from zaliver.instagram_upload.register import _navigate_page_to
+
+            _navigate_page_to(
+                survivor,
+                target,
+                label="combined keep-last",
+                keep_in_background=False,
+            )
+            _log("combined: единственную вкладку перевели на включённую площадку.")
+        except Exception as e:
+            _log(f"combined: не удалось переиспользовать последнюю вкладку: {e!r}")
+    for pg in doomed:
+        try:
+            pg.close()
+        except Exception:
+            pass
+
+
+def _focus_combined_upload_tab(
+    context,
+    *,
+    do_youtube: bool,
+    do_instagram: bool,
+    do_tiktok: bool,
+    yt_page,
+    log_label: str,
+) -> None:
+    if do_youtube:
+        candidate = yt_page if _page_still_open(yt_page) else None
+        if candidate is not None:
+            url = _ig_page_url_lower(candidate)
+            if "instagram.com" not in url and "tiktok.com" not in url:
+                _bring_studio_tab_to_front(candidate, log_label=log_label)
+                return
+        for pg in _ig_alive_context_pages(context):
+            url = _ig_page_url_lower(pg)
+            if "youtube.com" in url and "instagram.com" not in url:
+                _bring_studio_tab_to_front(pg, log_label=log_label)
+                return
+        return
+    pages = _ig_instagram_pages(context) if do_instagram else []
+    label = "Instagram"
+    if not pages and do_tiktok:
+        pages = _combined_tiktok_pages(context)
+        label = "TikTok"
+    if not pages:
+        return
+    try:
+        pages[0].bring_to_front()
+        _log(
+            f"{log_label}: фокус на {label} "
+            f"({_ig_page_url_lower(pages[0])!r})."
+        )
+    except Exception as e:
+        _log(f"{log_label}: не удалось переключить фокус на {label}: {e!r}")
 
 
 def _run_youtube_then_instagram_session(
@@ -6644,7 +7225,7 @@ def upload_youtube_and_instagram_in_profile(
             try:
                 browser, context, page = _playwright_page_from_cdp(pw, endpoints)
                 warmup_runner = _maybe_start_parallel_shorts_warmup(
-                    enabled=warmup_during_schedule,
+                    enabled=warmup_during_schedule and not skip_youtube,
                     schedule_publish_at=schedule_publish_at,
                     scheduled_batch=scheduled_batch,
                     cdp_endpoints=endpoints,
@@ -6881,7 +7462,9 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
 
     keep_open = bool(keep_browser_open)
     _log(
-        "Local antidetect: Yt+Inst залив. "
+        "Local antidetect: залив "
+        f"youtube={not skip_youtube}, instagram={not skip_instagram}, "
+        f"tiktok={bool(include_tiktok) and not skip_tiktok}. "
         f"profile_id={profile_id!r}, base_url={base_url!r}, headless={headless}, "
         f"keep_browser_open={keep_open}, video_path={video_path!r}"
     )
@@ -6965,6 +7548,12 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
                             headless=headless,
                             expose_cdp=True,
                             remote_cdp=remote_cdp,
+                            start_url=_combined_launch_start_url(
+                                skip_youtube=skip_youtube,
+                                skip_instagram=skip_instagram,
+                                skip_tiktok=skip_tiktok,
+                                include_tiktok=include_tiktok,
+                            ),
                         )
                         sid = acc.get("session_id")
                         if not isinstance(sid, str) or not sid.strip():
@@ -6995,6 +7584,12 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
                     headless=headless,
                     expose_cdp=True,
                     remote_cdp=remote_cdp,
+                    start_url=_combined_launch_start_url(
+                        skip_youtube=skip_youtube,
+                        skip_instagram=skip_instagram,
+                        skip_tiktok=skip_tiktok,
+                        include_tiktok=include_tiktok,
+                    ),
                 )
                 sid = acc.get("session_id")
                 if not isinstance(sid, str) or not sid.strip():
@@ -7017,7 +7612,7 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
                         pw, api, session_id, ws_url
                     )
                     warmup_runner = _maybe_start_parallel_shorts_warmup(
-                        enabled=warmup_during_schedule,
+                        enabled=warmup_during_schedule and not skip_youtube,
                         schedule_publish_at=schedule_publish_at,
                         scheduled_batch=scheduled_batch,
                         cdp_endpoints=(ws_url,),

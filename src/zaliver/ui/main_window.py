@@ -905,10 +905,14 @@ class MainWindow(QWidget):
         platform: str = PLATFORM_YOUTUBE,
         *,
         embedded: bool = False,
+        upload_targets: frozenset[str] | set[str] | None = None,
     ) -> None:
         super().__init__()
         self._platform = normalize_platform(platform)
         self._embedded = bool(embedded)
+        self._combined_upload_targets: frozenset[str] | None = None
+        if upload_targets and self._platform == PLATFORM_YT_INST_TT:
+            self._combined_upload_targets = frozenset(upload_targets)
         self.setWindowTitle(
             f"Zaliver — {platform_display_name(self._platform)}"
         )
@@ -928,7 +932,16 @@ class MainWindow(QWidget):
         self._stats_progress_dlg: QProgressDialog | None = None
         self._selected_input_files: list[str] = []
         self._background_music_files: list[str] = []
-        self._core = ZaliverCore.create(self._platform)
+        storage_platform = None
+        if self._platform == PLATFORM_YT_INST_TT:
+            targets = self._combined_upload_targets
+            youtube_on = targets is None or PLATFORM_YOUTUBE in targets
+            storage_platform = (
+                PLATFORM_YOUTUBE if youtube_on else PLATFORM_INSTAGRAM
+            )
+        self._core = ZaliverCore.create(
+            self._platform, storage_platform=storage_platform
+        )
         self._video_store = self._core.videos
         self._upload_store = self._core.uploads
         self._upload_session = None
@@ -2392,7 +2405,7 @@ class MainWindow(QWidget):
         self._youtube_pause_label = QLabel("Пауза между видео:")
         self._youtube_pause_label.setToolTip(yt_pause_tip)
         self._youtube_pause_wrap = yt_pause_wrap
-        yt_pause_visible = self._platform == PLATFORM_YOUTUBE
+        yt_pause_visible = self._combined_settings_platform() == PLATFORM_YOUTUBE
         self._youtube_pause_label.setVisible(yt_pause_visible)
         self._youtube_pause_wrap.setVisible(yt_pause_visible)
         self._btn_save_youtube = QPushButton("Сохранить")
@@ -2412,7 +2425,10 @@ class MainWindow(QWidget):
         gy.addWidget(self._youtube_settings_status, 5, 0, 1, 2)
         # В Instagram API-ключ Data API не используется (статистика через сессию профиля).
         # Yt+Inst — оба раздела: YouTube и Instagram.
-        gb_yt.setVisible(self._platform not in (PLATFORM_INSTAGRAM, PLATFORM_TIKTOK))
+        gb_yt.setVisible(
+            self._platform not in (PLATFORM_INSTAGRAM, PLATFORM_TIKTOK)
+            and self._combined_settings_platform() == PLATFORM_YOUTUBE
+        )
 
         gb_ig = QGroupBox("Instagram")
         self._gb_instagram_settings = gb_ig
@@ -2497,9 +2513,7 @@ class MainWindow(QWidget):
         gi.addWidget(self._instagram_tabs_per_profile, 2, 1)
         gi.addWidget(_settings_save_row(self._btn_save_instagram), 3, 0, 1, 2)
         gi.addWidget(self._instagram_settings_status, 4, 0, 1, 2)
-        gb_ig.setVisible(
-            self._platform in (PLATFORM_INSTAGRAM, PLATFORM_YT_INST, PLATFORM_YT_INST_TT, PLATFORM_TIKTOK)
-        )
+        gb_ig.setVisible(self._instagram_settings_section_visible())
         self._sync_instagram_crop_setting_visibility()
 
         gb_ai = QGroupBox("ИИ")
@@ -5516,6 +5530,34 @@ class MainWindow(QWidget):
             )
         return max_concurrent_browsers_from_settings(self._settings)
 
+    def _combined_target_enabled(self, platform: str) -> bool:
+        """В «Все вместе» выключенная площадка не участвует в заливе."""
+        if self._platform != PLATFORM_YT_INST_TT:
+            return True
+        targets = self._combined_upload_targets
+        if not targets:
+            return True
+        return platform in targets
+
+    def _combined_settings_platform(self) -> str:
+        """YouTube, если он включён; иначе настройки Instagram."""
+        if self._platform != PLATFORM_YT_INST_TT:
+            if self._platform == PLATFORM_INSTAGRAM:
+                return PLATFORM_INSTAGRAM
+            if self._platform == PLATFORM_TIKTOK:
+                return PLATFORM_TIKTOK
+            return PLATFORM_YOUTUBE
+        if self._combined_target_enabled(PLATFORM_YOUTUBE):
+            return PLATFORM_YOUTUBE
+        return PLATFORM_INSTAGRAM
+
+    def _instagram_settings_section_visible(self) -> bool:
+        if self._platform in (PLATFORM_INSTAGRAM, PLATFORM_TIKTOK, PLATFORM_YT_INST):
+            return True
+        if self._platform == PLATFORM_YT_INST_TT:
+            return self._combined_settings_platform() == PLATFORM_INSTAGRAM
+        return False
+
     def _settings_for(self, platform: str) -> PlatformSettings:
         """Настройки конкретной платформы (Yt+Inst читает youtube / instagram отдельно)."""
         store = getattr(self._settings, "store", self._settings)
@@ -5556,7 +5598,9 @@ class MainWindow(QWidget):
         YouTube и Instagram — свои значения; Yt+Inst — пауза Instagram.
         """
         plat = normalize_platform(platform or self._platform)
-        if plat in (PLATFORM_YT_INST, PLATFORM_YT_INST_TT):
+        if plat == PLATFORM_YT_INST_TT:
+            plat = self._combined_settings_platform()
+        elif plat == PLATFORM_YT_INST:
             plat = PLATFORM_INSTAGRAM
         return upload_pause_from_settings(self._settings_for(plat))
 
@@ -11813,14 +11857,35 @@ class MainWindow(QWidget):
         if hasattr(self, "_stitch_tab"):
             self._stitch_tab.set_idle()
 
+    def _upload_activity_label(self) -> str:
+        """Подпись лога по площадкам, включённым на экране выбора."""
+        if self._platform == PLATFORM_YT_INST_TT:
+            names = [
+                title
+                for pid, title in (
+                    (PLATFORM_INSTAGRAM, "Instagram"),
+                    (PLATFORM_YOUTUBE, "YouTube"),
+                    (PLATFORM_TIKTOK, "TikTok"),
+                )
+                if self._combined_target_enabled(pid)
+            ]
+            return " + ".join(names) if names else "Все вместе"
+        if self._platform == PLATFORM_INSTAGRAM:
+            return "Instagram"
+        if self._platform == PLATFORM_TIKTOK:
+            return "TikTok"
+        if self._platform == PLATFORM_YT_INST:
+            return "Yt+Inst"
+        return "YouTube"
+
     def _sync_toolbar_for_upload_phase(self) -> None:
-        """Во время залива на YouTube: отмена доступна, старт выключен."""
+        """Во время залива: отмена доступна, старт выключен."""
         self.btn_cancel.setEnabled(True)
         self.btn_start.setEnabled(False)
         tab = self._montage_tab()
         if tab is not None:
             tab.set_busy()
-            tab.progress_label.setText(self._brand("YouTube: загрузка…"))
+            tab.progress_label.setText(f"{self._upload_activity_label()}: загрузка…")
 
     def _finish_montage_tab_after_upload(self, status: str) -> None:
         tab = self._montage_tab()
@@ -11830,16 +11895,15 @@ class MainWindow(QWidget):
         mx = max(1, int(tab.progress.maximum()))
         tab.progress.setRange(0, mx)
         tab.progress.setValueImmediate(mx)
+        label = self._upload_activity_label()
         if status == "cancelled":
-            tab.progress_label.setText(self._brand("Загрузка на YouTube отменена."))
+            tab.progress_label.setText(f"Загрузка ({label}) отменена.")
         elif status == "timeout":
             tab.progress_label.setText(
-                self._brand("Загрузка на YouTube остановлена по таймауту.")
+                f"Загрузка ({label}) остановлена по таймауту."
             )
         elif status == "upload_failed":
-            tab.progress_label.setText(
-                self._brand("Готово (ошибки загрузки на YouTube).")
-            )
+            tab.progress_label.setText(f"Готово (ошибки загрузки: {label}).")
         else:
             tab.progress_label.setText("Готово")
 
@@ -11882,15 +11946,16 @@ class MainWindow(QWidget):
         self.progress.setValueImmediate(mx)
         self._finalize_idle_toolbar()
         self._finish_slice_tab_after_upload(status)
+        label = self._upload_activity_label()
         if status == "cancelled":
             if self._is_montage_mode(upload_mode):
                 self._append_montage_log(
-                    "YouTube: загрузка отменена пользователем.", mode=upload_mode
+                    f"{label}: загрузка отменена пользователем.", mode=upload_mode
                 )
             else:
-                self.progress_label.setText("Загрузка на YouTube отменена.")
-                self._append_log("YouTube: загрузка отменена пользователем.")
-            QMessageBox.information(self, "Zaliver", "Загрузка на YouTube отменена.")
+                self.progress_label.setText(f"Загрузка ({label}) отменена.")
+                self._append_log(f"{label}: загрузка отменена пользователем.")
+            QMessageBox.information(self, "Zaliver", f"Загрузка ({label}) отменена.")
         elif status == "timeout":
             timeout_msg = (
                 "Очередь заливов не завершилась в отведённое время "
@@ -11898,30 +11963,30 @@ class MainWindow(QWidget):
                 "Часть видео могла не залиться — см. лог."
             )
             if self._is_montage_mode(upload_mode):
-                self._append_montage_log(f"YouTube: {timeout_msg}", mode=upload_mode)
+                self._append_montage_log(f"{label}: {timeout_msg}", mode=upload_mode)
             else:
-                self.progress_label.setText("Загрузка на YouTube остановлена по таймауту.")
-                self._append_log(f"YouTube: {timeout_msg}")
+                self.progress_label.setText(f"Загрузка ({label}) остановлена по таймауту.")
+                self._append_log(f"{label}: {timeout_msg}")
             QMessageBox.warning(self, "Zaliver", timeout_msg)
         elif status == "upload_failed":
             if self._is_montage_mode(upload_mode):
                 self._append_montage_log(
-                    "YouTube: очередь завершена, залив не удался (см. лог выше).",
+                    f"{label}: очередь завершена, залив не удался (см. лог выше).",
                     mode=upload_mode,
                 )
             else:
-                self.progress_label.setText("Готово (есть ошибки загрузки на YouTube).")
+                self.progress_label.setText(f"Готово (есть ошибки загрузки: {label}).")
                 self._append_log(
-                    "YouTube: очередь завершена, часть загрузок завершилась с ошибками."
+                    f"{label}: очередь завершена, часть загрузок завершилась с ошибками."
                 )
         else:
             if self._is_montage_mode(upload_mode):
                 self._append_montage_log(
-                    "YouTube: очередь загрузок завершена.", mode=upload_mode
+                    f"{label}: очередь загрузок завершена.", mode=upload_mode
                 )
             else:
                 self.progress_label.setText("Готово")
-                self._append_log("YouTube: очередь загрузок завершена.")
+                self._append_log(f"{label}: очередь загрузок завершена.")
 
     def _on_progress(self, cur: int, total: int, msg: str) -> None:
         self.progress.setRange(0, max(1, total))
@@ -12023,7 +12088,7 @@ class MainWindow(QWidget):
         )
 
         if is_yt_inst_tt_upload:
-            upload_platform_label = "Inst+Yt+TikTok"
+            upload_platform_label = self._upload_activity_label()
         elif is_yt_inst_upload:
             upload_platform_label = "Yt+Inst"
         elif self._platform == PLATFORM_TIKTOK:
@@ -12039,8 +12104,13 @@ class MainWindow(QWidget):
             f"Видео={len(video_paths)}, профили={len(profile_ids)} [{ids_preview}]…"
         )
         if is_yt_inst_upload and ig_keep_browser_open:
+            pause_from = (
+                "YouTube"
+                if self._combined_settings_platform() == PLATFORM_YOUTUBE
+                else "Instagram"
+            )
             self._append_session_log(
-                "Yt+Inst: пауза Instagram = 0 — браузер не закрывается, "
+                f"{upload_platform_label}: пауза {pause_from} = 0 — браузер не закрывается, "
                 "если следующий залив на тот же профиль."
             )
         elif (
@@ -12366,6 +12436,17 @@ class MainWindow(QWidget):
                 skip_tiktok = bool(
                     mgr_now is not None
                     and mgr_now.is_platform_disabled(profile_id, "tiktok")
+                )
+                if is_yt_inst_tt_upload:
+                    if not self._combined_target_enabled(PLATFORM_YOUTUBE):
+                        skip_youtube = True
+                    if not self._combined_target_enabled(PLATFORM_INSTAGRAM):
+                        skip_instagram = True
+                    if not self._combined_target_enabled(PLATFORM_TIKTOK):
+                        skip_tiktok = True
+                user_wants_tiktok = (
+                    is_yt_inst_tt_upload
+                    and self._combined_target_enabled(PLATFORM_TIKTOK)
                 )
                 if skip_youtube and skip_instagram and (
                     not is_yt_inst_tt_upload or skip_tiktok
@@ -12729,15 +12810,15 @@ class MainWindow(QWidget):
                     on_instagram_success=_record_yt_inst_instagram,
                     on_instagram_error=_on_yt_inst_ig_error,
                     crop_aspect=ig_crop_aspect,
-                    include_tiktok=bool(is_yt_inst_tt_upload),
+                    include_tiktok=bool(user_wants_tiktok),
                     tt_session_login=tt_login,
                     tt_session_password=tt_pwd,
                     tt_session_twofa=tt_2fa,
                     on_tiktok_success=(
-                        _record_yt_inst_tiktok if is_yt_inst_tt_upload else None
+                        _record_yt_inst_tiktok if user_wants_tiktok else None
                     ),
                     on_tiktok_error=(
-                        _on_yt_inst_tt_error if is_yt_inst_tt_upload else None
+                        _on_yt_inst_tt_error if user_wants_tiktok else None
                     ),
                     skip_youtube=skip_youtube,
                     skip_instagram=skip_instagram,

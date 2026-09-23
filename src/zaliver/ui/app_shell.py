@@ -16,7 +16,11 @@ from PyQt6.QtWidgets import (
 
 from zaliver.ui.desktop_notify import DesktopNotifier
 from zaliver.ui.main_window import MainWindow
-from zaliver.ui.platform import normalize_platform, platform_display_name
+from zaliver.ui.platform import (
+    PLATFORM_YT_INST_TT,
+    normalize_platform,
+    platform_display_name,
+)
 from zaliver.ui.platform_select import PlatformSelectPane
 from zaliver.ui.widgets import install_spinbox_input_policy
 
@@ -151,7 +155,12 @@ class AppShell(QWidget):
         platform = normalize_platform(platform)
         self._dispose_main()
 
-        self._main = MainWindow(platform=platform, embedded=True)
+        targets = None
+        if platform == PLATFORM_YT_INST_TT:
+            targets = self._select.combined_targets()
+        self._main = MainWindow(
+            platform=platform, embedded=True, upload_targets=targets
+        )
         self._main.back_to_modes.connect(self._on_back_to_modes)
         self._stack.addWidget(self._main)
         self._stack.setCurrentWidget(self._main)

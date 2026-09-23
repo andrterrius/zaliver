@@ -3550,44 +3550,38 @@ def _is_chrome_net_error_url(url: str) -> bool:
 
 def _navigate_page_via_cdp_background(page, url: str, *, label: str) -> bool:
     """
-    Page.navigate по CDP без Target.activateTarget — вкладка не выходит на передний план.
-    Нужно для Yt+Inst, чтобы Studio не теряла мастер загрузки.
+    Фоновая навигация без второй CDP-сессии вкладки.
+
+    Вторая сессия включает Page domain и оставляет спиннер, если страница
+    уже успела загрузиться.
     """
-    cdp = None
     try:
-        cdp = page.context.new_cdp_session(page)
-        _log(f"{label}: навигация (CDP Page.navigate, фон) → {url}")
-        cdp.send("Page.navigate", {"url": url})
-        deadline = time.monotonic() + 90.0
-        while time.monotonic() < deadline:
-            try:
-                page.wait_for_timeout(200)
-            except Exception:
-                time.sleep(0.2)
-            cur = _page_url(page)
-            if not cur or cur.lower() == "about:blank":
-                continue
-            if _is_tiktok_url(cur) or cur.lower() != "about:blank":
-                try:
-                    page.wait_for_load_state("domcontentloaded", timeout=30_000)
-                except Exception as e:
-                    _log(f"{label}: wait domcontentloaded после CDP navigate: {e!r}")
-                _log(f"{label}: OK (фон), URL={cur!r}")
-                if _is_cookie_consent_url(cur):
-                    accept_tiktok_cookie_consent_if_present(
-                        page, appear_seconds=8.0, max_seconds=30.0
-                    )
-                return True
-        return False
+        _log(f"{label}: навигация (location.assign, фон) → {url}")
+        page.evaluate("(u) => { location.assign(u); }", url)
     except Exception as e:
-        _log(f"{label}: CDP Page.navigate не удалось: {e!r}")
+        _log(f"{label}: location.assign не удалось: {e!r}")
         return False
-    finally:
-        if cdp is not None:
+    deadline = time.monotonic() + 45.0
+    while time.monotonic() < deadline:
+        try:
+            page.wait_for_timeout(200)
+        except Exception:
+            time.sleep(0.2)
+        cur = _page_url(page)
+        if not cur or cur.lower() == "about:blank":
+            continue
+        if _is_tiktok_url(cur) or cur.lower() != "about:blank":
             try:
-                cdp.detach()
-            except Exception:
-                pass
+                page.wait_for_load_state("domcontentloaded", timeout=30_000)
+            except Exception as e:
+                _log(f"{label}: wait domcontentloaded после location.assign: {e!r}")
+            _log(f"{label}: OK (фон), URL={cur!r}")
+            if _is_cookie_consent_url(cur):
+                accept_tiktok_cookie_consent_if_present(
+                    page, appear_seconds=8.0, max_seconds=30.0
+                )
+            return True
+    return False
 
 
 def _navigate_page_to(

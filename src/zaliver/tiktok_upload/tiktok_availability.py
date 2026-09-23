@@ -203,8 +203,9 @@ def verify_tiktok_home_available(
     _wait_tiktok_network_ready(page)
     url0 = _page_url(page)
     low0 = url0.lower()
+    already_on_home = _is_tiktok_home_feed_url(url0)
 
-    if _is_tiktok_home_feed_url(url0):
+    if already_on_home:
         _log(f"TikTok: уже на главной (URL={url0!r}) — без повторной навигации.")
     elif _is_tiktok_url(url0):
         # После залива с keep_browser_open часто /video/... — сайдбар Log in
@@ -239,14 +240,18 @@ def verify_tiktok_home_available(
                 f"(текущий URL={url0!r})"
             )
             _navigate_page_to(page, TIKTOK_URL)
+            already_on_home = False
 
-    # Через 1.5 с переоткрываем домен TikTok (mobile splash / cold start).
-    _log("TikTok: ждём 1.5 с и переоткрываем главную…")
-    try:
-        page.wait_for_timeout(1500)
-    except Exception:
-        time.sleep(1.5)
-    _navigate_page_to(page, TIKTOK_URL)
+    # Холодный старт (splash / about:blank): через 1.5 с ещё раз открываем главную.
+    # Если лента уже открыта — не перезагружаем: параллельный TikTok+Instagram
+    # иначе оба зависают на page.goto(wait_until=commit) по 90 с.
+    if not already_on_home:
+        _log("TikTok: ждём 1.5 с и переоткрываем главную…")
+        try:
+            page.wait_for_timeout(1500)
+        except Exception:
+            time.sleep(1.5)
+        _navigate_page_to(page, TIKTOK_URL)
 
     _raise_if_accounts_suspended(page)
     accept_tiktok_cookie_consent_if_present(page, appear_seconds=2.0)

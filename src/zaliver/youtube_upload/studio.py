@@ -6657,7 +6657,7 @@ def _studio_prepare_upload_details_during_transfer(
                         right_slack=10,
                         backspace_extra=15,
                     )
-                    page.keyboard.type(t, delay=0)
+                    page.keyboard.insert_text(t)
                     title_done = True
                     _log("Studio: название введено.")
             except Exception:
@@ -6776,7 +6776,7 @@ def _studio_set_title_and_description(
             right_slack=10,
             backspace_extra=15,
         )
-        page.keyboard.type(t, delay=0)
+        page.keyboard.insert_text(t)
         page.wait_for_timeout(150)
 
     if d and not desc_done:

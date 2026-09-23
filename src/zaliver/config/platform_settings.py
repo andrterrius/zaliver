@@ -13,19 +13,10 @@ PLATFORM_YT_INST = "yt_inst"
 PLATFORM_YT_INST_TT = "yt_inst_tt"
 
 PLATFORM_CHOICES: tuple[tuple[str, str, str], ...] = (
-    (PLATFORM_YOUTUBE, "YouTube", "Залив видео на YouTube"),
-    (PLATFORM_INSTAGRAM, "Instagram", "Залив видео на Instagram"),
-    (PLATFORM_TIKTOK, "TikTok", "Залив видео на TikTok"),
-    (
-        PLATFORM_YT_INST,
-        "Yt+Inst",
-        "Одно видео на YouTube и Instagram (2 вкладки)",
-    ),
-    (
-        PLATFORM_YT_INST_TT,
-        "Inst+Yt+TikTok",
-        "Одно видео на Instagram, YouTube и TikTok (3 вкладки)",
-    ),
+    (PLATFORM_INSTAGRAM, "Instagram", ""),
+    (PLATFORM_YOUTUBE, "YouTube", ""),
+    (PLATFORM_TIKTOK, "TikTok", ""),
+    (PLATFORM_YT_INST_TT, "Все вместе", ""),
 )
 
 # Shared across platforms (antidetect, LLM key).
@@ -76,7 +67,7 @@ def platform_display_name(platform: str) -> str:
     if p == PLATFORM_YT_INST:
         return "Yt+Inst"
     if p == PLATFORM_YT_INST_TT:
-        return "Inst+Yt+TikTok"
+        return "Все вместе"
     return "YouTube"
 
 
@@ -132,7 +123,13 @@ def platform_settings_storage_id(platform: str | None) -> str:
 class PlatformSettings:
     """Settings with platforms/{id}/ prefix; antidetect and AI keys are shared."""
 
-    def __init__(self, settings: Any, platform: str) -> None:
+    def __init__(
+        self,
+        settings: Any,
+        platform: str,
+        *,
+        storage_platform: str | None = None,
+    ) -> None:
         if type(settings).__name__ == "PlatformSettings":
             self._store = settings.store  # type: ignore[attr-defined]
         elif isinstance(settings, SettingsStore):
@@ -140,7 +137,13 @@ class PlatformSettings:
         else:
             self._store = ensure_settings_store(settings)
         self._platform = normalize_platform(platform)
-        self._storage_platform = platform_settings_storage_id(self._platform)
+        if storage_platform:
+            stored = normalize_platform(storage_platform)
+            if stored in (PLATFORM_YT_INST, PLATFORM_YT_INST_TT):
+                stored = PLATFORM_YOUTUBE
+            self._storage_platform = stored
+        else:
+            self._storage_platform = platform_settings_storage_id(self._platform)
 
     @property
     def platform(self) -> str:

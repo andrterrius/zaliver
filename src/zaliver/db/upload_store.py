@@ -1733,6 +1733,49 @@ class UploadStore:
                     pass
             return changed
 
+    def reset_latest_upload_time_for_all_profiles(
+        self,
+        *,
+        platform: str = "youtube",
+        pause: timedelta | None = None,
+    ) -> int:
+        """Снимает паузу перед следующим заливом у всех профилей текущей платформы."""
+        plat = _normalize_platform(platform)
+        pause_td = resolve_upload_pause(pause)
+        shift = (
+            pause_td + timedelta(hours=1)
+            if pause_td.total_seconds() > 0
+            else timedelta(hours=1)
+        )
+        old = (datetime.now(tz=timezone.utc) - shift).isoformat()
+        plats = _combined_video_plats(plat) or (plat,)
+        changed = 0
+        with self._connect() as con:
+            for one in plats:
+                con.execute(
+                    """
+                    UPDATE uploaded_videos
+                    SET uploaded_at = ?
+                    WHERE platform = ?
+                      AND TRIM(COALESCE(profile_id, '')) <> ''
+                      AND id = (
+                        SELECT u2.id
+                        FROM uploaded_videos AS u2
+                        WHERE u2.platform = uploaded_videos.platform
+                          AND u2.profile_id = uploaded_videos.profile_id
+                        ORDER BY u2.uploaded_at DESC, u2.id DESC
+                        LIMIT 1
+                      );
+                    """,
+                    (old, one),
+                )
+                row = con.execute("SELECT changes() AS n;").fetchone()
+                try:
+                    changed += int(row["n"]) if row is not None else 0
+                except (TypeError, ValueError, KeyError):
+                    pass
+        return changed
+
     def flag_profile_after_upload_errors(self, *, profile_id: str, flagged: bool, error_text: str = "") -> None:
         pid = (profile_id or "").strip()
         if not pid:

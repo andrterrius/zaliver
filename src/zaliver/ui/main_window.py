@@ -2161,7 +2161,18 @@ class MainWindow(QWidget):
             on_select_filter=self._select_profiles_checked_filter,
             on_clear=self._clear_profiles_checked_selection,
         )
+        self._btn_profiles_reset_pauses = QPushButton("Сбросить паузы")
+        self._btn_profiles_reset_pauses.setObjectName("secondary")
+        self._btn_profiles_reset_pauses.setAutoDefault(False)
+        self._btn_profiles_reset_pauses.setDefault(False)
+        self._btn_profiles_reset_pauses.setToolTip(
+            "Снять паузу перед следующим заливом у всех профилей этой платформы"
+        )
+        self._btn_profiles_reset_pauses.clicked.connect(
+            self._ask_reset_upload_cooldown_for_all_profiles
+        )
         list_sel_row.addWidget(self._btn_profiles_clear_zaliver_tags)
+        list_sel_row.addWidget(self._btn_profiles_reset_pauses)
         self._profiles_interaction.selection_changed.connect(
             self._on_profiles_checked_selection_changed
         )
@@ -10452,6 +10463,37 @@ class MainWindow(QWidget):
             self._profiles_interaction.update_upload_cooldown_for_profile(pid, new_iso)
         elif hasattr(self, "_profiles_list"):
             self._apply_profiles_filter()
+
+    def _ask_reset_upload_cooldown_for_all_profiles(self) -> None:
+        pause = self._upload_pause_between_uploads()
+        pause_short = format_upload_pause_short(pause)
+        ans = QMessageBox.question(
+            self,
+            f"Пауза {pause_short}",
+            "Сбросить паузу перед следующим заливом у всех профилей? "
+            "После подтверждения с них снова можно будет загружать видео.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        n = self._upload_store.reset_latest_upload_time_for_all_profiles(
+            platform=self._platform, pause=pause
+        )
+        if n <= 0:
+            QMessageBox.information(
+                self,
+                "Zaliver",
+                "Нет сохранённых заливов — сбрасывать паузу не у кого.",
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Zaliver",
+            "Пауза сброшена у всех профилей с заливами на этой платформе. "
+            "С них снова можно загружать видео.",
+        )
+        self._apply_profiles_filter()
 
     def _dolphin_google_worker(
         self,

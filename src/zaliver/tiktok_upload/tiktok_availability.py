@@ -91,6 +91,45 @@ def _wait_leave_about_blank(page, *, max_seconds: float = _BLANK_SETTLE_S) -> st
     return _page_url(page)
 
 
+def _tiktok_home_ui_ready(page) -> bool:
+    """Главная реально открылась, а не зависла на URL без интерфейса."""
+    if _tiktok_logged_in_nav_visible(page) or _tiktok_sidebar_login_visible(page):
+        return True
+    if (
+        _is_saved_profile_chooser_screen(page)
+        or _onetap_password_visible(page)
+        or _is_classic_login_form_visible(page)
+        or _is_mobile_logged_out_landing(page)
+        or _tiktok_login_form_visible(page)
+    ):
+        return True
+    try:
+        return bool(
+            page.evaluate(
+                """() => {
+                    const side = document.querySelector(
+                        '[data-key-interaction="side_nav"]'
+                    );
+                    if (side) return true;
+                    const app = document.querySelector('#app, #main-content-homepage');
+                    const text = (document.body && document.body.innerText || '').trim();
+                    return !!(app && text.length > 80);
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+def _reopen_tiktok_home(page, *, reason: str) -> None:
+    _log(f"TikTok: {reason} — открываем главную ещё раз…")
+    try:
+        page.wait_for_timeout(1500)
+    except Exception:
+        time.sleep(1.5)
+    _navigate_page_to(page, TIKTOK_URL)
+
+
 def _wait_tiktok_network_ready(page, *, max_seconds: float = 45.0) -> None:
     """chrome-error / ERR_PROXY: локальный прокси антидетекта поднимается после CDP."""
     url0 = _page_url(page)
@@ -205,8 +244,15 @@ def verify_tiktok_home_available(
     low0 = url0.lower()
     already_on_home = _is_tiktok_home_feed_url(url0)
 
-    if already_on_home:
+    if already_on_home and _tiktok_home_ui_ready(page):
         _log(f"TikTok: уже на главной (URL={url0!r}) — без повторной навигации.")
+    elif already_on_home:
+        _log(
+            f"TikTok: URL главной есть ({url0!r}), "
+            "но интерфейс не открылся — переходим ещё раз."
+        )
+        _reopen_tiktok_home(page, reason="первичная вкладка не отрисовалась")
+        already_on_home = _tiktok_home_ui_ready(page)
     elif _is_tiktok_url(url0):
         # После залива с keep_browser_open часто /video/... — сайдбар Log in
         # надёжнее проверять с главной ленты.
@@ -246,12 +292,7 @@ def verify_tiktok_home_available(
     # Если лента уже открыта — не перезагружаем: параллельный TikTok+Instagram
     # иначе оба зависают на page.goto(wait_until=commit) по 90 с.
     if not already_on_home:
-        _log("TikTok: ждём 1.5 с и переоткрываем главную…")
-        try:
-            page.wait_for_timeout(1500)
-        except Exception:
-            time.sleep(1.5)
-        _navigate_page_to(page, TIKTOK_URL)
+        _reopen_tiktok_home(page, reason="ждём 1.5 с и переоткрываем главную")
 
     _raise_if_accounts_suspended(page)
     accept_tiktok_cookie_consent_if_present(page, appear_seconds=2.0)
@@ -262,6 +303,8 @@ def verify_tiktok_home_available(
     last_url = ""
     relogin_tried = False
     nav_wait_logged = False
+    nav_stuck_since: float | None = None
+    home_reopens_left = 2
     while time.monotonic() < deadline:
         last_url = _page_url(page)
         _raise_if_accounts_suspended(page)
@@ -311,12 +354,25 @@ def verify_tiktok_home_available(
             if not _tiktok_logged_in_nav_visible(page):
                 if not nav_wait_logged:
                     nav_wait_logged = True
+                    nav_stuck_since = time.monotonic()
                     _log(
                         "TikTok: сессия есть, ждём сайдбар без Log in… "
                         f"URL={last_url!r}"
                     )
+                elif (
+                    home_reopens_left > 0
+                    and nav_stuck_since is not None
+                    and time.monotonic() - nav_stuck_since >= 8.0
+                ):
+                    home_reopens_left -= 1
+                    nav_stuck_since = time.monotonic()
+                    _reopen_tiktok_home(
+                        page,
+                        reason="сайдбар так и не появился на первичной вкладке",
+                    )
                 page.wait_for_timeout(500)
                 continue
+            nav_stuck_since = None
             username = _extract_logged_in_username(page)
             _log(
                 "TikTok: вход в аккаунт подтверждён"

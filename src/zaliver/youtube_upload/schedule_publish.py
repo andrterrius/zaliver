@@ -76,6 +76,12 @@ def studio_time_label_ru(dt: datetime) -> str:
     return f"{dt.hour:02d}:{minute:02d}"
 
 
+def normalize_studio_time_label(text: str) -> str:
+    """Схлопнуть пробелы Studio (в т.ч. U+202F между временем и AM/PM)."""
+    raw = (text or "").replace("\u200b", "").replace("\u00ad", "").replace("\ufeff", "")
+    return re.sub(r"\s+", " ", raw, flags=re.UNICODE).strip().casefold()
+
+
 def studio_time_match_patterns(
     dt: datetime,
     *,
@@ -84,19 +90,22 @@ def studio_time_match_patterns(
     dt = dt.astimezone(MSK)
     minute = snap_studio_time_minutes(dt.minute)
     hour = dt.hour
+    # Playwright сравнивает regex с сырым textContent: узкий пробел U+202F
+    # и перевод строки после подписи слота.
     if locale == "ru":
         return [
-            re.compile(rf"^{re.escape(f'{hour:02d}:{minute:02d}')}$"),
-            re.compile(rf"^{re.escape(f'{hour}:{minute:02d}')}$"),
+            re.compile(rf"^\s*{re.escape(f'{hour:02d}:{minute:02d}')}\s*$"),
+            re.compile(rf"^\s*{re.escape(f'{hour}:{minute:02d}')}\s*$"),
         ]
     h12 = hour % 12 or 12
     ampm = "AM" if hour < 12 else "PM"
     patterns: list[re.Pattern[str]] = []
     for h_text in (str(h12), f"{h12:02d}"):
-        label = f"{h_text}:{minute:02d} {ampm}"
-        patterns.append(re.compile(rf"^{re.escape(label)}$", re.I))
         patterns.append(
-            re.compile(rf"^{re.escape(h_text)}:{minute:02d}\s*{ampm}$", re.I)
+            re.compile(
+                rf"^\s*{re.escape(h_text)}:{minute:02d}\s*{ampm}\s*$",
+                re.I,
+            )
         )
     return patterns
 

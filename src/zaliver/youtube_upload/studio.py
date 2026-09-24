@@ -19,6 +19,7 @@ from zaliver.youtube_upload.schedule_publish import (
     studio_date_input_candidates,
     studio_date_picker_locale_from_text,
     studio_date_trigger_matches,
+    normalize_studio_time_label,
     studio_time_input_label,
     studio_time_label_en,
     studio_time_label_en_variants,
@@ -7424,6 +7425,30 @@ def _studio_schedule_time_picker_locale(page, picker) -> str:
     return "ru"
 
 
+def _studio_schedule_time_wanted_labels(dt: datetime, *, locale: str) -> set[str]:
+    if locale == "en":
+        raw_labels = studio_time_label_en_variants(dt)
+    else:
+        raw_labels = [studio_time_label_ru(dt), dt.astimezone(MSK).strftime("%H:%M")]
+    wanted: set[str] = set()
+    for raw in raw_labels:
+        norm = normalize_studio_time_label(raw)
+        if not norm:
+            continue
+        wanted.add(norm)
+        wanted.add(norm.replace(" ", ""))
+    return wanted
+
+
+def _studio_click_schedule_time_item(page, item) -> None:
+    try:
+        item.scroll_into_view_if_needed(timeout=5_000)
+    except Exception:
+        pass
+    item.click(timeout=10_000)
+    page.wait_for_timeout(300)
+
+
 def _studio_try_pick_schedule_time_slot(
     page, picker, dt: datetime, *, locale: str
 ) -> bool:
@@ -7432,32 +7457,26 @@ def _studio_try_pick_schedule_time_slot(
     for pat in patterns:
         item = picker.filter(has_text=pat)
         if item.count() > 0:
-            try:
-                item.first.scroll_into_view_if_needed(timeout=5_000)
-            except Exception:
-                pass
-            item.first.click(timeout=10_000)
-            page.wait_for_timeout(300)
+            _studio_click_schedule_time_item(page, item.first)
             _log(
                 f"Studio: время отложенной публикации — "
                 f"{item.first.inner_text(timeout=2_000)!r}."
             )
             return True
-    if locale == "en":
-        candidates = studio_time_label_en_variants(dt)
-    else:
-        candidates = [studio_time_label_ru(dt), dt.astimezone(MSK).strftime("%H:%M")]
-    for raw in candidates:
-        item = picker.filter(has_text=re.compile(re.escape(raw.strip()), re.I))
-        if item.count() > 0:
-            try:
-                item.first.scroll_into_view_if_needed(timeout=5_000)
-            except Exception:
-                pass
-            item.first.click(timeout=10_000)
-            page.wait_for_timeout(300)
-            _log(f"Studio: время отложенной публикации — {raw}.")
-            return True
+    wanted = _studio_schedule_time_wanted_labels(dt, locale=locale)
+    try:
+        texts = picker.evaluate_all(
+            """(items) => items.map((el) => (el.innerText || el.textContent || ''))"""
+        )
+    except Exception:
+        texts = []
+    for i, raw in enumerate(texts):
+        norm = normalize_studio_time_label(str(raw or ""))
+        if norm not in wanted and norm.replace(" ", "") not in wanted:
+            continue
+        _studio_click_schedule_time_item(page, picker.nth(i))
+        _log(f"Studio: время отложенной публикации — {str(raw).strip()!r}.")
+        return True
     return False
 
 
@@ -8672,9 +8691,14 @@ def run_upload_scheduled_video_batch(
                 page, login_credentials=login_credentials
             )
         upload_file = _studio_validate_video_file_path(item.video_path)
+        when = (
+            "публикация сразу"
+            if item.schedule_publish_at is None
+            else f"отложка {item.schedule_publish_at!r}"
+        )
         _log(
-            f"Studio: отложка — загрузка {i + 1}/{total}: "
-            f"{str(upload_file)!r}, schedule={item.schedule_publish_at!r}"
+            f"Studio: загрузка {i + 1}/{total}: "
+            f"{str(upload_file)!r}, {when}"
         )
         res = _studio_upload_single_video(
             page=page,

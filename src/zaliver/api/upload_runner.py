@@ -251,11 +251,12 @@ def run_upload_job(
         if dt is not None:
             parsed_times.append(dt)
     parsed_times = sorted(parsed_times)
-    schedule_batch = len(parsed_times) if parsed_times and not is_shortform else 0
-    if is_shortform and schedule_times:
+    schedule_batch = (
+        len(parsed_times) if parsed_times and not is_instagram else 0
+    )
+    if is_instagram and schedule_times:
         sink.on_log(
-            f"{'TikTok' if is_tiktok else 'Instagram Reels'}: "
-            "отложка Studio не поддерживается — публикуем сразу."
+            "Instagram Reels: отложка не поддерживается — публикуем сразу."
         )
 
     pub_before = True if is_shortform else bool(publish_before_checks)
@@ -731,6 +732,7 @@ def run_upload_job(
                             title=item.title,
                             description=item.description,
                             one_res=confirmed,
+                            schedule_publish_at=item.schedule_publish_at,
                             record_platform=PLATFORM_TIKTOK,
                         )
                 else:
@@ -743,6 +745,7 @@ def run_upload_job(
                         title=task_title,
                         description=task_desc,
                         one_res=confirmed,
+                        schedule_publish_at=getattr(task, "schedule_publish_at", None),
                         record_platform=PLATFORM_TIKTOK,
                     )
 
@@ -876,6 +879,9 @@ def run_upload_job(
                 tabs_per_profile=max(1, tabs_n),
                 crop_aspect=ig_crop_aspect,
             )
+            if is_tiktok:
+                kw["schedule_publish_at"] = sched_at
+                kw["scheduled_batch"] = sched_batch
             if own:
                 from zaliver.antydetect.local_antidetect_api import local_api_token_scope
 
@@ -902,17 +908,39 @@ def run_upload_job(
                     **kw,
                 )
             rec_plat = PLATFORM_TIKTOK if is_tiktok else PLATFORM_INSTAGRAM
-            confirmed = _confirm_instagram_result(
-                upload_store, res, platform=rec_plat
-            )
-            _record_one(
-                profile_id=profile_id,
-                video_path=task.video_path,
-                title=task_title,
-                description=task_desc,
-                one_res=confirmed,
-                record_platform=rec_plat,
-            )
+            batch = res.get("batch_results") if isinstance(res, dict) else None
+            if is_tiktok and isinstance(batch, list) and sched_batch:
+                if len(batch) != len(sched_batch):
+                    raise RuntimeError(
+                        "scheduled_batch size mismatch: "
+                        f"{len(batch)} results vs {len(sched_batch)} tasks"
+                    )
+                for item, item_res in zip(sched_batch, batch):
+                    confirmed = _confirm_instagram_result(
+                        upload_store, item_res, platform=rec_plat
+                    )
+                    _record_one(
+                        profile_id=profile_id,
+                        video_path=item.video_path,
+                        title=item.title,
+                        description=item.description,
+                        one_res=confirmed,
+                        schedule_publish_at=item.schedule_publish_at,
+                        record_platform=rec_plat,
+                    )
+            else:
+                confirmed = _confirm_instagram_result(
+                    upload_store, res, platform=rec_plat
+                )
+                _record_one(
+                    profile_id=profile_id,
+                    video_path=task.video_path,
+                    title=task_title,
+                    description=task_desc,
+                    one_res=confirmed,
+                    schedule_publish_at=sched_at if is_tiktok else None,
+                    record_platform=rec_plat,
+                )
             return
 
         yt_kw: dict[str, Any] = dict(

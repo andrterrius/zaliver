@@ -5546,6 +5546,8 @@ class _YtInstIgJob:
     """Один (или batch) залив Instagram в очереди профиля Yt+Inst."""
 
     items: list[tuple[str, str, str]]
+    # Параллельно items: время отложки для TikTok (None — публикация сразу).
+    schedule_ats: list | None = None
     done: threading.Event = field(default_factory=threading.Event)
     result: dict | None = None
     error: BaseException | None = None
@@ -6054,13 +6056,24 @@ class _YtInstTtPipeline:
                             "Нет вкладки TikTok для pipeline-залива"
                         )
                     batch_results: list = []
+                    schedule_ats = list(job.schedule_ats or [])
                     for idx, (vp, tt, dd) in enumerate(job.items, start=1):
                         if not (vp or "").strip():
                             continue
+                        sched_at = (
+                            schedule_ats[idx - 1]
+                            if idx - 1 < len(schedule_ats)
+                            else None
+                        )
+                        sched_note = (
+                            f" schedule_at={sched_at!r}"
+                            if sched_at is not None
+                            else ""
+                        )
                         _log(
                             f"Inst+Yt+TikTok: TikTok queue "
                             f"{idx}/{len(job.items)} "
-                            f"profile={self.profile_id!r}…"
+                            f"profile={self.profile_id!r}{sched_note}…"
                         )
                         one = run_tiktok_reels_upload(
                             tt_page,
@@ -6074,6 +6087,7 @@ class _YtInstTtPipeline:
                             top_reels_scan=1,
                             keep_in_background=True,
                             wait_youtube_before_done=job.youtube_done,
+                            schedule_publish_at=sched_at,
                         )
                         batch_results.append(one)
                     if not batch_results:
@@ -6485,6 +6499,7 @@ def _run_youtube_and_instagram_parallel(
     )
 
     ig_items: list[tuple[str, str, str]] = []
+    tt_schedule_ats: list = []
     if scheduled_batch:
         for item in scheduled_batch:
             ig_items.append(
@@ -6494,6 +6509,7 @@ def _run_youtube_and_instagram_parallel(
                     str(getattr(item, "description", "") or ""),
                 )
             )
+            tt_schedule_ats.append(getattr(item, "schedule_publish_at", None))
     elif video_path:
         ig_items.append(
             (
@@ -6502,6 +6518,7 @@ def _run_youtube_and_instagram_parallel(
                 str(description or ""),
             )
         )
+        tt_schedule_ats.append(schedule_publish_at)
 
     ig_job: _YtInstIgJob | None = None
     yt_done_event = threading.Event()
@@ -6539,6 +6556,7 @@ def _run_youtube_and_instagram_parallel(
         )
         tt_job = _YtInstIgJob(
             items=ig_items,
+            schedule_ats=tt_schedule_ats,
             on_success=on_tiktok_success,
             on_error=on_tiktok_error,
             youtube_done=yt_done_event,

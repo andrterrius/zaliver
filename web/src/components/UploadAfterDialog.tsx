@@ -124,6 +124,7 @@ export function UploadAfterDialog({
 
   const isIg = platform === "instagram" || platform === "tiktok";
   const showYtOptions = !isIg;
+  const showSchedule = showYtOptions || platform === "tiktok";
 
   useEffect(() => {
     if (!open) return;
@@ -269,10 +270,10 @@ export function UploadAfterDialog({
       return;
     }
     const timesIso =
-      showYtOptions && schedulePublish
+      showSchedule && schedulePublish
         ? scheduleTimes.map(localToIsoNaive).filter(Boolean)
         : [];
-    if (showYtOptions && schedulePublish && !timesIso.length) {
+    if (showSchedule && schedulePublish && !timesIso.length) {
       setError("Укажите хотя бы одно время отложки (МСК).");
       return;
     }
@@ -284,7 +285,7 @@ export function UploadAfterDialog({
       publishBeforeChecks: isIg ? true : publishBeforeChecks,
       keepStudioTitle: isIg ? false : keepStudioTitle,
       uploadAsReady,
-      schedulePublish: isIg ? false : schedulePublish,
+      schedulePublish: showSchedule ? schedulePublish : false,
       scheduleTimesIso: timesIso,
       scheduleWarmupShorts:
         !isIg && schedulePublish ? scheduleWarmupShorts : false,
@@ -412,7 +413,7 @@ export function UploadAfterDialog({
               />
               Удалять после залива
             </label>
-            {showYtOptions ? (
+            {showSchedule ? (
               <label className="check">
                 <input
                   type="checkbox"
@@ -424,11 +425,12 @@ export function UploadAfterDialog({
             ) : null}
           </div>
 
-          {showYtOptions && schedulePublish ? (
+          {showSchedule && schedulePublish ? (
             <div className="stack" style={{ gap: 8, marginLeft: 8 }}>
               <p className="hint">
-                Время по Москве. На каждый профиль — по одному видео на каждое
-                время.
+                Время по Москве. На профиль сначала публикуются лишние видео
+                сразу — сколько их больше числа отложек, затем отложка. Одно
+                видео и одна отложка публикуются только в отложку.
               </p>
               {scheduleTimes.map((t, i) => (
                 <label
@@ -479,6 +481,7 @@ export function UploadAfterDialog({
                   Убрать время
                 </button>
               </div>
+              {showYtOptions ? (
               <label className="check">
                 <input
                   type="checkbox"
@@ -487,7 +490,8 @@ export function UploadAfterDialog({
                 />
                 Прогрев Shorts во второй вкладке
               </label>
-              {scheduleWarmupShorts ? (
+              ) : null}
+              {showYtOptions && scheduleWarmupShorts ? (
                 <>
                   <label className="check" style={{ marginLeft: 16 }}>
                     <input

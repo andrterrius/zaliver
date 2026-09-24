@@ -1009,6 +1009,8 @@ def upload_tiktok_reel_in_profile(
     tab_index: int = 0,
     tabs_per_profile: int = 1,
     crop_aspect: str = DEFAULT_TIKTOK_CROP_ASPECT,
+    schedule_publish_at=None,
+    scheduled_batch=None,
 ) -> dict:
     """Dolphin → TikTok → «Новая публикация» → файл → Share (Reels)."""
     from zaliver.tiktok_upload.reels_upload import run_tiktok_reels_upload
@@ -1064,6 +1066,8 @@ def upload_tiktok_reel_in_profile(
                         profile_id=profile_id,
                         top_reels_scan=scan_n,
                         crop_aspect=crop,
+                        schedule_publish_at=schedule_publish_at,
+                        scheduled_batch=scheduled_batch,
                     )
                 finally:
                     if own_page:
@@ -1156,6 +1160,8 @@ def upload_tiktok_reel_in_profile(
                 top_reels_scan=scan_n,
                 on_new_post_clicked=_on_new_post if (tab_i == 0 and tabs_n > 1) else None,
                 crop_aspect=crop,
+                schedule_publish_at=schedule_publish_at,
+                scheduled_batch=scheduled_batch,
             )
             _log(
                 "Dolphin: браузер оставлен открытым "
@@ -1295,6 +1301,8 @@ def upload_tiktok_reel_in_local_antidetect_profile(
     tab_index: int = 0,
     tabs_per_profile: int = 1,
     crop_aspect: str = DEFAULT_TIKTOK_CROP_ASPECT,
+    schedule_publish_at=None,
+    scheduled_batch=None,
 ) -> dict:
     """Локальный антидетект → TikTok → «Новая публикация» → файл → Share (Reels)."""
     from zaliver.tiktok_upload.reels_upload import run_tiktok_reels_upload
@@ -1377,6 +1385,8 @@ def upload_tiktok_reel_in_local_antidetect_profile(
                         profile_id=profile_id,
                         top_reels_scan=scan_n,
                         crop_aspect=crop,
+                        schedule_publish_at=schedule_publish_at,
+                        scheduled_batch=scheduled_batch,
                     )
                 finally:
                     if own_page:
@@ -1569,6 +1579,8 @@ def upload_tiktok_reel_in_local_antidetect_profile(
                 top_reels_scan=scan_n,
                 on_new_post_clicked=_on_new_post if (tab_i == 0 and tabs_n > 1) else None,
                 crop_aspect=crop,
+                schedule_publish_at=schedule_publish_at,
+                scheduled_batch=scheduled_batch,
             )
             _log(
                 "Local antidetect: браузер оставлен открытым "

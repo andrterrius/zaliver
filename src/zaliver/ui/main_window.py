@@ -4226,8 +4226,9 @@ class MainWindow(QWidget):
         schedule_publish_cb = QCheckBox("Опубликовать в отложку")
         schedule_publish_cb.setChecked(False)
         schedule_publish_cb.setToolTip(
-            "На экране «Открытый доступ» выбирается отложенная публикация (Москва). "
-            "На каждый профиль подряд загружается по одному видео на каждое указанное время."
+            "Видео профиля делятся на отложку и публикацию сразу. "
+            "Сразу уходит только разница: сколько видео на профиле больше числа отложек. "
+            "Одно видео и одна отложка — это видео только в отложку."
         )
 
         schedule_warmup_group = QGroupBox("Прогрев во время отложки")
@@ -4353,8 +4354,10 @@ class MainWindow(QWidget):
         schedule_btns.addStretch()
         schedule_times_layout.addLayout(schedule_btns)
         schedule_hint = QLabel(
-            "Интервал между временами любой. "
-            "Сначала все видео на одном профиле (по одному на каждое время), затем следующий профиль."
+            "Сначала на профиле публикуются лишние видео сразу "
+            "(сколько их больше числа отложек), затем отложка. "
+            "Если видео не больше отложек — все в отложку. "
+            "Интервал между временами любой."
         )
         schedule_hint.setObjectName("hint")
         schedule_hint.setWordWrap(True)
@@ -4365,7 +4368,9 @@ class MainWindow(QWidget):
 
         def _sync_schedule_times_visibility(checked: bool) -> None:
             schedule_times_widget.setVisible(checked)
-            schedule_warmup_group.setVisible(checked)
+            schedule_warmup_group.setVisible(
+                checked and self._platform != PLATFORM_TIKTOK
+            )
 
         def _sync_schedule_warmup_options() -> None:
             warmup_on = schedule_warmup_cb.isChecked()
@@ -4614,17 +4619,36 @@ class MainWindow(QWidget):
                 )
             else:
                 lines.append(f"Выбрано профилей для залива: {n}")
+            schedule_on = schedule_publish_cb.isChecked()
+            slots_n = schedule_slots_visible
+            if schedule_on and n > 0:
+                if pv <= 0:
+                    lines.append(
+                        f"Отложек: {slots_n}. Сразу — только видео сверх этого числа на профиль."
+                    )
+                else:
+                    base, rem = divmod(pv, n)
+
+                    def _split_note(count: int) -> str:
+                        immediate = max(0, count - slots_n)
+                        scheduled = min(count, slots_n)
+                        return f"{immediate} сразу + {scheduled} в отложку"
+
+                    if rem == 0:
+                        lines.append(f"На профиль: {_split_note(base)}.")
+                    else:
+                        lines.append(
+                            f"{rem} проф.: {_split_note(base + 1)}; "
+                            f"{n - rem} проф.: {_split_note(base)}."
+                        )
             dlg_profile_count_lbl.setText("\n".join(lines))
             can_raise_base = n > 0 and (
                 self._is_montage_mode(mode) or n_inputs > 0
             )
             can_raise_profiles = can_raise_base and n > pv
-            schedule_multi = (
-                schedule_publish_cb.isChecked() and schedule_slots_visible > 1
-            )
-            required_schedule = n * schedule_slots_visible if schedule_multi else 0
+            required_schedule = n * slots_n if schedule_on else 0
             can_raise_schedule = (
-                can_raise_base and schedule_multi and required_schedule > pv
+                can_raise_base and schedule_on and required_schedule > pv
             )
 
             if can_raise_profiles:
@@ -4697,16 +4721,18 @@ class MainWindow(QWidget):
         grid.addWidget(schedule_warmup_group, 6, 1)
         grid.addWidget(schedule_times_widget, 7, 1)
         if is_ig_upload:
-            # YouTube-only: описание, проверки Studio, название из настроек, отложка.
-            for w in (
+            # Instagram: без описания Studio и без отложки.
+            # TikTok: отложка есть, прогрев Shorts — нет.
+            hidden = [
                 desc_label,
                 desc_row,
                 publish_before_checks_cb,
                 keep_studio_title_cb,
-                schedule_publish_cb,
                 schedule_warmup_group,
-                schedule_times_widget,
-            ):
+            ]
+            if self._platform != PLATFORM_TIKTOK:
+                hidden.extend((schedule_publish_cb, schedule_times_widget))
+            for w in hidden:
                 w.setVisible(False)
             title_edit.setPlaceholderText(
                 "Описание к Тиктоков (необязательно). "
@@ -4761,7 +4787,9 @@ class MainWindow(QWidget):
             False if is_ig_upload else keep_studio_title_cb.isChecked()
         )
         schedule_publish = (
-            False if is_ig_upload else schedule_publish_cb.isChecked()
+            False
+            if self._platform == PLATFORM_INSTAGRAM
+            else schedule_publish_cb.isChecked()
         )
         schedule_warmup_shorts = schedule_publish and schedule_warmup_cb.isChecked()
         schedule_warmup_hashtag_raw = (
@@ -12140,9 +12168,12 @@ class MainWindow(QWidget):
         )
         schedule_warmup_search_query = upload_req.schedule_warmup_search_query
         schedule_warmup_hashtag = upload_req.schedule_warmup_hashtag
-        if is_instagram_upload and pending.get("schedule_publish"):
+        if (
+            self._platform == PLATFORM_INSTAGRAM
+            and pending.get("schedule_publish")
+        ):
             self._append_session_log(
-                "Instagram Reels: отложка Studio не поддерживается — публикуем сразу."
+                "Instagram Reels: отложка не поддерживается — публикуем сразу."
             )
 
         # Пауза 0 → режим keep_browser_open; решение «оставить/закрыть» — в менеджере.
@@ -12306,7 +12337,7 @@ class MainWindow(QWidget):
                     )
                     if guser and not stats_notified:
                         scheduled_unix = None
-                        if not is_ig_rec and not is_tt_rec:
+                        if not is_ig_rec:
                             sched_dt = parse_msk_datetime(schedule_publish_at)
                             if sched_dt is not None:
                                 scheduled_unix = int(sched_dt.timestamp())
@@ -12718,6 +12749,7 @@ class MainWindow(QWidget):
                                     title=item.title,
                                     description=item.description,
                                     one_res=confirmed,
+                                    schedule_publish_at=item.schedule_publish_at,
                                     record_platform=PLATFORM_TIKTOK,
                                 )
                         else:
@@ -12729,6 +12761,7 @@ class MainWindow(QWidget):
                                 title=resolved_title,
                                 description=resolved_description,
                                 one_res=confirmed,
+                                schedule_publish_at=task.schedule_publish_at,
                                 record_platform=PLATFORM_TIKTOK,
                             )
                         try:
@@ -12991,6 +13024,31 @@ class MainWindow(QWidget):
                     tabs_per_profile=max(1, tabs_n),
                     crop_aspect=ig_crop_aspect,
                 )
+                if self._platform == PLATFORM_TIKTOK:
+                    ig_kw["schedule_publish_at"] = task.schedule_publish_at
+                    expanded_batch = None
+                    if task.scheduled_batch:
+                        expanded_batch = []
+                        for item in task.scheduled_batch:
+                            item_ctx = TitleVariableContext(
+                                profile_name=_profile_display_name(profile_id),
+                                video_path=item.video_path,
+                                index=_next_upload_var_index(),
+                            )
+                            expanded_batch.append(
+                                ScheduledUploadItem(
+                                    video_path=item.video_path,
+                                    title=expand_title_variables(
+                                        item.title, item_ctx
+                                    ),
+                                    description=expand_title_variables(
+                                        item.description, item_ctx
+                                    ),
+                                    schedule_publish_at=item.schedule_publish_at,
+                                )
+                            )
+                    ig_kw["scheduled_batch"] = expanded_batch
+                    resolved_scheduled_batch = expanded_batch
                 if _is_own_antidetect_kind(kind):
                     if self._platform == PLATFORM_TIKTOK:
                         from zaliver.antydetect.tiktok_open import (
@@ -13031,7 +13089,16 @@ class MainWindow(QWidget):
                 # вкладки могут уже записать соседние ролики — берём первый
                 # из топ-5, которого ещё нет в базе.
                 res = _confirm_instagram_result(res, multi_tab=multi_tab)
-                resolved_scheduled_batch = None
+                if self._platform == PLATFORM_TIKTOK and isinstance(res, dict):
+                    raw_tt_batch = res.get("batch_results")
+                    if isinstance(raw_tt_batch, list) and task.scheduled_batch:
+                        res = dict(res)
+                        res["batch_results"] = [
+                            _confirm_instagram_result(item_res, multi_tab=multi_tab)
+                            for item_res in raw_tt_batch
+                        ]
+                if self._platform != PLATFORM_TIKTOK:
+                    resolved_scheduled_batch = None
             else:
                 creds = self._profile_login_credentials(profile_id)
                 yt_oldest = self._profile_yt_oldest_name(profile_id) or None

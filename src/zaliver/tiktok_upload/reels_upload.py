@@ -6,6 +6,7 @@ import os
 import re
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -144,6 +145,37 @@ _POST_BTN_RE = re.compile(
     r"^\s*(post|опубликовать|разместить)\s*$",
     re.I,
 )
+_SCHEDULE_BTN_RE = re.compile(
+    r"^\s*(запланировать|schedule)\s*$",
+    re.I,
+)
+_ALLOW_SCHEDULE_RE = re.compile(r"^\s*(разрешить|allow)\s*$", re.I)
+_TT_MONTHS = {
+    "январ": 1,
+    "феврал": 2,
+    "март": 3,
+    "апрел": 4,
+    "ма": 5,
+    "июн": 6,
+    "июл": 7,
+    "август": 8,
+    "сентябр": 9,
+    "октябр": 10,
+    "ноябр": 11,
+    "декабр": 12,
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
 
 
 class TikTokReelsUploadError(RuntimeError):
@@ -3248,10 +3280,260 @@ def _wait_copyright_checks_done(
     )
 
 
-def _click_studio_post(page) -> None:
-    btn = (
-        page.locator('[data-e2e="post_video_button"]')
-        .or_(page.get_by_role("button", name=_POST_BTN_RE))
+def _snap_tiktok_schedule_minute(minute: int) -> int:
+    """Список минут TikTok — шаг 5."""
+    return max(0, min(55, (int(minute) // 5) * 5))
+
+
+def _tiktok_month_number(title: str) -> int | None:
+    raw = (title or "").strip().lower()
+    for key, num in _TT_MONTHS.items():
+        if raw.startswith(key):
+            return num
+    return None
+
+
+def _click_post_schedule_radio(page, *, schedule: bool) -> None:
+    value = "schedule" if schedule else "post_now"
+    radio = page.locator(
+        f'[data-e2e="schedule_container"] input[name="postSchedule"][value="{value}"]'
+    )
+    radio.first.wait_for(state="attached", timeout=20_000)
+    try:
+        radio.first.scroll_into_view_if_needed(timeout=5_000)
+    except Exception:
+        pass
+    try:
+        if radio.first.is_checked():
+            _log(
+                "TikToks upload: уже выбрано "
+                + ("«Запланировать»." if schedule else "«Сейчас».")
+            )
+            return
+    except Exception:
+        pass
+    label = radio.locator("xpath=ancestor::label[1]")
+    clicked = False
+    try:
+        if int(label.count()) > 0:
+            label.first.click(timeout=8_000)
+            clicked = True
+    except Exception:
+        clicked = False
+    page.wait_for_timeout(250)
+    try:
+        checked = radio.first.is_checked()
+    except Exception:
+        checked = False
+    if not checked:
+        try:
+            radio.first.click(timeout=8_000, force=True)
+            clicked = True
+        except Exception:
+            pass
+        page.wait_for_timeout(250)
+        try:
+            checked = radio.first.is_checked()
+        except Exception:
+            checked = False
+    if not checked:
+        try:
+            radio.first.evaluate(
+                """(el) => {
+                    el.click();
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                }"""
+            )
+            clicked = True
+        except Exception:
+            pass
+        page.wait_for_timeout(300)
+        try:
+            checked = radio.first.is_checked()
+        except Exception:
+            checked = False
+    if not checked:
+        raise TikTokReelsUploadError(
+            "Не удалось выбрать "
+            + ("«Запланировать»." if schedule else "«Сейчас».")
+        )
+    if not clicked:
+        return
+    _log(
+        "TikToks upload: выбрано "
+        + ("«Запланировать»." if schedule else "«Сейчас».")
+    )
+
+
+def _allow_tiktok_schedule_storage(page) -> None:
+    """Модалка «Разрешить сохранять видео для отложенной публикации?»."""
+    deadline = time.monotonic() + 8.0
+    while time.monotonic() < deadline:
+        picker = page.locator('[data-e2e="schedule_container"] .scheduled-picker')
+        try:
+            if int(picker.count()) > 0 and picker.first.is_visible(timeout=200):
+                return
+        except Exception:
+            pass
+        try:
+            dialogs = page.locator('[role="dialog"]')
+            n = int(dialogs.count())
+        except Exception:
+            n = 0
+        for i in range(min(n, 4)):
+            box = dialogs.nth(i)
+            try:
+                text = box.inner_text(timeout=600) or ""
+            except Exception:
+                continue
+            if not re.search(r"отложенн|schedul", text, re.I):
+                continue
+            btn = box.get_by_role("button", name=_ALLOW_SCHEDULE_RE)
+            try:
+                if int(btn.count()) <= 0:
+                    continue
+                btn.first.click(timeout=8_000)
+            except Exception:
+                continue
+            _log("TikToks upload: разрешили сохранение видео для отложки.")
+            page.wait_for_timeout(400)
+            return
+        page.wait_for_timeout(200)
+
+
+def _scheduled_picker_input(page, *, kind: str):
+    """kind: time (HH:MM) или date (YYYY-MM-DD)."""
+    box = page.locator('[data-e2e="schedule_container"] .scheduled-picker')
+    box.first.wait_for(state="visible", timeout=15_000)
+    inputs = box.locator("input")
+    pattern = r"\d{2}:\d{2}" if kind == "time" else r"\d{4}-\d{2}-\d{2}"
+    count = int(inputs.count())
+    for i in range(count):
+        field = inputs.nth(i)
+        try:
+            val = (field.input_value(timeout=1_000) or "").strip()
+        except Exception:
+            val = ""
+        if re.fullmatch(pattern, val):
+            return field
+    raise TikTokReelsUploadError(
+        "Не найдено поле "
+        + ("времени" if kind == "time" else "даты")
+        + " отложки TikTok."
+    )
+
+
+def _set_tiktok_schedule_clock(page, dt: datetime) -> None:
+    hour = f"{dt.hour:02d}"
+    minute = f"{_snap_tiktok_schedule_minute(dt.minute):02d}"
+    field = _scheduled_picker_input(page, kind="time")
+    field.click(timeout=8_000)
+    page.wait_for_timeout(300)
+    picker = page.locator(
+        ".tiktok-timepicker-time-picker-container:not(.tiktok-timepicker-invisible)"
+    )
+    picker.first.wait_for(state="visible", timeout=8_000)
+    hour_item = picker.locator(".tiktok-timepicker-left").filter(
+        has_text=re.compile(rf"^\s*{hour}\s*$")
+    )
+    minute_item = picker.locator(".tiktok-timepicker-right").filter(
+        has_text=re.compile(rf"^\s*{minute}\s*$")
+    )
+    hour_item.first.click(timeout=8_000)
+    page.wait_for_timeout(150)
+    minute_item.first.click(timeout=8_000)
+    page.wait_for_timeout(200)
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    page.wait_for_timeout(150)
+    _log(f"TikToks upload: время отложки — {hour}:{minute}.")
+
+
+def _set_tiktok_schedule_date(page, dt: datetime) -> None:
+    field = _scheduled_picker_input(page, kind="date")
+    field.click(timeout=8_000)
+    page.wait_for_timeout(300)
+    cal = page.locator(".calendar-wrapper")
+    cal.first.wait_for(state="visible", timeout=8_000)
+    for _ in range(24):
+        month_title = (
+            cal.locator(".month-title").first.inner_text(timeout=2_000) or ""
+        ).strip()
+        year_title = (
+            cal.locator(".year-title").first.inner_text(timeout=2_000) or ""
+        ).strip()
+        month = _tiktok_month_number(month_title)
+        try:
+            year = int(re.search(r"\d{4}", year_title).group(0))
+        except Exception:
+            year = 0
+        if month == dt.month and year == dt.year:
+            break
+        forward = (year, month or 0) < (dt.year, dt.month)
+        arrows = cal.locator(".month-header-wrapper .arrow")
+        arrows.nth(1 if forward else 0).click(timeout=5_000)
+        page.wait_for_timeout(200)
+    else:
+        raise TikTokReelsUploadError(
+            f"Не удалось открыть {dt.month:02d}.{dt.year} в календаре TikTok."
+        )
+    clicked = cal.evaluate(
+        """(root, day) => {
+            const rows = [...root.querySelectorAll('.days-wrapper')];
+            const cells = [];
+            for (const row of rows) {
+                cells.push(...row.querySelectorAll('span.day'));
+            }
+            let start = -1;
+            for (let i = 0; i < cells.length; i++) {
+                const n = parseInt((cells[i].textContent || '').trim(), 10);
+                const prev = i > 0
+                    ? parseInt((cells[i - 1].textContent || '').trim(), 10)
+                    : 0;
+                if (n === 1 && (i === 0 || prev > 20)) {
+                    start = i;
+                    break;
+                }
+            }
+            if (start < 0) return false;
+            const cell = cells[start + day - 1];
+            if (!cell) return false;
+            cell.click();
+            return true;
+        }""",
+        dt.day,
+    )
+    if not clicked:
+        raise TikTokReelsUploadError(
+            f"Не найден день {dt.day} в календаре TikTok."
+        )
+    page.wait_for_timeout(200)
+    _log(f"TikToks upload: дата отложки — {dt:%Y-%m-%d}.")
+
+
+def _apply_tiktok_schedule(page, when: datetime) -> None:
+    from zaliver.youtube_upload.schedule_publish import parse_msk_datetime
+
+    dt = parse_msk_datetime(when)
+    if dt is None:
+        raise TikTokReelsUploadError("Некорректное время отложенной публикации TikTok.")
+    _log(
+        "TikToks upload: отложка — "
+        f"{dt.strftime('%d.%m.%Y %H:%M')} МСК…"
+    )
+    _click_post_schedule_radio(page, schedule=True)
+    _allow_tiktok_schedule_storage(page)
+    _set_tiktok_schedule_clock(page, dt)
+    _set_tiktok_schedule_date(page, dt)
+
+
+def _click_studio_post(page, *, scheduled: bool = False) -> None:
+    name_re = _SCHEDULE_BTN_RE if scheduled else _POST_BTN_RE
+    btn = page.locator('[data-e2e="post_video_button"]').or_(
+        page.get_by_role("button", name=name_re)
     )
     deadline = time.monotonic() + 180.0
     while time.monotonic() < deadline:
@@ -3280,12 +3562,18 @@ def _click_studio_post(page) -> None:
                 _dom_click(target)
             except Exception:
                 target.click(timeout=8_000, force=True)
-            _log("TikToks upload: нажали Post.")
+            _log(
+                "TikToks upload: нажали "
+                + ("«Запланировать»." if scheduled else "Post.")
+            )
             page.wait_for_timeout(400)
             return
         except Exception:
             page.wait_for_timeout(250)
-    raise TikTokReelsUploadError("Не удалось нажать кнопку Post.")
+    raise TikTokReelsUploadError(
+        "Не удалось нажать кнопку "
+        + ("«Запланировать»." if scheduled else "Post.")
+    )
 
 
 def _normalize_tiktok_video_url(url: str) -> str:
@@ -3361,6 +3649,8 @@ def run_tiktok_reels_upload(
     keep_in_background: bool = False,
     wait_youtube_before_done: threading.Event | None = None,
     crop_aspect: str = DEFAULT_TIKTOK_CROP_ASPECT,
+    schedule_publish_at: datetime | None = None,
+    scheduled_batch=None,
 ) -> dict[str, Any]:
     """
     Главная → Upload в сайдбаре → Studio → файл → описание → Post →
@@ -3371,10 +3661,29 @@ def run_tiktok_reels_upload(
     ``wait_youtube_before_done`` — оставлен для совместимости; Post жмём
     сразу после «Проблем не обнаружено», не ждём YouTube.
     """
-    upload_file = _validate_video_file_path(video_path)
-    caption = (title or "").strip() or (description or "").strip()
-    if (description or "").strip() and (title or "").strip():
-        caption = f"{(title or '').strip()}\n\n{(description or '').strip()}".strip()
+    jobs: list[tuple[str, str, str, datetime | None]] = []
+    if scheduled_batch:
+        for item in scheduled_batch:
+            jobs.append(
+                (
+                    str(getattr(item, "video_path", "") or ""),
+                    str(getattr(item, "title", "") or ""),
+                    str(getattr(item, "description", "") or ""),
+                    getattr(item, "schedule_publish_at", None),
+                )
+            )
+    else:
+        jobs.append(
+            (
+                str(video_path),
+                title or "",
+                description or "",
+                schedule_publish_at,
+            )
+        )
+    jobs = [job for job in jobs if (job[0] or "").strip()]
+    if not jobs:
+        raise TikTokReelsUploadError("Нет видео для залива в TikTok.")
 
     _log("TikToks upload: проверка сессии / главной TikTok…")
     verify_tiktok_home_available(
@@ -3385,77 +3694,120 @@ def run_tiktok_reels_upload(
         profile_id=profile_id,
     )
 
-    for attempt in range(1, _CREATE_FLOW_RETRY_ATTEMPTS + 1):
-        try:
-            _click_sidebar_upload(page)
-            if attempt == 1 and callable(on_new_post_clicked):
-                try:
-                    on_new_post_clicked()
-                except Exception as e:
-                    _log(f"TikToks upload: on_new_post_clicked: {e!r}")
-            dialog = _wait_studio_upload_page(page)
-            _dismiss_studio_modals(page)
-            if not _studio_file_uploaded(page):
-                _attach_video_file(
-                    page, dialog, upload_file, keep_in_background=keep_in_background
-                )
-            break
-        except TikTokReelsUploadError as e:
-            if not _is_retryable_create_flow_error(e):
-                raise
-            if attempt >= _CREATE_FLOW_RETRY_ATTEMPTS:
-                _log(
-                    "TikToks upload: шаг Upload не удался после "
-                    f"{_CREATE_FLOW_RETRY_ATTEMPTS} попыток — "
-                    "профиль будет исключён из очереди."
-                )
-                raise
+    results: list[dict[str, Any]] = []
+    for job_i, (job_path, job_title, job_desc, job_at) in enumerate(jobs):
+        if job_i > 0:
             _log(
-                f"TikToks upload: {e} "
-                f"(попытка {attempt}/{_CREATE_FLOW_RETRY_ATTEMPTS}) — "
-                "обновляем страницу и повторяем залив того же видео."
+                f"TikToks upload: следующее видео {job_i + 1}/{len(jobs)}…"
             )
-            _reload_tiktok_home_for_retry(
-                page, keep_in_background=keep_in_background
+        upload_file = _validate_video_file_path(job_path)
+        caption = (job_title or "").strip() or (job_desc or "").strip()
+        if (job_desc or "").strip() and (job_title or "").strip():
+            caption = (
+                f"{(job_title or '').strip()}\n\n{(job_desc or '').strip()}".strip()
             )
 
-    _wait_studio_details(page)
-    _dismiss_studio_modals(page)
-    video_stem = upload_file.stem
-    _log("TikToks upload: сначала проверяем описание, потом пишем при необходимости…")
-    _verify_or_refill_caption(page, caption, video_stem=video_stem)
+        for attempt in range(1, _CREATE_FLOW_RETRY_ATTEMPTS + 1):
+            try:
+                _click_sidebar_upload(page)
+                if job_i == 0 and attempt == 1 and callable(on_new_post_clicked):
+                    try:
+                        on_new_post_clicked()
+                    except Exception as e:
+                        _log(f"TikToks upload: on_new_post_clicked: {e!r}")
+                dialog = _wait_studio_upload_page(page)
+                _dismiss_studio_modals(page)
+                if not _studio_file_uploaded(page):
+                    _attach_video_file(
+                        page,
+                        dialog,
+                        upload_file,
+                        keep_in_background=keep_in_background,
+                    )
+                break
+            except TikTokReelsUploadError as e:
+                if not _is_retryable_create_flow_error(e):
+                    raise
+                if attempt >= _CREATE_FLOW_RETRY_ATTEMPTS:
+                    _log(
+                        "TikToks upload: шаг Upload не удался после "
+                        f"{_CREATE_FLOW_RETRY_ATTEMPTS} попыток — "
+                        "профиль будет исключён из очереди."
+                    )
+                    raise
+                _log(
+                    f"TikToks upload: {e} "
+                    f"(попытка {attempt}/{_CREATE_FLOW_RETRY_ATTEMPTS}) — "
+                    "обновляем страницу и повторяем залив того же видео."
+                )
+                _reload_tiktok_home_for_retry(
+                    page, keep_in_background=keep_in_background
+                )
 
-    def _keep_caption() -> None:
+        _wait_studio_details(page)
+        _dismiss_studio_modals(page)
+        video_stem = upload_file.stem
+        _log(
+            "TikToks upload: сначала проверяем описание, "
+            "потом пишем при необходимости…"
+        )
         _verify_or_refill_caption(page, caption, video_stem=video_stem)
 
-    _wait_studio_file_uploaded(page, on_tick=_keep_caption)
-    _keep_caption()
-    _wait_copyright_checks_done(page, on_tick=_keep_caption)
-    _keep_caption()
-    _click_studio_post(page)
-    scan_n = max(1, int(top_reels_scan or 1))
-    urls = _collect_posted_tiktok_urls(page, limit=scan_n)
-    candidates: list[dict[str, str]] = []
-    for u in urls:
-        vid_i = _video_id_from_tiktok_url(u)
-        if not vid_i:
-            continue
-        candidates.append({"video_id": vid_i, "url": u})
-    if not candidates:
-        raise TikTokReelsUploadError(
-            "Не удалось извлечь video_id из ссылки /@user/video/…"
-        )
-    url = candidates[0]["url"]
-    vid = candidates[0]["video_id"]
+        def _keep_caption() -> None:
+            _verify_or_refill_caption(page, caption, video_stem=video_stem)
 
-    _log(
-        f"TikToks upload: готово video_id={vid!r} url={url!r} "
-        f"candidates={len(candidates)}"
-    )
-    return {
-        "video_id": vid,
-        "url": url,
-        "title": (title or "").strip() or upload_file.stem,
-        "description": (description or "").strip(),
-        "candidate_reels": candidates,
-    }
+        if job_at is not None:
+            _log(
+                "TikToks upload: файл ещё грузится — "
+                "сразу настраиваем отложку."
+            )
+            _apply_tiktok_schedule(page, job_at)
+        else:
+            try:
+                picked = page.locator(
+                    '[data-e2e="schedule_container"] '
+                    'input[name="postSchedule"][value="schedule"]'
+                )
+                if int(picked.count()) > 0 and picked.first.is_checked():
+                    _click_post_schedule_radio(page, schedule=False)
+            except Exception:
+                pass
+
+        _wait_studio_file_uploaded(page, on_tick=_keep_caption)
+        _keep_caption()
+        _wait_copyright_checks_done(page, on_tick=_keep_caption)
+        _keep_caption()
+        _click_studio_post(page, scheduled=job_at is not None)
+        scan_n = max(1, int(top_reels_scan or 1))
+        urls = _collect_posted_tiktok_urls(page, limit=scan_n)
+        candidates: list[dict[str, str]] = []
+        for u in urls:
+            vid_i = _video_id_from_tiktok_url(u)
+            if not vid_i:
+                continue
+            candidates.append({"video_id": vid_i, "url": u})
+        if not candidates:
+            raise TikTokReelsUploadError(
+                "Не удалось извлечь video_id из ссылки /@user/video/…"
+            )
+        url = candidates[0]["url"]
+        vid = candidates[0]["video_id"]
+        _log(
+            f"TikToks upload: готово video_id={vid!r} url={url!r} "
+            f"candidates={len(candidates)}"
+        )
+        results.append(
+            {
+                "video_id": vid,
+                "url": url,
+                "title": (job_title or "").strip() or upload_file.stem,
+                "description": (job_desc or "").strip(),
+                "candidate_reels": candidates,
+            }
+        )
+
+    if len(results) == 1:
+        return results[0]
+    out = dict(results[-1])
+    out["batch_results"] = results
+    return out

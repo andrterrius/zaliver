@@ -10634,6 +10634,226 @@ def run_youtube_shorts_warmup(
 _SCHEDULE_PARALLEL_WARMUP_BATCH_COUNT = 5
 
 
+def _studio_hashtag_short_id(href: str) -> str:
+    m = re.search(r"/shorts/([A-Za-z0-9_-]{6,})", href or "", re.I)
+    if not m:
+        return ""
+    path = (href or "").split("?")[0].lower()
+    if "/hashtag/" in path:
+        return ""
+    return m.group(1)
+
+
+def _studio_collect_hashtag_short_hrefs(page) -> list[str]:
+    """Ссылки /shorts/ID на открытой странице хэштега, сверху вниз."""
+    try:
+        raw = page.evaluate(
+            """() => {
+            const out = [];
+            const seen = new Set();
+            for (const a of document.querySelectorAll('a[href*="/shorts/"]')) {
+                const href = a.getAttribute('href') || '';
+                const m = href.match(/\\/shorts\\/([A-Za-z0-9_-]{6,})/);
+                if (!m) continue;
+                const path = href.split('?')[0].toLowerCase();
+                if (path.includes('/hashtag/')) continue;
+                if (seen.has(m[1])) continue;
+                seen.add(m[1]);
+                out.push(href);
+            }
+            return out;
+            }"""
+        )
+    except Exception:
+        return []
+    hrefs: list[str] = []
+    for href in raw or []:
+        if _studio_hashtag_short_id(str(href)):
+            hrefs.append(str(href))
+    return hrefs
+
+
+def _studio_scroll_hashtag_grid(page) -> None:
+    try:
+        page.evaluate(
+            "() => window.scrollBy(0, Math.max(800, window.innerHeight))"
+        )
+    except Exception:
+        pass
+    page.wait_for_timeout(900)
+
+
+def _studio_refill_hashtag_short_queue(
+    page,
+    tag: str,
+    seen: set[str],
+    *,
+    want: int,
+    login_credentials=None,
+) -> list[str]:
+    """Открыть сетку хэштега и доскроллить, пока не наберётся want новых Shorts."""
+    url = _studio_hashtag_page_url(tag, shorts=True)
+    _log(f"Shorts (параллельно с отложкой): сетка хэштега «#{tag}» ({url})…")
+    try:
+        _studio_wait_for_google_session(
+            page, login_credentials=login_credentials, fast=True
+        )
+    except Exception:
+        pass
+    page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+    try:
+        page.locator(_HASHTAG_SHORTS_ITEM_SEL).first.wait_for(
+            state="attached", timeout=8_000
+        )
+    except Exception:
+        pass
+    found: list[str] = []
+    found_ids: set[str] = set()
+    stagnant = 0
+    while len(found) < want and stagnant < 6:
+        added = 0
+        for href in _studio_collect_hashtag_short_hrefs(page):
+            vid = _studio_hashtag_short_id(href)
+            if not vid or vid in seen or vid in found_ids:
+                continue
+            found.append(href)
+            found_ids.add(vid)
+            added += 1
+            if len(found) >= want:
+                break
+        if added:
+            stagnant = 0
+        else:
+            stagnant += 1
+        if len(found) >= want:
+            break
+        _studio_scroll_hashtag_grid(page)
+    _log(
+        f"Shorts (параллельно с отложкой): с хэштега «#{tag}» "
+        f"новых роликов {len(found)}."
+    )
+    return found
+
+
+def _studio_watch_hashtag_short(
+    page,
+    href: str,
+    *,
+    like_probability_pct: float,
+    subscribe_probability_pct: float,
+    should_stop: Callable[[], bool],
+) -> bool:
+    """Открыть один Short по ссылке с хэштега и досмотреть, не листая ленту."""
+    vid = _studio_hashtag_short_id(href)
+    resolved = _studio_resolve_youtube_href(href)
+    if not vid or not resolved:
+        return False
+    _log(f"Shorts (параллельно с отложкой): ролик хэштега {vid} ({resolved})…")
+    try:
+        page.goto(resolved, wait_until="domcontentloaded", timeout=60_000)
+    except Exception as e:
+        _log(
+            "Shorts (параллельно с отложкой): не открылся Short "
+            f"{vid}: {type(e).__name__}"
+        )
+        return False
+    if not _studio_wait_youtube_shorts_url(page, timeout_ms=8_000):
+        _log(
+            "Shorts (параллельно с отложкой): после перехода не плеер "
+            f"({page.url!r})."
+        )
+        return False
+    try:
+        _studio_wait_shorts_feed_ready(page, timeout_ms=15_000)
+    except Exception:
+        if not _studio_is_shorts_player_ready(page):
+            _log(f"Shorts (параллельно с отложкой): плеер не готов ({vid}).")
+            return False
+        _studio_dismiss_shorts_player_overlays(page)
+    _studio_ensure_shorts_playing(page)
+    if _studio_wait_for_short_full_watch(
+        page,
+        should_stop=should_stop,
+        max_wait_s=_SHORTS_FULL_WATCH_MAX_S,
+        expect_video_id=vid,
+    ):
+        return False
+    if like_probability_pct > 0 and random.random() * 100.0 < like_probability_pct:
+        active = _studio_read_active_short_video_id(page)
+        if active == vid and _studio_try_like_current_short(page):
+            page.wait_for_timeout(2_000)
+    if (
+        subscribe_probability_pct > 0
+        and random.random() * 100.0 < subscribe_probability_pct
+    ):
+        active = _studio_read_active_short_video_id(page)
+        if active == vid:
+            _studio_try_subscribe_current_short(page)
+    return True
+
+
+def _studio_browse_hashtag_shorts_during_upload(
+    page,
+    tag: str,
+    *,
+    should_stop: Callable[[], bool],
+    login_credentials=None,
+    batch_count: int,
+    like_probability_pct: float,
+    subscribe_probability_pct: float,
+) -> None:
+    """Смотреть ролики только из сетки хэштега, без ленты рекомендаций."""
+    seen: set[str] = set()
+    queue: list[str] = []
+    batch_idx = 0
+    empty_refills = 0
+    while not should_stop():
+        if not queue:
+            queue = _studio_refill_hashtag_short_queue(
+                page,
+                tag,
+                seen,
+                want=batch_count,
+                login_credentials=login_credentials,
+            )
+            if not queue:
+                empty_refills += 1
+                if empty_refills >= 2:
+                    _log(
+                        "Shorts (параллельно с отложкой): "
+                        "на хэштеге больше нет новых роликов."
+                    )
+                    break
+                continue
+            empty_refills = 0
+        batch_idx += 1
+        _log(
+            f"Shorts (параллельно с отложкой): пакет {batch_idx}, "
+            f"до {batch_count} роликов хэштега «#{tag}»…"
+        )
+        watched = 0
+        while queue and watched < batch_count and not should_stop():
+            href = queue.pop(0)
+            vid = _studio_hashtag_short_id(href)
+            if vid:
+                seen.add(vid)
+            if _studio_watch_hashtag_short(
+                page,
+                href,
+                like_probability_pct=like_probability_pct,
+                subscribe_probability_pct=subscribe_probability_pct,
+                should_stop=should_stop,
+            ):
+                watched += 1
+        if should_stop():
+            break
+    if should_stop():
+        _log(
+            "Shorts (параллельно с отложкой): залив профиля завершён — "
+            "останавливаем прогрев."
+        )
+
+
 @_studio_entrypoint
 def run_youtube_shorts_warmup_during_upload(
     page,
@@ -10650,6 +10870,23 @@ def run_youtube_shorts_warmup_during_upload(
     shorts_watch_max_s: float = _SHORTS_WARMUP_MAX_WATCH_S,
 ) -> None:
     """Прогрев Shorts на отдельной вкладке, пока на другой идёт отложенная заливка."""
+    tag = _studio_normalize_hashtag(hashtag)
+    batch_n = max(1, int(shorts_batch_count))
+    if tag:
+        _log(
+            "Shorts (параллельно с отложкой): прогрев по хэштегу "
+            f"«#{tag}» на отдельной вкладке…"
+        )
+        _studio_browse_hashtag_shorts_during_upload(
+            page,
+            tag,
+            should_stop=should_stop,
+            login_credentials=login_credentials,
+            batch_count=batch_n,
+            like_probability_pct=like_probability_pct,
+            subscribe_probability_pct=subscribe_probability_pct,
+        )
+        return
     _log(
         "Shorts (параллельно с отложкой): открываем ленту на отдельной вкладке "
         "(без переключения канала в Studio)…"

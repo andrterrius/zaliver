@@ -163,16 +163,20 @@ def _confirm_instagram_result(
         chosen = cand
         break
     if chosen is None:
-        raise RuntimeError(
-            (
-                "Instagram Reels"
-                if platform == PLATFORM_INSTAGRAM
-                else "TikTok"
-            )
-            + ": первое видео в профиле уже есть в базе залитых "
-            f"(video_id={ig_vid!r}, url={ig_url!r}, already={skipped!r}) "
-            "— заливка не подтверждена."
+        label = (
+            "Instagram Reels" if platform == PLATFORM_INSTAGRAM else "TikTok"
         )
+        if len(candidates) > 1:
+            reason = (
+                "среди последних ссылок нет новой — все уже есть в базе залитых "
+                f"(проверено={len(candidates)}, already={skipped!r})"
+            )
+        else:
+            reason = (
+                "первое видео в профиле уже есть в базе залитых "
+                f"(video_id={ig_vid!r}, url={ig_url!r}, already={skipped!r})"
+            )
+        raise RuntimeError(f"{label}: {reason} — заливка не подтверждена.")
     ig_vid = str(chosen.get("video_id") or "").strip()
     ig_url = str(chosen.get("url") or "").strip()
     if isinstance(res, dict):
@@ -741,11 +745,28 @@ def run_upload_job(
                     )
                     _record_one(
                         profile_id=profile_id,
-                        video_path=task.video_path,
-                        title=task_title,
-                        description=task_desc,
+                        video_path=str(
+                            (one_res or {}).get("video_path") or task.video_path
+                        )
+                        if isinstance(one_res, dict)
+                        else task.video_path,
+                        title=str((one_res or {}).get("title") or task_title)
+                        if isinstance(one_res, dict)
+                        else task_title,
+                        description=str(
+                            (one_res or {}).get("description") or task_desc
+                        )
+                        if isinstance(one_res, dict)
+                        else task_desc,
                         one_res=confirmed,
-                        schedule_publish_at=getattr(task, "schedule_publish_at", None),
+                        schedule_publish_at=(
+                            one_res.get(
+                                "schedule_publish_at",
+                                getattr(task, "schedule_publish_at", None),
+                            )
+                            if isinstance(one_res, dict)
+                            else getattr(task, "schedule_publish_at", None)
+                        ),
                         record_platform=PLATFORM_TIKTOK,
                     )
 
@@ -879,9 +900,27 @@ def run_upload_job(
                 tabs_per_profile=max(1, tabs_n),
                 crop_aspect=ig_crop_aspect,
             )
+            tt_inline = {"ok": False}
+
+            def _on_tt_each(one_res: dict) -> None:
+                confirmed = _confirm_instagram_result(
+                    upload_store, one_res, platform=PLATFORM_TIKTOK
+                )
+                _record_one(
+                    profile_id=profile_id,
+                    video_path=str(one_res.get("video_path") or task.video_path),
+                    title=str(one_res.get("title") or task_title),
+                    description=str(one_res.get("description") or task_desc),
+                    one_res=confirmed,
+                    schedule_publish_at=one_res.get("schedule_publish_at", sched_at),
+                    record_platform=PLATFORM_TIKTOK,
+                )
+                tt_inline["ok"] = True
+
             if is_tiktok:
                 kw["schedule_publish_at"] = sched_at
                 kw["scheduled_batch"] = sched_batch
+                kw["on_each_done"] = _on_tt_each
             if own:
                 from zaliver.antydetect.local_antidetect_api import local_api_token_scope
 
@@ -908,6 +947,8 @@ def run_upload_job(
                     **kw,
                 )
             rec_plat = PLATFORM_TIKTOK if is_tiktok else PLATFORM_INSTAGRAM
+            if is_tiktok and tt_inline["ok"]:
+                return
             batch = res.get("batch_results") if isinstance(res, dict) else None
             if is_tiktok and isinstance(batch, list) and sched_batch:
                 if len(batch) != len(sched_batch):

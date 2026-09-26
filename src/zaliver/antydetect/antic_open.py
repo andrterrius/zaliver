@@ -6090,6 +6090,14 @@ class _YtInstTtPipeline:
                             schedule_publish_at=sched_at,
                         )
                         batch_results.append(one)
+                        if job.on_success is not None:
+                            try:
+                                job.on_success(one)
+                            except Exception as cb_e:
+                                _log(
+                                    "Inst+Yt+TikTok: on_tiktok_success "
+                                    f"(видео {idx}): {cb_e!r}"
+                                )
                     if not batch_results:
                         raise RuntimeError(
                             "TikTok: нет результата pipeline-залива"
@@ -6104,13 +6112,6 @@ class _YtInstTtPipeline:
                         f"Inst+Yt+TikTok: TikTok — успех (pipeline) "
                         f"profile={self.profile_id!r}."
                     )
-                    if job.on_success is not None and job.result is not None:
-                        try:
-                            job.on_success(job.result)
-                        except Exception as cb_e:
-                            _log(
-                                f"Inst+Yt+TikTok: on_tiktok_success: {cb_e!r}"
-                            )
                 finally:
                     job.done.set()
                     signaled = True

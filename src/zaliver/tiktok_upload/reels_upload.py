@@ -121,6 +121,28 @@ _GOT_IT_BTN_RE = re.compile(
     r"got\s*it|понятно|хорошо|ясно",
     re.I,
 )
+_UNSAVED_DRAFT_TEXT_RE = re.compile(
+    r"не сохранилось|wasn['’]?t saved|was not saved|didn['’]?t save",
+    re.I,
+)
+_LOCAL_DRAFT_RESET_RE = re.compile(
+    r"^\s*(сброс|discard|reset)\s*$",
+    re.I,
+)
+_DELETE_POST_TITLE_RE = re.compile(
+    r"удалить эту публикацию|delete this post",
+    re.I,
+)
+_DELETE_POST_BTN_RE = re.compile(
+    r"^\s*(удалить|delete)\s*$",
+    re.I,
+)
+_CONTENT_LIMIT_TITLE_RE = re.compile(
+    r"на контент могут быть наложены ограничения|"
+    r"content may be restricted|"
+    r"restrictions may apply",
+    re.I,
+)
 _CHECKING_PROGRESS_RE = re.compile(
     r"checking in progress|"
     r"copyright check in progress|"
@@ -2785,6 +2807,43 @@ def _is_retryable_create_flow_error(exc: BaseException) -> bool:
     )
 
 
+def _open_tiktok_home(page, *, keep_in_background: bool = False) -> None:
+    """После залива вернуться на https://www.tiktok.com/ — сайдбар Upload."""
+    _log("TikToks upload: переходим на главную TikTok…")
+
+    def _accept_leave(dialog) -> None:
+        try:
+            dialog.accept()
+        except Exception:
+            pass
+
+    listener_attached = False
+    try:
+        page.on("dialog", _accept_leave)
+        listener_attached = True
+    except Exception:
+        pass
+    try:
+        _navigate_page_to(
+            page,
+            TIKTOK_URL,
+            label="Reels upload",
+            keep_in_background=keep_in_background,
+        )
+    except Exception as e:
+        _log(f"TikToks upload: переход на главную не удался: {e!r}")
+    finally:
+        if listener_attached:
+            try:
+                page.remove_listener("dialog", _accept_leave)
+            except Exception:
+                pass
+    try:
+        page.wait_for_timeout(1_000)
+    except Exception:
+        time.sleep(1.0)
+
+
 def _reload_tiktok_home_for_retry(
     page, *, keep_in_background: bool = False
 ) -> None:
@@ -3122,8 +3181,106 @@ def _wait_studio_upload_page(page, *, timeout_s: float = 90.0):
     )
 
 
+def _confirm_delete_unsaved_post(page) -> bool:
+    """«Удалить эту публикацию?» — нажать Удалить, не «Не сейчас»."""
+    try:
+        dlg = page.locator('[role="dialog"]').filter(has_text=_DELETE_POST_TITLE_RE)
+        if int(dlg.count()) <= 0:
+            return False
+        box = dlg.first
+        try:
+            if not box.is_visible(timeout=200):
+                return False
+        except Exception:
+            return False
+        btn = box.get_by_role("button", name=_DELETE_POST_BTN_RE)
+        try:
+            if int(btn.count()) <= 0:
+                btn = box.locator("button").filter(has_text=_DELETE_POST_BTN_RE)
+        except Exception:
+            btn = box.locator("button").filter(has_text=_DELETE_POST_BTN_RE)
+        if int(btn.count()) <= 0:
+            return False
+        _dom_click(btn.first)
+        _log("TikToks upload: подтвердили удаление несохранённой публикации.")
+        page.wait_for_timeout(300)
+        return True
+    except Exception:
+        return False
+
+
+def _dismiss_unsaved_local_draft(page) -> None:
+    """«Видео не сохранилось. Продолжить редактирование?» — Сброс, затем Удалить."""
+    try:
+        card = page.locator('[data-e2e="local_draft_container"]')
+        if int(card.count()) <= 0:
+            return
+        box = card.first
+        try:
+            if not box.is_visible(timeout=150):
+                return
+        except Exception:
+            return
+        try:
+            text = (box.inner_text(timeout=800) or "").strip()
+        except Exception:
+            text = ""
+        if text and not _UNSAVED_DRAFT_TEXT_RE.search(text):
+            return
+        btn = box.get_by_role("button", name=_LOCAL_DRAFT_RESET_RE)
+        try:
+            if int(btn.count()) <= 0:
+                btn = box.locator("button").filter(has_text=_LOCAL_DRAFT_RESET_RE)
+        except Exception:
+            btn = box.locator("button").filter(has_text=_LOCAL_DRAFT_RESET_RE)
+        if int(btn.count()) <= 0:
+            return
+        _dom_click(btn.first)
+        _log("TikToks upload: черновик не сохранился — нажали Сброс.")
+        deadline = time.monotonic() + 4.0
+        while time.monotonic() < deadline:
+            if _confirm_delete_unsaved_post(page):
+                return
+            try:
+                page.wait_for_timeout(200)
+            except Exception:
+                time.sleep(0.2)
+    except Exception:
+        pass
+
+
+def _dismiss_content_restriction_modal(page) -> bool:
+    """«На контент могут быть наложены ограничения» — закрыть крестиком."""
+    try:
+        dlg = page.locator('[role="dialog"]').filter(
+            has_text=_CONTENT_LIMIT_TITLE_RE
+        )
+        if int(dlg.count()) <= 0:
+            return False
+        box = dlg.first
+        try:
+            if not box.is_visible(timeout=200):
+                return False
+        except Exception:
+            return False
+        close = box.locator(".common-modal-close")
+        if int(close.count()) <= 0:
+            close = box.locator(".common-modal-close-icon")
+        if int(close.count()) <= 0:
+            return False
+        _dom_click(close.first)
+        _log("TikToks upload: закрыли окно ограничений контента.")
+        page.wait_for_timeout(300)
+        return True
+    except Exception:
+        return False
+
+
 def _dismiss_studio_modals(page) -> None:
     """Turn on (проверки контента) и Got it (обучение Studio)."""
+    _confirm_delete_unsaved_post(page)
+    _dismiss_unsaved_local_draft(page)
+    _dismiss_content_restriction_modal(page)
     try:
         dlg = page.locator('[role="dialog"]')
         n = int(dlg.count())
@@ -3532,16 +3689,30 @@ def _apply_tiktok_schedule(page, when: datetime) -> None:
 
 def _click_studio_post(page, *, scheduled: bool = False) -> None:
     name_re = _SCHEDULE_BTN_RE if scheduled else _POST_BTN_RE
-    btn = page.locator('[data-e2e="post_video_button"]').or_(
-        page.get_by_role("button", name=name_re)
-    )
+    action = "«Запланировать»" if scheduled else "«Опубликовать»"
     deadline = time.monotonic() + 180.0
+    clicks = 0
     while time.monotonic() < deadline:
+        closed_limit = _dismiss_content_restriction_modal(page)
         _dismiss_studio_modals(page)
+        if closed_limit and clicks >= 2:
+            _log(
+                "TikToks upload: окно ограничений закрыто после "
+                + action
+                + " — кнопку больше не жмём, проверяем посты."
+            )
+            return
+        if clicks >= 1 and not closed_limit:
+            return
+        if closed_limit and clicks == 1:
+            _log("TikToks upload: после крестика снова жмём " + action + ".")
         try:
             if not _studio_file_uploaded(page):
                 page.wait_for_timeout(400)
                 continue
+            btn = page.locator('[data-e2e="post_video_button"]').or_(
+                page.get_by_role("button", name=name_re)
+            )
             if int(btn.count()) <= 0:
                 page.wait_for_timeout(200)
                 continue
@@ -3556,23 +3727,33 @@ def _click_studio_post(page, *, scheduled: bool = False) -> None:
             except Exception:
                 disabled = False
             if disabled:
+                if clicks >= 1:
+                    _log(
+                        "TikToks upload: "
+                        + action
+                        + " уже нажата — проверяем посты."
+                    )
+                    return
                 page.wait_for_timeout(300)
                 continue
             try:
                 _dom_click(target)
             except Exception:
                 target.click(timeout=8_000, force=True)
-            _log(
-                "TikToks upload: нажали "
-                + ("«Запланировать»." if scheduled else "Post.")
-            )
-            page.wait_for_timeout(400)
-            return
+            clicks += 1
+            _log("TikToks upload: нажали " + action + ".")
+            page.wait_for_timeout(800)
         except Exception:
             page.wait_for_timeout(250)
+    if clicks >= 1:
+        _log(
+            "TikToks upload: "
+            + action
+            + " уже была нажата — переходим к таблице постов."
+        )
+        return
     raise TikTokReelsUploadError(
-        "Не удалось нажать кнопку "
-        + ("«Запланировать»." if scheduled else "Post.")
+        "Не удалось нажать кнопку " + action + "."
     )
 
 
@@ -3590,46 +3771,158 @@ def _video_id_from_tiktok_url(url: str) -> str:
     return _video_id_from_reel_url(url)
 
 
-def _collect_posted_tiktok_urls(
-    page, *, limit: int = 1, timeout_s: float = 180.0
-) -> list[str]:
-    """После Post — таблица постов, ссылка /@user/video/<id>."""
+_RECENT_TIKTOK_POSTS = 10
+_STUDIO_CONTENT_URL = "https://www.tiktok.com/tiktokstudio/content"
+_RECENT_POST_HREFS_JS = """(limit) => {
+  const root = document.querySelector('[data-tt="components_PostPage_FlexColumn"]')
+    || document.querySelector('[data-tt="components_PostTable_Container"]');
+  if (!root) return [];
+  const anchors = Array.from(root.querySelectorAll(
+    'a[data-tt="components_PostInfoCell_a"][href*="/video/"]'
+  ));
+  const out = [];
+  const seen = new Set();
+  for (const a of anchors) {
+    const href = String(a.getAttribute('href') || '');
+    if (!/\\/video\\/\\d{6,}/.test(href) || seen.has(href)) continue;
+    seen.add(href);
+    out.push(href);
+    if (out.length >= limit) break;
+  }
+  return out;
+}"""
+
+
+def _posts_table_present(page) -> bool:
+    try:
+        return bool(
+            page.evaluate(
+                """() => !!document.querySelector(
+                  '[data-tt="components_PostPage_FlexColumn"], [data-tt="components_PostTable_Container"]'
+                )"""
+            )
+        )
+    except Exception:
+        return False
+
+
+def _open_studio_posts(page, *, keep_in_background: bool = False) -> None:
+    _log("TikToks upload: открываем таблицу постов Studio…")
+    _navigate_page_to(
+        page,
+        _STUDIO_CONTENT_URL,
+        label="TikToks upload",
+        keep_in_background=keep_in_background,
+    )
+    try:
+        page.wait_for_timeout(800)
+    except Exception:
+        time.sleep(0.8)
+
+
+def _scroll_posts_for_more(page) -> None:
+    try:
+        page.evaluate(
+            """() => {
+              const box = document.querySelector('[data-tt="components_PostTable_FlexColumn"]')
+                || document.querySelector('[data-tt="components_PostPage_FlexColumn"]');
+              if (!box) return;
+              let node = box;
+              for (let i = 0; i < 6 && node; i++) {
+                if (node.scrollHeight > node.clientHeight + 20) {
+                  node.scrollTop += Math.max(300, node.clientHeight * 0.8);
+                  return;
+                }
+                node = node.parentElement;
+              }
+              window.scrollBy(0, 500);
+            }"""
+        )
+    except Exception:
+        pass
+
+
+def _collect_recent_tiktok_posts(
+    page,
+    *,
+    limit: int = _RECENT_TIKTOK_POSTS,
+    timeout_s: float = 180.0,
+    keep_in_background: bool = False,
+) -> list[dict[str, str]]:
+    """Последние ссылки таблицы постов сверху вниз. Сверка с базой — у вызывающего кода."""
     limit = max(1, int(limit or 1))
-    deadline = time.monotonic() + max(15.0, float(timeout_s))
-    last_n = 0
+    deadline = time.monotonic() + max(20.0, float(timeout_s))
+    last_log = 0.0
+    opened_posts = False
+    _log(
+        "TikToks upload: после публикации берём последние "
+        f"{limit} ссылок сверху вниз для сверки с базой."
+    )
     while time.monotonic() < deadline:
         _dismiss_studio_modals(page)
-        found: list[str] = []
-        seen: set[str] = set()
-        try:
-            links = page.locator('a[href*="/video/"]')
-            n = int(links.count())
-            last_n = n
-            for i in range(min(n, 30)):
-                try:
-                    href = links.nth(i).get_attribute("href") or ""
-                except Exception:
-                    continue
-                url = _normalize_tiktok_video_url(_absolute_tiktok_url(href))
+        if not _posts_table_present(page):
+            if not opened_posts:
+                opened_posts = True
+                _open_studio_posts(page, keep_in_background=keep_in_background)
+            try:
+                page.wait_for_timeout(400)
+            except Exception:
+                time.sleep(0.4)
+            continue
+        ordered: list[str] = []
+        seen_href: set[str] = set()
+        for _ in range(8):
+            try:
+                raw = page.evaluate(_RECENT_POST_HREFS_JS, limit)
+            except Exception:
+                raw = []
+            if isinstance(raw, list):
+                for href in raw:
+                    key = str(href or "").strip()
+                    if not key or key in seen_href:
+                        continue
+                    seen_href.add(key)
+                    ordered.append(key)
+            if len(ordered) >= limit:
+                break
+            _scroll_posts_for_more(page)
+            try:
+                page.wait_for_timeout(250)
+            except Exception:
+                time.sleep(0.25)
+        raw = ordered
+        found: list[dict[str, str]] = []
+        if isinstance(raw, list):
+            seen: set[str] = set()
+            for href in raw:
+                url = _normalize_tiktok_video_url(
+                    _absolute_tiktok_url(str(href or ""))
+                )
                 vid = _video_id_from_tiktok_url(url)
                 if not vid or url in seen:
                     continue
                 seen.add(url)
-                found.append(url)
+                found.append({"video_id": vid, "url": url})
                 if len(found) >= limit:
                     break
-        except Exception:
-            found = []
         if found:
+            _log(
+                "TikToks upload: ссылки для сверки — "
+                + ", ".join(item["video_id"] for item in found)
+                + "."
+            )
             return found
+        now = time.monotonic()
+        if now - last_log >= 8.0:
+            last_log = now
+            _log("TikToks upload: таблица постов ещё пустая, ждём…")
         try:
-            page.wait_for_timeout(400)
+            page.wait_for_timeout(500)
         except Exception:
-            time.sleep(0.4)
+            time.sleep(0.5)
     raise TikTokReelsUploadError(
-        "Не удалось найти URL залитого видео (/@user/video/…)"
-        + (f", ссылок /video/={last_n}" if last_n else "")
-        + "."
+        "После публикации не открылась таблица постов TikTok "
+        "(/@user/video/…)."
     )
 
 
@@ -3651,6 +3944,7 @@ def run_tiktok_reels_upload(
     crop_aspect: str = DEFAULT_TIKTOK_CROP_ASPECT,
     schedule_publish_at: datetime | None = None,
     scheduled_batch=None,
+    on_each_done=None,
 ) -> dict[str, Any]:
     """
     Главная → Upload в сайдбаре → Studio → файл → описание → Post →
@@ -3778,33 +4072,30 @@ def run_tiktok_reels_upload(
         _wait_copyright_checks_done(page, on_tick=_keep_caption)
         _keep_caption()
         _click_studio_post(page, scheduled=job_at is not None)
-        scan_n = max(1, int(top_reels_scan or 1))
-        urls = _collect_posted_tiktok_urls(page, limit=scan_n)
-        candidates: list[dict[str, str]] = []
-        for u in urls:
-            vid_i = _video_id_from_tiktok_url(u)
-            if not vid_i:
-                continue
-            candidates.append({"video_id": vid_i, "url": u})
-        if not candidates:
-            raise TikTokReelsUploadError(
-                "Не удалось извлечь video_id из ссылки /@user/video/…"
-            )
+        candidates = _collect_recent_tiktok_posts(
+            page,
+            limit=max(_RECENT_TIKTOK_POSTS, int(top_reels_scan or 1)),
+            keep_in_background=keep_in_background,
+        )
         url = candidates[0]["url"]
         vid = candidates[0]["video_id"]
         _log(
-            f"TikToks upload: готово video_id={vid!r} url={url!r} "
-            f"candidates={len(candidates)}"
+            f"TikToks upload: готово, сверяем {len(candidates)} ссылок с базой. "
+            f"первая video_id={vid!r}"
         )
-        results.append(
-            {
-                "video_id": vid,
-                "url": url,
-                "title": (job_title or "").strip() or upload_file.stem,
-                "description": (job_desc or "").strip(),
-                "candidate_reels": candidates,
-            }
-        )
+        one_done = {
+            "video_id": vid,
+            "url": url,
+            "title": (job_title or "").strip() or upload_file.stem,
+            "description": (job_desc or "").strip(),
+            "video_path": str(upload_file),
+            "schedule_publish_at": job_at,
+            "candidate_reels": candidates,
+        }
+        if callable(on_each_done):
+            on_each_done(one_done)
+        _open_tiktok_home(page, keep_in_background=keep_in_background)
+        results.append(one_done)
 
     if len(results) == 1:
         return results[0]

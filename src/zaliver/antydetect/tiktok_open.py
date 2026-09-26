@@ -1011,6 +1011,7 @@ def upload_tiktok_reel_in_profile(
     crop_aspect: str = DEFAULT_TIKTOK_CROP_ASPECT,
     schedule_publish_at=None,
     scheduled_batch=None,
+    on_each_done=None,
 ) -> dict:
     """Dolphin → TikTok → «Новая публикация» → файл → Share (Reels)."""
     from zaliver.tiktok_upload.reels_upload import run_tiktok_reels_upload
@@ -1162,6 +1163,7 @@ def upload_tiktok_reel_in_profile(
                 crop_aspect=crop,
                 schedule_publish_at=schedule_publish_at,
                 scheduled_batch=scheduled_batch,
+                on_each_done=on_each_done,
             )
             _log(
                 "Dolphin: браузер оставлен открытым "
@@ -1303,6 +1305,7 @@ def upload_tiktok_reel_in_local_antidetect_profile(
     crop_aspect: str = DEFAULT_TIKTOK_CROP_ASPECT,
     schedule_publish_at=None,
     scheduled_batch=None,
+    on_each_done=None,
 ) -> dict:
     """Локальный антидетект → TikTok → «Новая публикация» → файл → Share (Reels)."""
     from zaliver.tiktok_upload.reels_upload import run_tiktok_reels_upload
@@ -1581,6 +1584,7 @@ def upload_tiktok_reel_in_local_antidetect_profile(
                 crop_aspect=crop,
                 schedule_publish_at=schedule_publish_at,
                 scheduled_batch=scheduled_batch,
+                on_each_done=on_each_done,
             )
             _log(
                 "Local antidetect: браузер оставлен открытым "

@@ -12487,28 +12487,39 @@ class MainWindow(QWidget):
                     chosen = cand
                     break
                 if chosen is None:
+                    many = len(candidates) > 1
                     detail = (
                         f"проверено={len(candidates)}, already={skipped!r}"
-                        if multi_tab
+                        if many
                         else f"video_id={ig_vid!r}, url={ig_url!r}"
                     )
+                    label = (
+                        "TikTok"
+                        if platform == PLATFORM_TIKTOK
+                        else "Instagram Reels"
+                    )
                     raise RuntimeError(
-                        "Instagram Reels: "
+                        f"{label}: "
                         + (
-                            "все первые ролики в профиле уже есть в базе залитых"
-                            if multi_tab and len(candidates) > 1
+                            "среди последних ссылок нет новой — "
+                            "все уже есть в базе залитых"
+                            if many
                             else "первое видео в профиле уже есть в базе залитых"
                         )
                         + f" ({detail}) — заливка не подтверждена."
                     )
                 ig_vid = str(chosen.get("video_id") or "").strip()
                 ig_url = str(chosen.get("url") or "").strip()
-                if multi_tab and skipped:
+                if skipped:
                     try:
+                        known = (
+                            "TikTok"
+                            if platform == PLATFORM_TIKTOK
+                            else "Instagram"
+                        )
                         self._ui_log_line.emit(
-                            "[upload] Instagram multi-tab: пропущены уже "
-                            f"известные Reels {skipped!r}, берём "
-                            f"video_id={ig_vid!r}"
+                            f"[upload] {known}: пропущены уже известные "
+                            f"ссылки {skipped!r}, берём video_id={ig_vid!r}"
                         )
                     except Exception:
                         pass
@@ -12822,11 +12833,32 @@ class MainWindow(QWidget):
                                 tt_part, platform=PLATFORM_TIKTOK
                             )
                             _record_one(
-                                video_path=task.video_path,
-                                title=resolved_title,
-                                description=resolved_description,
+                                video_path=str(
+                                    (tt_part or {}).get("video_path")
+                                    or task.video_path
+                                )
+                                if isinstance(tt_part, dict)
+                                else task.video_path,
+                                title=str(
+                                    (tt_part or {}).get("title") or resolved_title
+                                )
+                                if isinstance(tt_part, dict)
+                                else resolved_title,
+                                description=str(
+                                    (tt_part or {}).get("description")
+                                    or resolved_description
+                                )
+                                if isinstance(tt_part, dict)
+                                else resolved_description,
                                 one_res=confirmed,
-                                schedule_publish_at=task.schedule_publish_at,
+                                schedule_publish_at=(
+                                    tt_part.get(
+                                        "schedule_publish_at",
+                                        task.schedule_publish_at,
+                                    )
+                                    if isinstance(tt_part, dict)
+                                    else task.schedule_publish_at
+                                ),
                                 record_platform=PLATFORM_TIKTOK,
                             )
                         try:
@@ -13040,6 +13072,7 @@ class MainWindow(QWidget):
                         pass
                 return
 
+            tiktok_record_inline = False
             if is_instagram_upload:
                 # Подпись Reels длиннее лимита названия Studio — только expand.
                 resolved_title = expand_title_variables(task.title, var_ctx)
@@ -13114,6 +13147,29 @@ class MainWindow(QWidget):
                             )
                     ig_kw["scheduled_batch"] = expanded_batch
                     resolved_scheduled_batch = expanded_batch
+
+                    def _on_tt_each(one_res: dict) -> None:
+                        nonlocal tiktok_record_inline
+                        confirmed = _confirm_instagram_result(
+                            one_res, platform=PLATFORM_TIKTOK
+                        )
+                        _record_one(
+                            video_path=str(
+                                one_res.get("video_path") or task.video_path
+                            ),
+                            title=str(one_res.get("title") or resolved_title),
+                            description=str(
+                                one_res.get("description") or resolved_description
+                            ),
+                            one_res=confirmed,
+                            schedule_publish_at=one_res.get(
+                                "schedule_publish_at", task.schedule_publish_at
+                            ),
+                            record_platform=PLATFORM_TIKTOK,
+                        )
+                        tiktok_record_inline = True
+
+                    ig_kw["on_each_done"] = _on_tt_each
                 if _is_own_antidetect_kind(kind):
                     if self._platform == PLATFORM_TIKTOK:
                         from zaliver.antydetect.tiktok_open import (
@@ -13153,17 +13209,30 @@ class MainWindow(QWidget):
                 # После залива: первое Reel в сетке. В multi-tab параллельные
                 # вкладки могут уже записать соседние ролики — берём первый
                 # из топ-5, которого ещё нет в базе.
-                res = _confirm_instagram_result(res, multi_tab=multi_tab)
-                if self._platform == PLATFORM_TIKTOK and isinstance(res, dict):
-                    raw_tt_batch = res.get("batch_results")
-                    if isinstance(raw_tt_batch, list) and task.scheduled_batch:
-                        res = dict(res)
-                        res["batch_results"] = [
-                            _confirm_instagram_result(item_res, multi_tab=multi_tab)
-                            for item_res in raw_tt_batch
-                        ]
-                if self._platform != PLATFORM_TIKTOK:
-                    resolved_scheduled_batch = None
+                # TikTok уже подтверждён и уведомлён по каждому видео.
+                if not tiktok_record_inline:
+                    confirm_platform = (
+                        PLATFORM_TIKTOK
+                        if self._platform == PLATFORM_TIKTOK
+                        else PLATFORM_INSTAGRAM
+                    )
+                    res = _confirm_instagram_result(
+                        res, multi_tab=multi_tab, platform=confirm_platform
+                    )
+                    if self._platform == PLATFORM_TIKTOK and isinstance(res, dict):
+                        raw_tt_batch = res.get("batch_results")
+                        if isinstance(raw_tt_batch, list) and task.scheduled_batch:
+                            res = dict(res)
+                            res["batch_results"] = [
+                                _confirm_instagram_result(
+                                    item_res,
+                                    multi_tab=multi_tab,
+                                    platform=PLATFORM_TIKTOK,
+                                )
+                                for item_res in raw_tt_batch
+                            ]
+                    if self._platform != PLATFORM_TIKTOK:
+                        resolved_scheduled_batch = None
             else:
                 creds = self._profile_login_credentials(profile_id)
                 yt_oldest = self._profile_yt_oldest_name(profile_id) or None
@@ -13269,7 +13338,9 @@ class MainWindow(QWidget):
                 if isinstance(raw_batch, list):
                     batch_results = raw_batch
 
-            if batch_results and task.scheduled_batch:
+            if tiktok_record_inline:
+                pass
+            elif batch_results and task.scheduled_batch:
                 if len(batch_results) != len(task.scheduled_batch):
                     raise RuntimeError(
                         "scheduled_batch size mismatch: "

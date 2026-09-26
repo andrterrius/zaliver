@@ -103,6 +103,7 @@ class MultiProfileUploader:
         schedule_batch_size: int = 0,
         schedule_times: list[datetime] | None = None,
         await_more_videos: bool = False,
+        planned_videos: int = 0,
         tabs_per_profile: dict[str, int] | None = None,
     ) -> None:
         # Deduplicate, preserve order (UI may pass the same id twice).
@@ -168,6 +169,8 @@ class MultiProfileUploader:
             self._schedule_batch_size = 0
         self._profile_batch_assigned: dict[str, int] = {pid: 0 for pid in self._profiles}
         self._profile_video_quota: dict[str, int] | None = None
+        self._schedule_quota_basis: int | None = None
+        self._planned_videos = max(0, int(planned_videos or 0))
         self._schedule_profile_order_idx = 0
 
         self._stop = threading.Event()
@@ -544,14 +547,36 @@ class MultiProfileUploader:
     def _active_schedule_profiles(self) -> list[str]:
         return [pid for pid in self._profiles if not self._is_profile_skipped(pid)]
 
-    def _ensure_schedule_quotas(self) -> bool:
-        """Сколько видео на каждый профиль — когда очередь видео уже полная."""
-        if self._profile_video_quota is not None:
-            return True
+    def _schedule_quota_basis_total(self) -> int | None:
+        """Сколько роликов делить между профилями.
+
+        Пока обработка ещё идёт, берём план. Иначе отложка ждёт последний
+        файл, и «по мере готовности» не открывает браузер на запасе профили×2.
+        """
         with self._done_lock:
-            if not self._producer_done:
-                return False
-            total = int(self._total)
+            producer_done = bool(self._producer_done)
+            actual = int(self._total)
+        if producer_done:
+            return actual
+        planned = int(self._planned_videos)
+        if planned <= 0:
+            return None
+        return max(planned, actual)
+
+    def _ensure_schedule_quotas(self) -> bool:
+        """Сколько видео на каждый профиль.
+
+        Квота считается по плану ещё до конца обработки, чтобы первая пачка
+        ушла в браузер и освободила буфер готовых видео.
+        """
+        total = self._schedule_quota_basis_total()
+        if total is None:
+            return False
+        if (
+            self._profile_video_quota is not None
+            and self._schedule_quota_basis == total
+        ):
+            return True
         profiles = self._active_schedule_profiles()
         quota: dict[str, int] = {pid: 0 for pid in self._profiles}
         n = len(profiles)
@@ -559,7 +584,12 @@ class MultiProfileUploader:
             base, rem = divmod(total, n)
             for i, pid in enumerate(profiles):
                 quota[pid] = base + (1 if i < rem else 0)
+        for pid in self._profiles:
+            assigned = int(self._profile_batch_assigned.get(pid, 0))
+            if assigned > int(quota.get(pid, 0)):
+                quota[pid] = assigned
         self._profile_video_quota = quota
+        self._schedule_quota_basis = total
         n_sched = len(self._schedule_times)
         parts: list[str] = []
         for pid in profiles:
@@ -570,9 +600,15 @@ class MultiProfileUploader:
                 continue
             parts.append(f"{pid}: {immediate} сразу + {scheduled} в отложку")
         plan = "; ".join(parts) if parts else "нечего назначать"
+        with self._done_lock:
+            producer_done = bool(self._producer_done)
+            actual = int(self._total)
+        waiting = ""
+        if not producer_done and actual < total:
+            waiting = f" (план {total}, уже готово {actual})"
         self._log(
             f"[{_ts()}] [upload] schedule: видео={total}, "
-            f"профилей={n}, отложек={n_sched}. {plan}"
+            f"профилей={n}, отложек={n_sched}{waiting}. {plan}"
         )
         return True
 

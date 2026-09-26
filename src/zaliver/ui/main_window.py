@@ -3848,6 +3848,18 @@ class MainWindow(QWidget):
             raw = str(src.get("profile_ids") or "")
         return len([p for p in raw.split(",") if p.strip()])
 
+    def _upload_planned_video_count(self, video_paths: list[str] | None = None) -> int:
+        """План роликов: из сессии, иначе сколько путей уже передано в залив."""
+        sess = getattr(self, "_upload_session", None)
+        planned = 0
+        if sess is not None:
+            try:
+                planned = int(getattr(sess, "planned_videos", 0) or 0)
+            except (TypeError, ValueError):
+                planned = 0
+        ready = len([p for p in (video_paths or []) if str(p or "").strip()])
+        return max(planned, ready)
+
     def _compute_streaming_upload_min_ready(
         self, *, profile_count: int, planned: int
     ) -> int:
@@ -4356,10 +4368,20 @@ class MainWindow(QWidget):
 
         schedule_slots_visible = 1
         schedule_btns = QHBoxLayout()
+        schedule_gap_lbl = QLabel("Разница в часах:")
+        schedule_gap_spin = QSpinBox()
+        schedule_gap_spin.setRange(1, 240)
+        schedule_gap_spin.setValue(5)
+        schedule_gap_spin.setSuffix(" ч")
+        schedule_gap_spin.setToolTip(
+            "На сколько часов сдвигать следующее время при «Добавить время»."
+        )
         btn_add_schedule_time = QPushButton("Добавить время")
         btn_add_schedule_time.setObjectName("secondary")
         btn_remove_schedule_time = QPushButton("Убрать время")
         btn_remove_schedule_time.setObjectName("secondary")
+        schedule_btns.addWidget(schedule_gap_lbl)
+        schedule_btns.addWidget(schedule_gap_spin)
         schedule_btns.addWidget(btn_add_schedule_time)
         schedule_btns.addWidget(btn_remove_schedule_time)
         schedule_btns.addStretch()
@@ -4417,7 +4439,8 @@ class MainWindow(QWidget):
             schedule_slots_visible += 1
             prev = schedule_time_edits[-1].dateTime()
             edit = _make_schedule_time_row(schedule_slots_visible, visible=True)
-            edit.setDateTime(prev.addSecs(5 * 3600))
+            gap_h = max(1, int(schedule_gap_spin.value()))
+            edit.setDateTime(prev.addSecs(gap_h * 3600))
             _sync_schedule_time_buttons()
 
         def _remove_schedule_time_slot() -> None:
@@ -13388,6 +13411,7 @@ class MainWindow(QWidget):
             schedule_batch_size=schedule_batch_size,
             schedule_times=schedule_times,
             await_more_videos=bool(streaming),
+            planned_videos=self._upload_planned_video_count(video_paths),
             tabs_per_profile=ig_tabs_per_profile,
         )
         mgr_holder["mgr"] = mgr

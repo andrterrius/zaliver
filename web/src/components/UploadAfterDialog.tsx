@@ -108,6 +108,7 @@ export function UploadAfterDialog({
   const [scheduleTimes, setScheduleTimes] = useState<string[]>([
     defaultScheduleLocal(),
   ]);
+  const [scheduleGapHours, setScheduleGapHours] = useState("5");
   const [scheduleWarmupShorts, setScheduleWarmupShorts] = useState(true);
   const [scheduleWarmupRecommendations, setScheduleWarmupRecommendations] =
     useState(true);
@@ -452,19 +453,36 @@ export function UploadAfterDialog({
                   />
                 </label>
               ))}
-              <div className="row" style={{ gap: 8 }}>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <label className="hint" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  Разница в часах
+                  <input
+                    className="field"
+                    type="number"
+                    min={1}
+                    max={240}
+                    value={scheduleGapHours}
+                    title="На сколько часов сдвигать следующее время при «Добавить время»"
+                    onChange={(e) => setScheduleGapHours(e.target.value)}
+                    style={{ width: 72 }}
+                  />
+                </label>
                 <button
                   type="button"
                   className="btn secondary"
-                  onClick={() =>
+                  onClick={() => {
+                    const parsed = Math.round(Number(scheduleGapHours));
+                    const gap = Number.isFinite(parsed)
+                      ? Math.max(1, Math.min(240, parsed))
+                      : 5;
                     setScheduleTimes((prev) => [
                       ...prev,
                       addHoursLocal(
                         prev[prev.length - 1] || defaultScheduleLocal(),
-                        5,
+                        gap,
                       ),
-                    ])
-                  }
+                    ]);
+                  }}
                 >
                   Добавить время
                 </button>

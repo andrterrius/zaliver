@@ -1040,6 +1040,7 @@ def run_upload_job(
         schedule_batch_size=schedule_batch,
         schedule_times=parsed_times if schedule_batch else None,
         await_more_videos=streaming,
+        planned_videos=planned,
         tabs_per_profile=ig_tabs_per_profile,
     )
     mgr_holder["mgr"] = mgr

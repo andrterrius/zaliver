@@ -1,3 +1,2 @@
 [console_scripts]
 zaliver = zaliver.__main__:main
-zaliver-api = zaliver.api.__main__:main

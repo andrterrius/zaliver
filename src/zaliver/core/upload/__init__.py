@@ -1,4 +1,4 @@
-"""Upload DTOs for headless / web backends."""
+"""Upload DTOs for desktop application services."""
 
 from zaliver.core.upload.build import build_upload_queue_request
 from zaliver.core.upload.types import AntidetectLaunchConfig, UploadQueueRequest

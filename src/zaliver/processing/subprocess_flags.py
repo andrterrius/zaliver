@@ -21,5 +21,5 @@ def worker_creationflags() -> int:
 
 
 def resolve_python_executable() -> str:
-    """Use the same interpreter as the API (python.exe). pythonw can break imports."""
+    """Use the same interpreter as the desktop application (python.exe). pythonw can break imports."""
     return str(Path(sys.executable))

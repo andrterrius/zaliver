@@ -1,4 +1,4 @@
-"""ZaliverCore — headless façade for desktop UI and future web API."""
+"""ZaliverCore — application services for the desktop UI."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ class ZaliverCore:
     """
     Application service: settings + stores + job factories.
 
-    Desktop PyQt and future HTTP backends should call this instead of
+    Desktop PyQt adapters should call this instead of
     embedding orchestration inside widgets.
     """
 

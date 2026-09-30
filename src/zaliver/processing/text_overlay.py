@@ -49,7 +49,7 @@ class TextOverlaySettings:
     def from_dict(d: Dict[str, Any]) -> "TextOverlaySettings":
         allowed = {f.name for f in fields(TextOverlaySettings)}
         raw = {k: v for k, v in d.items() if k in allowed}
-        # API / web UI send ``orientation``; dataclass field is preview_orientation.
+        # Legacy settings use ``orientation``; dataclass field is preview_orientation.
         if "preview_orientation" not in raw and "orientation" in d:
             raw["preview_orientation"] = d.get("orientation")
         s = TextOverlaySettings(**raw)
@@ -691,20 +691,8 @@ def wave_y_ffmpeg_expr(
     return f"{int(base_y)}+{int(amp)}*sin({phase})"
 
 
-def _api_server_mode() -> bool:
-    """True in FastAPI / job workers — must never import PyQt (old CPUs abort)."""
-    v = (os.environ.get("ZALIVER_API_SERVER") or "").strip().lower()
-    if v in {"1", "true", "yes", "on"}:
-        return True
-    v = (os.environ.get("ZALIVER_DISABLE_QT") or "").strip().lower()
-    return v in {"1", "true", "yes", "on"}
-
-
 def _qt_metrics_available() -> bool:
     """True when a Qt GUI app already exists (desktop UI). Never create one here."""
-    # Importing PyQt6 alone prints/aborts on CPUs without ssse3/sse4 (many VPS).
-    if _api_server_mode():
-        return False
     try:
         from PyQt6.QtGui import QGuiApplication
         from PyQt6.QtWidgets import QApplication
@@ -718,7 +706,7 @@ def _qt_metrics_available() -> bool:
 
 
 def _pil_font(font_path: str, font_size: int, *, bold: bool = True):
-    """Load a FreeType font via Pillow (no Qt — safe for API workers)."""
+    """Load a FreeType font via Pillow (no Qt required in background workers)."""
     try:
         from PIL import ImageFont
     except Exception:
@@ -851,7 +839,7 @@ def compute_scaled_overlay_approx(
     video_w: int,
     video_h: int,
 ) -> Optional[ScaledTextOverlay]:
-    """Layout text overlay without Qt (Pillow metrics — safe for Windows API)."""
+    """Layout text overlay without Qt (Pillow metrics for background workers)."""
     if not settings.enabled:
         return None
     text = (settings.text or "").strip()
@@ -925,20 +913,12 @@ def compute_scaled_overlay_approx(
     )
 
 
-def compute_scaled_overlay_for_api(
+def compute_scaled_overlay_for_worker(
     settings: TextOverlaySettings,
     video_w: int,
     video_h: int,
 ) -> Optional[ScaledTextOverlay]:
-    """
-    Prefer precise Qt metrics when a GUI app exists; otherwise Pillow.
-
-    Creating QGuiApplication in CREATE_NO_WINDOW API workers often AVs on Windows
-    (0xC0000005), so headless paths must never touch Qt font APIs.
-    On API servers we never import PyQt at all (Incompatible processor on old CPUs).
-    """
-    if _api_server_mode():
-        return compute_scaled_overlay_approx(settings, video_w, video_h)
+    """Use Qt metrics in the desktop GUI and Pillow in background workers."""
     if _qt_metrics_available():
         return compute_scaled_overlay(settings, video_w, video_h)
     return compute_scaled_overlay_approx(settings, video_w, video_h)
@@ -1172,8 +1152,6 @@ _COLOR_EMOJI_RASTER_PX = 160
 
 def _qt_gui_ready_for_emoji() -> bool:
     """Use an existing Qt app only — never create one in spawn workers."""
-    if _api_server_mode():
-        return False
     try:
         from PyQt6.QtGui import QGuiApplication
         from PyQt6.QtWidgets import QApplication

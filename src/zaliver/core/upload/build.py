@@ -1,4 +1,4 @@
-"""Helpers to build UploadQueueRequest from pending UI/API payloads."""
+"""Helpers to build UploadQueueRequest from pending desktop UI payloads."""
 
 from __future__ import annotations
 

@@ -41,7 +41,7 @@ from zaliver.processing.text_overlay import (
     ScaledTextOverlay,
     TextOverlaySettings,
     build_text_overlay_filters,
-    compute_scaled_overlay_for_api,
+    compute_scaled_overlay_for_worker,
 )
 from zaliver.processing.worker import _filter_complex_argv
 
@@ -2591,7 +2591,7 @@ def generate_video_from_segment(
     if text_overlay_cfg:
         toc = TextOverlaySettings.from_dict(text_overlay_cfg)
         # API/headless workers have no Qt GUI — use Pillow metrics (avoid 0xC0000005).
-        scaled_overlay = compute_scaled_overlay_for_api(
+        scaled_overlay = compute_scaled_overlay_for_worker(
             toc, video_w=width, video_h=height
         )
         if scaled_overlay is not None and scaled_overlay.lines:

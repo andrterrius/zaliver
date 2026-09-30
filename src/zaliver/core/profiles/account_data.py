@@ -1,4 +1,4 @@
-"""Ключи custom_data учёток и payload для merge — без Qt (безопасно для API)."""
+"""Ключи custom_data учёток и payload для merge — без зависимости от Qt."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Upload session request DTOs (built by UI or future HTTP API)."""
+"""Upload session request DTOs (built by the desktop UI)."""
 
 from __future__ import annotations
 

@@ -23,7 +23,7 @@ class SettingsStore(Protocol):
 
 
 class DictSettingsStore:
-    """In-memory store for tests and headless/web backends."""
+    """In-memory store for tests and application services."""
 
     def __init__(self, initial: dict[str, Any] | None = None) -> None:
         self._data: dict[str, Any] = dict(initial or {})
@@ -56,7 +56,7 @@ class DictSettingsStore:
 
 
 class JsonFileSettingsStore:
-    """Persistent JSON settings for headless / FastAPI (no Qt)."""
+    """Persistent JSON settings without a Qt dependency."""
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path).expanduser()

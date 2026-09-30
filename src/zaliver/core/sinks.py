@@ -1,4 +1,4 @@
-"""Progress callbacks for headless jobs (Qt / web adapters bind these)."""
+"""Progress callbacks for headless jobs (Qt adapters bind these)."""
 
 from __future__ import annotations
 

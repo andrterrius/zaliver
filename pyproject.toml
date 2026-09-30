@@ -9,7 +9,6 @@ description = "Desktop video uniquification with parallel whole-file processing"
 requires-python = ">=3.11"
 dependencies = [
   "PyQt6>=6.6.0",
-  # <2.2: wheels default to x86-64-v2; many VPS CPUs lack those instructions.
   "numpy>=1.26.0,<2.2",
   "scipy>=1.11.0,<1.16",
   "Pillow>=10.0.0",
@@ -25,27 +24,18 @@ bundle = ["pyinstaller>=6.3.0"]
 ffmpeg = ["imageio-ffmpeg>=0.4.9"]
 nuitka = ["nuitka>=2.3", "ordered-set>=4.0"]
 antydetect = ["requests>=2.32.0", "patchright>=1.59.1", "playwright>=1.46.0"]
-api = [
-  "fastapi>=0.115.0",
-  "uvicorn[standard]>=0.30.0",
-  "pydantic>=2.7.0",
-  "python-multipart>=0.0.9",
-  "patchright>=1.59.1",
-  "playwright>=1.46.0",
-]
 
 [project.scripts]
 zaliver = "zaliver.__main__:main"
-zaliver-api = "zaliver.api.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["zaliver", "zaliver.*"]
+namespaces = false
 
 [tool.setuptools.package-data]
 zaliver = [
   "ui/theme.qss",
   "ui/icons/*",
   "assets/fonts/*",
-  "api/web_dist/*",
-  "api/web_dist/assets/*",
 ]

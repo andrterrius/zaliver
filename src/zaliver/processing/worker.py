@@ -256,6 +256,11 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
             tb_i = None
     if tb_i is not None and tb_i <= 0:
         tb_i = None
+    # When the selected output size does not exceed the source, retain the
+    # source bitrate. CRF 1 / CQ 1 can otherwise produce files many times
+    # larger than the input even though the output has no extra detail.
+    if tb_i is not None and (w_out > w or h_out > h):
+        tb_i = None
     raw_compression = task.get("file_compression")
     if raw_compression is not None:
         set_file_compression(str(raw_compression))

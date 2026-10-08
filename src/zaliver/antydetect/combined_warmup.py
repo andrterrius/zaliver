@@ -95,10 +95,14 @@ def warmup_combined_profile(
                 yt_kwargs.update(workflow)
             yt_kwargs["profile_id"] = profile_id
 
+            # Release the setup connection before workers attach. Some antidetect
+            # CDP proxies stall navigation while another client owns the socket.
+            owner.stop()
+
             def run(platform):
                 with log_profile_context(profile_id):
                     with sync_playwright() as worker:
-                        shared_browser, shared_context, _ = _playwright_page_from_cdp(
+                        _browser, shared_context, _ = _playwright_page_from_cdp(
                             worker, endpoints
                         )
                         page = None
@@ -112,7 +116,6 @@ def warmup_combined_profile(
                                 finally:
                                     session.detach()
                             except Exception:
-                                # Another worker may have just finished and closed its tab.
                                 continue
                             if target == target_ids[platform]:
                                 page = candidate
@@ -160,7 +163,7 @@ def warmup_combined_profile(
                                 runner(page, **kwargs)
                         finally:
                             page.close()
-                        # worker.stop disconnects its transport; never close the shared browser.
+                        # Worker stop disconnects its transport, not the browser.
 
             errors = []
             with ThreadPoolExecutor(max_workers=len(platforms)) as pool:

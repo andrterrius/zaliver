@@ -1336,24 +1336,42 @@ def _with_video_metadata(args: list[str]) -> list[str]:
 def libx264_encode_args_for_target(
     target_video_bps: Optional[int], *, crf: int = 1
 ) -> List[str]:
-    """Constant quality. Source bitrate is not a cap."""
-    del target_video_bps
+    """Use source bitrate when supplied; otherwise encode at constant quality."""
+    if target_video_bps is not None and int(target_video_bps) > 0:
+        bps = int(target_video_bps)
+        return [
+            "-preset", _X264_PRESET,
+            "-b:v", str(bps),
+            "-maxrate", str(bps),
+            "-bufsize", str(max(bps, bps * 2)),
+        ]
     return ["-preset", _X264_PRESET, "-crf", str(int(crf))]
 
 
 def _h264_nvenc_args(target_video_bps: Optional[int], *, gpu_cq: int = 1) -> List[str]:
-    del target_video_bps
+    if target_video_bps is not None and int(target_video_bps) > 0:
+        bps = int(target_video_bps)
+        return ["-preset", "p7", "-tune", "hq", "-rc", "vbr",
+                "-b:v", str(bps), "-maxrate", str(bps), "-bufsize", str(bps * 2)]
     return ["-preset", "p7", "-tune", "hq", "-rc", "vbr", "-cq", str(int(gpu_cq)), "-b:v", "0"]
 
 
 def _h264_qsv_args(target_video_bps: Optional[int], *, gpu_cq: int = 1) -> List[str]:
-    del target_video_bps
+    if target_video_bps is not None and int(target_video_bps) > 0:
+        bps = int(target_video_bps)
+        return ["-preset", "veryslow", "-b:v", str(bps),
+                "-maxrate", str(bps), "-bufsize", str(bps * 2), "-look_ahead", "1"]
     # ICQ scale is 1–51; 1 is the best step QSV accepts.
     qsv_q = max(1, int(gpu_cq))
     return ["-preset", "veryslow", "-global_quality", str(qsv_q), "-look_ahead", "1"]
 
 
 def _h264_amf_args(target_video_bps: Optional[int], *, gpu_cq: int = 1) -> List[str]:
+    if target_video_bps is not None and int(target_video_bps) > 0:
+        bps = int(target_video_bps)
+        return ["-usage", "transcoding", "-quality", "quality", "-rc", "cbr",
+                "-b:v", str(bps), "-maxrate", str(bps), "-bufsize", str(bps * 2),
+                "-bf", "0", "-async_depth", "4"]
     del target_video_bps
     qp = str(int(gpu_cq))
     return [
@@ -1380,7 +1398,8 @@ def _h264_videotoolbox_args(
     target_video_bps: Optional[int], *, videotoolbox_q: int = 100
 ) -> List[str]:
     """Apple VideoToolbox (macOS): аппаратный H.264. Шкала качества 1–100, выше — лучше."""
-    del target_video_bps
+    if target_video_bps is not None and int(target_video_bps) > 0:
+        return ["-b:v", str(int(target_video_bps)), "-allow_sw", "1"]
     q = max(1, min(100, int(videotoolbox_q)))
     return ["-q:v", str(q), "-allow_sw", "1"]
 

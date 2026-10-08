@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import signal
+import inspect
 import threading
 import time
 from collections import deque
@@ -40,6 +41,9 @@ class VideoTask:
     schedule_slot_start: int | None = None
     attempts_by_profile: Dict[str, int] = field(default_factory=dict)
     last_failed_profile: str = ""
+    platform_items: dict[str, ScheduledUploadItem] = field(default_factory=dict)
+    completed_platforms: set[str] = field(default_factory=set)
+    platform_errors: dict[str, str] = field(default_factory=dict)
 
 
 # Лимит по умолчанию, если вызывающий код не передал max_concurrent_uploads.
@@ -105,6 +109,8 @@ class MultiProfileUploader:
         await_more_videos: bool = False,
         planned_videos: int = 0,
         tabs_per_profile: dict[str, int] | None = None,
+        schedule_group_for_video: Callable[[str], str] | None = None,
+        platform_expected_videos: dict[str, int] | None = None,
     ) -> None:
         # Deduplicate, preserve order (UI may pass the same id twice).
         seen: set[str] = set()
@@ -148,11 +154,36 @@ class MultiProfileUploader:
         self._upload_slots = threading.Semaphore(cap)
         self._log = log_sink
         self._upload_one = upload_one
+        try:
+            inspect.signature(upload_one).bind("profile", VideoTask("", "", ""), 0)
+            self._upload_accepts_tab_index = True
+        except TypeError:
+            self._upload_accepts_tab_index = False
+        except ValueError:
+            self._upload_accepts_tab_index = True
         self._on_profile_attempt = on_profile_attempt
         self._on_video_done = on_video_done
         self._profile_upload_pause_remaining_s = profile_upload_pause_remaining_s
 
         self._schedule_times = list(schedule_times or [])
+        if self._schedule_times:
+            from zaliver.youtube_upload.schedule_publish import (
+                parse_msk_datetime,
+                validate_schedule_times,
+            )
+
+            self._schedule_times = sorted(
+                parse_msk_datetime(t) for t in self._schedule_times
+            )
+            error = validate_schedule_times(self._schedule_times)
+            if error:
+                raise ValueError(error)
+        self._schedule_group_for_video = schedule_group_for_video or (lambda path: "")
+        self._platform_expected = dict(platform_expected_videos or {})
+        self._platform_buffers = {p: deque() for p in self._platform_expected}
+        self._platform_emitted = {p: 0 for p in self._platform_expected}
+        self._bundle_lock = threading.Lock()
+        self._schedule_slots_used: dict[tuple[str, str], int] = {}
         n_times = len(self._schedule_times)
         requested = max(0, int(schedule_batch_size or 0))
         if n_times:
@@ -160,18 +191,16 @@ class MultiProfileUploader:
                 raise ValueError(
                     "schedule_batch_size must be the number of schedule times"
                 )
-            # Число слотов отложки. Сколько видео уйдёт сразу, считается
-            # позже: max(0, видео на профиль − слоты).
+            # Every scheduled upload consumes one explicit time slot.
             self._schedule_batch_size = n_times
         elif requested:
             raise ValueError("schedule_times length must match schedule_batch_size")
         else:
             self._schedule_batch_size = 0
-        self._profile_batch_assigned: dict[str, int] = {pid: 0 for pid in self._profiles}
-        self._profile_video_quota: dict[str, int] | None = None
-        self._schedule_quota_basis: int | None = None
+        self._profile_batch_assigned: dict[str, int] = {
+            pid: 0 for pid in self._profiles
+        }
         self._planned_videos = max(0, int(planned_videos or 0))
-        self._schedule_profile_order_idx = 0
 
         self._stop = threading.Event()
         self._stop_reason = ""
@@ -252,27 +281,133 @@ class MultiProfileUploader:
         title: str,
         description: str,
     ) -> None:
-        for p in (video_paths or []):
-            path = (p or "").strip()
-            if not path:
-                continue
+        with self._bundle_lock:
+            for p in video_paths or []:
+                path = (p or "").strip()
+                if not path:
+                    continue
+                task = VideoTask(path, title or "", description or "")
+                if self._platform_expected:
+                    platform = self._schedule_group_for_video(path)
+                    if platform not in self._platform_buffers:
+                        raise ValueError(f"Unknown source platform: {path}")
+                    self._platform_buffers[platform].append(task)
+                else:
+                    self._global_q.put(task)
+                with self._done_lock:
+                    self._total += 1
+            self._flush_platform_bundles()
+
+    def _flush_platform_bundles(self) -> None:
+        while any(self._platform_buffers.values()):
+            required = [
+                p
+                for p, n in self._platform_expected.items()
+                if self._platform_emitted[p] < n
+            ]
+            if not self._producer_done and any(
+                not self._platform_buffers[p] for p in required
+            ):
+                return
+            items = {}
+            for p, buf in self._platform_buffers.items():
+                if buf:
+                    source = buf.popleft()
+                    items[p] = ScheduledUploadItem(
+                        source.video_path, source.title, source.description
+                    )
+                    self._platform_emitted[p] += 1
+            first = next(iter(items.values()))
             self._global_q.put(
-                VideoTask(video_path=path, title=title or "", description=description or "")
+                VideoTask(
+                    first.video_path,
+                    first.title,
+                    first.description,
+                    platform_items=items,
+                )
             )
-            with self._done_lock:
-                self._total += 1
+
+    def _task_groups(self, task: VideoTask) -> list[str]:
+        return list(task.platform_items) or [
+            self._schedule_group_for_video(task.video_path)
+        ]
+
+    def _task_platform_disabled(self, pid: str, task: VideoTask) -> bool:
+        return any(self.is_platform_disabled(pid, p) for p in self._task_groups(task))
+
+    @staticmethod
+    def _task_size(task: VideoTask) -> int:
+        return len(task.platform_items) or len(task.scheduled_batch or []) or 1
+
+    def _split_bundle(self, task: VideoTask) -> bool:
+        if len(task.platform_items) <= 1:
+            return False
+        for p, item in task.platform_items.items():
+            self._global_q.put(
+                VideoTask(
+                    item.video_path,
+                    item.title,
+                    item.description,
+                    platform_items={p: item},
+                    attempts_by_profile=dict(task.attempts_by_profile),
+                )
+            )
+        return True
+
+    def _finish_platform_bundle(self, task: VideoTask, pid: str, err: str) -> None:
+        for p, item in task.platform_items.items():
+            one = VideoTask(
+                item.video_path,
+                item.title,
+                item.description,
+                platform_items={p: item},
+                attempts_by_profile=dict(task.attempts_by_profile),
+                last_failed_profile=pid,
+            )
+            if p in task.completed_platforms:
+                with self._done_lock:
+                    self._done_ok += 1
+                self._emit_video_done(one, ok=True)
+                self._log(f"[{_ts()}] [upload] [OK] profile={pid} platform={p} video={item.video_path!r}")
+                continue
+            error = task.platform_errors.get(p) or err or "upload result not confirmed"
+            self._log(
+                f"[{_ts()}] [upload] [ERROR] profile={pid} platform={p} video={item.video_path!r} err={error!r}"
+            )
+            self.disable_platform_this_session(pid, p, reason=error[:240])
+            if "[UPLOAD_CONFIRMATION_UNKNOWN]" in error:
+                with self._done_lock:
+                    self._done_failed += 1
+                self._emit_video_done(one, ok=False)
+            else:
+                one.attempts_by_profile[pid] = one.attempts_by_profile.get(pid, 0) + 1
+                self._global_q.put(one)
 
     def mark_producer_done(self) -> None:
         """Обработка больше не добавит видео — можно завершать очередь при пустых очередях."""
-        with self._done_lock:
-            self._producer_done = True
+        with self._bundle_lock:
+            with self._done_lock:
+                self._producer_done = True
+            self._flush_platform_bundles()
+
+    def discard_expected_video(self, path: str) -> None:
+        """A processed source was skipped; do not wait forever for its platform."""
+        with self._bundle_lock:
+            p = self._schedule_group_for_video(path)
+            if p in self._platform_expected:
+                self._platform_expected[p] = max(
+                    self._platform_emitted[p], self._platform_expected[p] - 1
+                )
+                self._flush_platform_bundles()
 
     def _emit_video_done(self, task: VideoTask, *, ok: bool) -> None:
         cb = self._on_video_done
         if cb is None:
             return
         paths: list[str] = []
-        if task.scheduled_batch:
+        if task.platform_items:
+            paths = [item.video_path for item in task.platform_items.values()]
+        elif task.scheduled_batch:
             for item in task.scheduled_batch:
                 p = str(getattr(item, "video_path", "") or "").strip()
                 if p:
@@ -329,9 +464,7 @@ class MultiProfileUploader:
             self._log(
                 f"[{_ts()}] [upload] schedule: слотов отложки="
                 f"{len(self._schedule_times)}. "
-                "Сразу публикуется только разница "
-                "(видео на профиль − отложки); если видео не больше отложек — "
-                "все уходят в отложку."
+                "Все видео YouTube/TikTok получают время; при нехватке слотов залив отклоняется."
             )
 
     def exclude_profile_this_session(self, profile_id: str, *, reason: str = "") -> bool:
@@ -455,6 +588,8 @@ class MultiProfileUploader:
         for pid in self._profiles:
             if self._is_profile_skipped(pid):
                 continue
+            if self._task_platform_disabled(pid, task):
+                continue
             if int(task.attempts_by_profile.get(pid, 0)) >= self._max_attempts:
                 continue
             return False
@@ -527,6 +662,8 @@ class MultiProfileUploader:
         for pid in self._profiles:
             if self._is_profile_skipped(pid):
                 continue
+            if self._task_platform_disabled(pid, task):
+                continue
             if int(task.attempts_by_profile.get(pid, 0)) >= self._max_attempts:
                 continue
             # Multi-tab: не больше вкладок на профиль одновременно.
@@ -543,125 +680,6 @@ class MultiProfileUploader:
         # Сразу после ошибки предпочитаем другой профиль; если других нет — тот же.
         not_last = [p for p in out if p != task.last_failed_profile]
         return not_last if not_last else out
-
-    def _active_schedule_profiles(self) -> list[str]:
-        return [pid for pid in self._profiles if not self._is_profile_skipped(pid)]
-
-    def _schedule_quota_basis_total(self) -> int | None:
-        """Сколько роликов делить между профилями.
-
-        Пока обработка ещё идёт, берём план. Иначе отложка ждёт последний
-        файл, и «по мере готовности» не открывает браузер на запасе профили×2.
-        """
-        with self._done_lock:
-            producer_done = bool(self._producer_done)
-            actual = int(self._total)
-        if producer_done:
-            return actual
-        planned = int(self._planned_videos)
-        if planned <= 0:
-            return None
-        return max(planned, actual)
-
-    def _ensure_schedule_quotas(self) -> bool:
-        """Сколько видео на каждый профиль.
-
-        Квота считается по плану ещё до конца обработки, чтобы первая пачка
-        ушла в браузер и освободила буфер готовых видео.
-        """
-        total = self._schedule_quota_basis_total()
-        if total is None:
-            return False
-        if (
-            self._profile_video_quota is not None
-            and self._schedule_quota_basis == total
-        ):
-            return True
-        profiles = self._active_schedule_profiles()
-        quota: dict[str, int] = {pid: 0 for pid in self._profiles}
-        n = len(profiles)
-        if n > 0 and total > 0:
-            base, rem = divmod(total, n)
-            for i, pid in enumerate(profiles):
-                quota[pid] = base + (1 if i < rem else 0)
-        for pid in self._profiles:
-            assigned = int(self._profile_batch_assigned.get(pid, 0))
-            if assigned > int(quota.get(pid, 0)):
-                quota[pid] = assigned
-        self._profile_video_quota = quota
-        self._schedule_quota_basis = total
-        n_sched = len(self._schedule_times)
-        parts: list[str] = []
-        for pid in profiles:
-            count = quota.get(pid, 0)
-            immediate = max(0, count - n_sched)
-            scheduled = min(count, n_sched)
-            if count <= 0:
-                continue
-            parts.append(f"{pid}: {immediate} сразу + {scheduled} в отложку")
-        plan = "; ".join(parts) if parts else "нечего назначать"
-        with self._done_lock:
-            producer_done = bool(self._producer_done)
-            actual = int(self._total)
-        waiting = ""
-        if not producer_done and actual < total:
-            waiting = f" (план {total}, уже готово {actual})"
-        self._log(
-            f"[{_ts()}] [upload] schedule: видео={total}, "
-            f"профилей={n}, отложек={n_sched}{waiting}. {plan}"
-        )
-        return True
-
-    def _profile_schedule_quota(self, profile_id: str) -> int:
-        if not self._profile_video_quota:
-            return 0
-        return int(self._profile_video_quota.get(profile_id, 0))
-
-    def _current_schedule_profile(self) -> str | None:
-        if self._schedule_batch_size <= 0:
-            return None
-        if not self._ensure_schedule_quotas():
-            return None
-        n = len(self._profiles)
-        if n <= 0:
-            return None
-        checked = 0
-        while checked < n:
-            idx = self._schedule_profile_order_idx % n
-            pid = self._profiles[idx]
-            if self._is_profile_skipped(pid):
-                self._schedule_profile_order_idx += 1
-                checked += 1
-                continue
-            if self._profile_batch_assigned.get(pid, 0) < self._profile_schedule_quota(pid):
-                return pid
-            self._schedule_profile_order_idx += 1
-            checked += 1
-        return None
-
-    def _publish_at_for_profile_slot(self, profile_id: str, slot: int) -> datetime | None:
-        """Сначала лишние видео сразу, затем слоты отложки по порядку.
-
-        Сразу = max(0, видео на профиль − число отложек). Если видео не больше
-        отложек, все публикуются по расписанию.
-        """
-        quota = self._profile_schedule_quota(profile_id)
-        immediate = max(0, quota - len(self._schedule_times))
-        sched_idx = int(slot) - immediate
-        if sched_idx < 0 or sched_idx >= len(self._schedule_times):
-            return None
-        return self._schedule_times[sched_idx]
-
-    def _assign_schedule_slot(self, profile_id: str, task: VideoTask) -> None:
-        slot = int(self._profile_batch_assigned.get(profile_id, 0))
-        quota = self._profile_schedule_quota(profile_id)
-        if slot < 0 or slot >= quota:
-            task.schedule_publish_at = None
-            return
-        task.schedule_publish_at = self._publish_at_for_profile_slot(profile_id, slot)
-        self._profile_batch_assigned[profile_id] = slot + 1
-        if self._profile_batch_assigned[profile_id] >= quota:
-            self._schedule_profile_order_idx += 1
 
     def _pick_profile_for_task(self, task: VideoTask, eligible: list[str], start_idx: int) -> str | None:
         if self._schedule_batch_size <= 0:
@@ -686,12 +704,7 @@ class MultiProfileUploader:
                 return None
             return self._pick_round_robin(preferred, start_idx)
 
-        sched_pid = self._current_schedule_profile()
-        if sched_pid is None:
-            return None
-        if sched_pid not in eligible:
-            return None
-        return sched_pid
+        return self._pick_round_robin(eligible, start_idx) if eligible else None
 
     def _pick_round_robin(self, candidates: list[str], start_idx: int) -> str:
         if not candidates:
@@ -749,12 +762,15 @@ class MultiProfileUploader:
 
             while not self._stop.is_set():
                 if self._task_exhausted_on_all_profiles(task):
+                    if self._split_bundle(task):
+                        self._global_q.task_done()
+                        break
                     self._log(
                         f"[{_ts()}] [upload] [FAILED] video={task.video_path!r} "
                         f"reason=all_profiles_exhausted attempts={task.attempts_by_profile!r}"
                     )
                     with self._done_lock:
-                        self._done_failed += 1
+                        self._done_failed += self._task_size(task)
                     self._emit_video_done(task, ok=False)
                     self._global_q.task_done()
                     break
@@ -790,9 +806,6 @@ class MultiProfileUploader:
                 if chosen is None:
                     time.sleep(0.05)
                     continue
-
-                if self._schedule_batch_size > 0:
-                    self._assign_schedule_slot(chosen, task)
 
                 try:
                     pos = self._profiles.index(chosen)
@@ -837,93 +850,74 @@ class MultiProfileUploader:
                 break
 
     def _try_dispatch_schedule_batch(self, idx: int) -> tuple[bool, int]:
-        """Пакет отложенных загрузок на один профиль без закрытия браузера."""
-        if not self._ensure_schedule_quotas():
-            return False, idx
-
-        eligible: list[str] = []
-        for pid in self._profiles:
-            if self._is_profile_skipped(pid):
-                continue
-            # Пакет целиком — только в пустую очередь tab0.
-            if not self._tab_queue(pid, 0).empty():
-                continue
-            if self._profile_batch_assigned.get(pid, 0) >= self._profile_schedule_quota(pid):
-                continue
-            eligible.append(pid)
-        if not eligible:
-            return False, idx
-
-        sched_pid = self._current_schedule_profile()
-        if sched_pid is None or sched_pid not in eligible:
-            return False, idx
-
-        slot_start = int(self._profile_batch_assigned.get(sched_pid, 0))
-        remaining_slots = self._profile_schedule_quota(sched_pid) - slot_start
-        if remaining_slots <= 0:
-            return False, idx
-
-        available = self._global_q.qsize()
-        if available <= 0:
-            return False, idx
-        take = min(remaining_slots, available)
-
-        batch_tasks: list[VideoTask] = []
-        for _ in range(take):
-            try:
-                batch_tasks.append(self._global_q.get_nowait())
-            except Empty:
-                for t in batch_tasks:
-                    self._global_q.put(t)
-                return False, idx
-
-        batch_items: list[ScheduledUploadItem] = []
-        for i, t in enumerate(batch_tasks):
-            publish_at = self._publish_at_for_profile_slot(sched_pid, slot_start + i)
-            batch_items.append(
-                ScheduledUploadItem(
-                    video_path=t.video_path,
-                    title=t.title,
-                    description=t.description,
-                    schedule_publish_at=publish_at,
-                )
-            )
-
-        merged = VideoTask(
-            video_path=batch_tasks[0].video_path,
-            title=batch_tasks[0].title,
-            description=batch_tasks[0].description,
-            schedule_publish_at=batch_items[0].schedule_publish_at,
-            scheduled_batch=batch_items,
-            schedule_slot_start=slot_start,
-            attempts_by_profile=dict(batch_tasks[0].attempts_by_profile),
-            last_failed_profile=batch_tasks[0].last_failed_profile,
-        )
-
-        self._profile_batch_assigned[sched_pid] = slot_start + take
-        if self._profile_batch_assigned[sched_pid] >= self._profile_schedule_quota(sched_pid):
-            self._schedule_profile_order_idx += 1
-
+        """One video per attempt; never replay a partly successful batch."""
         try:
-            pos = self._profiles.index(sched_pid)
-        except ValueError:
-            pos = 0
-        idx = (pos + 1) % max(1, len(self._profiles))
-
-        self._tab_queue(sched_pid, 0).put(merged)
-        times_note = ", ".join(
-            "сразу"
-            if item.schedule_publish_at is None
-            else item.schedule_publish_at.isoformat()
-            for item in batch_items
-        )
-        self._log(
-            f"[{_ts()}] [upload] [QUEUED] profile={sched_pid} "
-            f"scheduled_batch={len(batch_items)} videos={times_note!r}"
-        )
-        for _ in batch_tasks:
+            task = self._global_q.get_nowait()
+        except Empty:
+            return False, idx
+        groups = self._task_groups(task)
+        group = groups[0]
+        # Instagram has no browser scheduler; the dialog explicitly labels this.
+        scheduled = group != "instagram"
+        candidates = [
+            pid
+            for pid in self._profiles
+            if not self._is_profile_skipped(pid)
+            and task.attempts_by_profile.get(pid, 0) < self._max_attempts
+            and not self._task_platform_disabled(pid, task)
+            and all(
+                p == "instagram"
+                or self._schedule_slots_used.get((pid, p), 0)
+                < len(self._schedule_times)
+                for p in groups
+            )
+        ]
+        if not candidates:
+            if self._split_bundle(task):
+                self._global_q.task_done()
+                return True, idx
+            self._log(
+                f"[{_ts()}] [upload] [FAILED] video={task.video_path!r}: нет доступного профиля/слота отложки; публикация сразу запрещена."
+            )
+            with self._done_lock:
+                self._done_failed += self._task_size(task)
+            self._emit_video_done(task, ok=False)
             self._global_q.task_done()
-        return True, idx
+            return True, idx
+        eligible = [
+            pid
+            for pid in self._eligible_profiles_for_dispatch(task)
+            if pid in candidates
+        ]
+        if not eligible:
+            self._global_q.put(task)
+            self._global_q.task_done()
+            return False, idx
+        # Balance profiles even when processing produces videos one at a time.
+        counts = {
+            pid: max(self._schedule_slots_used.get((pid, p), 0) for p in groups)
+            for pid in eligible
+        }
+        least = min(counts.values())
+        chosen = self._pick_round_robin(
+            [pid for pid in eligible if counts[pid] == least], idx
+        )
+        for p in groups:
+            slot = self._schedule_slots_used.get((chosen, p), 0)
+            at = self._schedule_times[slot] if p != "instagram" else None
+            if task.platform_items:
+                task.platform_items[p].schedule_publish_at = at
+            if p == group:
+                task.schedule_publish_at = at
+            self._schedule_slots_used[(chosen, p)] = slot + 1
+        self._profile_batch_assigned[chosen] += 1
+        self._assign_to_profile(chosen)
+        self._tab_queue(chosen, 0).put(task)
+        self._global_q.task_done()
+        self._log(
+            f"[{_ts()}] [upload] [QUEUED] profile={chosen} video={task.video_path!r} schedule_at={task.schedule_publish_at!r}"
+        )
+        return True, (self._profiles.index(chosen) + 1) % len(self._profiles)
 
     def should_keep_browser_open(self, profile_id: str) -> bool:
         """
@@ -1071,7 +1065,7 @@ class MultiProfileUploader:
                     self._finish_assigned_profile_task(profile_id, q)
                     break
 
-                if self._is_profile_skipped(profile_id):
+                if self._is_profile_skipped(profile_id) or self._task_platform_disabled(profile_id, task):
                     self._bounce_task_off_skipped_profile(
                         profile_id=profile_id,
                         task=task,
@@ -1088,7 +1082,9 @@ class MultiProfileUploader:
                 pause_fn = self._profile_upload_pause_remaining_s
                 profile_tabs = int(self._tabs_per_profile.get(profile_id, 1))
                 effective_cooldown = (
-                    0.0 if profile_tabs > 1 else float(self._cooldown_s)
+                    0.0
+                    if profile_tabs > 1 or self._schedule_batch_size > 0
+                    else float(self._cooldown_s)
                 )
                 abandon_after_wait = False
                 while True:
@@ -1111,7 +1107,9 @@ class MultiProfileUploader:
                     )
                     rem_internal = max(0.0, effective_cooldown - elapsed)
                     db_rem = 0.0
-                    if pause_fn is not None:
+                    if pause_fn is not None and (
+                        self._schedule_batch_size <= 0 or last_start <= 0
+                    ):
                         try:
                             db_rem = max(0.0, float(pause_fn(profile_id)))
                         except Exception:
@@ -1140,7 +1138,9 @@ class MultiProfileUploader:
                         self._finish_assigned_profile_task(profile_id, q)
                         abandon_after_wait = True
                         break
-                    if self._is_profile_skipped(profile_id):
+                    if self._is_profile_skipped(
+                        profile_id
+                    ) or self._task_platform_disabled(profile_id, task):
                         self._bounce_task_off_skipped_profile(
                             profile_id=profile_id,
                             task=task,
@@ -1181,7 +1181,7 @@ class MultiProfileUploader:
                             f"video={task.video_path!r}"
                         )
                         with self._done_lock:
-                            self._abandoned += 1
+                            self._abandoned += self._task_size(task)
                         self._emit_video_done(task, ok=False)
                         self._finish_assigned_profile_task(profile_id, q)
                         continue
@@ -1231,16 +1231,11 @@ class MultiProfileUploader:
                             int(self._active_counts.get(profile_id, 0)) + 1
                         )
                     try:
-                        self._upload_one(profile_id, task, tab_index)
-                        ok = True
-                    except TypeError:
-                        # Старые колбэки без tab_index.
-                        try:
+                        if self._upload_accepts_tab_index:
+                            self._upload_one(profile_id, task, tab_index)
+                        else:
                             self._upload_one(profile_id, task)
-                            ok = True
-                        except Exception as e:
-                            ok = False
-                            err_text = str(e) or repr(e)
+                        ok = True
                     except Exception as e:
                         ok = False
                         err_text = str(e) or repr(e)
@@ -1250,11 +1245,18 @@ class MultiProfileUploader:
                                 0, int(self._active_counts.get(profile_id, 0)) - 1
                             )
                     upload_ran = True
-                    if not ok:
-                        self.exclude_profile_this_session(
-                            profile_id,
-                            reason=(err_text or "upload_error")[:240],
-                        )
+                    if not ok and not task.platform_items:
+                        platform = self._schedule_group_for_video(task.video_path)
+                        if platform:
+                            self.disable_platform_this_session(
+                                profile_id,
+                                platform,
+                                reason=(err_text or "upload_error")[:240],
+                            )
+                        else:
+                            self.exclude_profile_this_session(
+                                profile_id, reason=(err_text or "upload_error")[:240]
+                            )
 
                     # После залива всегда пересчитываем keep_open: во время encode
                     # в очередь профиля могли добавить следующее видео (раньше
@@ -1289,7 +1291,9 @@ class MultiProfileUploader:
                             # Callback errors must not break upload flow.
                             pass
 
-                    if ok:
+                    if task.platform_items:
+                        self._finish_platform_bundle(task, profile_id, err_text)
+                    elif ok:
                         n_ok = (
                             len(task.scheduled_batch)
                             if task.scheduled_batch
@@ -1306,6 +1310,15 @@ class MultiProfileUploader:
                         )
                         with self._done_lock:
                             self._done_ok += n_ok
+                    elif "[UPLOAD_CONFIRMATION_UNKNOWN]" in err_text:
+                        self._log(
+                            f"[{_ts()}] [upload] [FAILED] video={task.video_path!r}: {err_text}; автоматический повтор запрещён."
+                        )
+                        with self._done_lock:
+                            self._done_failed += (
+                                len(task.scheduled_batch) if task.scheduled_batch else 1
+                            )
+                        self._emit_video_done(task, ok=False)
                     else:
                         # Record attempt on this profile and requeue to another one.
                         task.attempts_by_profile[profile_id] = int(

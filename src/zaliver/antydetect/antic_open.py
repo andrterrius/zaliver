@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from patchright.sync_api import sync_playwright
 
+from zaliver.title_variables import platform_title_or_youtube
 from zaliver.antydetect.api import DolphinAntyError, DolphinAntyLocalAPI
 from zaliver.instagram_upload.reels_upload import (
     DEFAULT_INSTAGRAM_CROP_ASPECT,
@@ -6344,21 +6345,30 @@ def _run_youtube_and_instagram_parallel(
     skip_youtube: bool = False,
     skip_instagram: bool = False,
     skip_tiktok: bool = False,
+    platform_titles: dict[str, str] | None = None,
+    platform_items: dict | None = None,
+    open_platforms: list[str] | tuple[str, ...] | None = None,
 ) -> dict:
     """
     Вкладка 1 — YouTube, вкладка 2 — Instagram, опционально вкладка 3 — TikTok.
+    open_platforms keeps selected tabs open even when this source belongs to
+    just one platform; skip_* controls uploads independently of tab visibility.
 
-    wait_for_instagram=False (pause 0 / keep-open на тот же профиль):
-      после успеха YouTube сразу возвращаемся — можно брать следующее видео
-      из очереди; Instagram/TikTok догоняют тем же роликом через pipeline.
-    wait_for_instagram=True: ждём Instagram (и TikTok) перед возвратом.
+    Uploads run concurrently through separate CDP connections. Always wait for
+    every active platform before returning so the profile cannot be closed while
+    another tab is uploading. platform_items assigns an independent source,
+    caption and schedule to each platform.
     """
     do_youtube = not bool(skip_youtube)
     do_instagram = not bool(skip_instagram)
     do_tiktok = bool(include_tiktok) and not bool(skip_tiktok)
+    selected_tabs = set(open_platforms or ())
+    open_youtube = do_youtube or "youtube" in selected_tabs
+    open_instagram = do_instagram or "instagram" in selected_tabs
+    open_tiktok = do_tiktok or "tiktok" in selected_tabs
     # Пара Instagram+TikTok без Studio оставляет спиннер. Вкладку открываем,
     # алгоритм залива YouTube не запускаем.
-    hold_youtube_tab = bool(do_youtube or (do_instagram and do_tiktok))
+    hold_youtube_tab = bool(open_youtube or (open_instagram and open_tiktok))
     combo = "+".join(
         name
         for name, enabled in (
@@ -6378,7 +6388,7 @@ def _run_youtube_and_instagram_parallel(
 
     # Сначала Instagram-вкладка — до долгого Studio / channel-appeal.
     # Тот же порядок, что при трёх галочках: createTarget, затем new_page.
-    if do_instagram:
+    if open_instagram:
         try:
             ig_busy = _yt_inst_ig_pipeline_busy(profile_id)
             ig_tab = _ensure_one_instagram_tab(
@@ -6440,7 +6450,7 @@ def _run_youtube_and_instagram_parallel(
         except Exception:
             pass
 
-    if do_tiktok:
+    if open_tiktok:
         try:
             tt_busy = _yt_inst_tt_pipeline_busy(profile_id)
             tt_tab = _ensure_one_tiktok_tab(
@@ -6487,14 +6497,14 @@ def _run_youtube_and_instagram_parallel(
     _close_disabled_platform_tabs(
         context,
         do_youtube=hold_youtube_tab,
-        do_instagram=do_instagram,
-        do_tiktok=do_tiktok,
+        do_instagram=open_instagram,
+        do_tiktok=open_tiktok,
     )
     _focus_combined_upload_tab(
         context,
         do_youtube=hold_youtube_tab,
-        do_instagram=do_instagram,
-        do_tiktok=do_tiktok,
+        do_instagram=open_instagram,
+        do_tiktok=open_tiktok,
         yt_page=yt_page,
         log_label=combo,
     )
@@ -6520,6 +6530,38 @@ def _run_youtube_and_instagram_parallel(
             )
         )
         tt_schedule_ats.append(schedule_publish_at)
+
+    tt_items = [
+        (path, platform_title_or_youtube(platform_titles, "tiktok", item_title), desc)
+        for path, item_title, desc in ig_items
+    ]
+    ig_items = [
+        (
+            path,
+            platform_title_or_youtube(platform_titles, "instagram", item_title),
+            desc,
+        )
+        for path, item_title, desc in ig_items
+    ]
+    if platform_items:
+
+        def payload(platform):
+            item = platform_items.get(platform)
+            return [(item.video_path, item.title, item.description)] if item else []
+
+        ig_items = payload("instagram")
+        tt_items = payload("tiktok")
+        tt_item = platform_items.get("tiktok")
+        tt_schedule_ats = [tt_item.schedule_publish_at] if tt_item else []
+        yt_item = platform_items.get("youtube")
+        if yt_item:
+            video_path, title, description = (
+                yt_item.video_path,
+                yt_item.title,
+                yt_item.description,
+            )
+            schedule_publish_at = yt_item.schedule_publish_at
+        scheduled_batch = None
 
     ig_job: _YtInstIgJob | None = None
     yt_done_event = threading.Event()
@@ -6547,7 +6589,7 @@ def _run_youtube_and_instagram_parallel(
         )
 
     tt_job: _YtInstIgJob | None = None
-    if do_tiktok and ig_items:
+    if do_tiktok and tt_items:
         tt_pipe = _get_yt_inst_tt_pipeline(
             profile_id,
             cdp_endpoints=cdp_endpoints,
@@ -6556,7 +6598,7 @@ def _run_youtube_and_instagram_parallel(
             session_twofa=tt_session_twofa,
         )
         tt_job = _YtInstIgJob(
-            items=ig_items,
+            items=tt_items,
             schedule_ats=tt_schedule_ats,
             on_success=on_tiktok_success,
             on_error=on_tiktok_error,
@@ -6765,12 +6807,15 @@ def _combined_launch_start_url(
     skip_instagram: bool,
     skip_tiktok: bool,
     include_tiktok: bool,
+    open_platforms: list[str] | tuple[str, ...] | None = None,
 ) -> str:
     """Стартовая вкладка.
 
     Пара Instagram+TikTok тоже стартует со Studio: без этой вкладки
     браузер оставляет спиннер. Залив на YouTube от этого не включается.
     """
+    if "youtube" in (open_platforms or ()):
+        return "https://studio.youtube.com/"
     ig_and_tt = (not skip_instagram) and bool(include_tiktok) and (not skip_tiktok)
     if not skip_youtube or ig_and_tt:
         return "https://studio.youtube.com/"
@@ -7060,6 +7105,9 @@ def _run_youtube_then_instagram_session(
     skip_youtube: bool = False,
     skip_instagram: bool = False,
     skip_tiktok: bool = False,
+    platform_titles: dict[str, str] | None = None,
+    platform_items: dict | None = None,
+    open_platforms: list[str] | tuple[str, ...] | None = None,
 ) -> dict:
     """Совместимая обёртка → параллельный / pipeline залив YT+Inst[+TT]."""
     return _run_youtube_and_instagram_parallel(
@@ -7095,6 +7143,9 @@ def _run_youtube_then_instagram_session(
         skip_youtube=skip_youtube,
         skip_instagram=skip_instagram,
         skip_tiktok=skip_tiktok,
+        platform_titles=platform_titles,
+        platform_items=platform_items,
+        open_platforms=open_platforms,
     )
 
 
@@ -7189,6 +7240,9 @@ def upload_youtube_and_instagram_in_profile(
     skip_youtube: bool = False,
     skip_instagram: bool = False,
     skip_tiktok: bool = False,
+    platform_titles: dict[str, str] | None = None,
+    platform_items: dict | None = None,
+    open_platforms: list[str] | tuple[str, ...] | None = None,
 ) -> dict:
     """
     Dolphin: один профиль, 2 вкладки — YouTube Studio затем Instagram Reels.
@@ -7298,6 +7352,9 @@ def upload_youtube_and_instagram_in_profile(
                     skip_youtube=skip_youtube,
                     skip_instagram=skip_instagram,
                     skip_tiktok=skip_tiktok,
+                    platform_titles=platform_titles,
+                    platform_items=platform_items,
+                    open_platforms=open_platforms,
                 )
                 if keep_open:
                     _log(
@@ -7318,7 +7375,7 @@ def upload_youtube_and_instagram_in_profile(
             release_before_stop=keep_open,
         )
     except CombinedPlatformUploadError as e:
-        if (video_path or "").strip() and not skip_instagram:
+        if (video_path or "").strip() and not skip_instagram and not platform_items:
             _log("Yt+Inst: fallback — отдельный залив Instagram…")
             try:
                 try:
@@ -7328,9 +7385,23 @@ def upload_youtube_and_instagram_in_profile(
                 clear_dolphin_keep_open_cdp(profile_id)
                 ig_only = _fallback_instagram_only_upload(
                     profile_id=profile_id,
-                    video_path=str(video_path),
-                    title=str(title or ""),
-                    description=str(description or ""),
+                    video_path=(
+                        platform_items["instagram"].video_path
+                        if platform_items and "instagram" in platform_items
+                        else str(video_path)
+                    ),
+                    title=(
+                        platform_items["instagram"].title
+                        if platform_items and "instagram" in platform_items
+                        else platform_title_or_youtube(
+                            platform_titles, "instagram", title or ""
+                        )
+                    ),
+                    description=(
+                        platform_items["instagram"].description
+                        if platform_items and "instagram" in platform_items
+                        else str(description or "")
+                    ),
                     headless=headless,
                     session_login=session_login,
                     session_password=session_password,
@@ -7361,7 +7432,7 @@ def upload_youtube_and_instagram_in_profile(
         raise
     except Exception as e:
         _log(f"Yt+Inst ошибка: {type(e).__name__}: {e!r}")
-        if (video_path or "").strip():
+        if (video_path or "").strip() and not skip_instagram and not platform_items:
             _log("Yt+Inst: после сбоя сессии — fallback Instagram…")
             try:
                 try:
@@ -7371,9 +7442,23 @@ def upload_youtube_and_instagram_in_profile(
                 clear_dolphin_keep_open_cdp(profile_id)
                 ig_res = _fallback_instagram_only_upload(
                     profile_id=profile_id,
-                    video_path=str(video_path),
-                    title=str(title or ""),
-                    description=str(description or ""),
+                    video_path=(
+                        platform_items["instagram"].video_path
+                        if platform_items and "instagram" in platform_items
+                        else str(video_path)
+                    ),
+                    title=(
+                        platform_items["instagram"].title
+                        if platform_items and "instagram" in platform_items
+                        else platform_title_or_youtube(
+                            platform_titles, "instagram", title or ""
+                        )
+                    ),
+                    description=(
+                        platform_items["instagram"].description
+                        if platform_items and "instagram" in platform_items
+                        else str(description or "")
+                    ),
                     headless=headless,
                     session_login=session_login,
                     session_password=session_password,
@@ -7464,6 +7549,9 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
     skip_youtube: bool = False,
     skip_instagram: bool = False,
     skip_tiktok: bool = False,
+    platform_titles: dict[str, str] | None = None,
+    platform_items: dict | None = None,
+    open_platforms: list[str] | tuple[str, ...] | None = None,
 ) -> dict:
     """
     Локальный антидетект: один профиль, 2 вкладки — YouTube затем Instagram.
@@ -7572,6 +7660,7 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
                                 skip_instagram=skip_instagram,
                                 skip_tiktok=skip_tiktok,
                                 include_tiktok=include_tiktok,
+                                open_platforms=open_platforms,
                             ),
                         )
                         sid = acc.get("session_id")
@@ -7608,6 +7697,7 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
                         skip_instagram=skip_instagram,
                         skip_tiktok=skip_tiktok,
                         include_tiktok=include_tiktok,
+                        open_platforms=open_platforms,
                     ),
                 )
                 sid = acc.get("session_id")
@@ -7687,6 +7777,9 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
                         skip_youtube=skip_youtube,
                         skip_instagram=skip_instagram,
                         skip_tiktok=skip_tiktok,
+                        platform_titles=platform_titles,
+                        platform_items=platform_items,
+                        open_platforms=open_platforms,
                     )
                     if keep_open:
                         _log(
@@ -7720,7 +7813,7 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
             if not keep_open:
                 unregister_local_session(profile_id=profile_id)
     except CombinedPlatformUploadError as e:
-        if (video_path or "").strip() and not skip_instagram:
+        if (video_path or "").strip() and not skip_instagram and not platform_items:
             _log("Yt+Inst: fallback — отдельный залив Instagram…")
             if session_id:
                 try:
@@ -7732,9 +7825,23 @@ def upload_youtube_and_instagram_in_local_antidetect_profile(
             try:
                 ig_only = _fallback_instagram_only_upload(
                     profile_id=profile_id,
-                    video_path=str(video_path),
-                    title=str(title or ""),
-                    description=str(description or ""),
+                    video_path=(
+                        platform_items["instagram"].video_path
+                        if platform_items and "instagram" in platform_items
+                        else str(video_path)
+                    ),
+                    title=(
+                        platform_items["instagram"].title
+                        if platform_items and "instagram" in platform_items
+                        else platform_title_or_youtube(
+                            platform_titles, "instagram", title or ""
+                        )
+                    ),
+                    description=(
+                        platform_items["instagram"].description
+                        if platform_items and "instagram" in platform_items
+                        else str(description or "")
+                    ),
                     headless=headless,
                     session_login=login,
                     session_password=pwd,

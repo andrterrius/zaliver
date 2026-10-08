@@ -545,6 +545,12 @@ QListWidget#uploadProfilesList::item:selected {
     border: none;
 }
 
+/* Компактный статус загрузки в окне выбора профилей перед заливом. */
+QListWidget#uploadProfilesList QLabel#profileListUpload {
+    font-size: 10px;
+    padding: 2px 6px;
+}
+
 /* Antidetect-style profile list row */
 QLabel#profileRowTitle {
     color: #e4e6ef;

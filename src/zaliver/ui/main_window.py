@@ -43,6 +43,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QLayout,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -203,6 +204,7 @@ from zaliver.title_variables import (
     TitleVariableContext,
     expand_and_limit_title,
     expand_title_variables,
+    platform_title_or_youtube,
 )
 
 from zaliver.processing.ffmpeg_merge import (
@@ -1002,6 +1004,7 @@ class MainWindow(QWidget):
         self._upload_delete_after_enabled = False
         # Yt+Inst: пути, успешно залитые на YouTube, ждут конца Instagram перед удалением.
         self._upload_yt_inst_pending_delete: set[str] = set()
+        self._upload_failed_paths: set[str] = set()
         self._upload_yt_inst_pending_remaining: dict[str, int] = {}
         self._upload_success_lock = threading.Lock()
         self._upload_manager = None
@@ -1175,11 +1178,23 @@ class MainWindow(QWidget):
         out_row.addWidget(btn_out, 0)
         out_row.addStretch(1)
 
-        io_grid.addWidget(QLabel("Исходные видео:"), 0, 0, Qt.AlignmentFlag.AlignTop)
-        io_grid.addWidget(self._input_files_hint, 0, 1)
-        io_grid.addWidget(input_files_btns_w, 1, 1)
-        io_grid.addWidget(QLabel("Выходная папка:"), 2, 0)
-        io_grid.addLayout(out_row, 2, 1)
+        from zaliver.ui.platform_sources import PlatformSourcesPanel
+
+        self.separate_platform_sources = QCheckBox(
+            "Отдельные видео для каждой платформы"
+        )
+        self._platform_sources = PlatformSourcesPanel(self)
+        self._common_input_buttons = input_files_btns_w
+        self.separate_platform_sources.toggled.connect(self._sync_platform_sources)
+        self.separate_platform_sources.toggled.connect(self._save_folder_settings)
+        self._platform_sources.changed.connect(self._save_folder_settings)
+        io_grid.addWidget(self.separate_platform_sources, 0, 0, 1, 2)
+        io_grid.addWidget(self._platform_sources, 3, 0, 1, 2)
+        io_grid.addWidget(QLabel("Исходные видео:"), 1, 0, Qt.AlignmentFlag.AlignTop)
+        io_grid.addWidget(self._input_files_hint, 1, 1)
+        io_grid.addWidget(input_files_btns_w, 2, 1)
+        io_grid.addWidget(QLabel("Выходная папка:"), 4, 0)
+        io_grid.addLayout(out_row, 4, 1)
         io_grid.setColumnStretch(1, 1)
         io_grid.setColumnMinimumWidth(0, 0)
         io_grid.setColumnMinimumWidth(1, 0)
@@ -1200,28 +1215,28 @@ class MainWindow(QWidget):
         copies_row.addWidget(self.copies_per_file, 0)
         copies_row.addWidget(self.one_copy_no_effects, 0)
         copies_row.addStretch(1)
-        io_grid.addWidget(QLabel("Копий на исходник:"), 3, 0)
-        io_grid.addLayout(copies_row, 3, 1)
+        io_grid.addWidget(QLabel("Копий на исходник:"), 5, 0)
+        io_grid.addLayout(copies_row, 5, 1)
         copies_hint = QLabel(
             "Каждая копия — отдельный прогон со своими случайными параметрами. "
             "Например: 10 видео × 5 = 50 файлов."
         )
         copies_hint.setObjectName("hint")
         copies_hint.setWordWrap(True)
-        io_grid.addWidget(copies_hint, 4, 0, 1, 2)
+        io_grid.addWidget(copies_hint, 6, 0, 1, 2)
         io_hint = QLabel(
             "Имена: имя_u_<случайные hex>.mp4 — у каждого выхода свой суффикс (не счётчик)."
         )
         io_hint.setObjectName("hint")
         io_hint.setWordWrap(True)
-        io_grid.addWidget(io_hint, 5, 0, 1, 2)
+        io_grid.addWidget(io_hint, 7, 0, 1, 2)
         self.delete_after_upload = QCheckBox("Удалять после залива")
         self.delete_after_upload.setChecked(False)
         self.delete_after_upload.setToolTip(
             "После каждого успешного залива файл сразу удаляется из выходной папки."
         )
         self.delete_after_upload.toggled.connect(self._save_folder_settings)
-        io_grid.addWidget(self.delete_after_upload, 6, 0, 1, 2)
+        io_grid.addWidget(self.delete_after_upload, 8, 0, 1, 2)
 
         bg_tracks = QGroupBox("Фоновые треки")
         bg_tracks_l = QVBoxLayout(bg_tracks)
@@ -2087,6 +2102,7 @@ class MainWindow(QWidget):
         self._btn_profiles_warmup.setToolTip(
             "Только для отмеченных профилей: прогрев ленты Shorts (YouTube) "
             "или Reels (Instagram) — просмотр роликов, случайные лайки/подписки. "
+            "В режиме «Все вместе» выбранные платформы прогреваются одновременно в отдельных вкладках. "
             "Режим Headless из настроек; параллельность — в «Настройках»."
         )
         self._btn_profiles_warmup.clicked.connect(self._start_profiles_warmup)
@@ -4040,19 +4056,19 @@ class MainWindow(QWidget):
         else:
             with self._upload_success_lock:
                 self._upload_yt_inst_pending_delete.discard(path)
-        if getattr(self, "_upload_delete_after_enabled", False):
+        if getattr(self, "_upload_delete_after_enabled", False) and path not in self._upload_failed_paths:
             self._delete_output_video_after_upload(path)
         else:
             self._release_ready_buffer_slot(path)
 
     def _delete_yt_inst_pending_outputs(self, video_paths: list[str]) -> None:
         """Списать одну площадку. Файл удаляется, только когда счётчик дошёл до нуля."""
-        delete_on = bool(getattr(self, "_upload_delete_after_enabled", False))
         for video_path in video_paths:
             path = str(video_path or "").strip()
             if not path:
                 continue
             with self._upload_success_lock:
+                self._upload_failed_paths.add(path)
                 pending = path in self._upload_yt_inst_pending_delete
                 if pending:
                     left = int(
@@ -4064,10 +4080,8 @@ class MainWindow(QWidget):
                     else:
                         self._upload_yt_inst_pending_remaining.pop(path, None)
                         self._upload_yt_inst_pending_delete.discard(path)
-            if delete_on and pending:
-                self._delete_output_video_after_upload(path)
-            else:
-                self._release_ready_buffer_slot(path)
+            # Preserve the file for retry/manual recovery when any platform failed.
+            self._release_ready_buffer_slot(path)
 
     def _on_output_saved(self, path: str, include_in_upload: bool = True) -> None:
         if isinstance(path, str) and path.strip():
@@ -4076,9 +4090,27 @@ class MainWindow(QWidget):
                 self._just_saved_outputs.append(p)
                 self._enqueue_or_start_streaming_upload(p)
             else:
-                self._append_log(
-                    f"Исключено из залива в YouTube: {Path(p).name}"
-                )
+                self._append_log(f"Исключено из залива: {Path(p).name}")
+                manager = self._upload_manager
+                if manager is not None and self._upload_streaming_active:
+                    manager.discard_expected_video(p)
+                elif self._pending_upload is not None:
+                    pending = self._pending_upload
+                    expected = pending.get("platform_expected_videos") or {}
+                    for platform, directory in (
+                        pending.get("platform_output_dirs") or {}
+                    ).items():
+                        if Path(p).resolve().parent == Path(directory).resolve():
+                            expected[platform] = max(0, expected.get(platform, 0) - 1)
+                            self._upload_streaming_min_ready = max(
+                                1,
+                                min(
+                                    self._upload_streaming_min_ready,
+                                    sum(expected.values()),
+                                ),
+                            )
+                            if self._just_saved_outputs:
+                                self._enqueue_or_start_streaming_upload(self._just_saved_outputs[-1])
             try:
                 s = self._upload_session
                 if s is not None:
@@ -4092,7 +4124,8 @@ class MainWindow(QWidget):
             finally:
                 self._after_video_saved.emit()
 
-        threading.Thread(target=work, daemon=True).start()
+        if Path(path).is_file():
+            threading.Thread(target=work, daemon=True).start()
 
     def _prompt_title_desc_and_profile(self, *, mode: str = "uniquify") -> dict[str, str] | None:
         profiles = self._profiles_raw or []
@@ -4124,18 +4157,28 @@ class MainWindow(QWidget):
             geo = screen.availableGeometry()
             dlg.setMinimumSize(
                 QSize(
-                    min(980, max(560, geo.width() - 48)),
-                    min(780, max(420, geo.height() - 48)),
+                    min(560, max(1, geo.width() - 48)),
+                    min(420, max(1, geo.height() - 48)),
                 )
             )
             dlg.resize(min(1100, geo.width() - 24), min(860, geo.height() - 24))
         else:
-            dlg.setMinimumSize(QSize(980, 780))
+            dlg.setMinimumSize(QSize(560, 420))
             dlg.resize(1100, 860)
 
-        grid = QGridLayout(dlg)
+        dialog_layout = QVBoxLayout(dlg)
+        content_scroll = QScrollArea()
+        content_scroll.setWidgetResizable(True)
+        content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        dialog_layout.addWidget(content_scroll, 1)
+
+        content = QWidget()
+        grid = QGridLayout(content)
+        grid.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(10)
+        content_scroll.setWidget(content)
 
         recent_upload_titles = self._upload_store.list_recent_upload_titles(
             platform=self._platform
@@ -4213,6 +4256,40 @@ class MainWindow(QWidget):
             side_extras=[btn_title_hints, btn_title_wand],
         )
 
+        platform_title_edits = {}
+        separate_titles_cb = QCheckBox("Разные названия для каждой платформы")
+        title_container = QWidget()
+        title_container_l = QVBoxLayout(title_container)
+        title_container_l.setContentsMargins(0, 0, 0, 0)
+        title_container_l.addWidget(title_row)
+        title_container_l.addWidget(separate_titles_cb)
+        extra_titles = QWidget()
+        extra_titles_l = QFormLayout(extra_titles)
+        extra_titles_l.setContentsMargins(0, 0, 0, 0)
+        for platform, label in (
+            (PLATFORM_INSTAGRAM, "Instagram:"),
+            (PLATFORM_TIKTOK, "TikTok:"),
+        ):
+            if platform not in self._source_platforms():
+                continue
+            edit = QPlainTextEdit()
+            edit.setMaximumHeight(60)
+            edit.setPlaceholderText(
+                "Пусто — название из YouTube. Переменные {date}, {profile}, {video}, {index}…"
+            )
+            recent = self._upload_store.list_recent_upload_titles(platform=platform)
+            if recent:
+                edit.setPlainText(recent[0])
+            platform_title_edits[platform] = edit
+            extra_titles_l.addRow(label, edit)
+        title_container_l.addWidget(extra_titles)
+        extra_titles.setVisible(False)
+        separate_titles_cb.toggled.connect(extra_titles.setVisible)
+        separate_titles_cb.setVisible(
+            self._platform in (PLATFORM_YT_INST, PLATFORM_YT_INST_TT)
+        )
+        title_row = title_container
+
         def _apply_ai_title(text: str) -> None:
             value = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
             title_edit.setPlainText(value)
@@ -4249,9 +4326,8 @@ class MainWindow(QWidget):
         schedule_publish_cb = QCheckBox("Опубликовать в отложку")
         schedule_publish_cb.setChecked(False)
         schedule_publish_cb.setToolTip(
-            "Видео профиля делятся на отложку и публикацию сразу. "
-            "Сразу уходит только разница: сколько видео на профиле больше числа отложек. "
-            "Одно видео и одна отложка — это видео только в отложку."
+            "Все видео YouTube и TikTok уходят в отложку. На каждый профиль и платформу "
+            "нужен отдельный слот для каждого ролика. Instagram публикуется сразу."
         )
 
         schedule_warmup_group = QGroupBox("Прогрев во время отложки")
@@ -4387,10 +4463,9 @@ class MainWindow(QWidget):
         schedule_btns.addStretch()
         schedule_times_layout.addLayout(schedule_btns)
         schedule_hint = QLabel(
-            "Сначала на профиле публикуются лишние видео сразу "
-            "(сколько их больше числа отложек), затем отложка. "
-            "Если видео не больше отложек — все в отложку. "
-            "Интервал между временами любой."
+            "Каждое время — один ролик на каждом профиле YouTube/TikTok. "
+            "При нехватке слотов публикация сразу запрещена. "
+            "Instagram публикуется сразу. Время задаётся по МСК с шагом 15 минут."
         )
         schedule_hint.setObjectName("hint")
         schedule_hint.setWordWrap(True)
@@ -4485,7 +4560,16 @@ class MainWindow(QWidget):
         lw.setObjectName("uploadProfilesList")
         lw.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         lw.setSpacing(4)
-        lw.setMinimumHeight(420)
+        # Keep the profile list bounded inside the dialog so large profile sets
+        # scroll within the list instead of stretching the whole dialog content.
+        profile_list_max_height = 420
+        if screen is not None:
+            profile_list_max_height = min(
+                profile_list_max_height, max(240, int(geo.height() * 0.42))
+            )
+        lw.setMinimumHeight(min(320, profile_list_max_height))
+        lw.setMaximumHeight(profile_list_max_height)
+        lw.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         lw.setMouseTracking(True)
 
         ids: list[str] = []
@@ -4573,7 +4657,7 @@ class MainWindow(QWidget):
             filtered_last = {k: last_upload_map[k] for k in pids if k in last_upload_map}
             dlg_interaction.select_checked_by_filter(mode, by_id, filtered_last)
 
-        n_inputs = len(self._selected_input_files or [])
+        n_inputs = len(self._effective_input_files())
         try:
             copies_n = max(1, int(self.copies_per_file.value()))
         except Exception:
@@ -4658,7 +4742,7 @@ class MainWindow(QWidget):
             if schedule_on and n > 0:
                 if pv <= 0:
                     lines.append(
-                        f"Отложек: {slots_n}. Сразу — только видео сверх этого числа на профиль."
+                        f"Слотов на профиль: {slots_n}. YouTube/TikTok только в отложку; Instagram сразу."
                     )
                 else:
                     base, rem = divmod(pv, n)
@@ -4666,7 +4750,11 @@ class MainWindow(QWidget):
                     def _split_note(count: int) -> str:
                         immediate = max(0, count - slots_n)
                         scheduled = min(count, slots_n)
-                        return f"{immediate} сразу + {scheduled} в отложку"
+                        return (
+                            f"{count} в отложку"
+                            if count <= slots_n
+                            else f"не хватает {count - slots_n} слотов"
+                        )
 
                     if rem == 0:
                         lines.append(f"На профиль: {_split_note(base)}.")
@@ -4741,6 +4829,12 @@ class MainWindow(QWidget):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
         )
         grid.addWidget(title_row, 0, 1)
+        separate_titles_cb.toggled.connect(
+            lambda checked: title_field_label.setText(
+                "YouTube:" if checked else "Название:"
+            )
+        )
+
         grid.addWidget(
             desc_label,
             1,
@@ -4810,7 +4904,7 @@ class MainWindow(QWidget):
 
         grid.addWidget(QLabel("Профили:"), 8, 0, Qt.AlignmentFlag.AlignTop)
         grid.addWidget(profiles_col, 8, 1)
-        grid.addWidget(btns, 9, 0, 1, 2)
+        dialog_layout.addWidget(btns)
         grid.setRowStretch(8, 1)
 
         title_edit.setFocus()
@@ -4882,6 +4976,16 @@ class MainWindow(QWidget):
                 return None
             schedule_times_iso = [t.isoformat() for t in sorted(schedule_times_msk)]
         title = (title_edit.toPlainText() or "").strip()
+        platform_titles = {}
+        if separate_titles_cb.isChecked():
+            platform_titles = {
+                p: edit.toPlainText().strip()
+                for p, edit in platform_title_edits.items()
+            }
+            platform_titles[PLATFORM_YOUTUBE] = title
+            for p, value in platform_titles.items():
+                if value:
+                    self._upload_store.remember_upload_title(value, platform=p)
         if title and not keep_studio_title:
             if not is_ig_upload:
                 show_youtube_title_warnings(self, [title])
@@ -4904,6 +5008,7 @@ class MainWindow(QWidget):
         if not picked:
             return {
                 "title": title,
+                "platform_titles": platform_titles,
                 "description": description,
                 "profile_ids": "",
                 "publish_before_checks": publish_before_checks,
@@ -4916,12 +5021,36 @@ class MainWindow(QWidget):
                 "schedule_warmup_search_query": schedule_warmup_search_query,
                 "schedule_warmup_hashtag": schedule_warmup_hashtag,
             }
-        if not is_ig_upload and not keep_studio_title and not title:
+        if schedule_publish:
+            mapping = self._platform_input_paths() if mode == "uniquify" else {}
+            counts = (
+                [
+                    len(paths) * max(1, self.copies_per_file.value())
+                    for p, paths in mapping.items()
+                    if p != PLATFORM_INSTAGRAM
+                ]
+                if mapping
+                else [_planned_videos_count()]
+            )
+            if counts and max(counts) > len(picked) * len(schedule_times_iso):
+                QMessageBox.warning(
+                    self,
+                    "Zaliver",
+                    "Не хватает слотов отложки. Добавьте время публикации или профили; публикация лишних видео сразу отключена.",
+                )
+                return None
+        if (
+            not is_ig_upload
+            and self._combined_target_enabled(PLATFORM_YOUTUBE)
+            and not keep_studio_title
+            and not title
+        ):
             QMessageBox.warning(self, "Zaliver", "Название видео обязательно для загрузки в YouTube.")
             return None
 
         return {
             "title": title,
+            "platform_titles": platform_titles,
             "description": description,
             "profile_ids": ",".join(picked),
             "publish_before_checks": publish_before_checks,
@@ -5061,6 +5190,15 @@ class MainWindow(QWidget):
         except Exception:
             files = []
         self._selected_input_files = [str(x) for x in files if str(x).strip()]
+        for platform in self._platform_sources.lists:
+            self._platform_sources.set_paths(
+                platform,
+                self._settings.value(f"input_files/{platform}", [], type=list) or [],
+            )
+        self.separate_platform_sources.setChecked(
+            self._settings.value("separate_platform_sources", False, type=bool)
+        )
+        self._sync_platform_sources()
         self._sync_input_files_hint()
         try:
             mf = self._settings.value("background_music_files", [], type=list) or []
@@ -5302,6 +5440,14 @@ class MainWindow(QWidget):
                 "delete_after_upload", bool(self.delete_after_upload.isChecked())
             )
         self._settings.setValue("input_files", list(self._selected_input_files))
+        if hasattr(self, "_platform_sources"):
+            self._settings.setValue(
+                "separate_platform_sources", self.separate_platform_sources.isChecked()
+            )
+            for platform in self._platform_sources.lists:
+                self._settings.setValue(
+                    f"input_files/{platform}", self._platform_sources.paths(platform)
+                )
         self._settings.setValue("background_music_files", list(self._background_music_files))
         if hasattr(self, "background_music"):
             self._settings.setValue(
@@ -8514,6 +8660,8 @@ class MainWindow(QWidget):
             if self._platform == PLATFORM_TIKTOK
             else ("Прогрев Reels" if is_ig else "Прогрев Shorts")
         )
+        if self._platform in (PLATFORM_YT_INST, PLATFORM_YT_INST_TT):
+            title = f"Прогрев платформ в {len(self._source_platforms())} вкладках"
         if self._profiles_warmup_running:
             QMessageBox.information(
                 self,
@@ -8703,7 +8851,28 @@ class MainWindow(QWidget):
                 "horizontal_videos_count": warmup_settings.horizontal_videos_count,
                 "search_oldest_channel": search_oldest,
             }
-            if _is_own_antidetect_kind(kind_s):
+            if self._platform in (PLATFORM_YT_INST, PLATFORM_YT_INST_TT):
+                from zaliver.antydetect.combined_warmup import warmup_combined_profile
+
+                self._ui_log_line.emit(
+                    "[warmup] Параллельный прогрев: "
+                    + ", ".join(self._source_platforms())
+                )
+                warmup_combined_profile(
+                    pid,
+                    platforms=self._source_platforms(),
+                    kind="local" if _is_own_antidetect_kind(kind_s) else "dolphin",
+                    base_url=base_url,
+                    token=token,
+                    headless=headless,
+                    remote_cdp=remote_cdp,
+                    youtube_kwargs=dict(
+                        warmup_kw, login_credentials=creds, yt_oldest_name=yt_oldest
+                    ),
+                    instagram_credentials=self._instagram_session_credentials(pid),
+                    tiktok_credentials=self._tiktok_session_credentials(pid),
+                )
+            elif _is_own_antidetect_kind(kind_s):
                 u = (base_url or "").strip()
                 if not u:
                     raise LocalAntidetectError(
@@ -10688,6 +10857,43 @@ class MainWindow(QWidget):
             f"{hint}{message}"
         )
 
+    def _source_platforms(self) -> list[str]:
+        if self._platform == PLATFORM_YT_INST_TT:
+            return [
+                p
+                for p in (PLATFORM_YOUTUBE, PLATFORM_INSTAGRAM, PLATFORM_TIKTOK)
+                if self._combined_target_enabled(p)
+            ]
+        if self._platform == PLATFORM_YT_INST:
+            return [PLATFORM_YOUTUBE, PLATFORM_INSTAGRAM]
+        return [self._platform]
+
+    def _sync_platform_sources(self, *_args) -> None:
+        combined = self._platform in (PLATFORM_YT_INST, PLATFORM_YT_INST_TT)
+        self.separate_platform_sources.setVisible(combined)
+        separate = combined and self.separate_platform_sources.isChecked()
+        self._platform_sources.setVisible(separate)
+        self._input_files_hint.setVisible(not separate)
+        self._common_input_buttons.setVisible(not separate)
+        for platform, group in self._platform_sources.groups.items():
+            group.setVisible(platform in self._source_platforms())
+
+    def _platform_input_paths(self) -> dict[str, list[str]]:
+        if (
+            self._platform not in (PLATFORM_YT_INST, PLATFORM_YT_INST_TT)
+            or not self.separate_platform_sources.isChecked()
+        ):
+            return {}
+        return {p: self._platform_sources.paths(p) for p in self._source_platforms()}
+
+    def _effective_input_files(self) -> list[str]:
+        mapping = self._platform_input_paths()
+        return (
+            [path for paths in mapping.values() for path in paths]
+            if mapping
+            else list(self._selected_input_files)
+        )
+
     def _input_files_dialog_filter(self) -> str:
         return "Видео (*.mp4 *.mkv *.mov *.avi *.webm *.m4v *.ts);;Все файлы (*)"
 
@@ -11458,7 +11664,8 @@ class MainWindow(QWidget):
         return {
             "input_dir": "",
             "output_dir": self.output_dir_edit.text().strip(),
-            "input_files": list(self._selected_input_files),
+            "input_files": self._effective_input_files(),
+            "platform_input_files": self._platform_input_paths(),
             **self._processing_run_options(),
             "settings": st.to_dict(),
             "manual_bounds": bounds,
@@ -11475,7 +11682,9 @@ class MainWindow(QWidget):
             "playback_speed_enabled": bool(self.audio_speed.isChecked()),
             "audio_chorus_enabled": False,
             "background_music_enabled": bool(self.background_music.isChecked()),
-            "background_music_mix_with_source": bool(self.background_music_mix.isChecked()),
+            "background_music_mix_with_source": bool(
+                self.background_music_mix.isChecked()
+            ),
             "background_music_volume_pct": int(
                 round(self.background_music_volume.lowValue())
             ),
@@ -11507,6 +11716,29 @@ class MainWindow(QWidget):
         self._upload_streaming_description = ""
 
         opts = self._build_options()
+        platform_inputs = opts.get("platform_input_files") or {}
+        if platform_inputs:
+            missing = [
+                p
+                for p, paths in platform_inputs.items()
+                if not paths or any(not Path(path).is_file() for path in paths)
+            ]
+            if missing:
+                QMessageBox.warning(
+                    self,
+                    "Zaliver",
+                    "Выберите доступные исходные видео для: " + ", ".join(missing),
+                )
+                return
+            pending["platform_expected_videos"] = {
+                p: len(paths) * max(1, int(opts.get("copies_per_file") or 1))
+                for p, paths in platform_inputs.items()
+            }
+            pending["platform_output_dirs"] = {
+                p: str((Path(opts["output_dir"]) / p).resolve())
+                for p in platform_inputs
+            }
+
         if not opts["output_dir"]:
             QMessageBox.warning(self, "Zaliver", "Укажите выходную папку.")
             return
@@ -11571,6 +11803,8 @@ class MainWindow(QWidget):
         self._upload_streaming_min_ready = self._compute_streaming_upload_min_ready(
             profile_count=n_prof, planned=planned
         )
+        if platform_inputs:
+            self._upload_streaming_min_ready = max(self._upload_streaming_min_ready, len(platform_inputs))
         if self._upload_streaming_active:
             opts["upload_ready_buffer_limit"] = int(self._upload_streaming_min_ready)
         try:
@@ -12134,24 +12368,41 @@ class MainWindow(QWidget):
         ig_keep_browser_open = (
             self._upload_pause_between_uploads().total_seconds() <= 0
         )
-        upload_req = build_upload_queue_request(
-            platform=self._platform,
-            pending=pending,
-            video_paths=video_paths,
-            antidetect=AntidetectLaunchConfig(
-                kind=kind,
-                token=token,
-                base_url=base_url or "",
-                headless=headless,
-                remote_cdp=remote_cdp,
-            ),
-            streaming=streaming,
-            max_concurrent_browsers=int(self._max_concurrent_browsers()),
-            instagram_tabs_per_profile=int(self._instagram_tabs_per_profile_value()),
-            keep_browser_open=ig_keep_browser_open,
-            delete_after_upload=self._delete_after_upload_enabled(),
-        )
+        try:
+            upload_req = build_upload_queue_request(
+                platform=self._platform,
+                pending=pending,
+                video_paths=video_paths,
+                antidetect=AntidetectLaunchConfig(
+                    kind=kind,
+                    token=token,
+                    base_url=base_url or "",
+                    headless=headless,
+                    remote_cdp=remote_cdp,
+                ),
+                streaming=streaming,
+                max_concurrent_browsers=int(self._max_concurrent_browsers()),
+                instagram_tabs_per_profile=int(
+                    self._instagram_tabs_per_profile_value()
+                ),
+                keep_browser_open=ig_keep_browser_open,
+                delete_after_upload=self._delete_after_upload_enabled(),
+            )
+        except (ValueError, TypeError) as error:
+            self._append_session_log(f"[upload] Залив не запущен: {error}")
+            QMessageBox.warning(self, "Zaliver", str(error))
+            return False
         profile_ids = list(upload_req.profile_ids)
+        platform_output_dirs = {
+            str(Path(directory).resolve()): platform
+            for platform, directory in (
+                pending.get("platform_output_dirs") or {}
+            ).items()
+        }
+
+        def _video_platform(path: str) -> str:
+            return platform_output_dirs.get(str(Path(path).resolve().parent), "")
+
         if not profile_ids:
             self._append_session_log(
                 self._brand("YouTube: профили не выбраны — заливка пропущена.")
@@ -12219,6 +12470,7 @@ class MainWindow(QWidget):
         with self._upload_success_lock:
             self._upload_yt_inst_pending_delete.clear()
             self._upload_yt_inst_pending_remaining.clear()
+            self._upload_failed_paths.clear()
         self._sync_toolbar_for_upload_phase()
         self._upload_cancel_kind = (kind or "").strip()
         self._upload_cancel_dolphin_token = token
@@ -12365,6 +12617,11 @@ class MainWindow(QWidget):
                             pass
                 if not vid:
                     raise RuntimeError(f"Empty video_id (res={one_res!r})")
+                if task.platform_items and plat in task.platform_items:
+                    # Publication is confirmed even if local bookkeeping fails.
+                    if plat in task.completed_platforms:
+                        return
+                    task.completed_platforms.add(plat)
                 if not url:
                     if is_tt_rec:
                         url = f"https://www.tiktok.com/@/video/{vid}/"
@@ -12561,11 +12818,48 @@ class MainWindow(QWidget):
                     raise RuntimeError(
                         "Yt+Inst: все площадки профиля недоступны в этой сессии"
                     )
+                targets = set(task.platform_items) or (
+                    {_video_platform(task.video_path)}
+                    if _video_platform(task.video_path)
+                    else set()
+                )
+                if targets:
+                    skip_youtube = skip_youtube or PLATFORM_YOUTUBE not in targets
+                    skip_instagram = skip_instagram or PLATFORM_INSTAGRAM not in targets
+                    skip_tiktok = skip_tiktok or PLATFORM_TIKTOK not in targets
+                platform_titles = {}
+                resolved_platform_items = {}
+                for platform in (PLATFORM_YOUTUBE, PLATFORM_INSTAGRAM, PLATFORM_TIKTOK):
+                    item = task.platform_items.get(platform)
+                    item_ctx = TitleVariableContext(
+                        profile_name=var_ctx.profile_name,
+                        video_path=item.video_path if item else task.video_path,
+                        index=var_ctx.index,
+                    )
+                    raw_title = platform_title_or_youtube(
+                        pending.get("platform_titles"), platform, task.title
+                    )
+                    platform_titles[platform] = (
+                        expand_and_limit_title(raw_title, item_ctx).title
+                        if platform == PLATFORM_YOUTUBE
+                        else expand_title_variables(raw_title, item_ctx)
+                    )
+                    if item:
+                        resolved_platform_items[platform] = ScheduledUploadItem(
+                            item.video_path,
+                            platform_titles[platform],
+                            expand_title_variables(item.description, item_ctx),
+                            item.schedule_publish_at,
+                        )
+
+                def _platform_item(platform):
+                    return resolved_platform_items.get(platform) or task
+
                 combined_followups["n"] = (
                     (0 if skip_instagram else 1)
                     + (1 if is_yt_inst_tt_upload and not skip_tiktok else 0)
                 )
-                _armed_paths = [str(task.video_path or "").strip()]
+                _armed_paths = [item.video_path for item in task.platform_items.values()] if task.platform_items else [str(task.video_path or "").strip()]
                 if task.scheduled_batch:
                     for _item in task.scheduled_batch:
                         _armed_paths.append(
@@ -12578,8 +12872,9 @@ class MainWindow(QWidget):
                     for _sp in _armed_paths:
                         if not _sp or _active_platforms <= 0:
                             continue
+                        self._upload_failed_paths.discard(_sp)
                         self._upload_yt_inst_pending_delete.add(_sp)
-                        self._upload_yt_inst_pending_remaining[_sp] = _active_platforms
+                        self._upload_yt_inst_pending_remaining[_sp] = 1 if task.platform_items else _active_platforms
                 creds = self._profile_login_credentials(profile_id)
                 yt_oldest = self._profile_yt_oldest_name(profile_id) or None
                 search_oldest = self._youtube_search_oldest_channel()
@@ -12587,10 +12882,15 @@ class MainWindow(QWidget):
                     profile_id
                 )
                 task_scheduled = (
-                    task.schedule_publish_at is not None or task.scheduled_batch
+                    task.schedule_publish_at is not None
+                    or task.scheduled_batch
+                    or any(
+                        item.schedule_publish_at is not None
+                        for item in task.platform_items.values()
+                    )
                 )
                 title_result = expand_and_limit_title(task.title, var_ctx)
-                resolved_title = title_result.title
+                resolved_title = platform_titles[PLATFORM_YOUTUBE]
                 if title_result.truncated:
                     try:
                         self._ui_log_line.emit(
@@ -12677,11 +12977,11 @@ class MainWindow(QWidget):
                             )
                     else:
                         _record_one(
-                            video_path=task.video_path,
+                            video_path=_platform_item("youtube").video_path,
                             title=resolved_title,
-                            description=resolved_description,
+                            description=_platform_item("youtube").description if task.platform_items else resolved_description,
                             one_res=yt_part,
-                            schedule_publish_at=task.schedule_publish_at,
+                            schedule_publish_at=_platform_item("youtube").schedule_publish_at,
                             record_platform=PLATFORM_YOUTUBE,
                         )
                     try:
@@ -12725,9 +13025,11 @@ class MainWindow(QWidget):
                         else:
                             confirmed = _confirm_instagram_result(ig_part)
                             _record_one(
-                                video_path=task.video_path,
-                                title=resolved_title,
-                                description=resolved_description,
+                                video_path=_platform_item("instagram").video_path,
+                                title=platform_titles[PLATFORM_INSTAGRAM],
+                                description=_platform_item("instagram").description
+                                if task.platform_items
+                                else resolved_description,
                                 one_res=confirmed,
                                 record_platform=PLATFORM_INSTAGRAM,
                             )
@@ -12766,6 +13068,7 @@ class MainWindow(QWidget):
                             pass
 
                 def _on_yt_inst_ig_error(err: BaseException) -> None:
+                    task.platform_errors["instagram"] = str(err) or repr(err)
                     skipped = isinstance(err, CombinedPlatformUnavailableError)
                     try:
                         self._ui_log_line.emit(
@@ -12797,7 +13100,7 @@ class MainWindow(QWidget):
                             pass
                     # Одна площадка закончила (ошибка). Файл удаляем только
                     # когда счётчик остальных тоже дойдёт до нуля.
-                    paths_to_drop = [str(task.video_path or "").strip()]
+                    paths_to_drop = [str(_platform_item("instagram").video_path or "").strip()]
                     if task.scheduled_batch:
                         for item in task.scheduled_batch:
                             paths_to_drop.append(
@@ -12835,18 +13138,23 @@ class MainWindow(QWidget):
                             _record_one(
                                 video_path=str(
                                     (tt_part or {}).get("video_path")
-                                    or task.video_path
+                                    or _platform_item("tiktok").video_path
                                 )
                                 if isinstance(tt_part, dict)
-                                else task.video_path,
+                                else _platform_item("tiktok").video_path,
                                 title=str(
-                                    (tt_part or {}).get("title") or resolved_title
+                                    (tt_part or {}).get("title")
+                                    or platform_titles[PLATFORM_TIKTOK]
                                 )
                                 if isinstance(tt_part, dict)
-                                else resolved_title,
+                                else platform_titles[PLATFORM_TIKTOK],
                                 description=str(
                                     (tt_part or {}).get("description")
-                                    or resolved_description
+                                    or (
+                                        _platform_item("tiktok").description
+                                        if task.platform_items
+                                        else resolved_description
+                                    )
                                 )
                                 if isinstance(tt_part, dict)
                                 else resolved_description,
@@ -12854,10 +13162,10 @@ class MainWindow(QWidget):
                                 schedule_publish_at=(
                                     tt_part.get(
                                         "schedule_publish_at",
-                                        task.schedule_publish_at,
+                                        _platform_item("tiktok").schedule_publish_at,
                                     )
                                     if isinstance(tt_part, dict)
-                                    else task.schedule_publish_at
+                                    else _platform_item("tiktok").schedule_publish_at
                                 ),
                                 record_platform=PLATFORM_TIKTOK,
                             )
@@ -12876,6 +13184,7 @@ class MainWindow(QWidget):
                             pass
 
                 def _on_yt_inst_tt_error(err: BaseException) -> None:
+                    task.platform_errors["tiktok"] = str(err) or repr(err)
                     skipped = isinstance(err, CombinedPlatformUnavailableError)
                     try:
                         self._ui_log_line.emit(
@@ -12905,7 +13214,7 @@ class MainWindow(QWidget):
                             )
                         except Exception:
                             pass
-                    paths_to_drop = [str(task.video_path or "").strip()]
+                    paths_to_drop = [str(_platform_item("tiktok").video_path or "").strip()]
                     if task.scheduled_batch:
                         for item in task.scheduled_batch:
                             paths_to_drop.append(
@@ -12920,6 +13229,14 @@ class MainWindow(QWidget):
                     )
 
                 combined_kw = dict(
+                    open_platforms=[
+                        p
+                        for p in self._source_platforms()
+                        if mgr_now is None
+                        or not mgr_now.is_platform_disabled(profile_id, p)
+                    ],
+                    platform_titles=platform_titles,
+                    platform_items=resolved_platform_items or None,
                     headless=headless,
                     video_path=task.video_path,
                     title=resolved_title,
@@ -13002,7 +13319,7 @@ class MainWindow(QWidget):
                     ig_ok = True
 
                 if not yt_ok and not skip_youtube:
-                    yt_fail_paths = [str(task.video_path or "").strip()]
+                    yt_fail_paths = [str(_platform_item("youtube").video_path or "").strip()]
                     if task.scheduled_batch:
                         for item in task.scheduled_batch:
                             yt_fail_paths.append(
@@ -13029,6 +13346,24 @@ class MainWindow(QWidget):
                         )
                     except Exception:
                         pass
+
+                if task.platform_items:
+                    for platform, part, error, recorder in (
+                        ("youtube", yt_part, yt_err_s, _record_yt_inst_youtube),
+                        ("instagram", ig_part, ig_err_s, _record_yt_inst_instagram),
+                        ("tiktok", tt_part, tt_err_s, _record_yt_inst_tiktok),
+                    ):
+                        if platform not in task.platform_items:
+                            continue
+                        if (
+                            isinstance(part, dict)
+                            and platform not in task.completed_platforms
+                        ):
+                            recorder(part)
+                        if platform not in task.completed_platforms:
+                            task.platform_errors[platform] = (
+                                error or "upload result not confirmed"
+                            )
 
                 if (
                     not yt_ok
@@ -13476,9 +13811,18 @@ class MainWindow(QWidget):
             log_sink=self._ui_log_line.emit,
             upload_one=_upload_one,
             on_profile_attempt=_on_profile_upload_attempt,
-            on_video_done=lambda path, ok: (
-                None if ok else self._release_ready_buffer_slot(path)
-            ),
+            on_video_done=lambda path, ok: self._release_ready_buffer_slot(path),
+            schedule_group_for_video=_video_platform,
+            platform_expected_videos=(
+                pending.get("platform_expected_videos")
+                if streaming
+                else {
+                    p: sum(_video_platform(path) == p for path in video_paths)
+                    for p in platform_output_dirs.values()
+                }
+            )
+            if platform_output_dirs
+            else None,
             schedule_batch_size=schedule_batch_size,
             schedule_times=schedule_times,
             await_more_videos=bool(streaming),
@@ -13545,7 +13889,10 @@ class MainWindow(QWidget):
                     self._upload_yt_inst_pending_remaining.clear()
                 if getattr(self, "_upload_delete_after_enabled", False):
                     for video_path in leftover:
-                        self._delete_output_video_after_upload(video_path)
+                        if video_path in self._upload_failed_paths:
+                            self._release_ready_buffer_slot(video_path)
+                        else:
+                            self._delete_output_video_after_upload(video_path)
                 else:
                     for video_path in leftover:
                         self._release_ready_buffer_slot(video_path)

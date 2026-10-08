@@ -10,6 +10,19 @@ from pathlib import Path
 
 from zaliver.youtube_upload.schedule_publish import MSK
 
+
+def platform_title_or_youtube(
+    titles: dict[str, str] | None, platform: str, default_title: str = ""
+) -> str:
+    """Empty platform fields inherit the YouTube title before expansion."""
+    titles = titles or {}
+    own_title = titles.get(platform) or ""
+    if own_title.strip():
+        return own_title
+    youtube_title = titles.get("youtube") or ""
+    return youtube_title if youtube_title.strip() else default_title
+
+
 _WEEKDAYS_RU = (
     "Понедельник",
     "Вторник",

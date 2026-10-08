@@ -6,7 +6,10 @@ from typing import Any
 
 from zaliver.config.platform_settings import normalize_platform
 from zaliver.core.upload.types import AntidetectLaunchConfig, UploadQueueRequest
-from zaliver.youtube_upload.schedule_publish import parse_msk_datetime
+from zaliver.youtube_upload.schedule_publish import (
+    parse_msk_datetime,
+    validate_schedule_times,
+)
 
 
 def build_upload_queue_request(
@@ -32,6 +35,9 @@ def build_upload_queue_request(
             if dt is not None:
                 schedule_times.append(dt)
         schedule_times = sorted(schedule_times)
+        error = validate_schedule_times(schedule_times)
+        if error:
+            raise ValueError(error)
     return UploadQueueRequest(
         platform=plat,
         profile_ids=profile_ids,

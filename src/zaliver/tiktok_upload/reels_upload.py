@@ -2081,24 +2081,15 @@ def _caption_field_is_empty(got: str) -> bool:
     return not compact
 
 
-def _studio_caption_char_count(page) -> int | None:
-    try:
-        loc = page.locator('[data-e2e="caption_container"] .word-count span')
-        if int(loc.count()) <= 0:
-            return None
-        raw = (loc.first.inner_text(timeout=200) or "").strip()
-        return int(raw)
-    except Exception:
-        return None
-
-
 _CAPTION_SKIP_NONEMPTY_LOG = ""
 
 
 def _caption_is_empty_now(page, area) -> bool:
     got = _read_caption_text(area)
-    count = _studio_caption_char_count(page)
-    return _caption_field_is_empty(got) or count == 0
+    # The Studio counter can lag behind the editable DOM while React processes
+    # input. The field's actual text is authoritative when deciding whether to
+    # clear it before inserting a new caption.
+    return _caption_field_is_empty(got)
 
 
 def _clear_caption_field(page, area, *, timeout_s: float = 8.0) -> bool:
@@ -2117,7 +2108,7 @@ def _clear_caption_field(page, area, *, timeout_s: float = 8.0) -> bool:
             except Exception:
                 pass
         try:
-            page.keyboard.press("Control+A")
+            page.keyboard.press("ControlOrMeta+A")
             page.wait_for_timeout(30)
             page.keyboard.press("Backspace")
             page.keyboard.press("Delete")

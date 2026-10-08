@@ -26,6 +26,7 @@ from zaliver.youtube_upload.schedule_publish import (
     studio_time_label_ru,
     studio_time_match_patterns,
     studio_time_picker_locale_from_text,
+    validate_schedule_times,
 )
 
 from playwright.sync_api import Error as PlaywrightError
@@ -42,8 +43,7 @@ _STUDIO_UI_MS = 120_000
 # После передачи файла ждём в Studio один из исходов: лимит или завершение проверок (часто >1 мин).
 _POST_UPLOAD_STUDIO_OUTCOME_MAX_S = 3600.0
 _POST_UPLOAD_QUOTA_POLL_S = 2.0
-_PUBLISH_CONFIRM_MAX_S = 10.0
-_PUBLISH_REPUBLISH_GRACE_S = 12.0
+_PUBLISH_CONFIRM_MAX_S = 90.0
 _STUDIO_WIZARD_NEXT_MAX = 30
 _STUDIO_WIZARD_NEXT_AFTER_CLICK_MS = 250
 _STUDIO_WIZARD_NEXT_POLL_MS = 40
@@ -181,6 +181,10 @@ _YEAR_IN_TEXT_RE = re.compile(r"\b(19\d{2}|20[0-3]\d)\b")
 _PLAYWRIGHT_REMOTE_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024  # лимит Playwright для fallback-пути
 # set_files / set_input_files по CDP для крупных файлов; дефолт Playwright 30 с часто мало.
 _STUDIO_FILE_PICKER_TRANSFER_MS = 600_000
+
+
+class UploadConfirmationUncertainError(RuntimeError):
+    """A submit was attempted; another upload could duplicate the video."""
 
 
 class YoutubeStudioError(RuntimeError):
@@ -4926,7 +4930,7 @@ def _studio_keyboard_type_link_field(
     if not _studio_focus_link_input_for_keyboard(page, field):
         raise YoutubeStudioError(f"Studio: не удалось сфокусировать {field_label}.")
     page.wait_for_timeout(100)
-    page.keyboard.press("Control+A")
+    page.keyboard.press("ControlOrMeta+A")
     page.keyboard.press("Backspace")
     page.keyboard.insert_text(t)
     page.wait_for_timeout(250)
@@ -4961,7 +4965,7 @@ def _studio_type_link_input_playwright(
         pass
     page.wait_for_timeout(80)
     try:
-        el.press("Control+A")
+        el.press("ControlOrMeta+A")
         el.press("Backspace")
     except Exception:
         pass
@@ -5621,7 +5625,7 @@ def _studio_fill_plain_input(page, inp, text: str, *, label: str) -> None:
     except Exception:
         pass
     try:
-        field.press("Control+A")
+        field.press("ControlOrMeta+A")
         field.press("Backspace")
     except Exception:
         pass
@@ -7596,7 +7600,7 @@ def _studio_type_schedule_time_of_day(
     text = studio_time_input_label(dt, locale=locale)
     time_input.first.click(timeout=5_000)
     page.wait_for_timeout(120)
-    page.keyboard.press("Control+A")
+    page.keyboard.press("ControlOrMeta+A")
     page.keyboard.type(text, delay=30)
     page.keyboard.press("Enter")
     page.wait_for_timeout(300)
@@ -7652,11 +7656,27 @@ def _studio_configure_scheduled_publish(page, schedule_at: datetime) -> None:
     dt = parse_msk_datetime(schedule_at)
     if dt is None:
         raise YoutubeStudioError("Некорректное время отложенной публикации.")
+    error = validate_schedule_times([dt])
+    if error:
+        raise YoutubeStudioError(error)
     _log(f"Studio: отложенная публикация — {dt.strftime('%d.%m.%Y %H:%M')} МСК…")
     _studio_expand_schedule_section(page)
     _studio_select_schedule_timezone_moscow(page)
     _studio_pick_calendar_day(page, dt)
     _studio_pick_schedule_time_of_day(page, dt)
+    shown_date = _studio_date_picker_trigger_text(page)
+    if not studio_date_trigger_matches(shown_date, dt):
+        raise YoutubeStudioError(f"Studio не подтвердила дату отложки: {shown_date!r}")
+    time_input = page.locator(
+        "ytcp-visibility-scheduler #time-of-day-container input, ytcp-datetime-picker #time-of-day-container input"
+    )
+    shown_time = normalize_studio_time_label(time_input.first.input_value(timeout=5000))
+    expected = {
+        normalize_studio_time_label(value)
+        for value in [studio_time_label_ru(dt), *studio_time_label_en_variants(dt)]
+    }
+    if shown_time not in expected:
+        raise YoutubeStudioError(f"Studio не подтвердила время отложки: {shown_time!r}")
 
 
 def _studio_select_public_visibility(page, *, schedule_at: datetime | None = None) -> str:
@@ -7664,6 +7684,9 @@ def _studio_select_public_visibility(page, *, schedule_at: datetime | None = Non
     _studio_handle_interrupt_dialogs_if_present(page)
     _log("Studio: экран доступа — фиксируем ссылку на видео…")
     href = _studio_log_video_link_before_public(page)
+    if schedule_at is not None:
+        _studio_configure_scheduled_publish(page, schedule_at)
+        return href
     _log("Studio: «Открытый доступ»…")
     pub = (
         page.locator(
@@ -7674,8 +7697,6 @@ def _studio_select_public_visibility(page, *, schedule_at: datetime | None = Non
     )
     pub.first.wait_for(state="visible", timeout=30_000)
     pub.first.click(timeout=15_000)
-    if schedule_at is not None:
-        _studio_configure_scheduled_publish(page, schedule_at)
     return href
 
 
@@ -7802,8 +7823,6 @@ def _studio_wait_for_publish_confirmed(
         "(диалог «Video processing» / закрытие мастера / экран успеха)…"
     )
     deadline = time.monotonic() + max_wait_sec
-    republish_after = time.monotonic() + _PUBLISH_REPUBLISH_GRACE_S
-    republish_attempted = False
     poll_n = 0
     while time.monotonic() < deadline:
         poll_n += 1
@@ -7823,28 +7842,6 @@ def _studio_wait_for_publish_confirmed(
                     "подтверждено Studio."
                 )
             return
-        if (
-            not republish_attempted
-            and time.monotonic() >= republish_after
-        ):
-            btn = _studio_upload_finalize_button(page, schedule=schedule)
-            try:
-                if (
-                    btn.count() > 0
-                    and btn.first.is_visible(timeout=300)
-                    and btn.first.is_enabled()
-                ):
-                    retry_label = (
-                        "«Запланировать публикацию»" if schedule else "«Опубликовать»"
-                    )
-                    _log(
-                        f"Studio: {retry_label} всё ещё активна — повторный клик…"
-                    )
-                    btn.first.click(timeout=60_000)
-                    republish_attempted = True
-                    republish_after = time.monotonic() + _PUBLISH_REPUBLISH_GRACE_S
-            except Exception:
-                pass
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
@@ -8325,29 +8322,50 @@ def _studio_click_publish_when_enabled(
             if btn.count() > 0 and btn.first.is_visible(timeout=500):
                 if btn.first.is_enabled():
                     if schedule:
+                        dt = parse_msk_datetime(schedule_at)
+                        error = (
+                            validate_schedule_times([dt])
+                            if dt is not None
+                            else "Нет времени отложки."
+                        )
+                        if error:
+                            raise YoutubeStudioError(error)
                         remaining = max(0.0, deadline - time.monotonic())
                         captured_href = _studio_capture_uploads_review_video_link(
                             page, max_wait_sec=min(30.0, max(5.0, remaining))
                         )
-                        if captured_href:
-                            vid = _studio_try_extract_video_id_from_url(captured_href)
-                            if vid:
-                                stats_notified = _studio_try_notify_stats_server(
-                                    vid,
-                                    profile_id=profile_id,
-                                    username=stats_server_username,
-                                    schedule_at=schedule_at,
-                                )
-                    btn.first.click(timeout=60_000)
+                    # Even a click timeout may mean the server accepted the video.
+                    try:
+                        btn.first.click(timeout=60_000)
+                    except Exception as error:
+                        raise UploadConfirmationUncertainError(
+                            "[UPLOAD_CONFIRMATION_UNKNOWN] Неизвестен результат подтверждения; проверьте Studio перед повтором."
+                        ) from error
                     _log(f"Studio: {label} нажата.")
                     remaining_total = max(0.0, deadline - time.monotonic())
                     confirm_budget = min(
                         _PUBLISH_CONFIRM_MAX_S, max(30.0, remaining_total)
                     )
-                    _studio_wait_for_publish_confirmed(
-                        page, confirm_budget, schedule=schedule
-                    )
+                    try:
+                        _studio_wait_for_publish_confirmed(
+                            page, confirm_budget, schedule=schedule
+                        )
+                    except Exception as error:
+                        raise UploadConfirmationUncertainError(
+                            "[UPLOAD_CONFIRMATION_UNKNOWN] Studio не подтвердила результат; автоматический повтор отключён."
+                        ) from error
+                    if schedule and captured_href:
+                        vid = _studio_try_extract_video_id_from_url(captured_href)
+                        if vid:
+                            stats_notified = _studio_try_notify_stats_server(
+                                vid,
+                                profile_id=profile_id,
+                                username=stats_server_username,
+                                schedule_at=schedule_at,
+                            )
                     return captured_href, stats_notified
+        except (UploadConfirmationUncertainError, YoutubeStudioError):
+            raise
         except Exception:
             pass
         remaining = deadline - time.monotonic()
@@ -9826,7 +9844,7 @@ def _studio_type_youtube_search_input(page, search_input, query: str) -> bool:
             pass
         page.wait_for_timeout(80)
         try:
-            search_input.press("Control+A")
+            search_input.press("ControlOrMeta+A")
             search_input.press("Backspace")
         except Exception:
             pass
@@ -11208,4 +11226,3 @@ def _studio_open_subscriptions_shorts_shelf(page, *, login_credentials=None) -> 
 
     page.wait_for_timeout(1_500)
     _log("Продвижение: открыт первый Short из полки подписок.")
-

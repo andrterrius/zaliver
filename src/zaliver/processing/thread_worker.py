@@ -618,7 +618,19 @@ class ProcessingService:
             copies_per_file = max(1, int(options.get("copies_per_file", 1)))
             plan: List[Tuple[Path, Path, VideoInfo, int, int, Optional[int]]] = []
             try:
-                for p in videos:
+                platform_inputs = options.get("platform_input_files") or {}
+                sources = (
+                    [
+                        (Path(path), platform)
+                        for platform, paths in platform_inputs.items()
+                        for path in paths
+                    ]
+                    if platform_inputs
+                    else [(p, "") for p in videos]
+                )
+                for p, platform in sources:
+                    target_dir = out_dir / platform if platform else out_dir
+                    target_dir.mkdir(parents=True, exist_ok=True)
                     inf = probe_video(str(p))
                     if inf.frame_count <= 0:
                         raise RuntimeError(
@@ -629,12 +641,21 @@ class ProcessingService:
                         f"{p.name}: {inf.width}×{inf.height}, кодирование CRF {encode_crf}"
                     )
                     for ci in range(1, copies_per_file + 1):
-                        outp = out_dir / _unique_output_filename(p.stem)
+                        outp = target_dir / _unique_output_filename(p.stem)
                         plan.append((p, outp, inf, ci, copies_per_file, tvb))
             except Exception as e:
                 self._sink.on_finished(False, str(e))
                 return
 
+            if platform_inputs:
+                # Feed the bounded ready buffer one round of platforms at a time.
+                from itertools import zip_longest
+
+                grouped = [
+                    [item for item in plan if item[1].parent.name == p]
+                    for p in platform_inputs
+                ]
+                plan = [item for row in zip_longest(*grouped) for item in row if item is not None]
             total_all = max(1, sum(x[2].frame_count for x in plan))
             raise_fd_limit_soft()
             num_workers = cap_process_pool_workers(int(options.get("num_workers", 1)))
@@ -1243,6 +1264,7 @@ class ProcessingService:
                             status = fut.result()
                         except Exception as e:
                             _skip_job_finalize_error(j, e, log=log, n_jobs=n_jobs)
+                            self._sink.on_output_saved(str(j.outp), False)
                             settle_ready_job(ready_buf, "", keep=False)
                             emit_progress_global()
                             return False
@@ -1257,6 +1279,7 @@ class ProcessingService:
                                 keep=not j.skip_youtube_upload,
                             )
                         else:
+                            self._sink.on_output_saved(str(j.outp), False)
                             settle_ready_job(ready_buf, "", keep=False)
                         emit_progress_global()
                         return False

@@ -165,6 +165,16 @@ def studio_date_trigger_matches(text: str, dt: datetime) -> bool:
     shown = (text or "").strip().lower()
     if not shown or str(dt.year) not in shown:
         return False
+    numeric = re.search(r"(\d{1,2})([/.])(\d{1,2})\2(\d{2,4})", shown)
+    if numeric:
+        first, separator, second, year = numeric.groups()
+        year = int(year)
+        if year < 100:
+            year += 2000
+        month, day = (
+            (int(first), int(second)) if separator == "/" else (int(second), int(first))
+        )
+        return (year, month, day) == (dt.year, dt.month, dt.day)
     if not re.search(rf"(?<!\d){int(dt.day)}(?!\d)", shown):
         return False
     anchor = datetime(dt.year, dt.month, dt.day)
@@ -172,13 +182,6 @@ def studio_date_trigger_matches(text: str, dt: datetime) -> bool:
         return True
     if any(part in shown for part in _RU_DATE_MONTH_PARTS.get(dt.month, ())):
         return True
-    m_slash = re.search(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", shown)
-    if m_slash:
-        m, d, y = int(m_slash.group(1)), int(m_slash.group(2)), int(m_slash.group(3))
-        if y < 100:
-            y += 2000
-        if m == dt.month and d == dt.day and y == dt.year:
-            return True
     return False
 
 
@@ -190,11 +193,17 @@ def validate_schedule_times(
     """Возвращает текст ошибки или None, если всё ок."""
     if not times:
         return "Укажите хотя бы одно время отложенной публикации."
-    cur = now or datetime.now(tz=MSK)
+    cur = parse_msk_datetime(now) if now is not None else datetime.now(tz=MSK)
+    seen = set()
     for t in times:
         dt = parse_msk_datetime(t)
         if dt is None:
             return "Некорректное время отложенной публикации."
         if dt <= cur + timedelta(minutes=1):
             return "Время отложенной публикации должно быть в будущем (МСК)."
+        if dt.minute % _YT_TIME_STEP_MIN or dt.second or dt.microsecond:
+            return "Укажите время с шагом 15 минут (без секунд), чтобы Studio не округляла его назад."
+        if dt in seen:
+            return "Времена отложенной публикации не должны повторяться."
+        seen.add(dt)
     return None

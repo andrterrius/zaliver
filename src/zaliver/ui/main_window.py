@@ -4742,7 +4742,7 @@ class MainWindow(QWidget):
             if schedule_on and n > 0:
                 if pv <= 0:
                     lines.append(
-                        f"Слотов на профиль: {slots_n}. YouTube/TikTok только в отложку; Instagram сразу."
+                        f"Слотов на профиль: {slots_n}. Видео без слота загрузятся сразу первыми, остальные — в отложку. Instagram загружается сразу."
                     )
                 else:
                     base, rem = divmod(pv, n)
@@ -4750,11 +4750,12 @@ class MainWindow(QWidget):
                     def _split_note(count: int) -> str:
                         immediate = max(0, count - slots_n)
                         scheduled = min(count, slots_n)
-                        return (
-                            f"{count} в отложку"
-                            if count <= slots_n
-                            else f"не хватает {count - slots_n} слотов"
-                        )
+                        parts = []
+                        if immediate:
+                            parts.append(f"{immediate} сразу")
+                        if scheduled:
+                            parts.append(f"{scheduled} в отложку")
+                        return ", ".join(parts) or "нет видео"
 
                     if rem == 0:
                         lines.append(f"На профиль: {_split_note(base)}.")
@@ -5021,24 +5022,6 @@ class MainWindow(QWidget):
                 "schedule_warmup_search_query": schedule_warmup_search_query,
                 "schedule_warmup_hashtag": schedule_warmup_hashtag,
             }
-        if schedule_publish:
-            mapping = self._platform_input_paths() if mode == "uniquify" else {}
-            counts = (
-                [
-                    len(paths) * max(1, self.copies_per_file.value())
-                    for p, paths in mapping.items()
-                    if p != PLATFORM_INSTAGRAM
-                ]
-                if mapping
-                else [_planned_videos_count()]
-            )
-            if counts and max(counts) > len(picked) * len(schedule_times_iso):
-                QMessageBox.warning(
-                    self,
-                    "Zaliver",
-                    "Не хватает слотов отложки. Добавьте время публикации или профили; публикация лишних видео сразу отключена.",
-                )
-                return None
         if (
             not is_ig_upload
             and self._combined_target_enabled(PLATFORM_YOUTUBE)

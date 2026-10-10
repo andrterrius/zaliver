@@ -39,6 +39,7 @@ class VideoTask:
     schedule_publish_at: datetime | None = None
     scheduled_batch: list[ScheduledUploadItem] | None = None
     schedule_slot_start: int | None = None
+    force_immediate: bool = False
     attempts_by_profile: Dict[str, int] = field(default_factory=dict)
     last_failed_profile: str = ""
     platform_items: dict[str, ScheduledUploadItem] = field(default_factory=dict)
@@ -201,6 +202,7 @@ class MultiProfileUploader:
             pid: 0 for pid in self._profiles
         }
         self._planned_videos = max(0, int(planned_videos or 0))
+        self._schedule_immediate_remaining: int | None = None
 
         self._stop = threading.Event()
         self._stop_reason = ""
@@ -350,6 +352,7 @@ class MultiProfileUploader:
                     item.description,
                     platform_items={p: item},
                     attempts_by_profile=dict(task.attempts_by_profile),
+                    force_immediate=task.force_immediate,
                 )
             )
         return True
@@ -850,15 +853,73 @@ class MultiProfileUploader:
                 break
 
     def _try_dispatch_schedule_batch(self, idx: int) -> tuple[bool, int]:
-        """One video per attempt; never replay a partly successful batch."""
+        """Assign several scheduled videos to one profile/browser session."""
         try:
             task = self._global_q.get_nowait()
         except Empty:
             return False, idx
+
+        # Videos that exceed the available scheduled slots are uploaded first
+        # with no publish time. Only after these are assigned do we consume
+        # schedule slots for the remaining videos.
+        if self._schedule_immediate_remaining is None:
+            if self._planned_videos > 0 or self._producer_done:
+                planned = self._planned_videos or self._total
+                capacity = len(self._profiles) * len(self._schedule_times)
+                self._schedule_immediate_remaining = max(0, planned - capacity)
+            else:
+                self._global_q.put(task)
+                self._global_q.task_done()
+                return False, idx
+        if self._schedule_immediate_remaining > 0 or task.force_immediate:
+            newly_immediate = False
+            if self._schedule_immediate_remaining > 0:
+                if not task.force_immediate:
+                    task.force_immediate = True
+                    newly_immediate = True
+                    self._schedule_immediate_remaining = max(
+                        0, self._schedule_immediate_remaining - self._task_size(task)
+                    )
+            eligible = self._eligible_profiles_for_dispatch(task)
+            if not eligible:
+                if self._split_bundle(task):
+                    self._global_q.task_done()
+                    return True, idx
+                if self._task_exhausted_on_all_profiles(task):
+                    with self._done_lock:
+                        self._done_failed += self._task_size(task)
+                    self._emit_video_done(task, ok=False)
+                    self._global_q.task_done()
+                    self._log(
+                        f"[{_ts()}] [upload] [FAILED] immediate video={task.video_path!r}: "
+                        "нет доступного профиля; повторная публикация отложкой запрещена."
+                    )
+                    return True, idx
+                if newly_immediate:
+                    self._schedule_immediate_remaining += self._task_size(task)
+                    task.force_immediate = False
+                self._global_q.put(task)
+                self._global_q.task_done()
+                return False, idx
+            chosen = self._pick_profile_for_task(task, eligible, idx)
+            if chosen is None:
+                if newly_immediate:
+                    self._schedule_immediate_remaining += self._task_size(task)
+                    task.force_immediate = False
+                self._global_q.put(task)
+                self._global_q.task_done()
+                return False, idx
+            self._assign_to_profile(chosen)
+            self._tab_queue(chosen, 0).put(task)
+            self._global_q.task_done()
+            self._log(
+                f"[{_ts()}] [upload] [QUEUED] profile={chosen} video={task.video_path!r} "
+                "publish=immediate (before scheduled queue)"
+            )
+            return True, (self._profiles.index(chosen) + 1) % len(self._profiles)
+
         groups = self._task_groups(task)
         group = groups[0]
-        # Instagram has no browser scheduler; the dialog explicitly labels this.
-        scheduled = group != "instagram"
         candidates = [
             pid
             for pid in self._profiles
@@ -893,7 +954,9 @@ class MultiProfileUploader:
             self._global_q.put(task)
             self._global_q.task_done()
             return False, idx
-        # Balance profiles even when processing produces videos one at a time.
+        # Balance profiles by their next schedule slot, then fill the chosen
+        # profile's remaining slots in one task. The uploader can process this
+        # scheduled_batch without reopening the profile for every video.
         counts = {
             pid: max(self._schedule_slots_used.get((pid, p), 0) for p in groups)
             for pid in eligible
@@ -902,20 +965,78 @@ class MultiProfileUploader:
         chosen = self._pick_round_robin(
             [pid for pid in eligible if counts[pid] == least], idx
         )
-        for p in groups:
-            slot = self._schedule_slots_used.get((chosen, p), 0)
-            at = self._schedule_times[slot] if p != "instagram" else None
-            if task.platform_items:
-                task.platform_items[p].schedule_publish_at = at
-            if p == group:
-                task.schedule_publish_at = at
-            self._schedule_slots_used[(chosen, p)] = slot + 1
+
+        batch = [task]
+        encountered_other_task = False
+        # Platform bundles already represent one source video being sent to
+        # several platforms, so keep those intact. Ordinary videos are grouped
+        # up to the number of schedule times remaining on this profile.
+        if not task.platform_items:
+            available = min(
+                len(self._schedule_times)
+                - self._schedule_slots_used.get((chosen, p), 0)
+                for p in groups
+                if p != "instagram"
+            ) if any(p != "instagram" for p in groups) else 1
+            while len(batch) < available:
+                try:
+                    extra = self._global_q.get_nowait()
+                except Empty:
+                    break
+                if extra.platform_items or self._task_groups(extra) != groups:
+                    self._global_q.put(extra)
+                    self._global_q.task_done()
+                    encountered_other_task = True
+                    break
+                batch.append(extra)
+
+        if (
+            not task.platform_items
+            and len(batch) < available
+            and not encountered_other_task
+            and not self._producer_done
+        ):
+            # Video processing may enqueue incrementally. Wait until this
+            # profile's batch is full or production is finished, otherwise a
+            # fast first result would launch and close the browser by itself.
+            for one in batch:
+                self._global_q.put(one)
+                self._global_q.task_done()
+            return False, idx
+
+        if len(batch) > 1:
+            task.scheduled_batch = [
+                ScheduledUploadItem(
+                    video_path=one.video_path,
+                    title=one.title,
+                    description=one.description,
+                )
+                for one in batch
+            ]
+        for offset, one in enumerate(batch):
+            for p in groups:
+                slot = self._schedule_slots_used.get((chosen, p), 0)
+                at = self._schedule_times[slot] if p != "instagram" else None
+                if one.platform_items:
+                    one.platform_items[p].schedule_publish_at = at
+                if p == group:
+                    if len(batch) > 1:
+                        task.scheduled_batch[offset].schedule_publish_at = at
+                    else:
+                        one.schedule_publish_at = at
+                self._schedule_slots_used[(chosen, p)] = slot + 1
+        if len(batch) > 1:
+            # The top-level timestamp is retained for logging/compatibility;
+            # actual per-video times are carried by scheduled_batch items.
+            task.schedule_publish_at = task.scheduled_batch[0].schedule_publish_at
         self._profile_batch_assigned[chosen] += 1
         self._assign_to_profile(chosen)
         self._tab_queue(chosen, 0).put(task)
-        self._global_q.task_done()
+        for _ in batch:
+            self._global_q.task_done()
         self._log(
-            f"[{_ts()}] [upload] [QUEUED] profile={chosen} video={task.video_path!r} schedule_at={task.schedule_publish_at!r}"
+            f"[{_ts()}] [upload] [QUEUED] profile={chosen} video={task.video_path!r} "
+            f"batch={len(batch)} schedule_at={task.schedule_publish_at!r}"
         )
         return True, (self._profiles.index(chosen) + 1) % len(self._profiles)
 
@@ -1037,6 +1158,17 @@ class MultiProfileUploader:
                         try:
                             task = q.get(timeout=_KEEP_OPEN_IDLE_GRACE_S)
                         except Empty:
+                            if not self._producer_done:
+                                self._log(
+                                    f"[{_ts()}] [upload] [KEEP_OPEN] profile={profile_id}"
+                                    f"{tab_note} обработка ещё готовит видео — "
+                                    "оставляем браузер открытым и освобождаем слот"
+                                )
+                                self._release_profile_slot(
+                                    profile_id, close_browser=False
+                                )
+                                held_slot = False
+                                continue
                             self._log(
                                 f"[{_ts()}] [upload] [KEEP_OPEN] profile={profile_id}"
                                 f"{tab_note} idle>{_KEEP_OPEN_IDLE_GRACE_S:.0f}s — "

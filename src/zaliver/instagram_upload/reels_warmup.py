@@ -77,31 +77,25 @@ def _ensure_reels_feed(page) -> None:
 
 
 def _try_unmute_or_play(page) -> None:
-    """Снять mute / нажать Play, если рилс на паузе."""
-    for aria in ("Audio is muted", "Звук выключен", "Включить звук"):
-        try:
-            svg = page.locator(f'svg[aria-label="{aria}"]').first
-            if svg.is_visible(timeout=400):
-                btn = svg.locator(
-                    "xpath=ancestor::*[@role='button'][1]"
-                )
-                target = btn if btn.count() else svg
-                target.click(timeout=2_000)
-                page.wait_for_timeout(250)
-                _log("Reels: звук включён.")
-                break
-        except Exception:
-            continue
-    for aria in ("Press to play", "Нажмите для воспроизведения", "Воспроизвести"):
-        try:
-            btn = page.locator(f'[aria-label="{aria}"]').first
-            if btn.is_visible(timeout=400):
-                btn.click(timeout=2_000)
-                page.wait_for_timeout(250)
-                _log("Reels: воспроизведение запущено.")
-                break
-        except Exception:
-            continue
+    """Управлять только видимым видео, не трогая соседние карточки ленты."""
+    root = _element_from_handle(_active_reel_root_handle(page))
+    if root is None:
+        return
+    try:
+        root.evaluate("""(root) => {
+          const visible = el => {
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight;
+          };
+          for (const label of ['Audio is muted', 'Звук выключен', 'Включить звук']) {
+            const icon = root.querySelector(`svg[aria-label="${label}"]`);
+            if (icon && visible(icon)) { (icon.closest('[role="button"], button') || icon).click(); break; }
+          }
+          const video = Array.from(root.querySelectorAll('video')).find(visible);
+          if (video && video.paused) video.play().catch(() => {});
+        }""")
+    except Exception as e:
+        _log(f"Reels: не удалось запустить видео: {type(e).__name__}")
 
 
 def _active_reel_root_handle(page) -> Any | None:
@@ -113,16 +107,17 @@ def _active_reel_root_handle(page) -> Any | None:
               if (!videos.length) return null;
               let best = null;
               let bestScore = -1;
+              const vw = window.innerWidth || 1200;
               const vh = window.innerHeight || 800;
-              const mid = vh / 2;
+              const cx = vw / 2, cy = vh / 2;
               for (const v of videos) {
                 const r = v.getBoundingClientRect();
                 if (r.height < 40 || r.width < 40) continue;
-                const visible =
-                  Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
-                const centerDist = Math.abs((r.top + r.bottom) / 2 - mid);
-                const playingBonus = (!v.paused && v.readyState >= 2) ? 5000 : 0;
-                const score = playingBonus + visible * 2 - centerDist;
+                const visibleW = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
+                const visibleH = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+                const centerDist = Math.hypot((r.left + r.right) / 2 - cx, (r.top + r.bottom) / 2 - cy);
+                const playingBonus = (!v.paused && v.readyState >= 2) ? 3000 : 0;
+                const score = visibleW * visibleH - centerDist * 300 + playingBonus;
                 if (score > bestScore) {
                   bestScore = score;
                   best = v;
@@ -130,6 +125,7 @@ def _active_reel_root_handle(page) -> Any | None:
               }
               if (!best) return null;
               let root =
+                best.closest('[aria-label="Video player"]') ||
                 best.closest('article') ||
                 best.closest('[role="presentation"]')?.parentElement ||
                 best.closest('div[style*="--x-height"]') ||
@@ -138,22 +134,15 @@ def _active_reel_root_handle(page) -> Any | None:
               // (кнопки часто рядом с видео, не внутри самого <video>-блока).
               const hasActions = (node) => {
                 if (!node || !node.querySelector) return false;
-                return !!(
-                  node.querySelector(
-                    'svg[aria-label="Like"], svg[aria-label="Нравится"], ' +
-                    'svg[aria-label="Unlike"], svg[aria-label="Не нравится"]'
-                  ) ||
-                  Array.from(
-                    node.querySelectorAll('[role="button"], button')
-                  ).some((b) =>
-                    /^(Follow|Подписаться|Following|Подписки)$/i.test(
-                      ((b.innerText || b.textContent || '').trim().split('\\n')[0] || '')
-                    )
-                  )
+                return !!node.querySelector(
+                  'svg[aria-label="Like"], svg[aria-label="Нравится"], ' +
+                  'svg[aria-label="Unlike"], svg[aria-label="Не нравится"], ' +
+                  'svg[aria-label="Liked"]'
                 );
               };
               let guard = 0;
               while (root && root !== document.body && guard < 12) {
+                if (root.querySelectorAll('video').length > 1) return null;
                 if (hasActions(root)) break;
                 root = root.parentElement;
                 guard += 1;
@@ -173,17 +162,18 @@ def _current_video_src(page) -> str:
               const videos = Array.from(document.querySelectorAll(
                 '[role="dialog"] video, article video, main video'
               ));
+              const vw = window.innerWidth || 1200;
               const vh = window.innerHeight || 800;
-              const mid = vh / 2;
+              const cx = vw / 2, cy = vh / 2;
               let best = null, bestScore = -1;
               for (const v of videos) {
                 const r = v.getBoundingClientRect();
                 if (r.height < 40) continue;
-                const visible =
-                  Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
-                const centerDist = Math.abs((r.top + r.bottom) / 2 - mid);
-                const playingBonus = (!v.paused && v.readyState >= 2) ? 5000 : 0;
-                const score = playingBonus + visible * 2 - centerDist;
+                const visibleW = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
+                const visibleH = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+                const centerDist = Math.hypot((r.left + r.right) / 2 - cx, (r.top + r.bottom) / 2 - cy);
+                const playingBonus = (!v.paused && v.readyState >= 2) ? 3000 : 0;
+                const score = visibleW * visibleH - centerDist * 300 + playingBonus;
                 if (score > bestScore) {
                   bestScore = score;
                   best = v;
@@ -208,24 +198,40 @@ def _current_post_key(page) -> str:
               const videos = Array.from(document.querySelectorAll(
                 '[role="dialog"] video, article video, main video'
               ));
+              const vw = window.innerWidth || 1200;
               const vh = window.innerHeight || 800;
-              const mid = vh / 2;
-              let bestSrc = '';
+              const cx = vw / 2, cy = vh / 2;
+              let bestVideo = null;
               let bestScore = -1;
               for (const v of videos) {
                 const r = v.getBoundingClientRect();
                 if (r.height < 40 || r.width < 40) continue;
-                const visible =
-                  Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
-                const centerDist = Math.abs((r.top + r.bottom) / 2 - mid);
-                const playingBonus = (!v.paused && v.readyState >= 2) ? 5000 : 0;
-                const score = playingBonus + visible * 2 - centerDist;
+                const visibleW = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
+                const visibleH = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+                const centerDist = Math.hypot((r.left + r.right) / 2 - cx, (r.top + r.bottom) / 2 - cy);
+                const playingBonus = (!v.paused && v.readyState >= 2) ? 3000 : 0;
+                const score = visibleW * visibleH - centerDist * 300 + playingBonus;
                 if (score > bestScore) {
                   bestScore = score;
-                  bestSrc = v.currentSrc || v.src || '';
+                  bestVideo = v;
                 }
               }
-              return code + '|' + bestSrc;
+              if (!bestVideo) return code ? 'post:' + code : ''; 
+              let owner = '';
+              let node = bestVideo;
+              for (let depth = 0; node && node !== document.body && depth < 14; depth++) {
+                const links = Array.from(node.querySelectorAll('a[href*="/reels/"]'));
+                const visibleLink = links.find((a) => {
+                  const r = a.getBoundingClientRect();
+                  return r.width > 0 && r.height > 0;
+                });
+                if (visibleLink) {
+                  owner = visibleLink.getAttribute('href') || '';
+                  break;
+                }
+                node = node.parentElement;
+              }
+              return code ? 'post:' + code : (bestVideo.currentSrc || bestVideo.src || '');
             }"""
         )
         return (key or "").strip()
@@ -244,7 +250,7 @@ def _wait_for_post_change(
     deadline = time.monotonic() + max(0.5, timeout_ms / 1000.0)
     while time.monotonic() < deadline:
         cur = _current_post_key(page)
-        if cur and cur != prev:
+        if cur and prev and cur != prev:
             page.wait_for_timeout(350)
             return True
         page.wait_for_timeout(200)
@@ -418,10 +424,9 @@ def _try_follow_in_element(el) -> str:
 
 
 def _try_like_current_reel(page) -> bool:
-    root = _active_reel_root_handle(page)
-    el = _element_from_handle(root)
-    if el is not None:
-        status = _try_like_in_element(el)
+    for attempt in range(4):
+        el = _element_from_handle(_active_reel_root_handle(page))
+        status = _try_like_in_element(el) if el is not None else "missing"
         if status == "already":
             _log("Reels: уже лайкнуто — пропуск.")
             return False
@@ -429,29 +434,10 @@ def _try_like_current_reel(page) -> bool:
             page.wait_for_timeout(400)
             _log("Reels: лайк поставлен.")
             return True
-        if status == "error":
-            _log("Reels: лайк не удался в корне рилса.")
+        if attempt < 3:
+            page.wait_for_timeout(500)
 
-    # Fallback: page.locator (у Page метод есть).
-    try:
-        unlike = page.locator(_UNLIKE_SVG_SEL)
-        if unlike.count() and unlike.first.is_visible(timeout=500):
-            _log("Reels: уже лайкнуто — пропуск.")
-            return False
-    except Exception:
-        pass
-    try:
-        like_svg = page.locator(_LIKE_SVG_SEL).first
-        if like_svg.is_visible(timeout=1_500):
-            btn = like_svg.locator("xpath=ancestor::*[@role='button'][1]")
-            target = btn if btn.count() else like_svg
-            target.click(timeout=3_000)
-            page.wait_for_timeout(400)
-            _log("Reels: лайк поставлен.")
-            return True
-    except Exception as e:
-        _log(f"Reels: лайк не удался (page): {type(e).__name__}")
-    _log("Reels: кнопка лайка не найдена.")
+    _log("Reels: кнопка лайка активного ролика не найдена.")
     return False
 
 
@@ -470,116 +456,43 @@ def _try_follow_current_reel(page) -> bool:
         if status == "error":
             _log("Reels: Follow не удался в корне рилса.")
 
-    # Fallback по всей странице (Follow часто только в карточке рилса —
-    # ищем среди видимых кнопок с точным текстом).
-    try:
-        follow_btn = page.get_by_role(
-            "button", name=_FOLLOW_BTN_RE
-        ).first
-        if follow_btn.is_visible(timeout=1_200):
-            follow_btn.scroll_into_view_if_needed(timeout=2_000)
-            follow_btn.click(timeout=3_000)
-            page.wait_for_timeout(500)
-            _log("Reels: подписка оформлена.")
-            return True
-    except Exception:
-        pass
-    try:
-        following = page.get_by_role("button", name=_FOLLOWING_BTN_RE).first
-        if following.is_visible(timeout=400):
-            _log("Reels: уже подписан / запрошено — пропуск.")
-            return False
-    except Exception:
-        pass
-    try:
-        buttons = page.locator('[role="button"]')
-        n = min(buttons.count(), 80)
-        for i in range(n):
-            btn = buttons.nth(i)
-            try:
-                if not btn.is_visible(timeout=300):
-                    continue
-                text = (btn.inner_text(timeout=400) or "").strip().split("\n")[0].strip()
-            except Exception:
-                continue
-            if not text:
-                continue
-            if _FOLLOWING_BTN_RE.match(text):
-                _log("Reels: уже подписан / запрошено — пропуск.")
-                return False
-            if _FOLLOW_BTN_RE.match(text):
-                btn.scroll_into_view_if_needed(timeout=2_000)
-                btn.click(timeout=3_000)
-                page.wait_for_timeout(500)
-                _log("Reels: подписка оформлена.")
-                return True
-    except Exception as e:
-        _log(f"Reels: Follow не удался (page): {type(e).__name__}")
-    _log("Reels: кнопка Follow не найдена.")
+    _log("Reels: кнопка подписки активного ролика не найдена.")
     return False
 
 
 def _advance_to_next_reel(page, *, prev_src: str, sideways: bool = False) -> bool:
-    """Перейти к следующему рилсу (кнопка Далее / стрелки / свайп)."""
-    prev_key = _current_post_key(page) or (prev_src or "").strip()
-
-    def _changed(*, timeout_ms: int = 4_500) -> bool:
-        if _wait_for_post_change(page, prev_key, timeout_ms=timeout_ms):
-            return True
-        cur = _current_post_key(page)
-        return bool(cur and prev_key and cur != prev_key)
-
-    if sideways:
-        # В keyword-search модалке надёжнее только ArrowRight:
-        # общие aria «Next/Далее» часто кликают мимо и дают двойной скролл.
-        for attempt in range(1, 4):
-            try:
-                page.keyboard.press("ArrowRight")
-            except Exception as e:
-                _log(f"Reels: ArrowRight не сработал: {type(e).__name__}")
-                return False
-            if _changed(timeout_ms=5_000 if attempt == 1 else 6_000):
-                return True
-            _log(f"Reels: ArrowRight попытка {attempt}/3 — пост ещё не сменился.")
-        _log("Reels: не удалось перейти к следующему рилсу (вправо).")
-        return False
-
-    # 1) Кнопка навигации (лента рекомендаций и модалка профиля)
-    for aria in (
-        "Navigate to next Reel",
-        "Следующий Reel",
-        "Перейти к следующему Reel",
-        "Next",
-        "Далее",
-        "Следующее",
-    ):
-        try:
-            btn = page.locator(f'[aria-label="{aria}"]').first
-            if btn.is_visible(timeout=500):
-                btn.click(timeout=3_000)
-                if _changed():
-                    return True
-        except Exception:
-            continue
-
-    # 2) Клавиши: в ленте — вниз, запасной вариант — вправо.
-    for key in ("ArrowDown", "ArrowRight"):
-        try:
-            page.keyboard.press(key)
-            if _changed():
-                return True
-        except Exception as e:
-            _log(f"Reels: {key} не сработал: {type(e).__name__}")
-
-    # 3) Колесо мыши — только для вертикальной ленты рекомендаций.
+    """Переход считается успешным только после смены активного поста."""
+    previous = _current_post_key(page)
+    key = "ArrowRight" if sideways else "ArrowDown"
     try:
-        page.mouse.wheel(0, 900)
-        if _changed():
+        page.keyboard.press(key)
+        if _wait_for_post_change(page, previous):
             return True
-    except Exception:
-        pass
-
-    _log("Reels: не удалось перейти к следующему рилсу.")
+        if not sideways:
+            # Колесо направляем на видимое видео, чтобы прокручивалась лента,
+            # а не боковая панель или ранее просмотренная карточка.
+            point = page.evaluate("""() => {
+              const videos = [...document.querySelectorAll('main video')];
+              const candidates = videos.map(v => {
+                const r = v.getBoundingClientRect();
+                const area = Math.max(0, Math.min(r.right, innerWidth) - Math.max(r.left, 0)) *
+                  Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0));
+                return {r, area};
+              }).filter(x => x.area > 0).sort((a, b) => b.area - a.area);
+              if (!candidates.length) return null;
+              const r = candidates[0].r;
+              return {x: Math.max  (1, Math.min(innerWidth - 1, (r.left + r.right) / 2)),
+                      y: Math.max(1, Math.min(innerHeight - 1, (r.top + r.bottom) / 2)),
+                      delta: Math.max(400, Math.round(innerHeight * 0.85))};
+            }""")
+            if point:
+                page.mouse.move(point["x"], point["y"])
+                page.mouse.wheel(0, point["delta"])
+                if _wait_for_post_change(page, previous):
+                    return True
+    except Exception as e:
+        _log(f"Reels: переход не удался: {type(e).__name__}")
+    _log("Reels: смена ролика не подтверждена.")
     return False
 
 
@@ -837,9 +750,9 @@ def browse_instagram_reels_from_search(
         sideways=True,
     )
     _log(f"Reels: прогрев по поиску завершён ({watched}/{n}).")
-    if watched <= 0:
+    if watched < n:
         raise RuntimeError(
-            f"Прогрев Instagram Reels по поиску «{q}» не просмотрел ни одного ролика."
+            f"Прогрев Instagram Reels по поиску «{q}» остановился: просмотрено {watched} из {n}."
         )
 
 
@@ -864,6 +777,7 @@ def browse_instagram_reels(
     )
     _ensure_reels_feed(page)
 
+    watched = 0
     for i in range(1, n + 1):
         prev_src = _current_video_src(page)
         _log(f"Reels: рилс {i}/{n}…")
@@ -873,6 +787,7 @@ def browse_instagram_reels(
             watch_max_s=watch_max_s,
             watch_full=watch_full,
         )
+        watched += 1
         if _roll(like_p):
             _try_like_current_reel(page)
         else:
@@ -887,7 +802,9 @@ def browse_instagram_reels(
                 break
             page.wait_for_timeout(random.randint(400, 900))
 
-    _log(f"Reels: прогрев завершён ({n} запрошено).")
+    _log(f"Reels: прогрев завершён ({watched}/{n}).")
+    if watched < n:
+        raise RuntimeError(f"Прогрев Instagram Reels остановился: просмотрено {watched} из {n}.")
 
 
 @instagram_entrypoint

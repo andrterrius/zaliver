@@ -1926,16 +1926,11 @@ def _js_set_caption(locator, text: str) -> None:
 
 
 def _read_caption_text(area) -> str:
-    try:
-        return (
-            area.evaluate(
-                "(el) => (el && (el.innerText ?? el.textContent) "
-                "? String(el.innerText ?? el.textContent) : '')"
-            )
-            or ""
-        )
-    except Exception:
-        return ""
+    return area.evaluate(
+        "(el) => el ? String((el.tagName === 'TEXTAREA' || "
+        "el.tagName === 'INPUT') ? el.value : "
+        "(el.innerText ?? el.textContent ?? '')) : ''"
+    ) or ""
 
 
 def _focus_caption_without_scroll(area) -> None:
@@ -1949,39 +1944,10 @@ def _focus_caption_without_scroll(area) -> None:
 
 def _paste_caption_text(page, area, text: str) -> None:
     """Вставить описание целиком, без посимвольного тайпинга (он скроллит Studio)."""
-    _focus_caption_without_scroll(area)
-    try:
-        page.wait_for_timeout(40)
-    except Exception:
-        time.sleep(0.04)
-    try:
-        area.evaluate(
-            """(el, value) => {
-                try { el.focus({ preventScroll: true }); } catch (_) { el.focus(); }
-                let dt = null;
-                try { dt = new DataTransfer(); dt.setData('text/plain', value); } catch (_) {}
-                let ev;
-                try {
-                    ev = new ClipboardEvent('paste', {
-                        bubbles: true,
-                        cancelable: true,
-                        clipboardData: dt || undefined,
-                    });
-                } catch (_) {
-                    ev = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
-                }
-                if (dt && !ev.clipboardData) {
-                    try { Object.defineProperty(ev, 'clipboardData', { value: dt }); } catch (__) {}
-                }
-                el.dispatchEvent(ev);
-            }""",
-            text,
-        )
-    except Exception:
-        pass
-    if _caption_field_is_empty(_read_caption_text(area)):
-        _focus_caption_without_scroll(area)
-        page.keyboard.insert_text(text)
+    # Draft.js needs a real click to establish its internal selection after
+    # the previous caption was deleted; focus() alone is not sufficient.
+    area.click(timeout=4_000)
+    page.keyboard.insert_text(text)
 
 
 def _caption_gaps_preserved(wanted: str, got: str) -> bool:
@@ -1996,6 +1962,20 @@ def _caption_compare_norm(text: str) -> str:
     raw = raw.replace(BLANK_LINE_BRAILLE, "\n").replace("\u200b", "")
     lines = [ln.rstrip() for ln in raw.split("\n")]
     return "\n".join(lines).strip()
+
+
+def _build_tiktok_caption(title: str, description: str) -> str:
+    title = (title or "").strip()
+    description = (description or "").strip()
+    if not title or not description:
+        return title or description
+    normalized_title = _caption_compare_norm(title)
+    normalized_description = _caption_compare_norm(description)
+    if normalized_description == normalized_title or normalized_description.startswith(
+        normalized_title + "\n"
+    ):
+        return description
+    return f"{title}\n\n{description}"
 
 
 _OUTPUT_STEM_RE = re.compile(r".+_u_[0-9a-f]{8,}$", re.I)
@@ -2017,8 +1997,6 @@ def _caption_still_ours(wanted: str, got: str, *, video_stem: str = "") -> bool:
     compact_want = re.sub(r"\s+", "", want)
     compact_have = re.sub(r"\s+", "", have)
     if compact_want and compact_have == compact_want:
-        return True
-    if want in have and not (stem and have == stem):
         return True
     return False
 
@@ -2101,40 +2079,14 @@ def _clear_caption_field(page, area, *, timeout_s: float = 8.0) -> bool:
     deadline = time.monotonic() + max(1.0, float(timeout_s))
     while time.monotonic() < deadline:
         try:
-            _dom_click(area)
+            area.click(timeout=4_000)
         except Exception:
-            try:
-                area.click(timeout=4_000)
-            except Exception:
-                pass
+            return False
         try:
             page.keyboard.press("ControlOrMeta+A")
             page.wait_for_timeout(30)
             page.keyboard.press("Backspace")
             page.keyboard.press("Delete")
-        except Exception:
-            pass
-        try:
-            area.evaluate(
-                """(el) => {
-                    el.focus();
-                    try {
-                        const sel = window.getSelection();
-                        const range = document.createRange();
-                        range.selectNodeContents(el);
-                        sel.removeAllRanges();
-                        sel.addRange(range);
-                    } catch (_) {}
-                    try { document.execCommand('selectAll', false, null); } catch (_) {}
-                    try { document.execCommand('delete', false, null); } catch (_) {}
-                    const tag = (el.tagName || '').toUpperCase();
-                    if (tag === 'TEXTAREA' || tag === 'INPUT') {
-                        el.value = '';
-                        el.dispatchEvent(new Event('input', { bubbles: true }));
-                        el.dispatchEvent(new Event('change', { bubbles: true }));
-                    }
-                }"""
-            )
         except Exception:
             pass
         try:
@@ -2203,14 +2155,17 @@ def _fill_caption(
             if _ok(_read_caption_text(area)):
                 return True
             _paste_caption_text(page, area, text)
-            page.wait_for_timeout(200)
-            got = _read_caption_text(area)
-            if _ok(got):
-                _log(
-                    f"TikToks upload: описание вставлено целиком "
-                    f"({len(text)} символов)."
-                )
-                return True
+            deadline = time.monotonic() + 2.0
+            got = ""
+            while time.monotonic() < deadline:
+                page.wait_for_timeout(200)
+                got = _read_caption_text(area)
+                if _ok(got):
+                    _log(
+                        f"TikToks upload: описание вставлено целиком "
+                        f"({len(text)} символов)."
+                    )
+                    return True
             _log(
                 "TikToks upload: после вставки описание не совпало "
                 f"(got={got!r})."
@@ -2223,23 +2178,6 @@ def _fill_caption(
         except Exception as e:
             _log(f"TikToks upload: вставка описания не удалась: {e!r}")
 
-        try:
-            if not _ready_empty_to_write():
-                return False
-            if _ok(_read_caption_text(area)):
-                return True
-            _js_set_caption(area, text)
-            page.wait_for_timeout(200)
-            got = _read_caption_text(area)
-            if _ok(got):
-                _log(
-                    f"TikToks upload: описание вставлено через JS "
-                    f"({len(text)} символов)."
-                )
-                return True
-            _log(f"TikToks upload: JS-описание не совпало (got={got!r}).")
-        except Exception as e:
-            _log(f"TikToks upload: JS-вставка описания не удалась: {e!r}")
         return False
     except Exception as e:
         _log(f"TikToks upload: не удалось ввести описание: {e!r}")
@@ -2276,6 +2214,19 @@ def _verify_or_refill_caption(
     return _fill_caption(
         page, caption, video_stem=video_stem, find_timeout_s=8.0
     )
+
+
+def _caption_remains_correct(page, caption: str, *, video_stem: str = "") -> bool:
+    if not _caption_compare_norm(caption):
+        return True
+    for _ in range(3):
+        page.wait_for_timeout(500)
+        area = _pick_caption_area(page, timeout_s=2.0)
+        if area is None or not _caption_write_ok(
+            caption, _read_caption_text(area), video_stem=video_stem
+        ):
+            return False
+    return True
 
 
 def _pick_header_share_button(page):
@@ -3986,11 +3937,7 @@ def run_tiktok_reels_upload(
                 f"TikToks upload: следующее видео {job_i + 1}/{len(jobs)}…"
             )
         upload_file = _validate_video_file_path(job_path)
-        caption = (job_title or "").strip() or (job_desc or "").strip()
-        if (job_desc or "").strip() and (job_title or "").strip():
-            caption = (
-                f"{(job_title or '').strip()}\n\n{(job_desc or '').strip()}".strip()
-            )
+        caption = _build_tiktok_caption(job_title, job_desc)
 
         for attempt in range(1, _CREATE_FLOW_RETRY_ATTEMPTS + 1):
             try:
@@ -4032,15 +3979,6 @@ def run_tiktok_reels_upload(
         _wait_studio_details(page)
         _dismiss_studio_modals(page)
         video_stem = upload_file.stem
-        _log(
-            "TikToks upload: сначала проверяем описание, "
-            "потом пишем при необходимости…"
-        )
-        _verify_or_refill_caption(page, caption, video_stem=video_stem)
-
-        def _keep_caption() -> None:
-            _verify_or_refill_caption(page, caption, video_stem=video_stem)
-
         if job_at is not None:
             _log(
                 "TikToks upload: файл ещё грузится — "
@@ -4058,10 +3996,15 @@ def run_tiktok_reels_upload(
             except Exception:
                 pass
 
-        _wait_studio_file_uploaded(page, on_tick=_keep_caption)
-        _keep_caption()
-        _wait_copyright_checks_done(page, on_tick=_keep_caption)
-        _keep_caption()
+        _wait_studio_file_uploaded(page)
+        _wait_copyright_checks_done(page)
+        _log("TikToks upload: заполняем описание после завершения загрузки и проверок…")
+        if not _verify_or_refill_caption(page, caption, video_stem=video_stem) or not _caption_remains_correct(
+            page, caption, video_stem=video_stem
+        ):
+            raise TikTokReelsUploadError(
+                "Не удалось проверить описание перед публикацией TikTok."
+            )
         _click_studio_post(page, scheduled=job_at is not None)
         candidates = _collect_recent_tiktok_posts(
             page,

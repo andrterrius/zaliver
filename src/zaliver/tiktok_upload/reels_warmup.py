@@ -184,7 +184,7 @@ def _active_reel_root_handle(page) -> Any | None:
                   'article[data-e2e="recommend-list-item-container"]'
                 );
                 if (!art) continue;
-                const playingBonus = (!v.paused && v.readyState >= 2) ? 5000 : 0;
+                const playingBonus = (!v.paused && v.readyState >= 2) ? 10 : 0;
                 const score = scoreEl(v, playingBonus);
                 if (score > bestScore) {
                   bestScore = score;
@@ -223,7 +223,7 @@ def _current_video_src(page) -> str:
                 const visible =
                   Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
                 const centerDist = Math.abs((r.top + r.bottom) / 2 - mid);
-                const playingBonus = (!v.paused && v.readyState >= 2) ? 5000 : 0;
+                const playingBonus = (!v.paused && v.readyState >= 2) ? 10 : 0;
                 const score = playingBonus + visible * 2 - centerDist;
                 if (score > bestScore) {
                   bestScore = score;
@@ -239,62 +239,35 @@ def _current_video_src(page) -> str:
 
 
 def _current_post_key(page) -> str:
-    """Идентификатор текущего видео: data-scroll-index / id карточки + src."""
+    """Индекс наиболее видимой карточки, либо URL/источник в плеере поиска."""
     try:
-        key = page.evaluate(
-            """() => {
-              const articles = Array.from(document.querySelectorAll(
-                'article[data-e2e="recommend-list-item-container"]'
-              ));
-              const vh = window.innerHeight || 800;
-              const mid = vh / 2;
-              let bestArt = null;
-              let bestSrc = '';
-              let bestScore = -1;
-              const videos = Array.from(document.querySelectorAll(
-                'article[data-e2e="recommend-list-item-container"] video, main video'
-              ));
-              for (const v of videos) {
-                const r = v.getBoundingClientRect();
-                if (r.height < 40 || r.width < 40) continue;
-                const visible =
-                  Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
-                const centerDist = Math.abs((r.top + r.bottom) / 2 - mid);
-                const playingBonus = (!v.paused && v.readyState >= 2) ? 5000 : 0;
-                const score = playingBonus + visible * 2 - centerDist;
-                if (score > bestScore) {
-                  bestScore = score;
-                  bestSrc = v.currentSrc || v.src || '';
-                  bestArt = v.closest(
-                    'article[data-e2e="recommend-list-item-container"]'
-                  );
-                }
-              }
-              if (!bestArt) {
-                for (const art of articles) {
-                  const r = art.getBoundingClientRect();
-                  if (r.height < 40) continue;
-                  const visible =
-                    Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
-                  const centerDist = Math.abs((r.top + r.bottom) / 2 - mid);
-                  const score = visible * 2 - centerDist;
-                  if (score > bestScore) {
-                    bestScore = score;
-                    bestArt = art;
-                  }
-                }
-              }
-              const idx = bestArt
-                ? (bestArt.getAttribute('data-scroll-index')
-                   || bestArt.id
-                   || '')
-                : '';
-              return idx + '|' + bestSrc;
-            }"""
-        )
-        return (key or "").strip()
+        return (page.evaluate(r"""() => {
+          const cards = [...document.querySelectorAll('article[data-e2e="recommend-list-item-container"]')];
+          const ranked = cards.map(card => {
+            const r = card.getBoundingClientRect();
+            const area = Math.max(0, Math.min(r.right, innerWidth) - Math.max(r.left, 0)) *
+                         Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0));
+            return {card, area};
+          }).filter(x => x.area > 0).sort((a, b) => b.area - a.area);
+          if (ranked.length) {
+            const card = ranked[0].card;
+            const index = card.getAttribute('data-scroll-index') || card.id;
+            if (index) return 'card:' + index;
+            const video = card.querySelector('video');
+            if (video && (video.currentSrc || video.src)) return 'video:' + (video.currentSrc || video.src);
+          }
+          const match = location.pathname.match(/\/video\/([^/]+)/);
+          if (match) return 'post:' + match[1];
+          const videos = [...document.querySelectorAll('video')].map(video => {
+            const r = video.getBoundingClientRect();
+            return {video, area: Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0)) *
+              Math.max(0, Math.min(r.right, innerWidth) - Math.max(r.left, 0))};
+          }).filter(x => x.area > 0).sort((a,b) => b.area - a.area);
+          const v = videos[0]?.video;
+          return v && (v.currentSrc || v.src) ? 'video:' + (v.currentSrc || v.src) : '';
+        }""") or '').strip()
     except Exception:
-        return ""
+        return ''
 
 
 def _wait_for_post_change(
@@ -308,7 +281,7 @@ def _wait_for_post_change(
     deadline = time.monotonic() + max(0.5, timeout_ms / 1000.0)
     while time.monotonic() < deadline:
         cur = _current_post_key(page)
-        if cur and cur != prev:
+        if cur and prev and cur != prev:
             page.wait_for_timeout(350)
             return True
         page.wait_for_timeout(200)
@@ -633,13 +606,6 @@ def _advance_to_next_reel(page, *, prev_src: str, sideways: bool = False) -> boo
     except Exception:
         pass
 
-    try:
-        card = page.locator('[data-e2e="feed-video"]').first
-        if card.count():
-            card.click(timeout=1_500)
-    except Exception:
-        pass
-
     for key in ("ArrowDown", "PageDown"):
         try:
             page.keyboard.press(key)
@@ -649,6 +615,19 @@ def _advance_to_next_reel(page, *, prev_src: str, sideways: bool = False) -> boo
             _log(f"TikTok: {key} не сработал: {type(e).__name__}")
 
     try:
+        point = page.evaluate("""() => {
+          const cards = [...document.querySelectorAll('article[data-e2e="recommend-list-item-container"], main video')];
+          const visible = cards.map(el => { const r = el.getBoundingClientRect();
+            return {r, area: Math.max(0, Math.min(r.right, innerWidth) - Math.max(r.left, 0)) *
+              Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0))};
+          }).filter(x => x.area > 0).sort((a,b) => b.area - a.area);
+          if (!visible.length) return null;
+          const r = visible[0].r;
+          return {x: Math.max(1, Math.min(innerWidth - 1, (r.left+r.right)/2)),
+                  y: Math.max(1, Math.min(innerHeight - 1, (r.top+r.bottom)/2))};
+        }""")
+        if point:
+            page.mouse.move(point["x"], point["y"])
         page.mouse.wheel(0, 900)
         if _changed():
             return True
@@ -968,6 +947,7 @@ def browse_tiktok_reels(
     )
     _ensure_reels_feed(page)
 
+    watched = 0
     for i in range(1, n + 1):
         prev_src = _current_video_src(page)
         _log(f"TikTok: видео {i}/{n}…")
@@ -977,6 +957,7 @@ def browse_tiktok_reels(
             watch_max_s=watch_max_s,
             watch_full=watch_full,
         )
+        watched += 1
         if _roll(like_p):
             _try_like_current_reel(page)
         else:
@@ -991,7 +972,9 @@ def browse_tiktok_reels(
                 break
             page.wait_for_timeout(random.randint(400, 900))
 
-    _log(f"TikTok: прогрев завершён ({n} запрошено).")
+    _log(f"TikTok: прогрев завершён ({watched}/{n}).")
+    if watched < n:
+        raise RuntimeError(f"Прогрев TikTok остановился: просмотрено {watched} из {n}.")
 
 
 @tiktok_entrypoint

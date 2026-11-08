@@ -74,8 +74,10 @@ def warmup_combined_profile(
             else:
                 browser, context, initial = _playwright_page_from_cdp(owner, endpoints)
             target_ids = {}
-            for index, platform in enumerate(platforms):
-                page = initial if index == 0 else context.new_page()
+            # Keep the profile's original tab open until all workers finish.
+            # Some antidetect browsers end the session when that tab closes.
+            for platform in platforms:
+                page = context.new_page()
                 session = context.new_cdp_session(page)
                 try:
                     target_ids[platform] = session.send("Target.getTargetInfo")[

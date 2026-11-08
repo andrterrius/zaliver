@@ -152,12 +152,13 @@ def test_combined_warmup_owns_one_session_and_runs_three_tabs_concurrently():
     class Page:
         def __init__(self, target):
             self.target = target
+            self.closed = False
 
         def goto(self, *args, **kwargs):
             pass
 
         def close(self):
-            pass
+            self.closed = True
 
     class Context:
         def __init__(self):
@@ -183,6 +184,7 @@ def test_combined_warmup_owns_one_session_and_runs_three_tabs_concurrently():
     def runner(page, **kwargs):
         barrier.wait(timeout=3)
         api.stop_profile.assert_not_called()
+        assert not context.pages[0].closed
         with lock:
             completed.append(page.target)
 
@@ -203,7 +205,9 @@ def test_combined_warmup_owns_one_session_and_runs_three_tabs_concurrently():
         warmup_combined_profile(
             "profile", platforms=["youtube", "instagram", "tiktok"], kind="dolphin"
         )
-    assert sorted(completed) == ["0", "1", "2"]
+    assert sorted(completed) == ["1", "2", "3"]
+    assert not context.pages[0].closed
+    assert all(page.closed for page in context.pages[1:])
     api.start_profile.assert_called_once()
     api.stop_profile.assert_called_once_with("profile")
     assert playwright.call_count == 4  # owner plus one transport per worker

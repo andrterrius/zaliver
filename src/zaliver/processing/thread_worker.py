@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import colorsys
 import queue
 import random
 import secrets
@@ -65,7 +66,7 @@ from zaliver.processing.ffmpeg_merge import (
     stamp_output_video_metadata,
     mux_video_background_music,
     apply_file_compression_from_options,
-    frame_size_for_quality,
+    frame_size_for_uniquify_quality,
     pick_best_h264_encoder,
     sync_ffmpeg_env_for_children,
 )
@@ -795,6 +796,29 @@ class ProcessingService:
                         # Галочки в UI: выключенный фильтр → нейтральное значение.
                         settings = apply_uniquify_effect_enables(settings, options)
 
+                    scales = options.get("video_scales") or {}
+                    scale = scales.get(os.path.normcase(str(p.resolve())), (1.0, 1.0))
+                    if isinstance(scale, (list, tuple)) and len(scale) == 2:
+                        settings["scale_x"], settings["scale_y"] = float(scale[0]), float(scale[1])
+                    position = (options.get("video_positions") or {}).get(os.path.normcase(str(p.resolve())), (0.0, 0.0))
+                    if isinstance(position, (list, tuple)) and len(position) == 2:
+                        settings["position_x"], settings["position_y"] = float(position[0]), float(position[1])
+                    crop_values = (options.get("video_crops") or {}).get(os.path.normcase(str(p.resolve())), (0.0, 0.0, 0.0, 0.0))
+                    if isinstance(crop_values, (list, tuple)) and len(crop_values) == 4:
+                        for name, value in zip(("crop_left", "crop_top", "crop_right", "crop_bottom"), crop_values):
+                            settings[name] = float(value)
+                    settings["scale_background"] = str(options.get("scale_background") or "black")
+                    settings["blur_strength"] = max(0, min(40, int(options.get("scale_blur_strength", 5))))
+                    settings["blur_darkness"] = max(0, min(80, int(options.get("scale_blur_darkness", 0))))
+                    if options.get("scale_random_color", True):
+                        rgb = colorsys.hsv_to_rgb(random.random(), random.uniform(.35, .65), random.uniform(.24, .42))
+                        settings["frame_color"] = ''.join(f'{round(c * 255):02x}' for c in rgb)
+                    else:
+                        settings["frame_color"] = str(options.get("scale_frame_color") or "#283957").lstrip('#')
+                    pattern = str(options.get("scale_pattern") or "geometry")
+                    settings["frame_pattern"] = pattern
+                    settings["frame_seed"] = random.randrange(1000000)
+
                     job_id = str(uuid.uuid4())
 
                     bg_track: Optional[str] = None
@@ -833,6 +857,14 @@ class ProcessingService:
                         text_overlay=job_text_overlay,
                         use_gpu_finalize=use_gpu_finalize,
                         no_effects=no_effects,
+                    )
+                    log(
+                        f"{job.tag(n_jobs)}: масштаб "
+                        f"{settings.get('scale_x', 1.0) * 100:.0f}% × "
+                        f"{settings.get('scale_y', 1.0) * 100:.0f}%, "
+                        f"смещение {settings.get('position_x', 0.0) * 100:.0f}% / "
+                        f"{settings.get('position_y', 0.0) * 100:.0f}%, "
+                        f"фон: {settings.get('scale_background', 'black')}."
                     )
                     if no_effects:
                         log(
@@ -1146,7 +1178,7 @@ class ProcessingService:
                         if not j.text_overlay:
                             return None
                         toc = TextOverlaySettings.from_dict(j.text_overlay)
-                        out_w, out_h = frame_size_for_quality(
+                        out_w, out_h = frame_size_for_uniquify_quality(
                             j.info.width, j.info.height, output_quality
                         )
                         scaled = compute_scaled_overlay_for_worker(toc, out_w, out_h)

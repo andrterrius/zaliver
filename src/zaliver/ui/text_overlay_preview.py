@@ -45,6 +45,223 @@ _FRAME_CACHE: dict[tuple[str, float, int], QPixmap] = {}
 _FRAME_CACHE_MAX = 12
 
 
+def _paint_frame_pattern(painter, frame, color, pattern):
+    painter.fillRect(frame, QColor(color))
+    if pattern == 'random':
+        pattern = 'mosaic'
+    if pattern == 'curved_grid':
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(255, 255, 255, 145), 1.5))
+        cx, cy = frame.center().x(), frame.center().y()
+        for index in range(-4, 5):
+            path = QPainterPath()
+            for i in range(41):
+                y = frame.top() + frame.height() * i / 40
+                x = cx + index * frame.width() / 8 * (1 + .35 * ((y-cy)/(frame.height()/2))**2)
+                if i == 0:
+                    path.moveTo(x, y)
+                else:
+                    path.lineTo(x, y)
+            painter.drawPath(path)
+            path = QPainterPath()
+            for i in range(41):
+                x = frame.left() + frame.width() * i / 40
+                y = cy + index * frame.height() / 8 * (1 + .35 * ((x-cx)/(frame.width()/2))**2)
+                if i == 0:
+                    path.moveTo(x, y)
+                else:
+                    path.lineTo(x, y)
+            painter.drawPath(path)
+        return
+    painter.setPen(QPen(QColor(255, 255, 255, 38), 1))
+    step = 24
+    for x in range(int(frame.left()), int(frame.right()), step):
+        if pattern in ('grid', 'stripes'):
+            painter.drawLine(x, int(frame.top()), x, int(frame.bottom()))
+        for y in range(int(frame.top()), int(frame.bottom()), step):
+            if pattern == 'geometry':
+                painter.drawRect(QRectF(x, y, 8, 8))
+            elif pattern == 'dots':
+                painter.fillRect(QRectF(x, y, 3, 3), QColor(255, 255, 255, 70))
+            elif pattern == 'mosaic':
+                alpha = 25 + ((x // step * 17 + y // step * 31) % 45)
+                painter.fillRect(QRectF(x, y, 12, 12), QColor(255, 255, 255, alpha))
+            elif pattern == 'grid' and x == int(frame.left()):
+                painter.drawLine(int(frame.left()), y, int(frame.right()), y)
+
+
+def _paint_blurred_background(painter, frame, pixmap, strength, darkness):
+    if strength:
+        size = max(24, min(480, round(960 / strength)))
+        pixmap = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    bg = pixmap.scaled(max(1, int(frame.width())), max(1, int(frame.height())), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+    painter.drawPixmap(frame, bg, QRectF((bg.width()-frame.width())/2, (bg.height()-frame.height())/2, frame.width(), frame.height()))
+    if darkness:
+        painter.fillRect(frame, QColor(0, 0, 0, round(255 * darkness / 100)))
+
+
+class ScalePreviewWidget(QWidget):
+    """Preview a source frame and resize it by dragging a corner."""
+
+    sizeChanged = pyqtSignal(float, float)
+    positionChanged = pyqtSignal(float, float)
+    cropChanged = pyqtSignal(float, float, float, float)
+    editStarted = pyqtSignal()
+    editFinished = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(280, 480)
+        self.setMaximumHeight(620)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._pixmap = None
+        self._sx = self._sy = 1.0
+        self._drag = False
+        self._moving = False
+        self._x = self._y = 0.0
+        self._crop = (0.0, 0.0, 0.0, 0.0)
+        self._cropping = False
+        self._background = 'black'
+        self._frame_color = '#283957'
+        self._pattern = 'geometry'
+        self._blur_strength, self._blur_darkness = 5, 0
+
+    def set_blur_options(self, strength, darkness):
+        self._blur_strength, self._blur_darkness = strength, darkness
+        self.update()
+
+    def set_frame_options(self, color, pattern):
+        self._frame_color, self._pattern = color, pattern
+        self.update()
+
+    def set_background_style(self, style):
+        self._background = style
+        self.update()
+
+    def set_background_video(self, path):
+        self._pixmap = load_video_frame_pixmap(path) if path else None
+        self.update()
+
+    def set_scale(self, sx, sy):
+        self._sx, self._sy = sx, sy
+        self.update()
+
+    def set_position(self, x, y):
+        self._x, self._y = x, y
+        self.update()
+
+    def set_crop(self, left, top, right, bottom):
+        self._crop = (left, top, right, bottom)
+        self.update()
+
+    def _visible_rect(self):
+        f = self._frame()
+        w, h = f.width() * self._sx, f.height() * self._sy
+        cx, cy = f.center().x() + self._x*f.width(), f.center().y() + self._y*f.height()
+        l, t, r, b = self._crop
+        return QRectF(cx-w/2+l*w, cy-h/2+t*h, w*(1-l-r), h*(1-t-b))
+
+    def _frame(self):
+        p = self._pixmap
+        aspect = p.width() / p.height() if p and not p.isNull() else 9 / 16
+        w = min(self.width() - 24, (self.height() - 24) * aspect)
+        h = w / aspect
+        return QRectF((self.width()-w)/2, (self.height()-h)/2, w, h)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor('#0f1117'))
+        frame = self._frame()
+        cx = frame.center().x() + self._x * frame.width()
+        cy = frame.center().y() + self._y * frame.height()
+        painter.fillRect(frame, QColor('black'))
+        painter.save()
+        painter.setClipRect(frame)
+        if self._background == 'blur' and self._pixmap and not self._pixmap.isNull():
+            _paint_blurred_background(painter, frame, self._pixmap, self._blur_strength, self._blur_darkness)
+        elif self._background in ('solid', 'pattern'):
+            painter.fillRect(frame, QColor(self._frame_color))
+            if self._background == 'pattern':
+                _paint_frame_pattern(painter, frame, self._frame_color, self._pattern)
+        if self._pixmap and not self._pixmap.isNull():
+            w, h = frame.width()*self._sx, frame.height()*self._sy
+            l, t, r, b = self._crop
+            source = QRectF(l*self._pixmap.width(), t*self._pixmap.height(), (1-l-r)*self._pixmap.width(), (1-t-b)*self._pixmap.height())
+            painter.drawPixmap(self._visible_rect(), self._pixmap, source)
+        painter.restore()
+        painter.setPen(QPen(QColor('#60a5fa'), 2))
+        visible = self._visible_rect()
+        for x in (visible.left(), visible.right()):
+            for y in (visible.top(), visible.bottom()):
+                painter.fillRect(QRectF(x-4, y-4, 8, 8), QColor('#60a5fa'))
+
+    def mousePressEvent(self, event):
+        f = self._frame()
+        cx, cy = f.center().x() + self._x*f.width(), f.center().y() + self._y*f.height()
+        x, y = abs(event.position().x()-cx), abs(event.position().y()-cy)
+        visible = self._visible_rect()
+        pos = event.position()
+        near_left = abs(pos.x()-visible.left()) < 14
+        near_right = abs(pos.x()-visible.right()) < 14
+        near_top = abs(pos.y()-visible.top()) < 14
+        near_bottom = abs(pos.y()-visible.bottom()) < 14
+        corner = (near_left or near_right) and (near_top or near_bottom)
+        self._cropping = bool(corner and event.modifiers() & Qt.KeyboardModifier.AltModifier and event.button() == Qt.MouseButton.LeftButton)
+        self._crop_corner = (near_left, near_top)
+        self._drag = event.button() == Qt.MouseButton.LeftButton and corner and not self._cropping
+        self._moving = bool(self._pixmap and not self._drag and not self._cropping and event.button() == Qt.MouseButton.LeftButton and visible.contains(pos) and f.contains(pos))
+        if self._drag or self._moving or self._cropping:
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self.editStarted.emit()
+        self._move_start = (event.position(), self._x, self._y)
+        self._drag_start = (self._sx, self._sy)
+        self._resize_start = event.position()
+
+    def mouseMoveEvent(self, event):
+        if self._cropping:
+            f = self._frame()
+            w, h = f.width()*self._sx, f.height()*self._sy
+            left_edge = f.center().x()+self._x*f.width()-w/2
+            top_edge = f.center().y()+self._y*f.height()-h/2
+            l, t, r, b = self._crop
+            nx, ny = (event.position().x()-left_edge)/w, (event.position().y()-top_edge)/h
+            if self._crop_corner[0]: l = max(0., min(0.95-r, nx))
+            else: r = max(0., min(0.95-l, 1-nx))
+            if self._crop_corner[1]: t = max(0., min(0.95-b, ny))
+            else: b = max(0., min(0.95-t, 1-ny))
+            self._crop = (l, t, r, b)
+            self.cropChanged.emit(*self._crop)
+            self.update()
+        elif self._drag:
+            f = self._frame()
+            dx = event.position().x() - self._resize_start.x()
+            dy = event.position().y() - self._resize_start.y()
+            sx = max(.1, min(2., self._drag_start[0] + 2*dx*(-1 if self._crop_corner[0] else 1)/f.width()))
+            sy = max(.1, min(2., self._drag_start[1] + 2*dy*(-1 if self._crop_corner[1] else 1)/f.height()))
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                start_x, start_y = self._drag_start
+                factor = max(.1 / min(start_x, start_y), min(2. / max(start_x, start_y), (sx/start_x + sy/start_y)/2))
+                sx, sy = start_x * factor, start_y * factor
+            self._sx, self._sy = sx, sy
+            self.sizeChanged.emit(self._sx, self._sy)
+            self.update()
+        elif self._moving:
+            f = self._frame()
+            start, x, y = self._move_start
+            self._x = max(-1.0, min(1.0, x + (event.position().x()-start.x())/f.width()))
+            self._y = max(-1.0, min(1.0, y + (event.position().y()-start.y())/f.height()))
+            self.positionChanged.emit(self._x, self._y)
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        edited = self._drag or self._moving or self._cropping
+        self._drag = False
+        self._moving = False
+        self._cropping = False
+        if edited:
+            self.editFinished.emit()
+
+
 def _popen_flags() -> int:
     if sys.platform == "win32":
         return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -277,6 +494,14 @@ class TextOverlayPreviewWidget(QWidget):
         self._anim_frame = 0
         self._bg_video_path: str | None = None
         self._bg_pixmap: QPixmap | None = None
+        self._video_scale_x = 1.0
+        self._video_scale_y = 1.0
+        self._video_x = self._video_y = 0.0
+        self._video_crop = (0.0, 0.0, 0.0, 0.0)
+        self._video_background = "black"
+        self._frame_color = "#283957"
+        self._pattern = "geometry"
+        self._blur_strength, self._blur_darkness = 5, 0
         self._aspect_key: float | None = None
         self._text_visible = True
         self._playing = False
@@ -428,6 +653,28 @@ class TextOverlayPreviewWidget(QWidget):
             self._stop_animation()
         self.update()
 
+    def set_video_transform(self, sx: float, sy: float, background: str) -> None:
+        self._video_scale_x = sx
+        self._video_scale_y = sy
+        self._video_background = background
+        self.update()
+
+    def set_frame_options(self, color: str, pattern: str) -> None:
+        self._frame_color, self._pattern = color, pattern
+        self.update()
+
+    def set_blur_options(self, strength: int, darkness: int) -> None:
+        self._blur_strength, self._blur_darkness = strength, darkness
+        self.update()
+
+    def set_video_position(self, x: float, y: float) -> None:
+        self._video_x, self._video_y = x, y
+        self.update()
+
+    def set_video_crop(self, left: float, top: float, right: float, bottom: float) -> None:
+        self._video_crop = (left, top, right, bottom)
+        self.update()
+
     def set_background_video(
         self, path: str | Path | None, *, force: bool = False
     ) -> None:
@@ -454,7 +701,6 @@ class TextOverlayPreviewWidget(QWidget):
             and resolved == self._bg_video_path
             and self._bg_pixmap is not None
             and not self._bg_pixmap.isNull()
-            and not self._playing
         ):
             self._sync_play_button()
             return
@@ -717,15 +963,20 @@ class TextOverlayPreviewWidget(QWidget):
 
         bg = self._bg_pixmap
         if bg is not None and not bg.isNull():
-            scaled = bg.scaled(
-                max(1, int(round(fw))),
-                max(1, int(round(fh))),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            px = fx + (fw - scaled.width()) / 2.0
-            py = fy + (fh - scaled.height()) / 2.0
-            painter.drawPixmap(int(round(px)), int(round(py)), scaled)
+            painter.fillRect(frame_rect, QColor("black"))
+            if self._video_background == "blur":
+                _paint_blurred_background(painter, frame_rect, bg, self._blur_strength, self._blur_darkness)
+            elif self._video_background in ("solid", "pattern"):
+                painter.fillRect(frame_rect, QColor(self._frame_color))
+                if self._video_background == "pattern":
+                    _paint_frame_pattern(painter, frame_rect, self._frame_color, self._pattern)
+            video_w, video_h = fw*self._video_scale_x, fh*self._video_scale_y
+            px = fx + (fw - video_w) / 2.0 + self._video_x * fw
+            py = fy + (fh - video_h) / 2.0 + self._video_y * fh
+            l, t, r, b = self._video_crop
+            source = QRectF(l*bg.width(), t*bg.height(), (1-l-r)*bg.width(), (1-t-b)*bg.height())
+            target = QRectF(px+l*video_w, py+t*video_h, (1-l-r)*video_w, (1-t-b)*video_h)
+            painter.drawPixmap(target, bg, source)
             painter.fillRect(frame_rect, QColor(0, 0, 0, 40))
         else:
             painter.fillRect(frame_rect, QColor("#1a1f2e"))

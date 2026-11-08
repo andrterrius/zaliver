@@ -155,7 +155,7 @@ def _cpu_tail_after_download(
         sp = vf._scale_pct_block(w, h, scale_pct)
         if sp:
             tail.insert(0, sp)
-    tail.append(f"format=yuv420p,{vf._final_scale_block(w_out, h_out)}")
+    tail.append(f"format=yuv420p,{vf._uniquify_final_scale_block(w_out, h_out)}")
     return tail
 
 

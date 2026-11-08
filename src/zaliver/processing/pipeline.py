@@ -15,6 +15,20 @@ class UniquifySettings:
     saturation_scale: float = 1.0
     crop_jitter_px: int = 0  # max pixels crop from each side (random per chunk in worker)
     scale_pct: float = 100.0  # 99.5–100.5 style; 100 = no resize
+    scale_x: float = 1.0
+    scale_y: float = 1.0
+    position_x: float = 0.0
+    position_y: float = 0.0
+    crop_left: float = 0.0
+    crop_top: float = 0.0
+    crop_right: float = 0.0
+    crop_bottom: float = 0.0
+    scale_background: str = "black"
+    blur_strength: int = 5
+    blur_darkness: int = 0
+    frame_color: str = "202840"
+    frame_pattern: str = "geometry"
+    frame_seed: int = 0
     noise_sigma: float = 0.0
     seed_base: int = 0
     playback_speed_factor: float = 1.0  # 1.0 = без изменений; >1 быстрее видео+аудио

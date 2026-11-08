@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import json
+import math
 import sqlite3
 import sys
 import tempfile
@@ -28,7 +30,7 @@ from PyQt6.QtCore import (
     QUrl,
     pyqtSignal,
 )
-from PyQt6.QtGui import QDesktopServices, QMouseEvent, QPixmap, QShowEvent, QColor
+from PyQt6.QtGui import QDesktopServices, QMouseEvent, QPixmap, QShowEvent, QColor, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -46,6 +48,7 @@ from PyQt6.QtWidgets import (
     QLayout,
     QLabel,
     QLineEdit,
+    QInputDialog,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -171,7 +174,7 @@ from zaliver.ui.widgets import (
     wrap_work_section_page,
 )
 from zaliver.ui.text_overlay_io import make_text_overlay_io_buttons
-from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
+from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget, ScalePreviewWidget
 from zaliver.ui.slicing_tab_pane import SlicingTabPane
 from zaliver.ui.stitching_tab_pane import StitchingTabPane
 from zaliver.ui.channel_edit_tab_pane import ChannelEditTabPane
@@ -1120,7 +1123,7 @@ class MainWindow(QWidget):
         header_block.addWidget(self.progress_label)
 
         section_nav, section_nav_group, _section_btns = make_work_section_nav(
-            ["Исходники", "Фильтры", "Текст", "Музыка"],
+            ["Исходники", "Фильтры", "Масштабирование", "Текст", "Музыка"],
             parent=home,
         )
         header_block.addWidget(section_nav)
@@ -1188,6 +1191,8 @@ class MainWindow(QWidget):
         self.separate_platform_sources.toggled.connect(self._sync_platform_sources)
         self.separate_platform_sources.toggled.connect(self._save_folder_settings)
         self._platform_sources.changed.connect(self._save_folder_settings)
+        self._platform_sources.changed.connect(self._refresh_source_previews)
+        self.separate_platform_sources.toggled.connect(self._refresh_source_previews)
         io_grid.addWidget(self.separate_platform_sources, 0, 0, 1, 2)
         io_grid.addWidget(self._platform_sources, 3, 0, 1, 2)
         io_grid.addWidget(QLabel("Исходные видео:"), 1, 0, Qt.AlignmentFlag.AlignTop)
@@ -1638,7 +1643,125 @@ class MainWindow(QWidget):
         self.rb_scale_pct = _bound_slider(
             range_min=90.0, range_max=110.0, lo=95.0, hi=100.6, step=0.1, decimals=1
         )
-        br = _bounds_row(br, "Масштаб", self.rb_scale_pct, self.fx_scale_enabled)
+        scale_gb = QGroupBox("Масштабирование")
+        scale_outer = QVBoxLayout(scale_gb)
+        self.scale_enabled = ToggleSwitch("Изменить масштаб")
+        self.scale_enabled.setChecked(True)
+        scale_header = QHBoxLayout()
+        scale_header.addWidget(self.scale_enabled)
+        scale_header.addStretch()
+        for label, slot in (("Экспорт", self._export_scale_settings), ("Импорт", self._import_scale_settings)):
+            button = QPushButton(label)
+            button.setObjectName("secondary")
+            button.clicked.connect(slot)
+            scale_header.addWidget(button)
+        scale_outer.addLayout(scale_header)
+        self._scale_panel = QWidget()
+        scale_outer.addWidget(self._scale_panel)
+        scale_layout = QGridLayout(self._scale_panel)
+        scale_layout.addWidget(QLabel("Потяни за угол видео. Зажми Shift для пропорций или Alt для обрезки. Ctrl+Z — отмена."), 0, 0, 1, 3)
+        self.scale_background = QComboBox()
+        self.scale_background.addItem("Чёрный", "black")
+        self.scale_background.addItem("Размытое видео", "blur")
+        self.scale_background.addItem("Однотонная рамка", "solid")
+        self.scale_background.addItem("Рамка с узором", "pattern")
+        self.scale_background.setCurrentIndex(self.scale_background.findData("blur"))
+        scale_layout.addWidget(QLabel("Фон"), 5, 0)
+        scale_layout.addWidget(self.scale_background, 5, 1, 1, 2)
+        self.scale_frame_options = QWidget()
+        frame_options = QHBoxLayout(self.scale_frame_options)
+        frame_options.setContentsMargins(0, 0, 0, 0)
+        self.scale_random_color = QCheckBox("Случайный цвет")
+        self.scale_random_color.setChecked(True)
+        self._scale_frame_color = "#283957"
+        self.scale_color_button = QPushButton("Выбрать цвет…")
+        self.scale_color_button.clicked.connect(self._choose_scale_frame_color)
+        self.scale_pattern = QComboBox()
+        self.scale_pattern.addItem("Геометрия", "geometry")
+        self.scale_pattern.addItem("Сетка", "grid")
+        self.scale_pattern.addItem("Искривлённая сетка", "curved_grid")
+        self.scale_pattern.addItem("Полосы", "stripes")
+        self.scale_pattern.addItem("Пунктир", "dots")
+        self.scale_pattern.addItem("Мозаика", "mosaic")
+        self.scale_pattern.addItem("Случайный узор", "random")
+        frame_options.addWidget(self.scale_random_color)
+        frame_options.addWidget(self.scale_color_button)
+        frame_options.addWidget(self.scale_pattern)
+        scale_layout.addWidget(self.scale_frame_options, 6, 0, 1, 3)
+        self.scale_blur_options = QWidget()
+        blur_options = QHBoxLayout(self.scale_blur_options)
+        blur_options.setContentsMargins(0, 0, 0, 0)
+        self.scale_blur_strength = QSpinBox()
+        self.scale_blur_strength.setRange(0, 40)
+        self.scale_blur_strength.setValue(5)
+        self.scale_blur_darkness = QSpinBox()
+        self.scale_blur_darkness.setRange(0, 80)
+        self.scale_blur_darkness.setSuffix(" %")
+        blur_options.addWidget(QLabel("Сила размытия"))
+        blur_options.addWidget(self.scale_blur_strength)
+        blur_options.addWidget(QLabel("Затемнение"))
+        blur_options.addWidget(self.scale_blur_darkness)
+        blur_options.addStretch()
+        scale_layout.addWidget(self.scale_blur_options, 7, 0, 1, 3)
+        self.scale_background.currentIndexChanged.connect(self._sync_scale_frame_options)
+        self.scale_random_color.toggled.connect(self._sync_scale_frame_options)
+        self.scale_pattern.currentIndexChanged.connect(self._sync_scale_frame_options)
+        self.scale_blur_strength.valueChanged.connect(self._sync_scale_frame_options)
+        self.scale_blur_darkness.valueChanged.connect(self._sync_scale_frame_options)
+        self._video_scales = {}
+        self._video_positions = {}
+        self._video_crops = {}
+        self._scale_undo_stack = []
+        self._scale_undo_pending = None
+        self.scale_preview = ScalePreviewWidget()
+        self.scale_preview.set_background_style(self.scale_background.currentData())
+        self.scale_background.currentIndexChanged.connect(
+            lambda: self.scale_preview.set_background_style(self.scale_background.currentData())
+        )
+        self.scale_background.currentIndexChanged.connect(
+            lambda: self._apply_text_overlay_preview_video()
+        )
+        self.scale_preview.sizeChanged.connect(self._scale_preview_changed)
+        self.scale_preview.positionChanged.connect(self._scale_preview_position_changed)
+        self.scale_preview.cropChanged.connect(self._scale_preview_crop_changed)
+        self.scale_preview.editStarted.connect(self._begin_scale_undo)
+        self.scale_preview.editFinished.connect(self._end_scale_undo)
+        self._scale_undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, scale_gb)
+        self._scale_undo_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._scale_undo_shortcut.activated.connect(self._undo_scale_edit)
+        self.scale_enabled.toggled.connect(self._update_scale_controls)
+        scale_layout.addWidget(self.scale_preview, 1, 0, 1, 3)
+        self._scale_preview_index = 0
+        self._scale_preview_prev = QPushButton("‹")
+        self._scale_preview_next = QPushButton("›")
+        self._scale_preview_label = QLabel()
+        self._scale_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._scale_preview_label.setWordWrap(True)
+        self._scale_preview_prev.clicked.connect(lambda: self._change_scale_preview(-1))
+        self._scale_preview_next.clicked.connect(lambda: self._change_scale_preview(1))
+        scale_layout.addWidget(self._scale_preview_prev, 2, 0)
+        scale_layout.addWidget(self._scale_preview_label, 2, 1)
+        scale_layout.addWidget(self._scale_preview_next, 2, 2)
+        controls = QWidget()
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        for label, action in (("По центру по горизонтали", "horizontal"), ("По центру по вертикали", "vertical"), ("Сбросить масштабирование", "reset")):
+            button = QPushButton(label)
+            button.setObjectName("secondary")
+            button.clicked.connect(lambda _checked=False, a=action: self._adjust_scale_preview(a))
+            controls_layout.addWidget(button)
+        scale_layout.addWidget(controls, 3, 0, 1, 3)
+        stretch_controls = QWidget()
+        stretch_layout = QHBoxLayout(stretch_controls)
+        stretch_layout.setContentsMargins(0, 0, 0, 0)
+        for label, action in (("Растянуть по горизонтали", "stretch_horizontal"), ("Растянуть по вертикали", "stretch_vertical")):
+            button = QPushButton(label)
+            button.setObjectName("secondary")
+            button.clicked.connect(lambda _checked=False, a=action: self._adjust_scale_preview(a))
+            stretch_layout.addWidget(button)
+        scale_layout.addWidget(stretch_controls, 4, 0, 1, 3)
+        self._update_scale_preview()
+        self._sync_scale_frame_options()
         self.rb_noise = _bound_slider(
             range_min=0.0, range_max=10.0, lo=0.5, hi=4.0, step=0.05, decimals=2
         )
@@ -1663,6 +1786,7 @@ class MainWindow(QWidget):
         self._uniquify_section_stack = QStackedWidget()
         self._uniquify_section_stack.addWidget(wrap_work_section_page(io))
         self._uniquify_section_stack.addWidget(wrap_work_section_page(fx))
+        self._uniquify_section_stack.addWidget(wrap_work_section_page(scale_gb))
         self._uniquify_section_stack.addWidget(wrap_work_section_page(text_gb))
         self._uniquify_section_stack.addWidget(wrap_work_section_page(bg_tracks))
         section_nav_group.idClicked.connect(self._uniquify_section_stack.setCurrentIndex)
@@ -2680,15 +2804,15 @@ class MainWindow(QWidget):
         self.output_quality.setCurrentIndex(quality_idx if quality_idx >= 0 else 0)
         self.output_quality.setToolTip(
             "Короткая сторона кадра. У горизонтального ролика это высота, "
-            "у вертикального — ширина. Длинная сторона 16:9, для 3:4 и 4:3 — 4:3."
+            "у вертикального — ширина. При уникализации сохраняются пропорции исходника."
         )
         self.output_quality.currentIndexChanged.connect(
             lambda *_: self._save_folder_settings()
         )
         quality_hint = QLabel(
             "Для уникализации, нарезки и склейки этой платформы. "
-            "Пропорции сохраняются. У 3:4 и 4:3 полос нет, у остальных "
-            "пустое место закрывается чёрным сверху и снизу."
+            "При уникализации размер кадра сохраняет пропорции исходника. "
+            "При нарезке и склейке кадр может дополняться чёрными полосами."
         )
         quality_hint.setObjectName("hint")
         quality_hint.setWordWrap(True)
@@ -10947,6 +11071,8 @@ class MainWindow(QWidget):
     def _sync_input_files_hint(self) -> None:
         if not hasattr(self, "_input_files_hint"):
             return
+        if hasattr(self, "scale_preview"):
+            self._update_scale_preview()
         n = len(self._selected_input_files or [])
         has_files = n > 0
         if hasattr(self, "_btn_add_input_files"):
@@ -11235,7 +11361,7 @@ class MainWindow(QWidget):
         """Выбранные исходники в том же порядке, что в списке файлов."""
         out: list[str] = []
         seen: set[str] = set()
-        for p in self._selected_input_files or []:
+        for p in self._effective_input_files():
             raw = str(p).strip()
             if not raw:
                 continue
@@ -11255,6 +11381,213 @@ class MainWindow(QWidget):
             seen.add(key)
             out.append(resolved)
         return out
+
+    def _refresh_source_previews(self, *_args) -> None:
+        if hasattr(self, "scale_preview"):
+            self._update_scale_preview()
+        if hasattr(self, "text_overlay_preview"):
+            self._schedule_text_overlay_preview_sync()
+
+    def _change_scale_preview(self, delta: int) -> None:
+        videos = self._text_overlay_preview_videos()
+        if videos:
+            self._scale_preview_index = (self._scale_preview_index + delta) % len(videos)
+        self._update_scale_preview()
+
+    def _update_scale_controls(self, enabled: bool) -> None:
+        self._scale_panel.setVisible(enabled)
+        self._scale_panel.setEnabled(enabled)
+        self._apply_text_overlay_preview_video()
+
+    def _scale_export_payload(self) -> dict:
+        videos = self._text_overlay_preview_videos()
+        if not videos:
+            raise ValueError("Сначала выбери исходное видео.")
+        key = os.path.normcase(videos[self._scale_preview_index])
+        scale, position, crop = self._scale_snapshot(key)
+        return {"kind": "zaliver_scale", "version": 1,
+                "enabled": self.scale_enabled.isChecked(),
+                "scale": scale, "position": position, "crop": crop,
+                "background": self.scale_background.currentData(),
+                "blur_strength": self.scale_blur_strength.value(),
+                "blur_darkness": self.scale_blur_darkness.value(),
+                "frame_color": self._scale_frame_color,
+                "random_color": self.scale_random_color.isChecked(),
+                "pattern": self.scale_pattern.currentData()}
+
+    def _export_scale_settings(self) -> None:
+        try:
+            payload = self._scale_export_payload()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Экспорт масштабирования", str(exc))
+            return
+        QApplication.clipboard().setText(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        QMessageBox.information(self, "Экспорт масштабирования", "Строка настроек скопирована. Можешь вставить и сохранить её.")
+
+    def _apply_scale_import(self, raw: str) -> None:
+        data = json.loads(raw)
+        if not isinstance(data, dict) or data.get("kind") != "zaliver_scale" or data.get("version") != 1:
+            raise ValueError("Это не строка настроек масштабирования.")
+        videos = self._text_overlay_preview_videos()
+        if not videos:
+            raise ValueError("Сначала выбери исходное видео.")
+
+        def numbers(name: str, count: int, low: float, high: float) -> list[float]:
+            values = data.get(name)
+            if not isinstance(values, list) or len(values) != count or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not low <= v <= high for v in values):
+                raise ValueError(f"Некорректный параметр: {name}.")
+            return [float(v) for v in values]
+
+        scale = numbers("scale", 2, 0.1, 20.0)
+        position = numbers("position", 2, -10.0, 10.0)
+        crop = numbers("crop", 4, 0.0, 0.95)
+        if crop[0] + crop[2] > .950001 or crop[1] + crop[3] > .950001:
+            raise ValueError("Некорректная обрезка.")
+        bg = self.scale_background.findData(data.get("background"))
+        pattern = self.scale_pattern.findData(data.get("pattern"))
+        color = data.get("frame_color")
+        strength, darkness = data.get("blur_strength"), data.get("blur_darkness")
+        if bg < 0 or pattern < 0 or not isinstance(color, str) or len(color) != 7 or not color.startswith('#') or not QColor(color).isValid() or type(strength) is not int or not 0 <= strength <= 40 or type(darkness) is not int or not 0 <= darkness <= 80 or type(data.get("enabled")) is not bool or type(data.get("random_color")) is not bool:
+            raise ValueError("Некорректные настройки фона.")
+        self._begin_scale_undo()
+        key = os.path.normcase(videos[self._scale_preview_index])
+        self._video_scales[key], self._video_positions[key], self._video_crops[key] = scale, position, crop
+        self._end_scale_undo()
+        self._scale_frame_color = color
+        self.scale_background.setCurrentIndex(bg)
+        self.scale_pattern.setCurrentIndex(pattern)
+        self.scale_random_color.setChecked(data["random_color"])
+        self.scale_blur_strength.setValue(strength)
+        self.scale_blur_darkness.setValue(darkness)
+        self.scale_enabled.setChecked(data["enabled"])
+        self._sync_scale_frame_options()
+        self._update_scale_preview()
+        self._apply_text_overlay_preview_video()
+
+    def _import_scale_settings(self) -> None:
+        raw, ok = QInputDialog.getMultiLineText(self, "Импорт масштабирования", "Вставь строку настроек:")
+        if not ok:
+            return
+        try:
+            self._apply_scale_import(raw.strip())
+        except (ValueError, TypeError, OverflowError) as exc:
+            QMessageBox.warning(self, "Импорт масштабирования", f"Не удалось применить настройки: {exc}")
+
+    def _choose_scale_frame_color(self) -> None:
+        color = QColorDialog.getColor(QColor(self._scale_frame_color), self, "Цвет рамки")
+        if color.isValid():
+            self._scale_frame_color = color.name()
+            self.scale_random_color.setChecked(False)
+            self._sync_scale_frame_options()
+
+    def _sync_scale_frame_options(self, *_args) -> None:
+        mode = self.scale_background.currentData()
+        self.scale_frame_options.setVisible(mode in ("solid", "pattern"))
+        self.scale_blur_options.setVisible(mode == "blur")
+        self.scale_pattern.setVisible(mode == "pattern")
+        self.scale_color_button.setStyleSheet(f"background-color: {self._scale_frame_color}; color: white;")
+        self.scale_preview.set_frame_options(self._scale_frame_color, str(self.scale_pattern.currentData()))
+        self.scale_preview.set_blur_options(self.scale_blur_strength.value(), self.scale_blur_darkness.value())
+        self._apply_text_overlay_preview_video()
+
+    def _scale_preview_changed(self, sx: float, sy: float) -> None:
+        videos = self._text_overlay_preview_videos()
+        if videos:
+            self._video_scales[os.path.normcase(videos[self._scale_preview_index])] = [sx, sy]
+            self._apply_text_overlay_preview_video()
+
+    def _scale_preview_position_changed(self, x: float, y: float) -> None:
+        videos = self._text_overlay_preview_videos()
+        if videos:
+            self._video_positions[os.path.normcase(videos[self._scale_preview_index])] = [x, y]
+            self._apply_text_overlay_preview_video()
+
+    def _scale_preview_crop_changed(self, left: float, top: float, right: float, bottom: float) -> None:
+        videos = self._text_overlay_preview_videos()
+        if videos:
+            self._video_crops[os.path.normcase(videos[self._scale_preview_index])] = [left, top, right, bottom]
+            self._apply_text_overlay_preview_video()
+
+    def _scale_snapshot(self, key: str) -> tuple:
+        return (tuple(self._video_scales.get(key, (1.0, 1.0))),
+                tuple(self._video_positions.get(key, (0.0, 0.0))),
+                tuple(self._video_crops.get(key, (0.0, 0.0, 0.0, 0.0))))
+
+    def _begin_scale_undo(self) -> None:
+        videos = self._text_overlay_preview_videos()
+        if videos:
+            key = os.path.normcase(videos[self._scale_preview_index])
+            self._scale_undo_pending = (key, self._scale_snapshot(key))
+        else:
+            self._scale_undo_pending = None
+
+    def _end_scale_undo(self) -> None:
+        pending = self._scale_undo_pending
+        self._scale_undo_pending = None
+        if pending and pending[1] != self._scale_snapshot(pending[0]):
+            self._scale_undo_stack.append(pending)
+            self._scale_undo_stack = self._scale_undo_stack[-100:]
+
+    def _undo_scale_edit(self) -> None:
+        if not self._scale_undo_stack:
+            return
+        key, (scale, position, crop) = self._scale_undo_stack.pop()
+        self._video_scales[key] = list(scale)
+        self._video_positions[key] = list(position)
+        self._video_crops[key] = list(crop)
+        videos = self._text_overlay_preview_videos()
+        for index, path in enumerate(videos):
+            if os.path.normcase(path) == key:
+                self._scale_preview_index = index
+                break
+        self._update_scale_preview()
+        self._apply_text_overlay_preview_video()
+
+    def _adjust_scale_preview(self, action: str) -> None:
+        videos = self._text_overlay_preview_videos()
+        if not videos:
+            return
+        self._begin_scale_undo()
+        key = os.path.normcase(videos[self._scale_preview_index])
+        x, y = self._video_positions.get(key, (0.0, 0.0))
+        sx, sy = self._video_scales.get(key, (1.0, 1.0))
+        left, top, right, bottom = self._video_crops.get(key, (0.0, 0.0, 0.0, 0.0))
+        if action == "stretch_horizontal":
+            sx = 1.0 / max(0.05, 1.0 - left - right)
+            x = sx * (right - left) / 2.0
+        if action == "stretch_vertical":
+            sy = 1.0 / max(0.05, 1.0 - top - bottom)
+            y = sy * (bottom - top) / 2.0
+        if action == "horizontal":
+            x = sx * (right - left) / 2.0
+        if action == "vertical":
+            y = sy * (bottom - top) / 2.0
+        if action == "reset":
+            x, y = 0.0, 0.0
+        self._video_positions[key] = [x, y]
+        if action == "reset":
+            sx, sy = 1.0, 1.0
+            self._video_crops.pop(key, None)
+        self._video_scales[key] = [sx, sy]
+        self._end_scale_undo()
+        self._update_scale_preview()
+        self._apply_text_overlay_preview_video()
+
+    def _update_scale_preview(self) -> None:
+        videos = self._text_overlay_preview_videos()
+        count = len(videos)
+        self._scale_preview_index = self._scale_preview_index % count if count else 0
+        self._scale_preview_prev.setEnabled(count > 1)
+        self._scale_preview_next.setEnabled(count > 1)
+        path = videos[self._scale_preview_index] if videos else None
+        self._scale_preview_label.setText(
+            f"{self._scale_preview_index + 1} / {count} · {Path(path).name}"
+            if path else "Нет исходников — выбери видео во вкладке «Исходники»"
+        )
+        self.scale_preview.set_background_video(path)
+        self.scale_preview.set_scale(*self._video_scales.get(os.path.normcase(path), [1.0, 1.0]) if path else (1.0, 1.0))
+        self.scale_preview.set_position(*self._video_positions.get(os.path.normcase(path), [0.0, 0.0]) if path else (0.0, 0.0))
+        self.scale_preview.set_crop(*self._video_crops.get(os.path.normcase(path), [0.0, 0.0, 0.0, 0.0]) if path else (0.0, 0.0, 0.0, 0.0))
 
     def _clamp_text_overlay_preview_index(self) -> None:
         videos = self._text_overlay_preview_videos()
@@ -11278,7 +11611,7 @@ class MainWindow(QWidget):
         if hasattr(self, "_text_overlay_preview_meta"):
             if n <= 0:
                 self._text_overlay_preview_meta.setText(
-                    "Нет исходников — выберите видео во вкладке «Исходники»"
+                    "Нет исходников — выбери видео во вкладке «Исходники»"
                 )
             else:
                 name = Path(videos[idx]).name
@@ -11321,6 +11654,22 @@ class MainWindow(QWidget):
             self._clamp_text_overlay_preview_index()
             current = videos[int(self._text_overlay_preview_index)]
         self.text_overlay_preview.set_background_video(current, force=force)
+        scales = getattr(self, "_video_scales", {})
+        sx, sy = scales.get(os.path.normcase(current), (1.0, 1.0)) if current else (1.0, 1.0)
+        background = self.scale_background.currentData() if hasattr(self, "scale_background") else "black"
+        self.text_overlay_preview.set_video_transform(sx, sy, str(background or "black"))
+        positions = getattr(self, "_video_positions", {})
+        x, y = positions.get(os.path.normcase(current), (0.0, 0.0)) if current else (0.0, 0.0)
+        if hasattr(self, "scale_enabled") and not self.scale_enabled.isChecked():
+            sx, sy, x, y, background = 1.0, 1.0, 0.0, 0.0, "black"
+            self.text_overlay_preview.set_video_transform(sx, sy, background)
+        self.text_overlay_preview.set_video_position(x, y)
+        crops = getattr(self, "_video_crops", {})
+        crop_values = crops.get(os.path.normcase(current), (0.0, 0.0, 0.0, 0.0)) if current and (not hasattr(self, "scale_enabled") or self.scale_enabled.isChecked()) else (0.0, 0.0, 0.0, 0.0)
+        self.text_overlay_preview.set_video_crop(*crop_values)
+        if hasattr(self, "scale_pattern"):
+            self.text_overlay_preview.set_frame_options(self._scale_frame_color, str(self.scale_pattern.currentData()))
+            self.text_overlay_preview.set_blur_options(self.scale_blur_strength.value(), self.scale_blur_darkness.value())
         overlay_on = bool(self.text_overlay_enabled.isChecked())
         self.text_overlay_preview.set_text_visible(overlay_on)
 
@@ -11621,8 +11970,8 @@ class MainWindow(QWidget):
             saturation_max=float(self.rb_saturation.highValue()),
             crop_jitter_min=0,
             crop_jitter_max=0,
-            scale_pct_min=float(self.rb_scale_pct.lowValue()),
-            scale_pct_max=float(self.rb_scale_pct.highValue()),
+            scale_pct_min=100.0,
+            scale_pct_max=100.0,
             noise_sigma_min=float(self.rb_noise.lowValue()),
             noise_sigma_max=float(self.rb_noise.highValue()),
             seed_min=0,
@@ -11638,7 +11987,7 @@ class MainWindow(QWidget):
             contrast=float(self.rb_contrast.lowValue()),
             saturation_scale=float(self.rb_saturation.lowValue()),
             crop_jitter_px=0,
-            scale_pct=float(self.rb_scale_pct.lowValue()),
+            scale_pct=100.0,
             noise_sigma=float(self.rb_noise.lowValue()),
             seed_base=0,
             playback_speed_factor=float(self.audio_speed_range.lowValue()),
@@ -11651,6 +12000,15 @@ class MainWindow(QWidget):
             "platform_input_files": self._platform_input_paths(),
             **self._processing_run_options(),
             "settings": st.to_dict(),
+            "video_scales": dict(self._video_scales) if self.scale_enabled.isChecked() else {},
+            "video_positions": dict(self._video_positions) if self.scale_enabled.isChecked() else {},
+            "video_crops": dict(self._video_crops) if self.scale_enabled.isChecked() else {},
+            "scale_background": self.scale_background.currentData() if self.scale_enabled.isChecked() else "black",
+            "scale_blur_strength": self.scale_blur_strength.value(),
+            "scale_blur_darkness": self.scale_blur_darkness.value(),
+            "scale_frame_color": self._scale_frame_color,
+            "scale_random_color": self.scale_random_color.isChecked(),
+            "scale_pattern": self.scale_pattern.currentData(),
             "manual_bounds": bounds,
             "randomize_uniquify": True,
             "copies_per_file": int(self.copies_per_file.value()),
@@ -11659,7 +12017,7 @@ class MainWindow(QWidget):
             "contrast_enabled": bool(self.fx_contrast_enabled.isChecked()),
             "saturation_enabled": bool(self.fx_saturation_enabled.isChecked()),
             "crop_jitter_enabled": False,
-            "scale_enabled": bool(self.fx_scale_enabled.isChecked()),
+            "scale_enabled": False,
             "noise_enabled": bool(self.fx_noise_enabled.isChecked()),
             "seed_enabled": False,
             "playback_speed_enabled": bool(self.audio_speed.isChecked()),

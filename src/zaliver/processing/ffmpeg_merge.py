@@ -1207,6 +1207,19 @@ def frame_size_for_quality(
     return long_side, short
 
 
+def frame_size_for_uniquify_quality(
+    width: int, height: int, key: str | None = None
+) -> tuple[int, int]:
+    """Change resolution while keeping the source frame's aspect ratio."""
+    w = _even_frame_side(int(width) - int(width) % 2)
+    h = _even_frame_side(int(height) - int(height) % 2)
+    short = output_quality_short_side(current_output_quality() if key is None else key)
+    if short <= 0:
+        return w, h
+    factor = _even_frame_side(short) / min(w, h)
+    return _even_frame_side(round(w * factor)), _even_frame_side(round(h * factor))
+
+
 def apply_file_compression_from_options(options: dict | None) -> tuple[int, int, int]:
     raw = None
     meta = None
@@ -1516,7 +1529,7 @@ def _write_concat_demuxer_list(segment_paths: List[str], list_path: str) -> None
             f.write(f"file '{line}'\n")
 
 
-def _concat_reencode_vf(segment_paths: List[str]) -> Tuple[str, float]:
+def _concat_reencode_vf(segment_paths: List[str], *, preserve_frame: bool = False) -> Tuple[str, float]:
     """Фильтр нормализации кадра при перекодировании concat (без растягивания).
 
     Холст — кадр с максимальной площадью среди фрагментов, чтобы 1080 не
@@ -1542,6 +1555,8 @@ def _concat_reencode_vf(segment_paths: List[str]) -> Tuple[str, float]:
         if first_error is not None:
             raise first_error
         raise RuntimeError("concat: не удалось прочитать размер кадра")
+    if preserve_frame:
+        return "setsar=1", float(fps) if fps > 1e-6 else 30.0
     w, h = frame_size_for_quality(w, h, current_output_quality())
     from zaliver.processing.ffmpeg_vf import _final_scale_block
 
@@ -1555,6 +1570,7 @@ def _concat_segments_once(
     log: LogFn = None,
     target_video_bps: Optional[int] = None,
     prefer_gpu: bool = False,
+    preserve_frame: bool = False,
 ) -> None:
     """Один вызов ffmpeg concat (число file в list.txt = len(segment_paths))."""
     if not segment_paths:
@@ -1598,7 +1614,7 @@ def _concat_segments_once(
         enc, enc_args = video_encoder_for_mux(
             target_video_bps, prefer_gpu=prefer_gpu
         )
-        vf, fps = _concat_reencode_vf(segment_paths)
+        vf, fps = _concat_reencode_vf(segment_paths, preserve_frame=preserve_frame)
         run_ffmpeg(
             [
                 "-f",
@@ -1638,6 +1654,7 @@ def _concat_segments_batched(
     log: LogFn = None,
     target_video_bps: Optional[int] = None,
     prefer_gpu: bool = False,
+    preserve_frame: bool = False,
 ) -> None:
     paths = [str(p) for p in segment_paths if p]
     if not paths:
@@ -1646,7 +1663,7 @@ def _concat_segments_batched(
     if len(paths) <= batch_limit:
         _concat_segments_once(
             paths, out_path, log=log, target_video_bps=target_video_bps,
-            prefer_gpu=prefer_gpu,
+            prefer_gpu=prefer_gpu, preserve_frame=preserve_frame,
         )
         return
 
@@ -1675,13 +1692,14 @@ def _concat_segments_batched(
                     log=log,
                     target_video_bps=target_video_bps,
                     prefer_gpu=prefer_gpu,
+                    preserve_frame=preserve_frame,
                 )
                 temps.append(tmp)
                 nxt.append(str(tmp))
             current = nxt
         _concat_segments_once(
             current, out_path, log=log, target_video_bps=target_video_bps,
-            prefer_gpu=prefer_gpu,
+            prefer_gpu=prefer_gpu, preserve_frame=preserve_frame,
         )
     finally:
         out_resolved = Path(out_path).resolve()
@@ -1699,6 +1717,7 @@ def concat_segments(
     log: LogFn = None,
     target_video_bps: Optional[int] = None,
     prefer_gpu: bool = False,
+    preserve_frame: bool = False,
 ) -> None:
     batch_limit = _max_ffmpeg_concat_batch()
     min_batch = _MIN_FFMPEG_CONCAT_BATCH
@@ -1717,6 +1736,7 @@ def concat_segments(
                 log=log,
                 target_video_bps=target_video_bps,
                 prefer_gpu=prefer_gpu,
+                preserve_frame=preserve_frame,
             )
             return
         except RuntimeError as e:
@@ -2216,6 +2236,7 @@ def merge_segments_with_source_audio(
         log=log,
         target_video_bps=target_video_bps,
         prefer_gpu=prefer_gpu,
+        preserve_frame=True,
     )
     if background_music_path and str(background_music_path).strip():
         fc, fpsi = music_video_meta or (0, 30.0)

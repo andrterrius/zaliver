@@ -15,7 +15,7 @@ from zaliver.processing.fd_limit import raise_fd_limit_soft
 from zaliver.processing.ffmpeg_merge import (
     libx264_encode_args_for_target,
     current_encode_quality,
-    frame_size_for_quality,
+    frame_size_for_uniquify_quality,
     pick_best_h264_encoder,
     set_file_compression,
     set_video_metadata,
@@ -211,7 +211,7 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
     h = int(task["height"])
     fps = float(task["fps"])
     use_gpu = bool(task.get("use_gpu", False))
-    w_out, h_out = frame_size_for_quality(w, h, task.get("output_quality"))
+    w_out, h_out = frame_size_for_uniquify_quality(w, h, task.get("output_quality"))
 
     out_p = Path(task["output_path"]).expanduser()
     try:
@@ -290,7 +290,7 @@ def process_chunk_disk(task: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     attempts: list[tuple[str, Optional[object], list[str], str, list[str]]] = []
-    if use_gpu:
+    if use_gpu and abs(settings.scale_x - 1.0) < 0.0001 and abs(settings.scale_y - 1.0) < 0.0001 and abs(settings.position_x) < 0.0001 and abs(settings.position_y) < 0.0001 and not any((settings.crop_left, settings.crop_top, settings.crop_right, settings.crop_bottom)) and settings.scale_background == "black":
         gpu_pipeline = resolve_gpu_pipeline(prefer_gpu=True, encoder=enc)
         if gpu_pipeline is not None:
             attempts.append(

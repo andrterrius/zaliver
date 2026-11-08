@@ -292,10 +292,10 @@ def _watch_current_reel(
     watch_full: bool,
 ) -> None:
     _try_unmute_or_play(page)
-    lo = max(1.0, float(watch_min_s))
-    hi = max(lo, float(watch_max_s))
+    lo = min(180.0, max(1.0, float(watch_min_s)))
+    hi = min(180.0, max(lo, float(watch_max_s)))
     if watch_full:
-        # Полный просмотр: ждём окончания video.ended или таймаут по duration.
+        # Оцениваем длительность ролика, ограничивая просмотр тремя минутами.
         try:
             duration = page.evaluate(
                 """() => {
@@ -313,8 +313,7 @@ def _watch_current_reel(
         except Exception:
             duration_f = 0.0
         if duration_f > 0:
-            # Чуть меньше полной длины, чтобы не зависнуть на loop.
-            wait_s = min(max(lo, duration_f * 0.95), 90.0)
+            wait_s = min(duration_f, 180.0)
         else:
             wait_s = random.uniform(lo, hi)
     else:

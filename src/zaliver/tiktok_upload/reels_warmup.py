@@ -211,8 +211,9 @@ def _current_video_src(page) -> str:
     try:
         src = page.evaluate(
             """() => {
-              const videos = Array.from(document.querySelectorAll(
-                '[role="dialog"] video, article video, main video'
+              const dialog = document.querySelector('[role="dialog"][aria-modal="true"]');
+              const videos = Array.from((dialog || document).querySelectorAll(
+                dialog ? 'video' : 'article video, main video'
               ));
               const vh = window.innerHeight || 800;
               const mid = vh / 2;
@@ -242,6 +243,18 @@ def _current_post_key(page) -> str:
     """Индекс наиболее видимой карточки, либо URL/источник в плеере поиска."""
     try:
         return (page.evaluate(r"""() => {
+          const dialog = document.querySelector('[role="dialog"][aria-modal="true"]');
+          if (dialog) {
+            const match = location.pathname.match(/\/(?:video|photo)\/([^/]+)/);
+            if (match) return 'post:' + match[1];
+            const videos = [...dialog.querySelectorAll('video')].map(video => {
+              const r = video.getBoundingClientRect();
+              return {video, area: Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0)) *
+                Math.max(0, Math.min(r.right, innerWidth) - Math.max(r.left, 0))};
+            }).filter(x => x.area > 0).sort((a, b) => b.area - a.area);
+            const v = videos[0]?.video;
+            return v && (v.currentSrc || v.src) ? 'video:' + (v.currentSrc || v.src) : '';
+          }
           const cards = [...document.querySelectorAll('article[data-e2e="recommend-list-item-container"]')];
           const ranked = cards.map(card => {
             const r = card.getBoundingClientRect();
@@ -323,16 +336,20 @@ def _watch_current_reel(
     watch_full: bool,
 ) -> None:
     _try_unmute_or_play(page)
-    lo = max(1.0, float(watch_min_s))
-    hi = max(lo, float(watch_max_s))
+    lo = min(180.0, max(1.0, float(watch_min_s)))
+    hi = min(180.0, max(lo, float(watch_max_s)))
     if watch_full:
-        # Полный просмотр: ждём окончания video.ended или таймаут по duration.
+        # Оцениваем длительность ролика, ограничивая просмотр тремя минутами.
         try:
             duration = page.evaluate(
                 """() => {
-                  const videos = Array.from(document.querySelectorAll(
-                    '[role="dialog"] video, article video, main video'
-                  ));
+                  const dialog = document.querySelector('[role="dialog"][aria-modal="true"]');
+                  const videos = Array.from((dialog || document).querySelectorAll(
+                    dialog ? 'video' : 'article video, main video'
+                  )).filter(v => {
+                    const r = v.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                  });
                   const playing = videos.find(v => !v.paused && v.readyState >= 2);
                   const v = playing || videos[0];
                   if (!v) return 0;
@@ -344,8 +361,7 @@ def _watch_current_reel(
         except Exception:
             duration_f = 0.0
         if duration_f > 0:
-            # Чуть меньше полной длины, чтобы не зависнуть на loop.
-            wait_s = min(max(lo, duration_f * 0.95), 90.0)
+            wait_s = min(duration_f, 180.0)
         else:
             wait_s = random.uniform(lo, hi)
     else:
@@ -585,6 +601,14 @@ def _advance_to_next_reel(page, *, prev_src: str, sideways: bool = False) -> boo
         return bool(cur and prev_key and cur != prev_key)
 
     if sideways:
+        try:
+            btn = page.locator('[role="dialog"] [data-e2e="arrow-right"]').first
+            if btn.count() and btn.is_visible(timeout=400) and not btn.is_disabled():
+                btn.click(timeout=3_000)
+                if _changed(timeout_ms=5_000):
+                    return True
+        except Exception as e:
+            _log(f"TikTok: кнопка следующего видео не сработала: {type(e).__name__}")
         for attempt in range(1, 4):
             try:
                 page.keyboard.press("ArrowRight")

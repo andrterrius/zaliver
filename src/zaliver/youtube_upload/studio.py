@@ -8787,7 +8787,7 @@ _YOUTUBE_HOME_URL = "https://www.youtube.com/"
 _YOUTUBE_SHORTS_FEED_URL = "https://www.youtube.com/shorts/"
 _HORIZONTAL_WARMUP_DEFAULT_COUNT = 3
 _HORIZONTAL_WARMUP_MIN_WATCH_S = 180.0
-_HORIZONTAL_WARMUP_MAX_WATCH_S = 300.0
+_HORIZONTAL_WARMUP_MAX_WATCH_S = 180.0
 _HORIZONTAL_SEARCH_RESULTS_WAIT_MS = 2_500
 _WATCH_LIKE_BTN_SELECTORS = (
     "ytd-watch-metadata ytd-menu-renderer #top-level-buttons-computed like-button-view-model button",
@@ -8831,7 +8831,7 @@ _SHORTS_WARMUP_DEFAULT_LIKE_PROB_PCT = 10.0
 _SHORTS_WARMUP_DEFAULT_SUBSCRIBE_PROB_PCT = 10.0
 _SHORTS_FULL_WATCH_COMPLETE_PCT = 95.0
 _SHORTS_FULL_WATCH_LOOP_RESET_PCT = 12.0
-_SHORTS_FULL_WATCH_MAX_S = 120.0
+_SHORTS_FULL_WATCH_MAX_S = 180.0
 _SHORTS_FULL_WATCH_POLL_S = 0.45
 _SHORTS_FULL_WATCH_STALL_ROUNDS = 22
 _SHORTS_LIKE_BTN_RE = re.compile(
@@ -9587,7 +9587,8 @@ def _studio_wait_for_short_full_watch(
     paused = _studio_is_shorts_paused(page)
     if paused is True:
         _studio_resume_shorts_playback(page)
-    deadline = time.monotonic() + max(5.0, float(max_wait_s))
+    max_wait_s = min(_SHORTS_FULL_WATCH_MAX_S, max(5.0, float(max_wait_s)))
+    deadline = time.monotonic() + max_wait_s
     last_pct = -1.0
     stall_rounds = 0
     logged_progress = False
@@ -9693,8 +9694,8 @@ def _studio_browse_youtube_shorts(
     subscribe_prob = min(100.0, max(0.0, float(subscribe_probability_pct)))
     comment_prob = min(100.0, max(0.0, float(comment_probability_pct)))
     comment_texts = [c.strip() for c in (comments or []) if (c or "").strip()]
-    watch_min = max(0.1, float(min_watch_s))
-    watch_max = max(watch_min, float(max_watch_s))
+    watch_min = min(_SHORTS_FULL_WATCH_MAX_S, max(0.1, float(min_watch_s)))
+    watch_max = min(_SHORTS_FULL_WATCH_MAX_S, max(watch_min, float(max_watch_s)))
 
     log_extra = ""
     if like_prob > 0:
@@ -9704,7 +9705,7 @@ def _studio_browse_youtube_shorts(
     if comment_prob > 0 and comment_texts:
         log_extra += f", комментарий {comment_prob:g}%"
     if watch_full_video:
-        watch_note = "до конца каждого ролика"
+        watch_note = "до конца каждого ролика, максимум 180 с"
     else:
         watch_note = f"{watch_min:.0f}–{watch_max:.0f} с на каждом"
     _log(
@@ -9776,7 +9777,7 @@ def _studio_browse_youtube_shorts(
             if _studio_wait_for_short_full_watch(
                 page,
                 should_stop=should_stop,
-                max_wait_s=max(watch_max, _SHORTS_FULL_WATCH_MAX_S),
+                max_wait_s=_SHORTS_FULL_WATCH_MAX_S,
                 expect_video_id=cur_id,
             ):
                 _log(f"Shorts: остановка по запросу (просмотрено {watched} из {n}).")

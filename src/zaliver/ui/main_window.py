@@ -8345,11 +8345,11 @@ class MainWindow(QWidget):
 
         watch_range_row = QHBoxLayout()
         watch_min_spin = QSpinBox()
-        watch_min_spin.setRange(1, 9999)
+        watch_min_spin.setRange(1, 180)
         watch_min_spin.setValue(5)
         watch_min_spin.setSuffix(" с")
         watch_max_spin = QSpinBox()
-        watch_max_spin.setRange(1, 9999)
+        watch_max_spin.setRange(1, 180)
         watch_max_spin.setValue(25)
         watch_max_spin.setSuffix(" с")
         watch_range_row.addWidget(watch_min_spin)
@@ -8364,7 +8364,7 @@ class MainWindow(QWidget):
         watch_full_cb = QCheckBox("Смотреть каждый Short до конца")
         watch_full_cb.setToolTip(
             "Как при прогреве во время отложки: дождаться конца ролика "
-            "(прогресс в логе в процентах), затем листать дальше. "
+            "(прогресс в логе в процентах), максимум 180 секунд, затем листать дальше. "
             "Если снять галочку — случайное время в указанном диапазоне."
         )
         form.addRow("", watch_full_cb)
@@ -8467,7 +8467,7 @@ class MainWindow(QWidget):
         horizontal_count_label = QLabel("Количество просмотренных видео:")
         horizontal_form.addRow(horizontal_count_label, horizontal_count_spin)
 
-        horizontal_watch_hint = QLabel("Время просмотра: 3–5 мин на каждое видео (случайно)")
+        horizontal_watch_hint = QLabel("Время просмотра: 3 мин на каждое видео")
         horizontal_watch_hint.setObjectName("hint")
         horizontal_watch_hint.setWordWrap(True)
 
@@ -8639,11 +8639,11 @@ class MainWindow(QWidget):
 
         watch_range_row = QHBoxLayout()
         watch_min_spin = QSpinBox()
-        watch_min_spin.setRange(1, 9999)
+        watch_min_spin.setRange(1, 180)
         watch_min_spin.setValue(4)
         watch_min_spin.setSuffix(" с")
         watch_max_spin = QSpinBox()
-        watch_max_spin.setRange(1, 9999)
+        watch_max_spin.setRange(1, 180)
         watch_max_spin.setValue(12)
         watch_max_spin.setSuffix(" с")
         watch_range_row.addWidget(watch_min_spin)
@@ -8658,7 +8658,7 @@ class MainWindow(QWidget):
         watch_full_cb = QCheckBox(f"Смотреть каждый {one} до конца")
         watch_full_cb.setChecked(True)
         watch_full_cb.setToolTip(
-            "Дождаться конца ролика, затем листать дальше. "
+            "Дождаться конца ролика, максимум 180 секунд, затем листать дальше. "
             "Если снять галочку — случайное время в указанном диапазоне."
         )
         form.addRow("", watch_full_cb)
@@ -8827,7 +8827,7 @@ class MainWindow(QWidget):
 
         if isinstance(warmup_settings, ReelsWarmupSettings):
             watch_note = (
-                "до конца каждого ролика"
+                "до конца каждого ролика (максимум 180 с)"
                 if warmup_settings.watch_full
                 else (
                     f"{warmup_settings.watch_min_s}–"
@@ -8855,7 +8855,7 @@ class MainWindow(QWidget):
             worker = self._profiles_reels_warmup_worker
         else:
             watch_note = (
-                "до конца каждого ролика (прогресс в %)"
+                "до конца каждого ролика (максимум 180 с, прогресс в %)"
                 if warmup_settings.watch_full_video
                 else (
                     f"{warmup_settings.shorts_watch_min_s}–"

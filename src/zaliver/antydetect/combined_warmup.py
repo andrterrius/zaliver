@@ -1,8 +1,51 @@
 """One browser session, one independent Playwright connection per warmup tab."""
 
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Lock
 
 from zaliver.log_format import log_profile_context
+
+
+def _watch_one_more(page, platform, options):
+    """Advance and watch one additional video in the existing feed."""
+    if platform == "youtube":
+        from zaliver.youtube_upload import studio
+
+        if not studio._studio_page_on_youtube_shorts(page):
+            studio._studio_open_shorts_for_warmup(
+                page, login_credentials=options.get("login_credentials"),
+                shorts_recommendations=options.get("shorts_recommendations", True),
+                search_query=options.get("search_query"), hashtag=options.get("hashtag"),
+            )
+        previous = studio._studio_read_active_short_video_id(page)
+        if not studio._studio_advance_shorts_feed(page, prev_video_id=previous):
+            raise RuntimeError("Не удалось перейти к следующему Short")
+        studio._studio_browse_youtube_shorts(
+            page, count=1,
+            like_probability_pct=options.get("like_probability_pct", 10),
+            subscribe_probability_pct=options.get("subscribe_probability_pct", 10),
+            min_watch_s=options.get("shorts_watch_min_s", 5),
+            max_watch_s=options.get("shorts_watch_max_s", 25),
+            watch_full_video=options.get("watch_full_video", False),
+        )
+        return
+
+    if platform == "instagram":
+        from zaliver.instagram_upload import reels_warmup as reels
+    else:
+        from zaliver.tiktok_upload import reels_warmup as reels
+    previous = reels._current_video_src(page)
+    if not reels._advance_to_next_reel(page, prev_src=previous):
+        raise RuntimeError("Не удалось перейти к следующему ролику")
+    reels._watch_current_reel(
+        page, watch_min_s=options.get("shorts_watch_min_s", 5),
+        watch_max_s=options.get("shorts_watch_max_s", 25),
+        watch_full=options.get("watch_full_video", False),
+    )
+    if reels._roll(options.get("like_probability_pct", 10)):
+        reels._try_like_current_reel(page)
+    if reels._roll(options.get("subscribe_probability_pct", 10)):
+        reels._try_follow_current_reel(page)
 
 
 def warmup_combined_profile(
@@ -21,6 +64,7 @@ def warmup_combined_profile(
     from zaliver.antydetect.antic_open import (
         DolphinAntyLocalAPI,
         sync_playwright,
+        _log,
         _playwright_page_from_cdp,
         _playwright_page_from_local_session_cdp,
         _local_studio_workflow_kwargs,
@@ -101,7 +145,17 @@ def warmup_combined_profile(
             # CDP proxies stall navigation while another client owns the socket.
             owner.stop()
 
-            def run(platform):
+            completed = set()
+            completion_lock = Lock()
+            all_finished = Event()
+
+            def mark_finished(platform):
+                with completion_lock:
+                    completed.add(platform)
+                    if len(completed) == len(platforms):
+                        all_finished.set()
+
+            def run_platform(platform):
                 with log_profile_context(profile_id):
                     with sync_playwright() as worker:
                         _browser, shared_context, _ = _playwright_page_from_cdp(
@@ -163,9 +217,24 @@ def warmup_combined_profile(
                                     timeout=60000,
                                 )
                                 runner(page, **kwargs)
+                            mark_finished(platform)
+                            while not all_finished.is_set():
+                                try:
+                                    _watch_one_more(page, platform, yt_kwargs)
+                                except Exception as error:
+                                    # Keep the tab open if the feed cannot advance.
+                                    _log(f"{platform}: не удалось продолжить просмотр: {error}")
+                                    all_finished.wait()
+                                    break
                         finally:
                             page.close()
                         # Worker stop disconnects its transport, not the browser.
+
+            def run(platform):
+                try:
+                    run_platform(platform)
+                finally:
+                    mark_finished(platform)
 
             errors = []
             with ThreadPoolExecutor(max_workers=len(platforms)) as pool:

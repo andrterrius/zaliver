@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from threading import Barrier, Lock
+from threading import Barrier, Event, Lock
 from unittest.mock import Mock, patch
 import subprocess
 
@@ -180,18 +180,30 @@ def test_combined_warmup_owns_one_session_and_runs_three_tabs_concurrently():
     api.start_profile.return_value.http_url.return_value = "http://test"
     barrier = Barrier(3)
     completed, lock = [], Lock()
+    extra_watched = Event()
+    extra_platforms = []
 
     def runner(page, **kwargs):
         barrier.wait(timeout=3)
+        if page.target == "3":
+            assert extra_watched.wait(timeout=3)
         api.stop_profile.assert_not_called()
         assert not context.pages[0].closed
         with lock:
             completed.append(page.target)
 
+    def watch_extra(page, platform, options):
+        assert not page.closed
+        if not extra_watched.is_set():
+            assert not context.pages[3].closed
+            extra_platforms.append(platform)
+            extra_watched.set()
+        Event().wait(0.01)
+
     playwright = Mock()
     playwright.return_value.__enter__ = Mock(return_value=Mock())
     playwright.return_value.__exit__ = Mock(return_value=False)
-    with patch.object(
+    with patch("zaliver.antydetect.combined_warmup._watch_one_more", side_effect=watch_extra), patch.object(
         antic_open, "DolphinAntyLocalAPI", return_value=api
     ), patch.object(antic_open, "sync_playwright", playwright), patch.object(
         antic_open,
@@ -206,6 +218,7 @@ def test_combined_warmup_owns_one_session_and_runs_three_tabs_concurrently():
             "profile", platforms=["youtube", "instagram", "tiktok"], kind="dolphin"
         )
     assert sorted(completed) == ["1", "2", "3"]
+    assert extra_platforms
     assert not context.pages[0].closed
     assert all(page.closed for page in context.pages[1:])
     api.start_profile.assert_called_once()

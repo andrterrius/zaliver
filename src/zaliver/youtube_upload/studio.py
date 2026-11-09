@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote, urlencode, urljoin, urlparse
 
 from zaliver.youtube_upload.schedule_publish import (
     MSK,
@@ -8875,7 +8875,7 @@ _SHORTS_SUBSCRIBE_BTN_SELECTORS = (
 )
 _YOUTUBE_SUBSCRIPTIONS_FEED_URL = "https://www.youtube.com/feed/subscriptions"
 _SHORTS_COMMENTS_BTN_RE = re.compile(
-    r"view\s+comments|"
+    r"view\s+(?:\d+[\d,.]*\s+)?comments?\b|"
     r"посмотреть\s+комментарии|"
     r"^comments$|"
     r"^комментарии$",
@@ -8952,8 +8952,9 @@ def _studio_advance_shorts_feed(
         + " — повторяем прокрутку…"
     )
     page.keyboard.press("ArrowDown")
-    page.wait_for_timeout(500)
-    return _studio_read_active_short_video_id(page)
+    page.wait_for_timeout(1_000)
+    next_id = _studio_read_active_short_video_id(page)
+    return next_id if next_id and next_id != prev_video_id else ""
 
 
 def _studio_read_active_short_video_id(page) -> str:
@@ -9157,7 +9158,7 @@ def _studio_scroll_shorts_to_next(
         _studio_focus_shorts_player(page)
 
         page.keyboard.press("ArrowDown")
-        page.wait_for_timeout(800)
+        page.wait_for_timeout(1_000)
         vid = _studio_read_active_short_video_id(page)
         if vid and vid != prev_video_id:
             return vid
@@ -9168,19 +9169,19 @@ def _studio_scroll_shorts_to_next(
             page.mouse.wheel(0, 900)
         except Exception:
             pass
-        page.wait_for_timeout(800)
+        page.wait_for_timeout(1_000)
         vid = _studio_read_active_short_video_id(page)
         if vid and vid != prev_video_id:
             return vid
 
         _studio_swipe_shorts_feed_up(page)
-        page.wait_for_timeout(900)
+        page.wait_for_timeout(1_000)
         vid = _studio_read_active_short_video_id(page)
         if vid and vid != prev_video_id:
             return vid
 
         page.keyboard.press("PageDown")
-        page.wait_for_timeout(800)
+        page.wait_for_timeout(1_000)
         vid = _studio_read_active_short_video_id(page)
         if vid and vid != prev_video_id:
             return vid
@@ -9189,32 +9190,29 @@ def _studio_scroll_shorts_to_next(
 
 
 def _studio_try_like_current_short(page) -> bool:
-    """Клик по лайку на текущем Short, если ещё не лайкнут."""
+    """Клик по видимой кнопке лайка, если ролик ещё не лайкнут."""
     like_btn = (
         page.locator("like-button-view-model button")
         .or_(page.locator("#like-button button"))
-        .or_(
-            page.locator(
-                "ytd-segmented-like-dislike-button-renderer like-button-view-model button"
-            )
-        )
         .or_(page.get_by_role("button", name=_SHORTS_LIKE_BTN_RE))
     )
     try:
-        btn = like_btn.first
-        if not btn.is_visible(timeout=2_000):
-            return False
-        label = (btn.get_attribute("aria-label") or "").strip()
-        if label and _SHORTS_ALREADY_LIKED_RE.search(label):
-            _log("Shorts: ролик уже с лайком — пропуск.")
-            return False
-        btn.click(timeout=3_000)
-        page.wait_for_timeout(400)
-        _log("Shorts: лайк поставлен.")
-        return True
+        for index in range(min(like_btn.count(), 10)):
+            btn = like_btn.nth(index)
+            if not btn.is_visible(timeout=500):
+                continue
+            label = (btn.get_attribute("aria-label") or "").strip()
+            pressed = (btn.get_attribute("aria-pressed") or "").strip().lower()
+            if pressed == "true" or (label and _SHORTS_ALREADY_LIKED_RE.search(label)):
+                _log("Shorts: ролик уже с лайком — пропуск.")
+                return False
+            btn.click(timeout=3_000)
+            page.wait_for_timeout(400)
+            _log("Shorts: лайк поставлен.")
+            return True
     except Exception as e:
         _log(f"Shorts: не удалось поставить лайк: {type(e).__name__}")
-        return False
+    return False
 
 
 def _studio_try_subscribe_current_short(page) -> bool:
@@ -9730,6 +9728,21 @@ def _studio_browse_youtube_shorts(
         _studio_dismiss_shorts_player_overlays(page)
         cur_id = _studio_read_active_short_video_id(page) or prev_id
 
+        if _studio_is_current_short_an_ad(page):
+            skip_attempts += 1
+            if skip_attempts > max_skip_attempts:
+                _log("Shorts: слишком много рекламы подряд — остановка.")
+                break
+            _log("Shorts: реклама — смотрим 1 с и пролистываем.")
+            if _studio_wait_ms_with_stop(page, 1_000, should_stop=should_stop):
+                return
+            next_id = _studio_advance_shorts_feed(
+                page, prev_video_id=cur_id or prev_id, log_label=""
+            )
+            if next_id:
+                prev_id = next_id
+            continue
+
         if cur_id and cur_id in seen_ids:
             skip_attempts += 1
             if skip_attempts > max_skip_attempts:
@@ -9746,19 +9759,6 @@ def _studio_browse_youtube_shorts(
                 if advance_fail_streak >= 3:
                     _log("Shorts: не удаётся перейти к новому ролику — остановка.")
                     break
-            continue
-
-        if _studio_is_current_short_an_ad(page):
-            skip_attempts += 1
-            if skip_attempts > max_skip_attempts:
-                _log("Shorts: слишком много рекламы подряд — остановка.")
-                break
-            _log("Shorts: реклама — пролистываем без просмотра.")
-            next_id = _studio_advance_shorts_feed(
-                page, prev_video_id=cur_id or prev_id, log_label=""
-            )
-            if next_id:
-                prev_id = next_id
             continue
 
         skip_attempts = 0
@@ -9973,7 +9973,8 @@ def _studio_click_search_shorts_chip(page) -> bool:
         ):
             try:
                 btn = page.locator(sel).first
-                if btn.is_visible(timeout=2_000):
+                btn.wait_for(state="visible", timeout=3_000)
+                if btn.is_visible():
                     btn.click(timeout=5_000)
                     page.wait_for_timeout(1_500)
                     _log(f"Shorts: фильтр «{label}» в поиске выбран.")
@@ -10214,7 +10215,7 @@ def _studio_open_first_search_short(page) -> bool:
 def _studio_goto_shorts_from_search(
     page, query: str, *, login_credentials=None
 ) -> bool:
-    """Главная YouTube → поиск → первый Short из полки на странице выдачи."""
+    """Поиск YouTube → фильтр Shorts → первый ролик в выдаче."""
     q = (query or "").strip()
     if not q:
         return False
@@ -10222,7 +10223,9 @@ def _studio_goto_shorts_from_search(
     _studio_goto_youtube_home(
         page, login_credentials=login_credentials, for_channel_scan=False
     )
-    if not _studio_search_youtube(page, q, skip_home_goto=True):
+    url = "https://www.youtube.com/results?" + urlencode({"search_query": q})
+    page.goto(url, wait_until="domcontentloaded", timeout=120_000)
+    if not _studio_click_search_shorts_chip(page):
         return False
     try:
         page.locator(_SEARCH_SHORTS_SHELF_ITEM_SEL).first.wait_for(
@@ -10270,35 +10273,8 @@ def _studio_goto_shorts_from_hashtag(
             )
         except Exception:
             pass
-    href = _studio_first_hashtag_short_href(page)
-    if not href:
-        _log("Shorts: на странице хэштега нет ссылок на Shorts.")
-        return False
-    resolved = _studio_resolve_youtube_href(href)
-    _log(f"Shorts: открываем первый Short с хэштега ({resolved!r})…")
-    try:
-        page.goto(resolved, wait_until="domcontentloaded", timeout=60_000)
-    except Exception as e:
-        _log(f"Shorts: goto первого Short: {type(e).__name__}")
-        return False
-    if not _studio_wait_youtube_shorts_url(page, timeout_ms=8_000):
-        _log(f"Shorts: после перехода URL не плеер Shorts ({page.url!r}).")
-        return False
-    try:
-        _studio_wait_shorts_feed_ready(page, timeout_ms=15_000)
-    except Exception:
-        if not _studio_is_shorts_player_ready(page):
-            _log("Shorts: плеер после хэштега не готов.")
-            return False
-        _studio_dismiss_shorts_player_overlays(page)
-    _studio_ensure_shorts_playing(page)
-    vid = _studio_read_active_short_video_id(page)
-    _log(
-        "Shorts: открыт первый Short с хэштега"
-        + (f" ({vid})" if vid else "")
-        + f" — {page.url!r}"
-    )
-    return True
+    # Клик сохраняет контекст выдачи хэштега для ленты следующих Shorts.
+    return _studio_open_first_search_short(page)
 
 
 def _studio_collect_rich_grid_watch_links(page) -> list:

@@ -184,6 +184,7 @@ def warmup_combined_profile(
                             if platform == "youtube":
                                 run_youtube_shorts_warmup(page, **yt_kwargs)
                             else:
+                                search_query = (yt_kwargs.get("hashtag") or "").strip().lstrip("#").strip()
                                 credentials = (
                                     instagram_credentials
                                     if platform == "instagram"
@@ -204,7 +205,8 @@ def warmup_combined_profile(
                                     watch_min_s=yt_kwargs.get("shorts_watch_min_s", 5),
                                     watch_max_s=yt_kwargs.get("shorts_watch_max_s", 25),
                                     watch_full=yt_kwargs.get("watch_full_video", False),
-                                    reels_recommendations=True,
+                                    reels_recommendations=not bool(search_query),
+                                    search_query=search_query,
                                 )
                                 runner = (
                                     run_instagram_reels_warmup

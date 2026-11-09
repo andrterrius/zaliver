@@ -143,7 +143,8 @@ def test_real_processing_routes_different_sources_with_identical_names(
         )
 
 
-def test_combined_warmup_owns_one_session_and_runs_three_tabs_concurrently():
+@pytest.mark.parametrize("hashtag, expected_query", [("#travel", "travel"), ("", "")])
+def test_combined_warmup_owns_one_session_and_runs_three_tabs_concurrently(hashtag, expected_query):
     from zaliver.antydetect import antic_open
     from zaliver.youtube_upload import studio
     from zaliver.instagram_upload import reels_warmup as instagram
@@ -180,6 +181,7 @@ def test_combined_warmup_owns_one_session_and_runs_three_tabs_concurrently():
     api.start_profile.return_value.http_url.return_value = "http://test"
     barrier = Barrier(3)
     completed, lock = [], Lock()
+    received = {}
     extra_watched = Event()
     extra_platforms = []
 
@@ -191,6 +193,7 @@ def test_combined_warmup_owns_one_session_and_runs_three_tabs_concurrently():
         assert not context.pages[0].closed
         with lock:
             completed.append(page.target)
+            received[page.target] = kwargs
 
     def watch_extra(page, platform, options):
         assert not page.closed
@@ -215,9 +218,14 @@ def test_combined_warmup_owns_one_session_and_runs_three_tabs_concurrently():
         instagram, "run_instagram_reels_warmup", side_effect=runner
     ), patch.object(tiktok, "run_tiktok_reels_warmup", side_effect=runner):
         warmup_combined_profile(
-            "profile", platforms=["youtube", "instagram", "tiktok"], kind="dolphin"
+            "profile", platforms=["youtube", "instagram", "tiktok"], kind="dolphin",
+            youtube_kwargs={"hashtag": hashtag},
         )
     assert sorted(completed) == ["1", "2", "3"]
+    assert received["1"]["hashtag"] == hashtag
+    for target in ("2", "3"):
+        assert received[target]["search_query"] == expected_query
+        assert received[target]["reels_recommendations"] is (not bool(expected_query))
     assert extra_platforms
     assert not context.pages[0].closed
     assert all(page.closed for page in context.pages[1:])

@@ -807,16 +807,22 @@ class ProcessingService:
                     if isinstance(crop_values, (list, tuple)) and len(crop_values) == 4:
                         for name, value in zip(("crop_left", "crop_top", "crop_right", "crop_bottom"), crop_values):
                             settings[name] = float(value)
-                    settings["scale_background"] = str(options.get("scale_background") or "black")
-                    settings["blur_strength"] = max(0, min(40, int(options.get("scale_blur_strength", 5))))
-                    settings["blur_darkness"] = max(0, min(80, int(options.get("scale_blur_darkness", 0))))
-                    if options.get("scale_random_color", True):
+                    frame_options = dict(options)
+                    frame_options.update((options.get("video_frame_styles") or {}).get(os.path.normcase(str(p.resolve())), {}))
+                    settings["scale_background"] = str(frame_options.get("scale_background") or "black")
+                    settings["blur_strength"] = max(0, min(40, int(frame_options.get("scale_blur_strength", 5))))
+                    settings["blur_darkness"] = max(0, min(80, int(frame_options.get("scale_blur_darkness", 0))))
+                    if frame_options.get("scale_random_color", True):
                         rgb = colorsys.hsv_to_rgb(random.random(), random.uniform(.35, .65), random.uniform(.24, .42))
                         settings["frame_color"] = ''.join(f'{round(c * 255):02x}' for c in rgb)
                     else:
-                        settings["frame_color"] = str(options.get("scale_frame_color") or "#283957").lstrip('#')
-                    pattern = str(options.get("scale_pattern") or "geometry")
+                        settings["frame_color"] = str(frame_options.get("scale_frame_color") or "#283957").lstrip('#')
+                    pattern = str(frame_options.get("scale_pattern") or "geometry")
                     settings["frame_pattern"] = pattern
+                    settings["frame_gradient"] = bool(frame_options.get("scale_frame_gradient", False))
+                    settings["frame_gradient_colors"] = list(frame_options.get("scale_gradient_colors", ["#e13ce8"]))
+                    settings["frame_gradient_speed"] = max(0, min(200, int(frame_options.get("scale_gradient_speed", 100))))
+                    settings["frame_gradient_type"] = str(frame_options.get("scale_gradient_type", "linear"))
                     settings["frame_seed"] = random.randrange(1000000)
 
                     job_id = str(uuid.uuid4())

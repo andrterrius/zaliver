@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import time
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +14,9 @@ from PyQt6.QtGui import (
     QFont,
     QFontMetrics,
     QImage,
+    QLinearGradient,
+    QRadialGradient,
+    QConicalGradient,
     QMouseEvent,
     QPainter,
     QPainterPath,
@@ -45,8 +50,44 @@ _FRAME_CACHE: dict[tuple[str, float, int], QPixmap] = {}
 _FRAME_CACHE_MAX = 12
 
 
-def _paint_frame_pattern(painter, frame, color, pattern):
-    painter.fillRect(frame, QColor(color))
+def _paint_frame_background(painter, frame, color, gradient=False, colors=None, speed=100, gradient_type="linear"):
+    if not gradient:
+        painter.fillRect(frame, QColor(color))
+        return
+    if gradient_type == "radial":
+        brush = QRadialGradient(frame.center(), math.hypot(frame.width(), frame.height()) / 2)
+    elif gradient_type == "conical":
+        brush = QConicalGradient(frame.center(), 0)
+    else:
+        brush = QLinearGradient(frame.topLeft(), frame.bottomRight())
+    phase = -time.monotonic() * .55 * speed / 100
+    palette = [QColor(color)] + [QColor(c) for c in (colors if colors is not None else ["#e13ce8"])]
+    count = len(palette)
+    for i in range(max(33, count * 16 + 1)):
+        steps = max(32, count * 16)
+        position = (i / steps * count + phase / (2 * math.pi) * count) % count
+        index = int(position)
+        blend = (1 + math.cos(math.pi * (position - index))) / 2
+        first, second = palette[index], palette[(index + 1) % count]
+        rgb = [round(a * blend + b * (1 - blend)) for a, b in zip(first.getRgb()[:3], second.getRgb()[:3])]
+        brush.setColorAt(i / steps, QColor(*rgb))
+    painter.fillRect(frame, brush)
+
+
+def _paint_frame_pattern(painter, frame, color, pattern, gradient=False, colors=None, speed=100, gradient_type="linear"):
+    _paint_frame_background(painter, frame, color, gradient, colors, speed, gradient_type)
+    if pattern == "mosaic":
+        step = max(4.0, min(frame.width(), frame.height()) / 7)
+        size = step / 2
+        nx = max(1, int((frame.width() - size) / step) + 1)
+        ny = max(1, int((frame.height() - size) / step) + 1)
+        x0 = frame.left() + (frame.width() - (nx - 1) * step - size) / 2
+        y0 = frame.top() + (frame.height() - (ny - 1) * step - size) / 2
+        for ix in range(nx):
+            for iy in range(ny):
+                x, y = x0 + ix * step, y0 + iy * step
+                painter.fillRect(QRectF(x, y, size, size), QColor(255, 255, 255, 25 + ((ix * 17 + iy * 31) % 45)))
+        return
     if pattern == 'random':
         pattern = 'mosaic'
     if pattern == 'curved_grid':
@@ -130,8 +171,17 @@ class ScalePreviewWidget(QWidget):
         self._blur_strength, self._blur_darkness = strength, darkness
         self.update()
 
-    def set_frame_options(self, color, pattern):
-        self._frame_color, self._pattern = color, pattern
+    def set_frame_options(self, color, pattern, gradient=False, colors=None, speed=100, gradient_type="linear"):
+        self._frame_color, self._pattern, self._frame_gradient = color, pattern, gradient
+        self._gradient_colors, self._gradient_speed, self._gradient_type = colors, speed, gradient_type
+        if not hasattr(self, "_frame_gradient_timer"):
+            self._frame_gradient_timer = QTimer(self)
+            self._frame_gradient_timer.setInterval(50)
+            self._frame_gradient_timer.timeout.connect(self.update)
+        if gradient:
+            self._frame_gradient_timer.start()
+        else:
+            self._frame_gradient_timer.stop()
         self.update()
 
     def set_background_style(self, style):
@@ -180,9 +230,9 @@ class ScalePreviewWidget(QWidget):
         if self._background == 'blur' and self._pixmap and not self._pixmap.isNull():
             _paint_blurred_background(painter, frame, self._pixmap, self._blur_strength, self._blur_darkness)
         elif self._background in ('solid', 'pattern'):
-            painter.fillRect(frame, QColor(self._frame_color))
+            _paint_frame_background(painter, frame, self._frame_color, getattr(self, "_frame_gradient", False), getattr(self, "_gradient_colors", None), getattr(self, "_gradient_speed", 100), getattr(self, "_gradient_type", "linear"))
             if self._background == 'pattern':
-                _paint_frame_pattern(painter, frame, self._frame_color, self._pattern)
+                _paint_frame_pattern(painter, frame, self._frame_color, self._pattern, getattr(self, "_frame_gradient", False), getattr(self, "_gradient_colors", None), getattr(self, "_gradient_speed", 100), getattr(self, "_gradient_type", "linear"))
         if self._pixmap and not self._pixmap.isNull():
             w, h = frame.width()*self._sx, frame.height()*self._sy
             l, t, r, b = self._crop
@@ -659,8 +709,17 @@ class TextOverlayPreviewWidget(QWidget):
         self._video_background = background
         self.update()
 
-    def set_frame_options(self, color: str, pattern: str) -> None:
-        self._frame_color, self._pattern = color, pattern
+    def set_frame_options(self, color: str, pattern: str, gradient: bool = False, colors: list[str] | None = None, speed: int = 100, gradient_type: str = "linear") -> None:
+        self._frame_color, self._pattern, self._frame_gradient = color, pattern, gradient
+        self._gradient_colors, self._gradient_speed, self._gradient_type = colors, speed, gradient_type
+        if not hasattr(self, "_frame_gradient_timer"):
+            self._frame_gradient_timer = QTimer(self)
+            self._frame_gradient_timer.setInterval(50)
+            self._frame_gradient_timer.timeout.connect(self.update)
+        if gradient:
+            self._frame_gradient_timer.start()
+        else:
+            self._frame_gradient_timer.stop()
         self.update()
 
     def set_blur_options(self, strength: int, darkness: int) -> None:
@@ -967,9 +1026,9 @@ class TextOverlayPreviewWidget(QWidget):
             if self._video_background == "blur":
                 _paint_blurred_background(painter, frame_rect, bg, self._blur_strength, self._blur_darkness)
             elif self._video_background in ("solid", "pattern"):
-                painter.fillRect(frame_rect, QColor(self._frame_color))
+                _paint_frame_background(painter, frame_rect, self._frame_color, getattr(self, "_frame_gradient", False), getattr(self, "_gradient_colors", None), getattr(self, "_gradient_speed", 100), getattr(self, "_gradient_type", "linear"))
                 if self._video_background == "pattern":
-                    _paint_frame_pattern(painter, frame_rect, self._frame_color, self._pattern)
+                    _paint_frame_pattern(painter, frame_rect, self._frame_color, self._pattern, getattr(self, "_frame_gradient", False), getattr(self, "_gradient_colors", None), getattr(self, "_gradient_speed", 100), getattr(self, "_gradient_type", "linear"))
             video_w, video_h = fw*self._video_scale_x, fh*self._video_scale_y
             px = fx + (fw - video_w) / 2.0 + self._video_x * fw
             py = fy + (fh - video_h) / 2.0 + self._video_y * fh

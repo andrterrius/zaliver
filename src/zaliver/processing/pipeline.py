@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -28,6 +28,10 @@ class UniquifySettings:
     blur_darkness: int = 0
     frame_color: str = "202840"
     frame_pattern: str = "geometry"
+    frame_gradient: bool = False
+    frame_gradient_colors: list[str] = field(default_factory=lambda: ["e13ce8"])
+    frame_gradient_speed: int = 100
+    frame_gradient_type: str = "linear"
     frame_seed: int = 0
     noise_sigma: float = 0.0
     seed_base: int = 0

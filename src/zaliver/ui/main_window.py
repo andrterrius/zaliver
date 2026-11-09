@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import copy
 import json
 import math
 import sqlite3
@@ -19,6 +20,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import (
     QEvent,
+    QSignalBlocker,
     QObject,
     QPointF,
     QDateTime,
@@ -1681,13 +1683,49 @@ class MainWindow(QWidget):
         self.scale_pattern.addItem("Сетка", "grid")
         self.scale_pattern.addItem("Искривлённая сетка", "curved_grid")
         self.scale_pattern.addItem("Полосы", "stripes")
-        self.scale_pattern.addItem("Пунктир", "dots")
         self.scale_pattern.addItem("Мозаика", "mosaic")
         self.scale_pattern.addItem("Случайный узор", "random")
         frame_options.addWidget(self.scale_random_color)
         frame_options.addWidget(self.scale_color_button)
         frame_options.addWidget(self.scale_pattern)
+        self.scale_frame_gradient = QCheckBox("Градиент")
+        frame_options.addWidget(self.scale_frame_gradient)
+        self._scale_gradient_colors = ["#e13ce8"]
+        self.scale_gradient_options = QWidget()
+        gradient_outer = QVBoxLayout(self.scale_gradient_options)
+        gradient_outer.setContentsMargins(0, 0, 0, 0)
+        gradient_options = QHBoxLayout()
+        self.scale_gradient_colors_list = QListWidget()
+        self.scale_gradient_colors_list.setMaximumHeight(100)
+        self.scale_gradient_colors_list.itemDoubleClicked.connect(lambda _item: self._edit_scale_gradient_color())
+        self.scale_gradient_add = QPushButton("Добавить цвет…")
+        self.scale_gradient_add.clicked.connect(self._add_scale_gradient_color)
+        self.scale_gradient_edit = QPushButton("Изменить…")
+        self.scale_gradient_edit.clicked.connect(self._edit_scale_gradient_color)
+        self.scale_gradient_remove = QPushButton("Удалить")
+        self.scale_gradient_remove.clicked.connect(self._remove_scale_gradient_color)
+        self.scale_gradient_type = QComboBox()
+        self.scale_gradient_type.addItem("Линейный", "linear")
+        self.scale_gradient_type.addItem("Круглый", "radial")
+        self.scale_gradient_type.addItem("Конусный", "conical")
+        self.scale_gradient_speed = QSpinBox()
+        self.scale_gradient_speed.setRange(0, 200)
+        self.scale_gradient_speed.setValue(100)
+        self.scale_gradient_speed.setSuffix(" %")
+        for widget in (self.scale_gradient_add, self.scale_gradient_edit, self.scale_gradient_remove):
+            gradient_options.addWidget(widget)
+        gradient_options.addStretch()
+        gradient_settings = QHBoxLayout()
+        for widget in (QLabel("Тип"), self.scale_gradient_type, QLabel("Скорость"), self.scale_gradient_speed):
+            gradient_settings.addWidget(widget)
+        gradient_settings.addStretch()
+        gradient_outer.addLayout(gradient_options)
+        gradient_outer.addLayout(gradient_settings)
+        gradient_outer.addWidget(QLabel("Дополнительные цвета (по порядку)"))
+        gradient_outer.addWidget(self.scale_gradient_colors_list)
+        self._refresh_scale_gradient_colors()
         scale_layout.addWidget(self.scale_frame_options, 6, 0, 1, 3)
+        scale_layout.addWidget(self.scale_gradient_options, 8, 0, 1, 3)
         self.scale_blur_options = QWidget()
         blur_options = QHBoxLayout(self.scale_blur_options)
         blur_options.setContentsMargins(0, 0, 0, 0)
@@ -1706,11 +1744,18 @@ class MainWindow(QWidget):
         self.scale_background.currentIndexChanged.connect(self._sync_scale_frame_options)
         self.scale_random_color.toggled.connect(self._sync_scale_frame_options)
         self.scale_pattern.currentIndexChanged.connect(self._sync_scale_frame_options)
+        self.scale_frame_gradient.toggled.connect(self._sync_scale_frame_options)
+        self.scale_gradient_speed.valueChanged.connect(self._sync_scale_frame_options)
+        self.scale_gradient_type.currentIndexChanged.connect(self._sync_scale_frame_options)
         self.scale_blur_strength.valueChanged.connect(self._sync_scale_frame_options)
         self.scale_blur_darkness.valueChanged.connect(self._sync_scale_frame_options)
         self._video_scales = {}
         self._video_positions = {}
         self._video_crops = {}
+        self._video_frame_styles = {}
+        self._scale_style_key = None
+        self._loading_scale_style = False
+        self._default_scale_style = self._capture_scale_style()
         self._scale_undo_stack = []
         self._scale_undo_pending = None
         self.scale_preview = ScalePreviewWidget()
@@ -1730,8 +1775,16 @@ class MainWindow(QWidget):
         self._scale_undo_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._scale_undo_shortcut.activated.connect(self._undo_scale_edit)
         self.scale_enabled.toggled.connect(self._update_scale_controls)
-        scale_layout.addWidget(self.scale_preview, 1, 0, 1, 3)
+        preview_container = QWidget()
+        preview_layout = QVBoxLayout(preview_container)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.addWidget(self.scale_preview)
+        self.scale_repeat_first = QCheckBox("Повторять эти настройки для остальных видео")
+        self.scale_repeat_first.setChecked(True)
+        preview_layout.addWidget(self.scale_repeat_first, alignment=Qt.AlignmentFlag.AlignHCenter)
+        scale_layout.addWidget(preview_container, 1, 0, 1, 3)
         self._scale_preview_index = 0
+        self.scale_repeat_first.toggled.connect(self._scale_repeat_toggled)
         self._scale_preview_prev = QPushButton("‹")
         self._scale_preview_next = QPushButton("›")
         self._scale_preview_label = QLabel()
@@ -1754,7 +1807,7 @@ class MainWindow(QWidget):
         stretch_controls = QWidget()
         stretch_layout = QHBoxLayout(stretch_controls)
         stretch_layout.setContentsMargins(0, 0, 0, 0)
-        for label, action in (("Растянуть по горизонтали", "stretch_horizontal"), ("Растянуть по вертикали", "stretch_vertical")):
+        for label, action in (("Растянуть по горизонтали", "stretch_horizontal"), ("Растянуть по вертикали", "stretch_vertical"), ("Сбросить обрезку", "reset_crop")):
             button = QPushButton(label)
             button.setObjectName("secondary")
             button.clicked.connect(lambda _checked=False, a=action: self._adjust_scale_preview(a))
@@ -11413,7 +11466,11 @@ class MainWindow(QWidget):
                 "blur_darkness": self.scale_blur_darkness.value(),
                 "frame_color": self._scale_frame_color,
                 "random_color": self.scale_random_color.isChecked(),
-                "pattern": self.scale_pattern.currentData()}
+                "pattern": self.scale_pattern.currentData(),
+                "gradient": self.scale_frame_gradient.isChecked(),
+                "gradient_colors": list(self._scale_gradient_colors),
+                "gradient_speed": self.scale_gradient_speed.value(),
+                "gradient_type": self.scale_gradient_type.currentData()}
 
     def _export_scale_settings(self) -> None:
         try:
@@ -11444,19 +11501,30 @@ class MainWindow(QWidget):
         if crop[0] + crop[2] > .950001 or crop[1] + crop[3] > .950001:
             raise ValueError("Некорректная обрезка.")
         bg = self.scale_background.findData(data.get("background"))
-        pattern = self.scale_pattern.findData(data.get("pattern"))
+        pattern = self.scale_pattern.findData("geometry" if data.get("pattern") == "dots" else data.get("pattern"))
         color = data.get("frame_color")
         strength, darkness = data.get("blur_strength"), data.get("blur_darkness")
+        gradient_colors = data.get("gradient_colors", [data.get("gradient_color", "#e13ce8")])
+        gradient_speed = data.get("gradient_speed", 100)
+        gradient_type = self.scale_gradient_type.findData(data.get("gradient_type", "linear"))
+        if gradient_type < 0 or not isinstance(gradient_colors, list) or any(not isinstance(c, str) or len(c) != 7 or not c.startswith("#") or not QColor(c).isValid() for c in gradient_colors) or type(gradient_speed) is not int or not 0 <= gradient_speed <= 200 or type(data.get("gradient", False)) is not bool:
+            raise ValueError("Некорректные настройки градиента.")
         if bg < 0 or pattern < 0 or not isinstance(color, str) or len(color) != 7 or not color.startswith('#') or not QColor(color).isValid() or type(strength) is not int or not 0 <= strength <= 40 or type(darkness) is not int or not 0 <= darkness <= 80 or type(data.get("enabled")) is not bool or type(data.get("random_color")) is not bool:
             raise ValueError("Некорректные настройки фона.")
         self._begin_scale_undo()
         key = os.path.normcase(videos[self._scale_preview_index])
         self._video_scales[key], self._video_positions[key], self._video_crops[key] = scale, position, crop
+        self._propagate_first_scale()
         self._end_scale_undo()
         self._scale_frame_color = color
+        self._scale_gradient_colors = list(gradient_colors)
+        self._refresh_scale_gradient_colors()
+        self.scale_gradient_speed.setValue(gradient_speed)
+        self.scale_gradient_type.setCurrentIndex(gradient_type)
         self.scale_background.setCurrentIndex(bg)
         self.scale_pattern.setCurrentIndex(pattern)
         self.scale_random_color.setChecked(data["random_color"])
+        self.scale_frame_gradient.setChecked(data.get("gradient", False) is True)
         self.scale_blur_strength.setValue(strength)
         self.scale_blur_darkness.setValue(darkness)
         self.scale_enabled.setChecked(data["enabled"])
@@ -11480,33 +11548,134 @@ class MainWindow(QWidget):
             self.scale_random_color.setChecked(False)
             self._sync_scale_frame_options()
 
+    def _refresh_scale_gradient_colors(self) -> None:
+        self.scale_gradient_colors_list.clear()
+        for index, color in enumerate(self._scale_gradient_colors):
+            item = QListWidgetItem(f"Цвет {index + 2}: {color}")
+            item.setBackground(QColor(color))
+            c = QColor(color)
+            item.setForeground(QColor("black" if c.lightness() > 150 else "white"))
+            self.scale_gradient_colors_list.addItem(item)
+
+    def _add_scale_gradient_color(self) -> None:
+        color = QColorDialog.getColor(QColor("#e13ce8"), self, "Добавить цвет градиента")
+        if color.isValid():
+            self._scale_gradient_colors.append(color.name())
+            self._refresh_scale_gradient_colors()
+            self.scale_gradient_colors_list.setCurrentRow(len(self._scale_gradient_colors) - 1)
+            self._sync_scale_frame_options()
+
+    def _edit_scale_gradient_color(self) -> None:
+        index = self.scale_gradient_colors_list.currentRow()
+        if 0 <= index < len(self._scale_gradient_colors):
+            color = QColorDialog.getColor(QColor(self._scale_gradient_colors[index]), self, "Цвет градиента")
+            if color.isValid():
+                self._scale_gradient_colors[index] = color.name()
+                self._refresh_scale_gradient_colors()
+                self.scale_gradient_colors_list.setCurrentRow(index)
+                self._sync_scale_frame_options()
+
+    def _remove_scale_gradient_color(self) -> None:
+        index = self.scale_gradient_colors_list.currentRow()
+        if 0 <= index < len(self._scale_gradient_colors):
+            self._scale_gradient_colors.pop(index)
+            self._refresh_scale_gradient_colors()
+            self.scale_gradient_colors_list.setCurrentRow(min(index, len(self._scale_gradient_colors) - 1))
+            self._sync_scale_frame_options()
+
+    def _capture_scale_style(self) -> dict:
+        return {
+            "scale_background": self.scale_background.currentData(),
+            "scale_blur_strength": self.scale_blur_strength.value(),
+            "scale_blur_darkness": self.scale_blur_darkness.value(),
+            "scale_frame_color": self._scale_frame_color,
+            "scale_random_color": self.scale_random_color.isChecked(),
+            "scale_pattern": self.scale_pattern.currentData(),
+            "scale_frame_gradient": self.scale_frame_gradient.isChecked(),
+            "scale_gradient_colors": list(self._scale_gradient_colors),
+            "scale_gradient_speed": self.scale_gradient_speed.value(),
+            "scale_gradient_type": self.scale_gradient_type.currentData(),
+        }
+
+    def _load_scale_style(self, style: dict) -> None:
+        controls = (self.scale_background, self.scale_blur_strength, self.scale_blur_darkness,
+                    self.scale_random_color, self.scale_pattern, self.scale_frame_gradient,
+                    self.scale_gradient_speed, self.scale_gradient_type)
+        blockers = [QSignalBlocker(widget) for widget in controls]
+        self._loading_scale_style = True
+        try:
+            self.scale_background.setCurrentIndex(self.scale_background.findData(style["scale_background"]))
+            self.scale_blur_strength.setValue(style["scale_blur_strength"])
+            self.scale_blur_darkness.setValue(style["scale_blur_darkness"])
+            self._scale_frame_color = style["scale_frame_color"]
+            self.scale_random_color.setChecked(style["scale_random_color"])
+            self.scale_pattern.setCurrentIndex(self.scale_pattern.findData(style["scale_pattern"]))
+            self.scale_frame_gradient.setChecked(style["scale_frame_gradient"])
+            self._scale_gradient_colors = list(style["scale_gradient_colors"])
+            self._refresh_scale_gradient_colors()
+            self.scale_gradient_speed.setValue(style["scale_gradient_speed"])
+            self.scale_gradient_type.setCurrentIndex(self.scale_gradient_type.findData(style["scale_gradient_type"]))
+            self.scale_preview.set_background_style(style["scale_background"])
+            self._sync_scale_frame_options()
+        finally:
+            self._loading_scale_style = False
+            del blockers
+
     def _sync_scale_frame_options(self, *_args) -> None:
         mode = self.scale_background.currentData()
         self.scale_frame_options.setVisible(mode in ("solid", "pattern"))
         self.scale_blur_options.setVisible(mode == "blur")
         self.scale_pattern.setVisible(mode == "pattern")
+        self.scale_frame_gradient.setVisible(mode in ("solid", "pattern"))
+        self.scale_gradient_options.setVisible(mode in ("solid", "pattern") and self.scale_frame_gradient.isChecked())
         self.scale_color_button.setStyleSheet(f"background-color: {self._scale_frame_color}; color: white;")
-        self.scale_preview.set_frame_options(self._scale_frame_color, str(self.scale_pattern.currentData()))
+        self.scale_preview.set_frame_options(self._scale_frame_color, str(self.scale_pattern.currentData()), self.scale_frame_gradient.isChecked(), list(self._scale_gradient_colors), self.scale_gradient_speed.value(), self.scale_gradient_type.currentData())
         self.scale_preview.set_blur_options(self.scale_blur_strength.value(), self.scale_blur_darkness.value())
+        if not self._loading_scale_style and self._scale_style_key is not None:
+            self._video_frame_styles[self._scale_style_key] = self._capture_scale_style()
+            self._propagate_first_scale()
         self._apply_text_overlay_preview_video()
 
     def _scale_preview_changed(self, sx: float, sy: float) -> None:
         videos = self._text_overlay_preview_videos()
         if videos:
             self._video_scales[os.path.normcase(videos[self._scale_preview_index])] = [sx, sy]
+            self._propagate_first_scale()
             self._apply_text_overlay_preview_video()
 
     def _scale_preview_position_changed(self, x: float, y: float) -> None:
         videos = self._text_overlay_preview_videos()
         if videos:
             self._video_positions[os.path.normcase(videos[self._scale_preview_index])] = [x, y]
+            self._propagate_first_scale()
             self._apply_text_overlay_preview_video()
 
     def _scale_preview_crop_changed(self, left: float, top: float, right: float, bottom: float) -> None:
         videos = self._text_overlay_preview_videos()
         if videos:
             self._video_crops[os.path.normcase(videos[self._scale_preview_index])] = [left, top, right, bottom]
+            self._propagate_first_scale()
             self._apply_text_overlay_preview_video()
+
+    def _scale_repeat_toggled(self, enabled: bool) -> None:
+        if enabled and self._scale_preview_index == 0:
+            self._begin_scale_undo()
+            self._propagate_first_scale()
+            self._end_scale_undo()
+            self._apply_text_overlay_preview_video()
+
+    def _propagate_first_scale(self) -> None:
+        videos = self._text_overlay_preview_videos()
+        if not videos or self._scale_preview_index != 0 or not self.scale_repeat_first.isChecked():
+            return
+        scale, position, crop = self._scale_snapshot(os.path.normcase(videos[0]))
+        for path in videos[1:]:
+            key = os.path.normcase(path)
+            self._video_scales[key] = list(scale)
+            self._video_positions[key] = list(position)
+            self._video_crops[key] = list(crop)
+            if os.path.normcase(videos[0]) in self._video_frame_styles:
+                self._video_frame_styles[key] = copy.deepcopy(self._video_frame_styles[os.path.normcase(videos[0])])
 
     def _scale_snapshot(self, key: str) -> tuple:
         return (tuple(self._video_scales.get(key, (1.0, 1.0))),
@@ -11517,29 +11686,36 @@ class MainWindow(QWidget):
         videos = self._text_overlay_preview_videos()
         if videos:
             key = os.path.normcase(videos[self._scale_preview_index])
-            self._scale_undo_pending = (key, self._scale_snapshot(key))
+            affected = videos if self._scale_preview_index == 0 and self.scale_repeat_first.isChecked() else [videos[self._scale_preview_index]]
+            self._scale_undo_pending = (key, {os.path.normcase(path): (self._scale_snapshot(os.path.normcase(path)), copy.deepcopy(self._video_frame_styles.get(os.path.normcase(path)))) for path in affected})
         else:
             self._scale_undo_pending = None
 
     def _end_scale_undo(self) -> None:
         pending = self._scale_undo_pending
         self._scale_undo_pending = None
-        if pending and pending[1] != self._scale_snapshot(pending[0]):
+        if pending and any(before != self._scale_snapshot(key) or style != self._video_frame_styles.get(key) for key, (before, style) in pending[1].items()):
             self._scale_undo_stack.append(pending)
             self._scale_undo_stack = self._scale_undo_stack[-100:]
 
     def _undo_scale_edit(self) -> None:
         if not self._scale_undo_stack:
             return
-        key, (scale, position, crop) = self._scale_undo_stack.pop()
-        self._video_scales[key] = list(scale)
-        self._video_positions[key] = list(position)
-        self._video_crops[key] = list(crop)
+        selected_key, snapshots = self._scale_undo_stack.pop()
+        for key, ((scale, position, crop), style) in snapshots.items():
+            if style is None:
+                self._video_frame_styles.pop(key, None)
+            else:
+                self._video_frame_styles[key] = style
+            self._video_scales[key] = list(scale)
+            self._video_positions[key] = list(position)
+            self._video_crops[key] = list(crop)
         videos = self._text_overlay_preview_videos()
         for index, path in enumerate(videos):
-            if os.path.normcase(path) == key:
+            if os.path.normcase(path) == selected_key:
                 self._scale_preview_index = index
                 break
+        self._scale_style_key = None
         self._update_scale_preview()
         self._apply_text_overlay_preview_video()
 
@@ -11552,6 +11728,12 @@ class MainWindow(QWidget):
         x, y = self._video_positions.get(key, (0.0, 0.0))
         sx, sy = self._video_scales.get(key, (1.0, 1.0))
         left, top, right, bottom = self._video_crops.get(key, (0.0, 0.0, 0.0, 0.0))
+        if action == "reset_crop":
+            self._video_crops.pop(key, None)
+            self._end_scale_undo()
+            self._update_scale_preview()
+            self._apply_text_overlay_preview_video()
+            return
         if action == "stretch_horizontal":
             sx = 1.0 / max(0.05, 1.0 - left - right)
             x = sx * (right - left) / 2.0
@@ -11569,6 +11751,7 @@ class MainWindow(QWidget):
             sx, sy = 1.0, 1.0
             self._video_crops.pop(key, None)
         self._video_scales[key] = [sx, sy]
+        self._propagate_first_scale()
         self._end_scale_undo()
         self._update_scale_preview()
         self._apply_text_overlay_preview_video()
@@ -11577,9 +11760,30 @@ class MainWindow(QWidget):
         videos = self._text_overlay_preview_videos()
         count = len(videos)
         self._scale_preview_index = self._scale_preview_index % count if count else 0
+        if videos:
+            first_key = os.path.normcase(videos[0])
+            self._video_frame_styles.setdefault(first_key, copy.deepcopy(self._default_scale_style))
+            for video in videos[1:]:
+                key = os.path.normcase(video)
+                if key not in self._video_frame_styles:
+                    initial = self._video_frame_styles[first_key] if self.scale_repeat_first.isChecked() else self._default_scale_style
+                    self._video_frame_styles[key] = copy.deepcopy(initial)
+                    if self.scale_repeat_first.isChecked():
+                        scale, position, crop = self._scale_snapshot(first_key)
+                        self._video_scales[key], self._video_positions[key], self._video_crops[key] = list(scale), list(position), list(crop)
         self._scale_preview_prev.setEnabled(count > 1)
         self._scale_preview_next.setEnabled(count > 1)
         path = videos[self._scale_preview_index] if videos else None
+        self.scale_repeat_first.setVisible(count > 1 and self._scale_preview_index == 0)
+        style_key = os.path.normcase(path) if path else None
+        if style_key != self._scale_style_key:
+            self._scale_style_key = style_key
+            if style_key is not None:
+                if style_key not in self._video_frame_styles:
+                    first_key = os.path.normcase(videos[0])
+                    inherited = self._video_frame_styles.get(first_key) if self.scale_repeat_first.isChecked() and self._scale_preview_index > 0 else None
+                    self._video_frame_styles[style_key] = copy.deepcopy(inherited or self._default_scale_style)
+                self._load_scale_style(self._video_frame_styles[style_key])
         self._scale_preview_label.setText(
             f"{self._scale_preview_index + 1} / {count} · {Path(path).name}"
             if path else "Нет исходников — выбери видео во вкладке «Исходники»"
@@ -11656,7 +11860,8 @@ class MainWindow(QWidget):
         self.text_overlay_preview.set_background_video(current, force=force)
         scales = getattr(self, "_video_scales", {})
         sx, sy = scales.get(os.path.normcase(current), (1.0, 1.0)) if current else (1.0, 1.0)
-        background = self.scale_background.currentData() if hasattr(self, "scale_background") else "black"
+        frame_style = self._video_frame_styles.get(os.path.normcase(current), self._default_scale_style) if current and hasattr(self, "_video_frame_styles") else None
+        background = frame_style["scale_background"] if frame_style else (self.scale_background.currentData() if hasattr(self, "scale_background") else "black")
         self.text_overlay_preview.set_video_transform(sx, sy, str(background or "black"))
         positions = getattr(self, "_video_positions", {})
         x, y = positions.get(os.path.normcase(current), (0.0, 0.0)) if current else (0.0, 0.0)
@@ -11668,8 +11873,9 @@ class MainWindow(QWidget):
         crop_values = crops.get(os.path.normcase(current), (0.0, 0.0, 0.0, 0.0)) if current and (not hasattr(self, "scale_enabled") or self.scale_enabled.isChecked()) else (0.0, 0.0, 0.0, 0.0)
         self.text_overlay_preview.set_video_crop(*crop_values)
         if hasattr(self, "scale_pattern"):
-            self.text_overlay_preview.set_frame_options(self._scale_frame_color, str(self.scale_pattern.currentData()))
-            self.text_overlay_preview.set_blur_options(self.scale_blur_strength.value(), self.scale_blur_darkness.value())
+            style = frame_style or self._capture_scale_style()
+            self.text_overlay_preview.set_frame_options(style["scale_frame_color"], str(style["scale_pattern"]), style["scale_frame_gradient"], list(style["scale_gradient_colors"]), style["scale_gradient_speed"], style["scale_gradient_type"])
+            self.text_overlay_preview.set_blur_options(style["scale_blur_strength"], style["scale_blur_darkness"])
         overlay_on = bool(self.text_overlay_enabled.isChecked())
         self.text_overlay_preview.set_text_visible(overlay_on)
 
@@ -12003,12 +12209,17 @@ class MainWindow(QWidget):
             "video_scales": dict(self._video_scales) if self.scale_enabled.isChecked() else {},
             "video_positions": dict(self._video_positions) if self.scale_enabled.isChecked() else {},
             "video_crops": dict(self._video_crops) if self.scale_enabled.isChecked() else {},
+            "video_frame_styles": copy.deepcopy(self._video_frame_styles) if self.scale_enabled.isChecked() else {},
             "scale_background": self.scale_background.currentData() if self.scale_enabled.isChecked() else "black",
             "scale_blur_strength": self.scale_blur_strength.value(),
             "scale_blur_darkness": self.scale_blur_darkness.value(),
             "scale_frame_color": self._scale_frame_color,
             "scale_random_color": self.scale_random_color.isChecked(),
             "scale_pattern": self.scale_pattern.currentData(),
+            "scale_frame_gradient": self.scale_frame_gradient.isChecked(),
+            "scale_gradient_colors": list(self._scale_gradient_colors),
+            "scale_gradient_speed": self.scale_gradient_speed.value(),
+            "scale_gradient_type": self.scale_gradient_type.currentData(),
             "manual_bounds": bounds,
             "randomize_uniquify": True,
             "copies_per_file": int(self.copies_per_file.value()),

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import colorsys
 import queue
 import random
 import secrets
@@ -25,6 +24,20 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import multiprocessing
+
+
+def _random_frame_color() -> str:
+    return ''.join(f'{random.randrange(256):02x}' for _ in range(3))
+
+
+def _frame_colors(frame_options: dict) -> tuple[str, list[str]]:
+    colors = list(frame_options.get("scale_gradient_colors", ["#e13ce8"]))
+    if frame_options.get("scale_random_color", True):
+        base = _random_frame_color()
+        if frame_options.get("scale_frame_gradient", False):
+            colors = [_random_frame_color() for _ in colors]
+        return base, colors
+    return str(frame_options.get("scale_frame_color") or "#283957").lstrip('#'), colors
 
 
 def _prefer_thread_pool() -> bool:
@@ -812,15 +825,10 @@ class ProcessingService:
                     settings["scale_background"] = str(frame_options.get("scale_background") or "black")
                     settings["blur_strength"] = max(0, min(40, int(frame_options.get("scale_blur_strength", 5))))
                     settings["blur_darkness"] = max(0, min(80, int(frame_options.get("scale_blur_darkness", 0))))
-                    if frame_options.get("scale_random_color", True):
-                        rgb = colorsys.hsv_to_rgb(random.random(), random.uniform(.35, .65), random.uniform(.24, .42))
-                        settings["frame_color"] = ''.join(f'{round(c * 255):02x}' for c in rgb)
-                    else:
-                        settings["frame_color"] = str(frame_options.get("scale_frame_color") or "#283957").lstrip('#')
+                    settings["frame_color"], settings["frame_gradient_colors"] = _frame_colors(frame_options)
                     pattern = str(frame_options.get("scale_pattern") or "geometry")
                     settings["frame_pattern"] = pattern
                     settings["frame_gradient"] = bool(frame_options.get("scale_frame_gradient", False))
-                    settings["frame_gradient_colors"] = list(frame_options.get("scale_gradient_colors", ["#e13ce8"]))
                     settings["frame_gradient_speed"] = max(0, min(200, int(frame_options.get("scale_gradient_speed", 100))))
                     settings["frame_gradient_type"] = str(frame_options.get("scale_gradient_type", "linear"))
                     settings["frame_seed"] = random.randrange(1000000)

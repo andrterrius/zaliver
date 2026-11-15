@@ -6,6 +6,7 @@ import os
 import copy
 import json
 import math
+import random
 import sqlite3
 import sys
 import tempfile
@@ -1714,7 +1715,7 @@ class MainWindow(QWidget):
         self.scale_frame_options = QWidget()
         frame_options = QHBoxLayout(self.scale_frame_options)
         frame_options.setContentsMargins(0, 0, 0, 0)
-        self.scale_random_color = QCheckBox("Случайный цвет")
+        self.scale_random_color = QCheckBox("Случайные цвета")
         self.scale_random_color.setChecked(True)
         self._scale_frame_color = "#283957"
         self.scale_color_button = QPushButton("Выбрать цвет…")
@@ -11774,13 +11775,27 @@ class MainWindow(QWidget):
         self.scale_pattern.setVisible(mode == "pattern")
         self.scale_frame_gradient.setVisible(mode in ("solid", "pattern"))
         self.scale_gradient_options.setVisible(mode in ("solid", "pattern") and self.scale_frame_gradient.isChecked())
-        self.scale_color_button.setStyleSheet(f"background-color: {self._scale_frame_color}; color: white;")
-        self.scale_preview.set_frame_options(self._scale_frame_color, str(self.scale_pattern.currentData()), self.scale_frame_gradient.isChecked(), list(self._scale_gradient_colors), self.scale_gradient_speed.value(), self.scale_gradient_type.currentData())
+        preview_color, preview_colors = self._scale_preview_palette(self._capture_scale_style(), self._scale_style_key)
+        self.scale_color_button.setStyleSheet(f"background-color: {preview_color}; color: white;")
+        self.scale_preview.set_frame_options(preview_color, str(self.scale_pattern.currentData()), self.scale_frame_gradient.isChecked(), preview_colors, self.scale_gradient_speed.value(), self.scale_gradient_type.currentData())
         self.scale_preview.set_blur_options(self.scale_blur_strength.value(), self.scale_blur_darkness.value())
         if not self._loading_scale_style and self._scale_style_key is not None:
             self._video_frame_styles[self._scale_style_key] = self._capture_scale_style()
             self._propagate_first_scale()
         self._apply_text_overlay_preview_video()
+
+    def _scale_preview_palette(self, style: dict, key) -> tuple[str, list[str]]:
+        if not hasattr(self, "_random_scale_preview_colors"):
+            self._random_scale_preview_colors = {}
+        if not style.get("scale_random_color", False):
+            self._random_scale_preview_colors.pop(key, None)
+            return style["scale_frame_color"], list(style["scale_gradient_colors"])
+        count = len(style["scale_gradient_colors"])
+        palette = self._random_scale_preview_colors.setdefault(key, [])
+        while len(palette) < count + 1:
+            palette.append("#" + "".join(f"{random.randrange(256):02x}" for _ in range(3)))
+        del palette[count + 1:]
+        return palette[0], palette[1:]
 
     def _scale_preview_changed(self, sx: float, sy: float) -> None:
         videos = self._text_overlay_preview_videos()
@@ -12020,7 +12035,8 @@ class MainWindow(QWidget):
         self.text_overlay_preview.set_video_crop(*crop_values)
         if hasattr(self, "scale_pattern"):
             style = frame_style or self._capture_scale_style()
-            self.text_overlay_preview.set_frame_options(style["scale_frame_color"], str(style["scale_pattern"]), style["scale_frame_gradient"], list(style["scale_gradient_colors"]), style["scale_gradient_speed"], style["scale_gradient_type"])
+            preview_color, preview_colors = self._scale_preview_palette(style, os.path.normcase(current) if current else None)
+            self.text_overlay_preview.set_frame_options(preview_color, str(style["scale_pattern"]), style["scale_frame_gradient"], preview_colors, style["scale_gradient_speed"], style["scale_gradient_type"])
             self.text_overlay_preview.set_blur_options(style["scale_blur_strength"], style["scale_blur_darkness"])
         overlay_on = bool(self.text_overlay_enabled.isChecked())
         self.text_overlay_preview.set_text_visible(overlay_on)

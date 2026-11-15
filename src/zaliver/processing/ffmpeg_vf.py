@@ -198,7 +198,10 @@ def build_uniquify_filtergraph(
                     spatial = "atan2(H/2-Y,X-W/2)/(2*PI)"
                 else:
                     spatial = "(X/W+Y/H)/2"
-                pos = f"mod(mod(({spatial})*{count}-T*{0.55 * speed * count / (2 * 3.141592654):.6f},{count})+{count},{count})"
+                # T starts at zero for each encoded chunk; use the source-frame
+                # offset so the gradient keeps moving across chunk boundaries.
+                time_offset = s / max(0.01, float(fps))
+                pos = f"mod(mod(({spatial})*{count}-(T+{time_offset:.12f})*{0.55 * speed * count / (2 * 3.141592654):.6f},{count})+{count},{count})"
                 rgb = [[int(c[i:i+2], 16) for i in (0, 2, 4)] for c in colors]
                 def gradient_channel(channel_index):
                     if count == 1:

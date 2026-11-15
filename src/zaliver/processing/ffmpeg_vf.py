@@ -175,13 +175,43 @@ def build_uniquify_filtergraph(
         if background == "black":
             bg = f"scale={w}:{h},drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill"
         elif background == "blur":
-            radius = max(0, min(40, int(settings.blur_strength), (min(w, h) - 2) // 4))
+            # Split the selected picture horizontally and fill the gaps above
+            # and below the foreground with the corresponding blurred half.
+            bx = min(w - 2, int(w * left) // 2 * 2)
+            by = min(h - 2, int(h * top) // 2 * 2)
+            bw = min(w - bx, max(2, int(w * (1-left-right)) // 2 * 2))
+            bh = min(h - by, max(2, int(h * (1-top-bottom)) // 2 * 2))
+            half = max(2, (bh // 2) // 2 * 2)
+            upper_h = half if bh >= 4 else bh
+            lower_y = by + half if bh >= 4 else by
+            lower_h = bh - half if bh >= 4 else bh
+            fg_h = min(nh - min(nh - 2, int(nh * top) // 2 * 2),
+                       max(2, int(nh * (1-top-bottom)) // 2 * 2))
+            fg_y = (h-fg_h)/2 + py*h + (top-bottom)*nh/2
+            # Extend both halves behind the foreground so side margins are
+            # filled as well. Their seam follows the foreground's midpoint.
+            bottom_start = max(0, min(h, round(fg_y + fg_h / 2)))
+            gap_top = bottom_start
+            gap_bottom = h - bottom_start
             factor = 1.0 - max(0, min(80, int(settings.blur_darkness))) / 100.0
-            bg = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
-            if radius:
-                bg += f",boxblur={radius}:2"
-            if factor < 1.0:
-                bg += f",colorchannelmixer=rr={factor:.2f}:gg={factor:.2f}:bb={factor:.2f}"
+            def blurred_half(source_y, source_h, target_h):
+                target_h = max(2, target_h)
+                sigma = max(0, min(40, int(settings.blur_strength)))
+                result = f"crop={bw}:{source_h}:{bx}:{source_y},scale={w}:{target_h}"
+                if sigma:
+                    result += f",gblur=sigma={sigma}:steps=3"
+                if factor < 1.0:
+                    result += f",colorchannelmixer=rr={factor:.2f}:gg={factor:.2f}:bb={factor:.2f}"
+                return result
+            upper = blurred_half(by, upper_h, gap_top)
+            lower = blurred_half(lower_y, lower_h, gap_bottom)
+            top_y = 0 if gap_top else -2
+            bottom_y = bottom_start if gap_bottom else h
+            bg = (f"split=3[blurbase][blurtop][blurbottom];"
+                  f"[blurbase]scale={w}:{h},drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill[blurblack];"
+                  f"[blurtop]{upper}[upper];[blurbottom]{lower}[lower];"
+                  f"[blurblack][upper]overlay=0:{top_y}:shortest=1[blurupper];"
+                  f"[blurupper][lower]overlay=0:{bottom_y}:shortest=1")
         else:
             if settings.frame_gradient:
                 # Interpolate cyclically through all chosen colors.

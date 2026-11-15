@@ -1854,6 +1854,10 @@ class MainWindow(QWidget):
             button.setObjectName("secondary")
             button.clicked.connect(lambda _checked=False, a=action: self._adjust_scale_preview(a))
             stretch_layout.addWidget(button)
+        crop_button = QPushButton("Обрезать")
+        crop_button.setObjectName("secondary")
+        crop_button.clicked.connect(self._open_scale_crop_dialog)
+        stretch_layout.addWidget(crop_button)
         scale_layout.addWidget(stretch_controls, 4, 0, 1, 3)
         self._update_scale_preview()
         self._sync_scale_frame_options()
@@ -11880,6 +11884,27 @@ class MainWindow(QWidget):
                 self._scale_preview_index = index
                 break
         self._scale_style_key = None
+        self._update_scale_preview()
+        self._apply_text_overlay_preview_video()
+
+    def _open_scale_crop_dialog(self) -> None:
+        from zaliver.ui.scale_crop_dialog import ScaleCropDialog
+        videos = self._text_overlay_preview_videos()
+        if not videos:
+            QMessageBox.information(self, "Обрезка видео", "Сначала выберите входное видео.")
+            return
+        pixmap = self.scale_preview._pixmap
+        if pixmap is None or pixmap.isNull():
+            QMessageBox.warning(self, "Обрезка видео", "Не удалось получить кадр видео для предпросмотра.")
+            return
+        key = os.path.normcase(videos[self._scale_preview_index])
+        dialog = ScaleCropDialog(pixmap, self._video_crops.get(key, (0, 0, 0, 0)), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._begin_scale_undo()
+        self._video_crops[key] = list(dialog.crop())
+        self._propagate_first_scale()
+        self._end_scale_undo()
         self._update_scale_preview()
         self._apply_text_overlay_preview_video()
 

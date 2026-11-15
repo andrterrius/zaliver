@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from PIL import Image, ImageFilter
+
 from PyQt6.QtCore import QPointF, QRectF, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
@@ -134,14 +136,43 @@ def _paint_frame_pattern(painter, frame, color, pattern, gradient=False, colors=
                 painter.drawLine(int(frame.left()), y, int(frame.right()), y)
 
 
-def _paint_blurred_background(painter, frame, pixmap, strength, darkness):
-    if strength:
-        size = max(24, min(480, round(960 / strength)))
-        pixmap = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-    bg = pixmap.scaled(max(1, int(frame.width())), max(1, int(frame.height())), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
-    painter.drawPixmap(frame, bg, QRectF((bg.width()-frame.width())/2, (bg.height()-frame.height())/2, frame.width(), frame.height()))
-    if darkness:
-        painter.fillRect(frame, QColor(0, 0, 0, round(255 * darkness / 100)))
+def _paint_blurred_background(painter, frame, pixmap, strength, darkness, crop=(0, 0, 0, 0), scale=(1, 1), position=(0, 0)):
+    l, t, r, b = crop
+    w, h = pixmap.width(), pixmap.height()
+    x = min(w - 2, int(w * l) // 2 * 2)
+    y = min(h - 2, int(h * t) // 2 * 2)
+    cw = min(w - x, max(2, int(w * (1-l-r)) // 2 * 2))
+    ch = min(h - y, max(2, int(h * (1-t-b)) // 2 * 2))
+    split = max(2, (ch // 2) // 2 * 2) if ch >= 4 else ch
+    lower_y = y + split if ch >= 4 else y
+    lower_h = ch - split if ch >= 4 else ch
+    video_h = frame.height() * scale[1]
+    video_top = frame.center().y() + position[1] * frame.height() - video_h / 2
+    middle = max(frame.top(), min(frame.bottom(), video_top + (t + (1-t-b)/2) * video_h))
+    areas = ((QRectF(frame.left(), frame.top(), frame.width(), middle-frame.top()),
+              pixmap.copy(x, y, cw, split)),
+             (QRectF(frame.left(), middle, frame.width(), frame.bottom()-middle),
+              pixmap.copy(x, lower_y, cw, lower_h)))
+    for target, part in areas:
+        if target.height() <= 0 or part.isNull():
+            continue
+        part = part.scaled(max(1, round(target.width())), max(1, round(target.height())),
+                           Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        if strength:
+            image = part.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
+            bits = image.bits()
+            bits.setsize(image.sizeInBytes())
+            pil = Image.frombytes("RGBA", (image.width(), image.height()), bytes(bits),
+                                  "raw", "RGBA", image.bytesPerLine())
+            sigma = strength * frame.height() / max(1, pixmap.height())
+            blurred = pil.filter(ImageFilter.GaussianBlur(radius=sigma))
+            data = blurred.tobytes("raw", "RGBA")
+            image = QImage(data, blurred.width, blurred.height, blurred.width * 4,
+                           QImage.Format.Format_RGBA8888).copy()
+            part = QPixmap.fromImage(image)
+        painter.drawPixmap(target, part, QRectF(0, 0, part.width(), part.height()))
+        if darkness:
+            painter.fillRect(target, QColor(0, 0, 0, round(255 * darkness / 100)))
 
 
 class ScalePreviewWidget(QWidget):
@@ -232,7 +263,7 @@ class ScalePreviewWidget(QWidget):
         painter.save()
         painter.setClipRect(frame)
         if self._background == 'blur' and self._pixmap and not self._pixmap.isNull():
-            _paint_blurred_background(painter, frame, self._pixmap, self._blur_strength, self._blur_darkness)
+            _paint_blurred_background(painter, frame, self._pixmap, self._blur_strength, self._blur_darkness, self._crop, (self._sx, self._sy), (self._x, self._y))
         elif self._background in ('solid', 'pattern'):
             _paint_frame_background(painter, frame, self._frame_color, getattr(self, "_frame_gradient", False), getattr(self, "_gradient_colors", None), getattr(self, "_gradient_speed", 100), getattr(self, "_gradient_type", "linear"))
             if self._background == 'pattern':
@@ -1146,7 +1177,7 @@ class TextOverlayPreviewWidget(QWidget):
         if bg is not None and not bg.isNull():
             painter.fillRect(frame_rect, QColor("black"))
             if self._video_background == "blur":
-                _paint_blurred_background(painter, frame_rect, bg, self._blur_strength, self._blur_darkness)
+                _paint_blurred_background(painter, frame_rect, bg, self._blur_strength, self._blur_darkness, self._video_crop, (self._video_scale_x, self._video_scale_y), (self._video_x, self._video_y))
             elif self._video_background in ("solid", "pattern"):
                 _paint_frame_background(painter, frame_rect, self._frame_color, getattr(self, "_frame_gradient", False), getattr(self, "_gradient_colors", None), getattr(self, "_gradient_speed", 100), getattr(self, "_gradient_type", "linear"))
                 if self._video_background == "pattern":

@@ -247,10 +247,21 @@ def build_uniquify_filtergraph(
                 gradient_w = _even_dim(max(2, round(w * gradient_scale)))
                 gradient_h = _even_dim(max(2, round(h * gradient_scale)))
                 gradient_animated = speed > 0 and count > 1
-                source = "" if gradient_animated else "trim=end_frame=1,setpts=PTS-STARTPTS,"
+                output_fps = max(0.01, float(fps))
+                gradient_fps = min(15.0, output_fps)
+                # Calculate fewer gradient images; interpolation restores the
+                # original frame rate. Extend the source to provide the last
+                # interpolation pair even for short chunks.
+                interpolate_gradient = gradient_animated and gradient_fps < output_fps
+                if interpolate_gradient:
+                    source = f"tpad=stop_mode=clone:stop_duration={2 / gradient_fps:.6f},fps={gradient_fps:.6f}:start_time=0,"
+                else:
+                    source = "" if gradient_animated else "trim=end_frame=1,setpts=PTS-STARTPTS,"
                 bg = f"{source}scale={gradient_w}:{gradient_h},format=gbrp,geq=" + ":".join(
                     f"{channel}='{gradient_channel(i)}'" for i, channel in enumerate(("r", "g", "b"))
                 )
+                if interpolate_gradient:
+                    bg += f",framerate=fps={output_fps:.6f}:flags=0:interp_start=0:interp_end=255"
                 bg += f",scale={w}:{h}:flags=bilinear"
             else:
                 # Static backgrounds are rendered once and reused.

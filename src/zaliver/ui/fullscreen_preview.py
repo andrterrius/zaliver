@@ -47,12 +47,15 @@ class FullscreenPreview(QObject):
         box.setContentsMargins(0, 0, 0, 0)
         preview.setMaximumSize(16777215, 16777215)
         preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        preview._fullscreen_reparenting = True
         box.addWidget(preview)
+        preview._fullscreen_reparenting = False
         self.dialog = dialog
         self.button.setText("⛶")
         self.button.setToolTip("Выйти из полноэкранного режима")
 
         def restore(_result):
+            preview._fullscreen_reparenting = True
             box.removeWidget(preview)
             preview.setParent(parent)
             preview.setMaximumSize(maximum)
@@ -60,6 +63,7 @@ class FullscreenPreview(QObject):
             layout.replaceWidget(placeholder, preview)
             placeholder.deleteLater()
             preview.show()
+            preview._fullscreen_reparenting = False
             self.dialog = None
             self.button.setText("⛶")
             self.button.setToolTip("Весь экран")

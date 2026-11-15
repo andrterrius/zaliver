@@ -274,6 +274,8 @@ class ScalePreviewWidget(QWidget):
             source = QRectF(l*self._pixmap.width(), t*self._pixmap.height(), (1-l-r)*self._pixmap.width(), (1-t-b)*self._pixmap.height())
             painter.drawPixmap(self._visible_rect(), self._pixmap, source)
         painter.restore()
+        if getattr(self, "_composite_overlay", None):
+            self._composite_overlay(painter, frame)
         painter.setPen(QPen(QColor('#60a5fa'), 2))
         visible = self._visible_rect()
         for x in (visible.left(), visible.right()):
@@ -544,6 +546,8 @@ class TextOverlayPreviewWidget(QWidget):
     """Drag text on a vertical/horizontal frame; position stored as normalized anchor."""
 
     positionChanged = pyqtSignal(float, float)
+    fontSizeChanged = pyqtSignal(int)
+    layerSelected = pyqtSignal(int)
     playbackChanged = pyqtSignal(bool)
 
     def __init__(self, parent=None) -> None:
@@ -572,6 +576,7 @@ class TextOverlayPreviewWidget(QWidget):
         self._font_bold = True
         self._custom_font_path = ""
         self._dragging = False
+        self._resizing = None
         self._drag_offset = QPointF(0.0, 0.0)
         self._font_path = effective_font_path("", bold=True)
         self._lines: list[str] = []
@@ -1189,7 +1194,8 @@ class TextOverlayPreviewWidget(QWidget):
             source = QRectF(l*bg.width(), t*bg.height(), (1-l-r)*bg.width(), (1-t-b)*bg.height())
             target = QRectF(px+l*video_w, py+t*video_h, (1-l-r)*video_w, (1-t-b)*video_h)
             painter.drawPixmap(target, bg, source)
-            painter.fillRect(frame_rect, QColor(0, 0, 0, 40))
+            if not getattr(self, "_composite_clean", False):
+                painter.fillRect(frame_rect, QColor(0, 0, 0, 40))
         else:
             painter.fillRect(frame_rect, QColor("#1a1f2e"))
 
@@ -1199,12 +1205,17 @@ class TextOverlayPreviewWidget(QWidget):
         painter.drawRoundedRect(frame_rect, radius, radius)
 
         if not self._text_visible:
+            if getattr(self, "_composite_overlay", None):
+                self._composite_overlay(painter, frame_rect)
             return
 
         has_current = bool(self._char_lines and any(self._char_lines))
         if not has_current and not self._other_layers:
-            painter.setPen(QColor("#475569"))
-            painter.drawText(int(fx + fw / 2 - 70), int(fy + fh / 2), "Введи текст…")
+            if not getattr(self, "_composite_clean", False):
+                painter.setPen(QColor("#475569"))
+                painter.drawText(int(fx + fw / 2 - 70), int(fy + fh / 2), "Введите текст:")
+            if getattr(self, "_composite_overlay", None):
+                self._composite_overlay(painter, frame_rect)
             return
 
         # Use the same stacking order as the rendered video.
@@ -1219,6 +1230,17 @@ class TextOverlayPreviewWidget(QWidget):
             else:
                 self._painting_layer_index = index
                 self._paint_other_text(painter, layer, (fx, fy, fw, fh))
+        if getattr(self, "_composite_overlay", None):
+            self._composite_overlay(painter, frame_rect)
+        if has_current and not getattr(self, "_composite_clean", False):
+            rect = self._text_bounds()
+            painter.save()
+            painter.setPen(QPen(QColor('#48b7ff'), 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect)
+            for point in (rect.topLeft(), rect.topRight(), rect.bottomLeft(), rect.bottomRight()):
+                painter.fillRect(QRectF(point.x()-5, point.y()-5, 10, 10), QColor('#48b7ff'))
+            painter.restore()
 
     def _paint_current_text(self, painter: QPainter, scale: float) -> None:
         block_x, block_y = self._block_top_left()
@@ -1281,6 +1303,42 @@ class TextOverlayPreviewWidget(QWidget):
                 char_global += 1
             y += line_h
 
+    def _text_bounds(self) -> QRectF:
+        x, y = self._block_top_left()
+        _, _, _, fh = self._frame_geometry()
+        scale = fh / self._ref_size()[1]
+        return QRectF(x, y, self._block_w * scale, self._block_h * scale)
+
+    def _other_layer_bounds(self, index, overlay) -> QRectF:
+        fx, fy, fw, fh = self._frame_geometry()
+        raw = next((item for layer_index, item in self._other_layers_data if layer_index == index), {})
+        ref_h = REF_HORIZONTAL[1] if raw.get("preview_orientation") == "horizontal" else REF_VERTICAL[1]
+        scale = fh / ref_h
+        width, height, _ = measure_text_block(overlay.lines, overlay.font_size, overlay.font_path,
+                                              overlay.letter_spacing, bold=overlay.font_bold)
+        height += overlay.wave_amp * 2
+        return QRectF(fx + overlay.x * scale, fy + overlay.y * scale, width * scale, height * scale)
+
+    def _layer_at(self, pos: QPointF):
+        if not self._text_visible:
+            return None
+        layers = [(index, self._other_layer_bounds(index, overlay)) for index, overlay in self._other_layers]
+        if self._char_lines and any(self._char_lines):
+            layers.append((self._selected_layer_index, self._text_bounds()))
+        for index, bounds in sorted(layers, key=lambda item: item[0], reverse=True):
+            if bounds.contains(pos):
+                return index
+        return None
+
+    def _corner_at(self, pos: QPointF):
+        if not self._text_visible or not any(self._char_lines):
+            return None
+        rect = self._text_bounds()
+        for point in (rect.topLeft(), rect.topRight(), rect.bottomLeft(), rect.bottomRight()):
+            if abs(pos.x()-point.x()) <= 10 and abs(pos.y()-point.y()) <= 10:
+                return point
+        return None
+
     def _hit_test(self, pos: QPointF) -> bool:
         if not self._text_visible:
             return False
@@ -1300,7 +1358,17 @@ class TextOverlayPreviewWidget(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         pos = event.position()
-        if self._hit_test(pos):
+        corner = self._corner_at(pos)
+        if corner is not None:
+            center = self._text_bounds().center()
+            distance = max(1.0, math.hypot(corner.x()-center.x(), corner.y()-center.y()))
+            self._resizing = (center, distance, self._font_size)
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            return
+        layer = self._layer_at(pos)
+        if layer is not None and layer != self._selected_layer_index:
+            self.layerSelected.emit(layer)
+        if layer is not None and self._hit_test(pos):
             self._dragging = True
             block_x, block_y = self._block_top_left()
             _, _, fw, fh = self._frame_geometry()
@@ -1314,6 +1382,14 @@ class TextOverlayPreviewWidget(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         pos = event.position()
+        if self._resizing is not None:
+            center, start_distance, initial_size = self._resizing
+            distance = math.hypot(pos.x()-center.x(), pos.y()-center.y())
+            size = max(12, min(240, round(initial_size * distance / start_distance)))
+            if size != self._font_size:
+                self.set_font_size(size)
+                self.fontSizeChanged.emit(size)
+            return
         if self._dragging:
             fx, fy, fw, fh = self._frame_geometry()
             cx = pos.x() - self._drag_offset.x()
@@ -1325,12 +1401,18 @@ class TextOverlayPreviewWidget(QWidget):
             self.update()
             self.positionChanged.emit(self._anchor_x, self._anchor_y)
             return
-        if self._hit_test(pos):
+        if self._corner_at(pos) is not None:
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        elif self._layer_at(pos) is not None:
             self.setCursor(Qt.CursorShape.OpenHandCursor)
         else:
             self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._resizing is not None:
+            self._resizing = None
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            return
         if event.button() == Qt.MouseButton.LeftButton and self._dragging:
             self._dragging = False
             self.setCursor(

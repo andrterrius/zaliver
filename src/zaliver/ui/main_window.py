@@ -1377,7 +1377,7 @@ class MainWindow(QWidget):
         layer_row.addWidget(add_layer)
         layer_row.addWidget(self.text_layer_remove)
         text_controls_l.addLayout(layer_row)
-        layer_hint = QLabel("В предпросмотре показаны все тексты. Для перемещения выбери текст в списке.")
+        layer_hint = QLabel("Нажмите на текст в предпросмотре, чтобы выбрать и переместить его.")
         layer_hint.setObjectName("hint")
         layer_hint.setWordWrap(True)
         text_controls_l.addWidget(layer_hint)
@@ -1566,6 +1566,8 @@ class MainWindow(QWidget):
         self.text_overlay_preview.setMinimumHeight(240)
         self.text_overlay_preview.setMaximumHeight(340)
         self.text_overlay_preview.positionChanged.connect(self._on_text_overlay_position_changed)
+        self.text_overlay_preview.layerSelected.connect(self.text_layer_combo.setCurrentIndex)
+        self.text_overlay_preview.fontSizeChanged.connect(self.text_overlay_font_size.setValue)
         text_controls_l.addWidget(self.text_overlay_preview)
 
         self._text_overlay_preview_index = 0
@@ -1889,6 +1891,12 @@ class MainWindow(QWidget):
         self._uniquify_section_stack.addWidget(wrap_work_section_page(text_gb))
         from zaliver.ui.banner_editor import BannerEditor
         self.banner_editor = BannerEditor(self._settings, "uniquify/banners", self._text_overlay_preview_videos)
+        self.banner_editor.canvas.composite_provider = self._configure_banner_preview
+        self.scale_preview._composite_overlay = self._paint_scale_composite
+        self.text_overlay_preview._composite_overlay = lambda painter, frame: self._paint_preview_banners(painter, frame, "text")
+        self.banner_editor.settings_changed.connect(self._refresh_composite_previews)
+        self.banner_editor.canvas.preview_invalidated.connect(self._refresh_composite_previews)
+        self.banner_editor.enabled.toggled.connect(self._refresh_composite_previews)
         self._uniquify_section_stack.addWidget(wrap_work_section_page(self.banner_editor))
         self._uniquify_section_stack.addWidget(wrap_work_section_page(bg_tracks))
         section_nav_group.idClicked.connect(self._uniquify_section_stack.setCurrentIndex)
@@ -12036,6 +12044,86 @@ class MainWindow(QWidget):
         self._text_overlay_preview_index = (int(self._text_overlay_preview_index) + 1) % n
         self._apply_text_overlay_preview_video(force=True)
 
+    def _refresh_composite_previews(self, *_args) -> None:
+        if hasattr(self, "scale_preview"):
+            self.scale_preview.update()
+        if hasattr(self, "text_overlay_preview"):
+            self.text_overlay_preview.update()
+        if hasattr(self, "banner_editor"):
+            self.banner_editor.canvas.update()
+
+    def _paint_scale_composite(self, painter, frame) -> None:
+        editor = getattr(self, "banner_editor", None)
+        videos = self._text_overlay_preview_videos()
+        if editor and videos and self.text_overlay_enabled.isChecked():
+            from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
+            canvas = editor.canvas
+            if canvas._composite_renderer is None:
+                canvas._composite_renderer = TextOverlayPreviewWidget(canvas)
+                canvas._composite_renderer._btn_play.hide()
+                canvas._composite_renderer.hide()
+                canvas._composite_renderer._composite_clean = True
+            preview = canvas._composite_renderer
+            preview.resize(self.scale_preview.size())
+            preview._bg_pixmap = self.scale_preview._pixmap
+            preview._note_content_aspect()
+            path = videos[max(0, min(self._scale_preview_index, len(videos)-1))]
+            self._configure_banner_preview(preview, path)
+            preview._stop_animation()
+            painter.save()
+            painter.setClipRect(frame)
+            for index, layer in preview._other_layers:
+                preview._painting_layer_index = index
+                preview._paint_other_text(painter, layer, (frame.x(), frame.y(), frame.width(), frame.height()))
+            painter.restore()
+        self._paint_preview_banners(painter, frame, "scale")
+
+    def _paint_preview_banners(self, painter, frame, section) -> None:
+        editor = getattr(self, "banner_editor", None)
+        videos = self._text_overlay_preview_videos()
+        if not editor or not editor.enabled.isChecked() or not videos:
+            return
+        index = self._scale_preview_index if section == "scale" else self._text_overlay_preview_index
+        index = max(0, min(int(index), len(videos)-1))
+        key = editor._video_key(videos[index])
+        if key == editor._current_video_key:
+            items = editor.canvas.items
+        else:
+            first = editor._per_video.get(editor._video_key(videos[0]), [])
+            items = editor._per_video.get(key, first if editor.repeat_first.isChecked() else [])
+        painter.save()
+        painter.setClipRect(frame)
+        for item in items:
+            pixmap = editor.canvas.images.get(item["path"])
+            if pixmap is None:
+                pixmap = editor.canvas.load_media(item["path"])
+            if pixmap is not None and not pixmap.isNull():
+                from PyQt6.QtCore import QRectF
+                target = QRectF(frame.x()+item['x']*frame.width(), frame.y()+item['y']*frame.height(), item['w']*frame.width(), item['h']*frame.height())
+                painter.drawPixmap(target, pixmap, QRectF(pixmap.rect()))
+        painter.restore()
+
+    def _configure_banner_preview(self, preview, path) -> None:
+        key = os.path.normcase(path)
+        enabled = self.scale_enabled.isChecked()
+        sx, sy = self._video_scales.get(key, (1, 1)) if enabled else (1, 1)
+        x, y = self._video_positions.get(key, (0, 0)) if enabled else (0, 0)
+        crop = self._video_crops.get(key, (0, 0, 0, 0)) if enabled else (0, 0, 0, 0)
+        style = self._video_frame_styles.get(key, self._default_scale_style)
+        preview.set_video_transform(sx, sy, style['scale_background'] if enabled else 'black')
+        preview.set_video_position(x, y)
+        preview.set_video_crop(*crop)
+        color, colors = self._scale_preview_palette(style, key)
+        preview.set_frame_options(color, str(style['scale_pattern']), style['scale_frame_gradient'], colors, style['scale_gradient_speed'], style['scale_gradient_type'])
+        preview.set_blur_options(style['scale_blur_strength'], style['scale_blur_darkness'])
+        preview.set_text_visible(self.text_overlay_enabled.isChecked())
+        if self.text_overlay_enabled.isChecked():
+            layers = list(self._text_layers)
+            layers[self._text_layer_index] = self._current_text_overlay_options_dict()
+            preview.set_other_layers([(i, layer) for i, layer in enumerate(layers) if isinstance(layer, dict)], -1)
+        else:
+            preview.set_other_layers([], -1)
+
     def _apply_text_overlay_preview_video(self, *, force: bool = False) -> None:
         """Показать кадр текущего исходника по индексу (стрелки листают файлы по кругу)."""
         if not hasattr(self, "text_overlay_preview"):
@@ -12087,6 +12175,7 @@ class MainWindow(QWidget):
         if not overlay_on:
             if anchor_x is not None and anchor_y is not None:
                 preview.set_anchor(anchor_x, anchor_y)
+            self._refresh_composite_previews()
             return
         orient = self.text_overlay_orientation.currentData()
         preview.blockSignals(True)
@@ -12108,6 +12197,7 @@ class MainWindow(QWidget):
                         if i != self._text_layer_index and isinstance(layer, dict)]
         preview.set_other_layers(other_layers, self._text_layer_index)
         preview.blockSignals(False)
+        self._refresh_composite_previews()
 
     def _schedule_text_overlay_preview_sync(self) -> None:
         if not hasattr(self, "_text_overlay_preview_timer"):
@@ -12124,8 +12214,7 @@ class MainWindow(QWidget):
         self._text_overlay_panel.setEnabled(on)
         glow_on = bool(self.text_overlay_glow_enabled.isChecked())
         self.text_overlay_glow_btn.setEnabled(on and glow_on)
-        if on:
-            self._sync_text_overlay_preview()
+        self._sync_text_overlay_preview()
 
     def _populate_text_overlay_font_combo(self) -> None:
         if not hasattr(self, "text_overlay_font_combo"):
@@ -12296,6 +12385,7 @@ class MainWindow(QWidget):
 
     def _on_text_overlay_position_changed(self, ax: float, ay: float) -> None:
         self._save_folder_settings()
+        self._refresh_composite_previews()
 
     def _on_text_overlay_style_changed(self, *_args) -> None:
         self._schedule_text_overlay_preview_sync()

@@ -7,7 +7,7 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QRectF, QPointF, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap, QKeySequence, QShortcut, QMovie, QImage
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, QLabel, QListWidget, QMessageBox, QGroupBox, QCheckBox
-from zaliver.ui.text_overlay_preview import load_video_frame_pixmap, _PreviewVideoWorker
+from zaliver.ui.text_overlay_preview import load_video_frame_pixmap, _PreviewVideoWorker, TextOverlayPreviewWidget
 from zaliver.ui.fullscreen_preview import FullscreenPreview
 from zaliver.ui.widgets import ToggleSwitch
 from zaliver.processing.banner_overlay import VIDEO_BANNER_EXTENSIONS
@@ -20,6 +20,7 @@ class BannerCanvas(QWidget):
     selected = pyqtSignal(int)
     edit_started = pyqtSignal()
     edit_finished = pyqtSignal()
+    preview_invalidated = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -27,6 +28,8 @@ class BannerCanvas(QWidget):
         self.images = {}
         self.movies = {}
         self.background = None
+        self.composite_provider = None
+        self._composite_renderer = None
         self.video_path = ''
         self._play_worker = None
         self._playing = False
@@ -150,6 +153,9 @@ class BannerCanvas(QWidget):
                 movie.start()
 
     def hideEvent(self, event):
+        if getattr(self, "_fullscreen_reparenting", False) or self._fullscreen_preview.dialog is not None:
+            super().hideEvent(event)
+            return
         self.stop_playback(restore=False)
         for movie in self.movies.values():
             if movie.state() == QMovie.MovieState.Running:
@@ -158,6 +164,7 @@ class BannerCanvas(QWidget):
 
     def _movie_frame(self, path, movie):
         self.images[path] = movie.currentPixmap()
+        self.preview_invalidated.emit()
         if self.isVisible():
             self.update()
 
@@ -178,7 +185,29 @@ class BannerCanvas(QWidget):
         f = self.frame()
         p.fillRect(f, QColor('#101010'))
         if self.background and not self.background.isNull():
-            p.drawPixmap(f, self.background, QRectF(self.background.rect()))
+            if self.composite_provider:
+                if self._composite_renderer is None:
+                    self._composite_renderer = TextOverlayPreviewWidget(self)
+                    self._composite_renderer._btn_play.hide()
+                    self._composite_renderer.hide()
+                    self._composite_renderer._composite_clean = True
+                renderer = self._composite_renderer
+                # The text preview widget normally caps its height at 340px;
+                # remove that cap here so full-screen compositing remains sharp.
+                renderer.setMaximumSize(16777215, 16777215)
+                renderer.resize(self.size())
+                renderer._bg_pixmap = self.background
+                renderer._note_content_aspect()
+                self.composite_provider(renderer, self.video_path)
+                renderer._anim_frame += 1 if self._playing else 0
+                renderer._stop_animation()
+                layer = QPixmap(renderer.size())
+                layer.fill(Qt.GlobalColor.transparent)
+                renderer.render(layer, flags=QWidget.RenderFlag.DrawWindowBackground)
+                fx, fy, fw, fh = renderer._frame_geometry()
+                p.drawPixmap(f, layer, QRectF(fx, fy, fw, fh))
+            else:
+                p.drawPixmap(f, self.background, QRectF(self.background.rect()))
         p.save(); p.setClipRect(f)
         for b in self.items:
             pix = self.images.get(b['path'])
@@ -230,6 +259,8 @@ class BannerCanvas(QWidget):
 
 
 class BannerEditor(QWidget):
+    settings_changed = pyqtSignal()
+
     def __init__(self, settings, key, video_provider):
         super().__init__(); self.settings = settings; self.key = key; self.video_provider = video_provider; self.last_video = None
         self.video_index = 0
@@ -432,6 +463,7 @@ class BannerEditor(QWidget):
             self.save()
 
     def save(self):
+        self.settings_changed.emit()
         self.settings.setValue(self.key, json.dumps(self.canvas.items, ensure_ascii=False))
         if self._current_video_key:
             self._per_video[self._current_video_key] = [dict(b) for b in self.canvas.items]

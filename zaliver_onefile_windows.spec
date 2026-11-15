@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller onefile GUI bundle for Windows (theme.qss)."""
+"""PyInstaller onedir GUI bundle for Windows (theme.qss)."""
 
 APP_NAME = "Zaliver"
 
@@ -29,9 +29,6 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
     name=APP_NAME,
     debug=False,
@@ -47,4 +44,16 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon="src/zaliver/ui/icons/app.ico",
+    exclude_binaries=True,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name=APP_NAME,
 )

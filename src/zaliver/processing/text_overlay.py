@@ -8,7 +8,8 @@ import re
 import sys
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass, fields
+from functools import lru_cache
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -29,6 +30,10 @@ class TextOverlaySettings:
     glow_enabled: bool = True
     glow_color: str = "#00FFFF"
     text_color: str = "#FFFFFF"
+    opacity: float = 1.0
+    outline_width: int = 0
+    outline_color: str = "#000000"
+    center_lines: bool = False
     letter_spacing: int = 0
     custom_font_path: str = ""
     font_bold: bool = True
@@ -41,6 +46,7 @@ class TextOverlaySettings:
     wave_frame_speed: float = NEON_WAVE_FRAME_SPEED
     from_middle: bool = True
     after_frame_change: bool = False
+    layers: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -53,6 +59,7 @@ class TextOverlaySettings:
         if "preview_orientation" not in raw and "orientation" in d:
             raw["preview_orientation"] = d.get("orientation")
         s = TextOverlaySettings(**raw)
+        s.layers = [dict(item) for item in s.layers if isinstance(item, dict)] if isinstance(s.layers, list) else []
         s.preview_orientation = (
             "horizontal" if str(s.preview_orientation).lower() == "horizontal" else "vertical"
         )
@@ -63,6 +70,10 @@ class TextOverlaySettings:
         s.glow_enabled = bool(s.glow_enabled)
         s.glow_color = _normalize_hex_color(str(s.glow_color))
         s.text_color = _normalize_hex_color(str(s.text_color), default="#FFFFFF")
+        s.opacity = max(0.0, min(1.0, float(s.opacity)))
+        s.outline_width = max(0, min(40, int(s.outline_width)))
+        s.outline_color = _normalize_hex_color(str(s.outline_color), default="#000000")
+        s.center_lines = bool(s.center_lines)
         s.letter_spacing = max(-50, min(120, int(s.letter_spacing)))
         s.custom_font_path = str(s.custom_font_path or "").strip()
         s.font_bold = bool(s.font_bold)
@@ -97,6 +108,10 @@ class ScaledTextOverlay:
     wave_frame_speed: float
     from_middle: bool = True
     enable_after_sec: float | None = None
+    opacity: float = 1.0
+    outline_width: int = 0
+    outline_color: str = "#000000"
+    layers: List["ScaledTextOverlay"] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -147,6 +162,10 @@ class ScaledTextOverlay:
             wave_amp=int(d.get("wave_amp", 4)),
             wave_char_phase=float(d.get("wave_char_phase", NEON_WAVE_CHAR_PHASE)),
             wave_frame_speed=float(d.get("wave_frame_speed", NEON_WAVE_FRAME_SPEED)),
+            layers=[ScaledTextOverlay.from_dict(item) for item in d.get("layers", []) if isinstance(item, dict)],
+            opacity=max(0.0, min(1.0, float(d.get("opacity", 1.0)))),
+            outline_width=max(0, int(d.get("outline_width", 0))),
+            outline_color=str(d.get("outline_color", "#000000")),
             from_middle=bool(d.get("from_middle", True)),
             enable_after_sec=(
                 float(d["enable_after_sec"])
@@ -522,8 +541,17 @@ def _is_emoji_font_path(font_path: str) -> bool:
     )
 
 
+@lru_cache(maxsize=256)
+def _registered_font_family(font_path: str) -> str:
+    from PyQt6.QtGui import QFontDatabase
+
+    fid = QFontDatabase.addApplicationFont(font_path)
+    families = QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else []
+    return families[0] if families else ""
+
+
 def _make_qfont(font_path: str, font_size: int, *, bold: bool = True):
-    from PyQt6.QtGui import QFont, QFontDatabase
+    from PyQt6.QtGui import QFont
 
     px = max(8, int(font_size))
     # Emoji fonts have no bold face — forcing bold breaks glyph metrics.
@@ -531,19 +559,17 @@ def _make_qfont(font_path: str, font_size: int, *, bold: bool = True):
     if font_path:
         p = Path(font_path)
         if p.is_file():
-            fid = QFontDatabase.addApplicationFont(str(p.resolve()))
-            if fid >= 0:
-                families = QFontDatabase.applicationFontFamilies(fid)
-                if families:
-                    font = QFont(families[0])
-                    font.setPixelSize(px)
-                    if use_bold:
-                        font.setWeight(QFont.Weight.Bold)
-                        font.setBold(True)
-                    else:
-                        font.setWeight(QFont.Weight.Normal)
-                        font.setBold(False)
-                    return font
+            family = _registered_font_family(str(p.resolve()))
+            if family:
+                font = QFont(family)
+                font.setPixelSize(px)
+                if use_bold:
+                    font.setWeight(QFont.Weight.Bold)
+                    font.setBold(True)
+                else:
+                    font.setWeight(QFont.Weight.Normal)
+                    font.setBold(False)
+                return font
     font = QFont("Montserrat")
     font.setFamilies(["Montserrat", "Segoe UI", "Bahnschrift", "Calibri", "Arial"])
     font.setPixelSize(px)
@@ -885,6 +911,8 @@ def compute_scaled_overlay_approx(
         ),
         default=0,
     )
+    if settings.center_lines:
+        char_lines = [[(ch, x + int(round((width - approx_line_pixel_width(line, font_size, letter_spacing, font_path, bold=font_bold)) / 2))) for ch, x in chars] for line, chars in zip(lines, char_lines)]
     block_h = line_h * max(1, len(lines)) + wave_amp * 2
     block_w = int(width)
     cx = settings.anchor_x * vw
@@ -910,6 +938,9 @@ def compute_scaled_overlay_approx(
         wave_frame_speed=float(settings.wave_frame_speed),
         from_middle=bool(settings.from_middle),
         enable_after_sec=None,
+        opacity=settings.opacity,
+        outline_width=max(0, int(round(settings.outline_width * scale))),
+        outline_color=settings.outline_color,
     )
 
 
@@ -919,9 +950,15 @@ def compute_scaled_overlay_for_worker(
     video_h: int,
 ) -> Optional[ScaledTextOverlay]:
     """Use Qt metrics in the desktop GUI and Pillow in background workers."""
-    if _qt_metrics_available():
-        return compute_scaled_overlay(settings, video_w, video_h)
-    return compute_scaled_overlay_approx(settings, video_w, video_h)
+    if not settings.enabled:
+        return None
+    compute = compute_scaled_overlay if _qt_metrics_available() else compute_scaled_overlay_approx
+    all_settings = [settings] + [TextOverlaySettings.from_dict({**item, "enabled": True, "layers": []}) for item in settings.layers]
+    scaled = [result for item in all_settings if (result := compute(item, video_w, video_h)) is not None]
+    if not scaled:
+        return None
+    scaled[0].layers = scaled[1:]
+    return scaled[0]
 
 
 def compute_scaled_overlay(
@@ -966,6 +1003,8 @@ def compute_scaled_overlay(
     block_w, block_h, line_h = measure_text_block(
         lines, font_size, font_path, letter_spacing, bold=font_bold
     )
+    if settings.center_lines:
+        char_lines = [[(ch, x + int(round((block_w - measure_text_block([line], font_size, font_path, letter_spacing, bold=font_bold)[0]) / 2))) for ch, x in chars] for line, chars in zip(lines, char_lines)]
     block_h += wave_amp * 2
     cx = settings.anchor_x * vw
     cy = settings.anchor_y * vh
@@ -990,6 +1029,9 @@ def compute_scaled_overlay(
         wave_frame_speed=float(settings.wave_frame_speed),
         from_middle=bool(settings.from_middle),
         enable_after_sec=None,
+        opacity=settings.opacity,
+        outline_width=max(0, int(round(settings.outline_width * scale))),
+        outline_color=settings.outline_color,
     )
 
 
@@ -1360,7 +1402,7 @@ def _emoji_stream_duration_sec(
     return chunk_dur + 0.5
 
 
-def build_text_overlay_filters(
+def _build_single_text_overlay_filters(
     overlay: ScaledTextOverlay,
     input_label: str = "v0",
     *,
@@ -1394,8 +1436,8 @@ def build_text_overlay_filters(
     if enable == "__skip__":
         return empty
     enable_part = f":enable='{enable}'" if enable else ""
-    fill = _hex_to_ffmpeg_color(overlay.text_color, 1.0)
-    emoji_fill = _hex_to_ffmpeg_color("#FFFFFF", 1.0)
+    fill = _hex_to_ffmpeg_color(overlay.text_color, overlay.opacity)
+    emoji_fill = _hex_to_ffmpeg_color("#FFFFFF", overlay.opacity)
     glow_layers: list[tuple[int, int, float]] = []
     if overlay.glow_enabled:
         glow_layers = neon_glow_layers(
@@ -1452,7 +1494,7 @@ def build_text_overlay_filters(
         # Twemoji is pal8 — convert before scale; force exact WxH box.
         prep.append(
             f"[{inp}:v]format=rgba,scale={em_size}:{em_size}:flags=lanczos,"
-            f"setsar=1,format=rgba[__em{i}]"
+            f"setsar=1,format=rgba,colorchannelmixer=aa={overlay.opacity:.3f}[__em{i}]"
         )
 
     parts: list[str] = []
@@ -1489,7 +1531,7 @@ def build_text_overlay_filters(
         glyph_fill = emoji_fill if is_emoji else fill
         glyph_glow = [] if is_emoji else glow_layers
         for gi, (dx, dy, alpha) in enumerate(glyph_glow):
-            col = _hex_to_ffmpeg_color(overlay.glow_color, alpha)
+            col = _hex_to_ffmpeg_color(overlay.glow_color, alpha * overlay.opacity)
             gl = f"tg{step}_{gi}"
             layer = (
                 f"drawtext={font_part}text='{esc}':fontsize={overlay.font_size}:"
@@ -1500,7 +1542,7 @@ def build_text_overlay_filters(
             label = gl
         core = (
             f"drawtext={font_part}text='{esc}':fontsize={overlay.font_size}:"
-            f"{y_align_part}x={cx}:y={_y_expr_with_offset(y_expr, 0)}:fontcolor={glyph_fill}:borderw=0"
+            f"{y_align_part}x={cx}:y={_y_expr_with_offset(y_expr, 0)}:fontcolor={glyph_fill}:borderw={overlay.outline_width}:bordercolor={_hex_to_ffmpeg_color(overlay.outline_color, overlay.opacity)}"
             f"{enable_part}"
         )
         parts.append(f"[{label}]{core}[{nxt}]")
@@ -1515,6 +1557,40 @@ def build_text_overlay_filters(
         ),
         emoji_count=len(png_list),
     )
+
+
+def build_text_overlay_filters(
+    overlay: ScaledTextOverlay, input_label: str = "v0", *,
+    start_frame: int = 0, frame_count: int = 0, total_frames: int = 0,
+    fps: float = 30.0, total_duration_sec: float | None = None,
+    emoji_input_start: int = 1,
+) -> TextOverlayFilterBuild:
+    """Chain independent overlays while keeping filter and emoji labels unique."""
+    layers = [overlay, *overlay.layers]
+    if len(layers) == 1:
+        return _build_single_text_overlay_filters(
+            overlay, input_label, start_frame=start_frame, frame_count=frame_count,
+            total_frames=total_frames, fps=fps, total_duration_sec=total_duration_sec,
+            emoji_input_start=emoji_input_start,
+        )
+    parts, argv = [], []
+    current = input_label
+    count = 0
+    for index, layer in enumerate(layers):
+        built = _build_single_text_overlay_filters(
+            layer, current, start_frame=start_frame, frame_count=frame_count,
+            total_frames=total_frames, fps=fps, total_duration_sec=total_duration_sec,
+            emoji_input_start=emoji_input_start + count,
+        )
+        output = "outv" if index == len(layers) - 1 else f"overlay_layer_{index}"
+        def rename(match):
+            name = match.group(1)
+            return f"[{output if name == 'outv' else f'layer_{index}_{name}'}]"
+        parts.append(re.sub(r"\[(outv|tc\d+|tg\d+_\d+|__em\d+)\]", rename, built.graph))
+        argv.extend(built.emoji_input_argv)
+        count += built.emoji_count
+        current = output
+    return TextOverlayFilterBuild(graph=";".join(parts), emoji_input_argv=argv, emoji_count=count)
 
 
 FFMPEG_GLOW_MAX_LAYERS = 6

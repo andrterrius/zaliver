@@ -48,6 +48,9 @@ def normalize_text_overlay_export_dict(raw: dict[str, Any]) -> dict[str, Any]:
     out["wave_frame_speed_max"] = wfs_hi
     out["wave_amp_frac"] = (waf_lo + waf_hi) * 0.5
     out["wave_frame_speed"] = (wfs_lo + wfs_hi) * 0.5
+    layers = raw.get("layers", [])
+    if isinstance(layers, list):
+        out["layers"] = [normalize_text_overlay_export_dict({**layer, "layers": []}) for layer in layers if isinstance(layer, dict)]
     return out
 
 

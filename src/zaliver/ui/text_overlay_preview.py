@@ -32,6 +32,8 @@ from zaliver.processing.text_overlay import (
     NEON_WAVE_FRAME_SPEED,
     REF_HORIZONTAL,
     REF_VERTICAL,
+    TextOverlaySettings,
+    compute_scaled_overlay,
     effective_font_path,
     font_path_for_unit,
     is_emoji_unit,
@@ -519,10 +521,17 @@ class TextOverlayPreviewWidget(QWidget):
         self.setMouseTracking(True)
         self._orientation = "vertical"
         self._text = ""
+        self._other_layers_data: list[tuple[int, dict]] = []
+        self._other_layers: list[tuple[int, object]] = []
+        self._selected_layer_index = 0
         self._font_size = 95
         self._max_width_frac = 0.85
         self._glow_color = QColor("#00FFFF")
         self._text_color = QColor("#FFFFFF")
+        self._opacity = 1.0
+        self._outline_width = 0
+        self._outline_color = QColor("#000000")
+        self._center_lines = False
         self._anchor_x = 0.5
         self._anchor_y = 0.15
         self._glow_enabled = True
@@ -690,6 +699,7 @@ class TextOverlayPreviewWidget(QWidget):
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._position_play_button()
+        self._rebuild_other_layers()
 
     def set_text_visible(self, visible: bool) -> None:
         """Показывать ли наложенный текст (выкл. — только кадр фона)."""
@@ -777,7 +787,7 @@ class TextOverlayPreviewWidget(QWidget):
     def _on_anim_tick(self) -> None:
         if self._playing:
             return
-        if not self._text_visible or not self._char_lines or not self.isVisible():
+        if not self._text_visible or not (self._char_lines or self._other_layers) or not self.isVisible():
             return
         self._anim_frame += 1
         self.update()
@@ -785,7 +795,7 @@ class TextOverlayPreviewWidget(QWidget):
     def _start_animation(self) -> None:
         if self._playing:
             return
-        if self._text_visible and self._char_lines and self.isVisible():
+        if self._text_visible and (self._char_lines or self._other_layers) and self.isVisible():
             if not self._anim_timer.isActive():
                 self._anim_timer.start()
 
@@ -806,26 +816,36 @@ class TextOverlayPreviewWidget(QWidget):
         super().hideEvent(event)
 
     def set_orientation(self, orientation: str) -> None:
-        self._orientation = (
-            "horizontal" if str(orientation).lower() == "horizontal" else "vertical"
-        )
+        value = "horizontal" if str(orientation).lower() == "horizontal" else "vertical"
+        if self._orientation == value:
+            return
+        self._orientation = value
         self._relayout()
         self.update()
         self._start_animation()
 
     def set_text(self, text: str) -> None:
-        self._text = text or ""
+        value = text or ""
+        if self._text == value:
+            return
+        self._text = value
         self._relayout()
         self.update()
         self._start_animation()
 
     def set_font_size(self, size: int) -> None:
-        self._font_size = max(8, min(400, int(size)))
+        value = max(8, min(400, int(size)))
+        if self._font_size == value:
+            return
+        self._font_size = value
         self._relayout()
         self.update()
 
     def set_max_width_frac(self, frac: float) -> None:
-        self._max_width_frac = max(0.2, min(1.0, float(frac)))
+        value = max(0.2, min(1.0, float(frac)))
+        if self._max_width_frac == value:
+            return
+        self._max_width_frac = value
         self._relayout()
         self.update()
 
@@ -843,10 +863,21 @@ class TextOverlayPreviewWidget(QWidget):
             self._text_color = color
         self.update()
 
+    def set_text_style(self, opacity: float, outline_width: int, outline_color: str, center_lines: bool) -> None:
+        self._opacity = max(0.0, min(1.0, float(opacity)))
+        self._outline_width = max(0, int(outline_width))
+        self._outline_color = QColor(outline_color)
+        self._center_lines = bool(center_lines)
+        self.update()
+
     def set_wave_settings(self, amp_frac: float, frame_speed: float) -> None:
-        self._wave_amp_frac = max(0.0, min(0.35, float(amp_frac)))
+        amp = max(0.0, min(0.35, float(amp_frac)))
+        speed = max(0.0, min(0.25, float(frame_speed)))
+        if self._wave_amp_frac == amp and self._wave_frame_speed == speed:
+            return
+        self._wave_amp_frac = amp
         self._wave_char_phase = NEON_WAVE_CHAR_PHASE
-        self._wave_frame_speed = max(0.0, min(0.25, float(frame_speed)))
+        self._wave_frame_speed = speed
         self._relayout()
         self.update()
 
@@ -855,17 +886,26 @@ class TextOverlayPreviewWidget(QWidget):
         self.update()
 
     def set_letter_spacing(self, spacing_px: int) -> None:
-        self._letter_spacing = max(-50, min(120, int(spacing_px)))
+        value = max(-50, min(120, int(spacing_px)))
+        if self._letter_spacing == value:
+            return
+        self._letter_spacing = value
         self._relayout()
         self.update()
 
     def set_font_path(self, custom_path: str = "") -> None:
-        self._custom_font_path = (custom_path or "").strip()
+        value = (custom_path or "").strip()
+        if self._custom_font_path == value:
+            return
+        self._custom_font_path = value
         self._relayout()
         self.update()
 
     def set_font_bold(self, bold: bool) -> None:
-        self._font_bold = bool(bold)
+        value = bool(bold)
+        if self._font_bold == value:
+            return
+        self._font_bold = value
         self._relayout()
         self.update()
 
@@ -898,6 +938,77 @@ class TextOverlayPreviewWidget(QWidget):
             return
         self._aspect_key = key
         self._relayout()
+        self._rebuild_other_layers()
+
+    def set_other_layers(self, layers: list[tuple[int, dict]], selected_index: int) -> None:
+        self._selected_layer_index = int(selected_index)
+        if layers != self._other_layers_data:
+            self._other_layers_data = [(index, dict(settings)) for index, settings in layers]
+            self._rebuild_other_layers()
+        self.update()
+
+    def _rebuild_other_layers(self) -> None:
+        if not hasattr(self, "_other_layers_data"):
+            return
+        _, _, fw, fh = self._frame_geometry()
+        rebuilt = []
+        for index, raw in self._other_layers_data:
+            settings = TextOverlaySettings.from_dict({**raw, "enabled": True, "layers": []})
+            ref_h = settings.reference_size()[1]
+            width = max(2, int(round(ref_h * fw / fh))) if fh else settings.reference_size()[0]
+            scaled = compute_scaled_overlay(settings, width, ref_h)
+            if scaled is not None:
+                rebuilt.append((index, scaled))
+        self._other_layers = rebuilt
+        if self._text_visible and (any(self._char_lines) or rebuilt):
+            self._start_animation()
+        else:
+            self._stop_animation()
+        self.update()
+
+    def _paint_other_text(self, painter: QPainter, overlay, frame: tuple[float, float, float, float]) -> None:
+        fx, fy, fw, fh = frame
+        # Scaled overlays use a reference frame with the same aspect ratio as the preview.
+        raw = next((item for index, item in self._other_layers_data if index == self._painting_layer_index), {})
+        orientation = str(raw.get("preview_orientation", "vertical"))
+        ref_h = REF_HORIZONTAL[1] if orientation == "horizontal" else REF_VERTICAL[1]
+        scale = fh / ref_h
+        size = max(8, int(round(overlay.font_size * scale)))
+        glow_layers = neon_glow_layers(size, max_layers=10, alpha_scale=0.48)
+        painter.save()
+        painter.setOpacity(overlay.opacity)
+        old_style = (self._glow_color, self._text_color, self._glow_enabled,
+                     self._outline_color, self._outline_width, getattr(self, "_paint_scale", 1.0))
+        self._glow_color = QColor(overlay.glow_color)
+        self._text_color = QColor(overlay.text_color)
+        self._glow_enabled = overlay.glow_enabled
+        self._outline_color = QColor(overlay.outline_color)
+        self._outline_width = overlay.outline_width
+        self._paint_scale = scale
+        char_global = 0
+        try:
+            for line_index, chars in enumerate(overlay.char_lines):
+                y = fy + (overlay.y + line_index * overlay.line_height + overlay.wave_amp) * scale
+                for ch, x_off in chars:
+                    emoji = is_emoji_unit(ch)
+                    color_path = resolve_color_emoji_font_path() if emoji else ""
+                    unit_path = color_path or font_path_for_unit(ch, overlay.font_path, bold=overlay.font_bold)
+                    font = _make_qfont(unit_path, size, bold=overlay.font_bold)
+                    painter.setFont(font)
+                    wave = wave_offset_y(char_global, self._anim_frame, overlay.wave_amp * scale,
+                                         char_phase=overlay.wave_char_phase,
+                                         frame_speed=overlay.wave_frame_speed)
+                    self._paint_neon_char(
+                        painter, QFontMetrics(font), ch, int(fx + (overlay.x + x_off) * scale),
+                        int(y), wave, glow_layers,
+                        fill_color=(QColor(0, 0, 0) if emoji and color_path else QColor("#FFFFFF") if emoji else None),
+                        apply_glow=not emoji,
+                    )
+                    char_global += 1
+        finally:
+            (self._glow_color, self._text_color, self._glow_enabled,
+             self._outline_color, self._outline_width, self._paint_scale) = old_style
+            painter.restore()
 
     def _frame_geometry(self) -> tuple[float, float, float, float]:
         w = max(40.0, float(self.width()) - 16.0)
@@ -953,7 +1064,7 @@ class TextOverlayPreviewWidget(QWidget):
         self._wave_amp = max(0.0, painted_size * self._wave_amp_frac)
         self._block_h += int(self._wave_amp * 2)
 
-        if not self._text_visible or not self._char_lines or not any(self._char_lines):
+        if not self._text_visible or (not any(self._char_lines) and not self._other_layers):
             self._stop_animation()
         elif self.isVisible():
             self._start_animation()
@@ -1000,8 +1111,16 @@ class TextOverlayPreviewWidget(QWidget):
                 painter.drawText(int(cx + dx), int(text_y + dy), ch)
 
         core = QColor(fill_color) if fill_color is not None else QColor(self._text_color)
-        painter.setPen(core)
-        painter.drawText(int(cx), int(text_y), ch)
+        if self._outline_width and not is_emoji_unit(ch):
+            path = QPainterPath()
+            path.addText(float(cx), float(text_y), painter.font(), ch)
+            painter.setPen(QPen(self._outline_color, max(0.5, self._outline_width * self._paint_scale * 2), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.setBrush(core)
+            painter.drawPath(path)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+        else:
+            painter.setPen(core)
+            painter.drawText(int(cx), int(text_y), ch)
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
@@ -1048,15 +1167,26 @@ class TextOverlayPreviewWidget(QWidget):
         if not self._text_visible:
             return
 
-        if not self._char_lines or not any(self._char_lines):
+        has_current = bool(self._char_lines and any(self._char_lines))
+        if not has_current and not self._other_layers:
             painter.setPen(QColor("#475569"))
-            painter.drawText(
-                int(fx + fw / 2 - 70),
-                int(fy + fh / 2),
-                "Введи текст…",
-            )
+            painter.drawText(int(fx + fw / 2 - 70), int(fy + fh / 2), "Введи текст…")
             return
 
+        # Use the same stacking order as the rendered video.
+        entries = [(index, layer) for index, layer in self._other_layers]
+        if has_current:
+            entries.append((self._selected_layer_index, None))
+        for index, layer in sorted(entries, key=lambda entry: entry[0]):
+            if layer is None:
+                painter.save()
+                self._paint_current_text(painter, scale)
+                painter.restore()
+            else:
+                self._painting_layer_index = index
+                self._paint_other_text(painter, layer, (fx, fy, fw, fh))
+
+    def _paint_current_text(self, painter: QPainter, scale: float) -> None:
         block_x, block_y = self._block_top_left()
         main_font = self._font_for_paint(scale)
         painted_size = max(8, int(round(self._font_size * scale)))
@@ -1067,12 +1197,18 @@ class TextOverlayPreviewWidget(QWidget):
             painted_size, max_layers=10, alpha_scale=0.48
         )
 
+        painter.setOpacity(self._opacity)
+        self._paint_scale = scale
         char_global = 0
         y = block_y + wave_pad
         for li, chars in enumerate(self._char_lines):
             if not chars:
                 y += line_h
                 continue
+            line_offset = 0
+            if self._center_lines:
+                line_width = measure_text_block([self._lines[li]], self._font_size, self._font_path, self._letter_spacing, bold=self._font_bold)[0]
+                line_offset = (self._block_w - line_width) / 2
             for ch, x_off in chars:
                 emoji = is_emoji_unit(ch)
                 color_path = resolve_color_emoji_font_path() if emoji else ""
@@ -1096,7 +1232,7 @@ class TextOverlayPreviewWidget(QWidget):
                     painter,
                     fm,
                     ch,
-                    block_x + int(x_off * scale),
+                    block_x + int((x_off + line_offset) * scale),
                     y,
                     wave_dy,
                     glow_layers,

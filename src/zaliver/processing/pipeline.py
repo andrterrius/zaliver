@@ -89,6 +89,8 @@ def materialize_text_overlay_ranges(
         return None
     d = dict(raw)
     r = rng or np.random.default_rng()
+    if isinstance(d.get("layers"), list):
+        d["layers"] = [materialize_text_overlay_ranges(layer, rng=r) for layer in d["layers"] if isinstance(layer, dict)]
     amp_lo = d.pop("wave_amp_frac_min", None)
     amp_hi = d.pop("wave_amp_frac_max", None)
     spd_lo = d.pop("wave_frame_speed_min", None)

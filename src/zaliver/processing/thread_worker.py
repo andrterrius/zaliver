@@ -722,7 +722,7 @@ class ProcessingService:
             text_overlay_enabled = False
             if isinstance(raw_text_overlay, dict):
                 toc = TextOverlaySettings.from_dict(raw_text_overlay)
-                text_overlay_enabled = bool(toc.enabled and (toc.text or "").strip())
+                text_overlay_enabled = bool(toc.enabled and ((toc.text or "").strip() or any(str(layer.get("text") or "").strip() for layer in toc.layers)))
                 if text_overlay_enabled:
                     try:
                         from zaliver.processing.text_overlay import (
@@ -841,7 +841,7 @@ class ProcessingService:
                         sampled = materialize_text_overlay_ranges(raw_text_overlay)
                         if sampled is not None:
                             toc = TextOverlaySettings.from_dict(sampled)
-                            if toc.enabled and (toc.text or "").strip():
+                            if toc.enabled and ((toc.text or "").strip() or any(str(layer.get("text") or "").strip() for layer in toc.layers)):
                                 job_text_overlay = toc.to_dict()
 
                     job = OutputJob(

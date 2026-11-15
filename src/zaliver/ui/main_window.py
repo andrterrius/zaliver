@@ -1345,7 +1345,7 @@ class MainWindow(QWidget):
         btn_text_export, btn_text_import = make_text_overlay_io_buttons(
             self,
             get_settings=self._text_overlay_options_dict,
-            apply_settings=self._apply_text_overlay_options,
+            apply_settings=self._import_text_overlay_options,
         )
         text_header = QHBoxLayout()
         text_header.setContentsMargins(0, 0, 0, 0)
@@ -1360,6 +1360,26 @@ class MainWindow(QWidget):
         text_controls_l = QVBoxLayout(self._text_overlay_panel)
         text_controls_l.setContentsMargins(0, 0, 0, 0)
         text_controls_l.setSpacing(8)
+        self._text_layers_loading = True
+        self._text_layers = [None]
+        self._text_layer_index = 0
+        layer_row = QHBoxLayout()
+        self.text_layer_combo = QComboBox()
+        self.text_layer_combo.addItem("Текст 1")
+        self.text_layer_combo.currentIndexChanged.connect(self._select_text_layer)
+        add_layer = QPushButton("Добавить текст")
+        add_layer.clicked.connect(self._add_text_layer)
+        self.text_layer_remove = QPushButton("Удалить текст")
+        self.text_layer_remove.clicked.connect(self._remove_text_layer)
+        self.text_layer_remove.setEnabled(False)
+        layer_row.addWidget(self.text_layer_combo, 1)
+        layer_row.addWidget(add_layer)
+        layer_row.addWidget(self.text_layer_remove)
+        text_controls_l.addLayout(layer_row)
+        layer_hint = QLabel("В предпросмотре показаны все тексты. Для перемещения выбери текст в списке.")
+        layer_hint.setObjectName("hint")
+        layer_hint.setWordWrap(True)
+        text_controls_l.addWidget(layer_hint)
 
         self.text_overlay_from_middle = QCheckBox(
             "Текст с середины видео до конца"
@@ -1466,6 +1486,27 @@ class MainWindow(QWidget):
         text_opts.addWidget(self.text_overlay_letter_spacing, 3, 1)
         text_opts.addWidget(QLabel("Шрифт"), 4, 0)
         text_opts.addWidget(font_row_w, 4, 1)
+        self.text_overlay_center_lines = QCheckBox("Центрировать строки")
+        self.text_overlay_opacity = QSpinBox()
+        self.text_overlay_opacity.setRange(0, 100)
+        self.text_overlay_opacity.setValue(100)
+        self.text_overlay_opacity.setSuffix(" %")
+        self.text_overlay_outline_width = QSpinBox()
+        self.text_overlay_outline_width.setRange(0, 40)
+        self.text_overlay_outline_width.setSuffix(" px")
+        self._text_overlay_outline_color = "#000000"
+        self.text_overlay_outline_btn = QPushButton("Цвет обводки…")
+        self._sync_text_overlay_color_btn(self.text_overlay_outline_btn, self._text_overlay_outline_color)
+        self.text_overlay_outline_btn.clicked.connect(self._pick_text_overlay_outline_color)
+        self.text_overlay_center_lines.toggled.connect(self._on_text_overlay_style_changed)
+        self.text_overlay_opacity.valueChanged.connect(self._on_text_overlay_style_changed)
+        self.text_overlay_outline_width.valueChanged.connect(self._on_text_overlay_style_changed)
+        text_opts.addWidget(self.text_overlay_center_lines, 7, 1)
+        text_opts.addWidget(QLabel("Непрозрачность текста"), 8, 0)
+        text_opts.addWidget(self.text_overlay_opacity, 8, 1)
+        text_opts.addWidget(QLabel("Толщина обводки"), 9, 0)
+        text_opts.addWidget(self.text_overlay_outline_width, 9, 1)
+        text_opts.addWidget(self.text_overlay_outline_btn, 10, 1)
 
         self.text_overlay_wave_amp = ValueRangeSlider(
             minimum=0,
@@ -5481,6 +5522,11 @@ class MainWindow(QWidget):
             self._text_overlay_text_color = (
                 self._settings.value("text_overlay_text_color", "#FFFFFF", type=str) or "#FFFFFF"
             )
+            self._text_overlay_outline_color = self._settings.value("text_overlay_outline_color", "#000000", type=str) or "#000000"
+            self.text_overlay_opacity.setValue(self._settings.value("text_overlay_opacity", 100, type=int))
+            self.text_overlay_outline_width.setValue(self._settings.value("text_overlay_outline_width", 0, type=int))
+            self.text_overlay_center_lines.setChecked(self._settings.value("text_overlay_center_lines", False, type=bool))
+            self._sync_text_overlay_color_btn(self.text_overlay_outline_btn, self._text_overlay_outline_color)
             self.text_overlay_glow_enabled.setChecked(
                 bool(self._settings.value("text_overlay_glow_enabled", True, type=bool))
             )
@@ -5568,6 +5614,18 @@ class MainWindow(QWidget):
             self._sync_text_overlay_preview(ax, ay)
             self._update_text_overlay_controls()
         self._load_fx_enable_settings()
+        try:
+            saved_layers = json.loads(self._settings.value("text_overlay_layers", "[]", type=str) or "[]")
+        except (ValueError, TypeError):
+            saved_layers = []
+        current = self._current_text_overlay_options_dict()
+        self._text_layers = [item for item in saved_layers if isinstance(item, dict)] or [current]
+        self._text_layers[0]["enabled"] = bool(self.text_overlay_enabled.isChecked())
+        self._text_layer_index = 0
+        self._refresh_text_layer_combo()
+        self._apply_text_overlay_options(self._text_layers[0])
+        self._text_layers_loading = False
+        self._save_folder_settings()
 
     def _load_fx_enable_settings(self) -> None:
         if not hasattr(self, "fx_brightness_enabled"):
@@ -5594,6 +5652,8 @@ class MainWindow(QWidget):
         self._sync_fx_enable_slider_states()
 
     def _save_folder_settings(self) -> None:
+        if getattr(self, "_text_layers_loading", False):
+            return
         self._settings.setValue("output_folder", self.output_dir_edit.text().strip())
         if hasattr(self, "delete_after_upload"):
             self._settings.setValue(
@@ -5664,11 +5724,14 @@ class MainWindow(QWidget):
                 int(round(self.background_music_volume.highValue())),
             )
         if hasattr(self, "text_overlay_enabled"):
+            if hasattr(self, "text_overlay_preview") and self._text_layers:
+                self._text_layers[self._text_layer_index] = self._current_text_overlay_options_dict()
+                self._settings.setValue("text_overlay_layers", json.dumps(self._text_layers, ensure_ascii=False))
             self._settings.setValue(
                 "text_overlay_enabled", bool(self.text_overlay_enabled.isChecked())
             )
             self._settings.setValue(
-                "text_overlay_text", self.text_overlay_edit.toPlainText()
+                "text_overlay_text", str(self._text_layers[0].get("text", ""))
             )
             self._settings.setValue(
                 "text_overlay_from_middle",
@@ -5684,6 +5747,10 @@ class MainWindow(QWidget):
             )
             self._settings.setValue("text_overlay_glow_color", self._text_overlay_glow_color)
             self._settings.setValue("text_overlay_text_color", self._text_overlay_text_color)
+            self._settings.setValue("text_overlay_opacity", self.text_overlay_opacity.value())
+            self._settings.setValue("text_overlay_outline_width", self.text_overlay_outline_width.value())
+            self._settings.setValue("text_overlay_outline_color", self._text_overlay_outline_color)
+            self._settings.setValue("text_overlay_center_lines", self.text_overlay_center_lines.isChecked())
             self._settings.setValue(
                 "text_overlay_glow_enabled", bool(self.text_overlay_glow_enabled.isChecked())
             )
@@ -11320,6 +11387,10 @@ class MainWindow(QWidget):
             glow_enabled=bool(self.text_overlay_glow_enabled.isChecked()),
             glow_color=self._text_overlay_glow_color,
             text_color=self._text_overlay_text_color,
+            opacity=self.text_overlay_opacity.value() / 100,
+            outline_width=self.text_overlay_outline_width.value(),
+            outline_color=self._text_overlay_outline_color,
+            center_lines=self.text_overlay_center_lines.isChecked(),
             letter_spacing=int(self.text_overlay_letter_spacing.value()),
             custom_font_path=self._text_overlay_font_path,
             font_bold=bool(self.text_overlay_font_bold.isChecked()),
@@ -11332,7 +11403,7 @@ class MainWindow(QWidget):
             from_middle=bool(self.text_overlay_from_middle.isChecked()),
         )
 
-    def _text_overlay_options_dict(self) -> dict:
+    def _current_text_overlay_options_dict(self) -> dict:
         d = self._text_overlay_settings().to_dict()
         waf_lo, waf_hi, wfs_lo, wfs_hi = self._text_overlay_wave_values()
         d["wave_amp_frac_min"] = float(waf_lo)
@@ -11340,6 +11411,74 @@ class MainWindow(QWidget):
         d["wave_frame_speed_min"] = float(wfs_lo)
         d["wave_frame_speed_max"] = float(wfs_hi)
         return d
+
+    def _text_overlay_options_dict(self) -> dict:
+        self._text_layers[self._text_layer_index] = self._current_text_overlay_options_dict()
+        layers = copy.deepcopy(self._text_layers)
+        root = layers[0]
+        root["enabled"] = bool(self.text_overlay_enabled.isChecked())
+        root["layers"] = layers[1:]
+        return root
+
+    def _refresh_text_layer_combo(self) -> None:
+        self.text_layer_combo.blockSignals(True)
+        self.text_layer_combo.clear()
+        for index in range(len(self._text_layers)):
+            self.text_layer_combo.addItem(f"Текст {index + 1}")
+        self.text_layer_combo.setCurrentIndex(self._text_layer_index)
+        self.text_layer_combo.blockSignals(False)
+        self.text_layer_remove.setEnabled(len(self._text_layers) > 1)
+
+    def _select_text_layer(self, index: int) -> None:
+        if self._text_layers_loading or index < 0 or index == self._text_layer_index:
+            return
+        self._text_layers[self._text_layer_index] = self._current_text_overlay_options_dict()
+        self._text_layer_index = index
+        enabled = self.text_overlay_enabled.isChecked()
+        self._text_layers_loading = True
+        try:
+            self._apply_text_overlay_options({**self._text_layers[index], "enabled": enabled})
+        finally:
+            self._text_layers_loading = False
+        self._save_folder_settings()
+
+    def _add_text_layer(self) -> None:
+        self._text_layers[self._text_layer_index] = self._current_text_overlay_options_dict()
+        new_layer = copy.deepcopy(self._text_layers[self._text_layer_index])
+        new_layer["text"] = ""
+        new_layer["anchor_y"] = min(0.9, float(new_layer.get("anchor_y", 0.15)) + 0.15)
+        self._text_layers.append(new_layer)
+        self._refresh_text_layer_combo()
+        self.text_layer_combo.setCurrentIndex(len(self._text_layers) - 1)
+        self.text_overlay_edit.setFocus()
+
+    def _remove_text_layer(self) -> None:
+        if len(self._text_layers) <= 1:
+            return
+        del self._text_layers[self._text_layer_index]
+        index = min(self._text_layer_index, len(self._text_layers) - 1)
+        self._text_layer_index = index
+        self._refresh_text_layer_combo()
+        enabled = self.text_overlay_enabled.isChecked()
+        self._text_layers_loading = True
+        try:
+            self._apply_text_overlay_options({**self._text_layers[index], "enabled": enabled})
+        finally:
+            self._text_layers_loading = False
+        self._save_folder_settings()
+
+    def _import_text_overlay_options(self, raw: dict) -> None:
+        layers = [dict(raw)] + [dict(x) for x in raw.get("layers", []) if isinstance(x, dict)]
+        layers[0].pop("layers", None)
+        self._text_layers = layers
+        self._text_layer_index = 0
+        self._refresh_text_layer_combo()
+        self._text_layers_loading = True
+        try:
+            self._apply_text_overlay_options(layers[0])
+        finally:
+            self._text_layers_loading = False
+        self._save_folder_settings()
 
     def _apply_text_overlay_options(self, raw: dict) -> None:
         """Применить настройки текста (в т.ч. из импорта JSON)."""
@@ -11364,6 +11503,11 @@ class MainWindow(QWidget):
             self.text_overlay_orientation.setCurrentIndex(idx)
         self._text_overlay_glow_color = str(d.get("glow_color") or "#00FFFF")
         self._text_overlay_text_color = str(d.get("text_color") or "#FFFFFF")
+        self._text_overlay_outline_color = str(d.get("outline_color") or "#000000")
+        self.text_overlay_opacity.setValue(round(float(d.get("opacity", 1.0)) * 100))
+        self.text_overlay_outline_width.setValue(int(d.get("outline_width", 0)))
+        self.text_overlay_center_lines.setChecked(bool(d.get("center_lines", False)))
+        self._sync_text_overlay_color_btn(self.text_overlay_outline_btn, self._text_overlay_outline_color)
         self.text_overlay_glow_enabled.setChecked(bool(d.get("glow_enabled", True)))
         try:
             ls = int(d.get("letter_spacing", 0))
@@ -11405,6 +11549,8 @@ class MainWindow(QWidget):
         self._save_folder_settings()
         # Синхронизировать общий текст с нарезкой/склейкой.
         shared = self.text_overlay_edit.toPlainText()
+        if self._text_layer_index != 0:
+            return
         if hasattr(self, "_slice_tab"):
             self._slice_tab.set_text_overlay_text(shared)
         if hasattr(self, "_stitch_tab"):
@@ -11895,6 +12041,8 @@ class MainWindow(QWidget):
         preview = self.text_overlay_preview
         overlay_on = bool(self.text_overlay_enabled.isChecked())
         if not overlay_on:
+            if anchor_x is not None and anchor_y is not None:
+                preview.set_anchor(anchor_x, anchor_y)
             return
         orient = self.text_overlay_orientation.currentData()
         preview.blockSignals(True)
@@ -11903,6 +12051,7 @@ class MainWindow(QWidget):
         preview.set_glow_enabled(bool(self.text_overlay_glow_enabled.isChecked()))
         preview.set_glow_color(self._text_overlay_glow_color)
         preview.set_text_color(self._text_overlay_text_color)
+        preview.set_text_style(self.text_overlay_opacity.value() / 100, self.text_overlay_outline_width.value(), self._text_overlay_outline_color, self.text_overlay_center_lines.isChecked())
         preview.set_letter_spacing(int(self.text_overlay_letter_spacing.value()))
         preview.set_font_path(self._text_overlay_font_path)
         preview.set_font_bold(bool(self.text_overlay_font_bold.isChecked()))
@@ -11911,6 +12060,9 @@ class MainWindow(QWidget):
         preview.set_text(self.text_overlay_edit.toPlainText())
         if anchor_x is not None and anchor_y is not None:
             preview.set_anchor(anchor_x, anchor_y)
+        other_layers = [(i, layer) for i, layer in enumerate(self._text_layers)
+                        if i != self._text_layer_index and isinstance(layer, dict)]
+        preview.set_other_layers(other_layers, self._text_layer_index)
         preview.blockSignals(False)
 
     def _schedule_text_overlay_preview_sync(self) -> None:
@@ -12002,7 +12154,8 @@ class MainWindow(QWidget):
             return
         self._save_folder_settings()
         text = self.text_overlay_edit.toPlainText() if hasattr(self, "text_overlay_edit") else ""
-        self._on_shared_text_overlay_changed(text, source="uniquify")
+        if self._text_layer_index == 0 and not self._text_layers_loading:
+            self._on_shared_text_overlay_changed(text, source="uniquify")
 
     def _recent_text_overlay_texts(self) -> list[str]:
         store = getattr(self, "_upload_store", None)
@@ -12046,7 +12199,10 @@ class MainWindow(QWidget):
         except Exception:
             pass
         if source != "uniquify":
-            self._set_uniquify_text_overlay_text(value)
+            if getattr(self, "_text_layer_index", 0) == 0:
+                self._set_uniquify_text_overlay_text(value)
+            elif self._text_layers and isinstance(self._text_layers[0], dict):
+                self._text_layers[0]["text"] = value
         if source != "slice" and hasattr(self, "_slice_tab"):
             self._slice_tab.set_text_overlay_text(value)
         if source != "stitch" and hasattr(self, "_stitch_tab"):
@@ -12096,6 +12252,17 @@ class MainWindow(QWidget):
 
     def _on_text_overlay_position_changed(self, ax: float, ay: float) -> None:
         self._save_folder_settings()
+
+    def _on_text_overlay_style_changed(self, *_args) -> None:
+        self._schedule_text_overlay_preview_sync()
+        self._save_folder_settings()
+
+    def _pick_text_overlay_outline_color(self) -> None:
+        picked = QColorDialog.getColor(QColor(self._text_overlay_outline_color), self, "Цвет обводки")
+        if picked.isValid():
+            self._text_overlay_outline_color = picked.name().upper()
+            self._sync_text_overlay_color_btn(self.text_overlay_outline_btn, self._text_overlay_outline_color)
+            self._on_text_overlay_style_changed()
 
     def _pick_text_overlay_glow_color(self) -> None:
         initial = QColor(self._text_overlay_glow_color)

@@ -25,6 +25,7 @@ from PyQt6.QtGui import (
     QResizeEvent,
 )
 from PyQt6.QtWidgets import QPushButton, QSizePolicy, QWidget
+from zaliver.ui.fullscreen_preview import FullscreenPreview
 
 from zaliver.processing.text_overlay import (
     NEON_WAVE_AMP_FRAC,
@@ -157,6 +158,7 @@ class ScalePreviewWidget(QWidget):
         self.setMinimumSize(280, 480)
         self.setMaximumHeight(620)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._fullscreen_preview = FullscreenPreview(self)
         self._pixmap = None
         self._sx = self._sy = 1.0
         self._drag = False
@@ -580,6 +582,7 @@ class TextOverlayPreviewWidget(QWidget):
         self._btn_play.clicked.connect(self.toggle_playback)
         self._btn_play.setEnabled(False)
         self._position_play_button()
+        self._fullscreen_preview = FullscreenPreview(self)
 
     def is_playing(self) -> bool:
         return bool(self._playing)

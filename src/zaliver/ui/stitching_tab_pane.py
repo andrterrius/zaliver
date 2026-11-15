@@ -132,6 +132,8 @@ class StitchingTabPane(QWidget):
             ),
             "copies_per_track": int(self.copies_per_track.value()),
             "text_overlay": self.text_overlay_options_dict(),
+            "banners": self.banner_editor.options(),
+            "banners_by_video": self.banner_editor.options_by_video(),
             "transition": self._selected_transition(),
             "transition_duration": float(DEFAULT_STITCH_TRANSITION_DURATION),
             "transition_random": bool(self.transition_random.isChecked()),
@@ -662,7 +664,7 @@ class StitchingTabPane(QWidget):
         header_block.addWidget(self.progress_label)
 
         section_nav, section_nav_group, _section_btns = make_work_section_nav(
-            ["Исходники", "Текст", "Музыка", "Переходы"],
+            ["Исходники", "Текст", "Баннеры", "Музыка", "Переходы"],
             parent=self,
         )
         header_block.addWidget(section_nav)
@@ -1039,6 +1041,9 @@ class StitchingTabPane(QWidget):
         self._stitch_section_stack = QStackedWidget()
         self._stitch_section_stack.addWidget(wrap_work_section_page(io))
         self._stitch_section_stack.addWidget(wrap_work_section_page(text_gb))
+        from zaliver.ui.banner_editor import BannerEditor
+        self.banner_editor = BannerEditor(self._settings, "stitch/banners", lambda: [path for part in self._part_files for path in part])
+        self._stitch_section_stack.addWidget(wrap_work_section_page(self.banner_editor))
         self._stitch_section_stack.addWidget(wrap_work_section_page(music_gb))
         self._stitch_section_stack.addWidget(wrap_work_section_page(transitions_gb))
         section_nav_group.idClicked.connect(self._stitch_section_stack.setCurrentIndex)

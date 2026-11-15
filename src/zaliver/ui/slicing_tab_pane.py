@@ -109,6 +109,8 @@ class SlicingTabPane(QWidget):
             "music_files": list(self._music_files),
             "copies_per_track": int(self.copies_per_track.value()),
             "text_overlay": self.text_overlay_options_dict(),
+            "banners": self.banner_editor.options(),
+            "banners_by_video": self.banner_editor.options_by_video(),
             "use_suggested_durations": bool(self.auto_scene_durations.isChecked()),
             "min_scene_duration": float(self.scene_duration.lowValue()),
             "max_scene_duration": float(self.scene_duration.highValue()),
@@ -486,7 +488,7 @@ class SlicingTabPane(QWidget):
         header_block.addWidget(self.progress_label)
 
         section_nav, section_nav_group, _section_btns = make_work_section_nav(
-            ["Исходники", "Сцены", "Текст", "Музыка"],
+            ["Исходники", "Сцены", "Текст", "Баннеры", "Музыка"],
             parent=self,
         )
         header_block.addWidget(section_nav)
@@ -838,6 +840,9 @@ class SlicingTabPane(QWidget):
             wrap_work_section_page(duration_gb, scenes_gb)
         )
         self._slice_section_stack.addWidget(wrap_work_section_page(text_gb))
+        from zaliver.ui.banner_editor import BannerEditor
+        self.banner_editor = BannerEditor(self._settings, "slice/banners", lambda: list(self._clip_files))
+        self._slice_section_stack.addWidget(wrap_work_section_page(self.banner_editor))
         self._slice_section_stack.addWidget(wrap_work_section_page(music_gb))
         section_nav_group.idClicked.connect(self._slice_section_stack.setCurrentIndex)
 

@@ -307,6 +307,7 @@ def _run_whole_file_finalize(
     n_jobs: int,
     music_pool: List[str],
     cancel_check: Callable[[], bool],
+    banners: list | None = None,
 ) -> str:
     """Склейка не нужна — mux звука. Возвращает ok | cancelled | error."""
     video_only = j.outp.with_name(f"{j.outp.stem}._zaliver_video{j.outp.suffix}")
@@ -353,6 +354,15 @@ def _run_whole_file_finalize(
         _skip_job_finalize_error(j, e, log=log, n_jobs=n_jobs)
         return "error"
     if finalize_ok and not j.finalize_error:
+        try:
+            from zaliver.processing.banner_overlay import render_banners
+            if banners:
+                log(f"{j.tag(n_jobs)}: Наложение баннеров: {len(banners)}")
+            render_banners(j.outp, banners, cancel_check=cancel_check)
+        except Exception as e:
+            if str(e) == "cancelled": return "cancelled"
+            _skip_job_finalize_error(j, e, log=log, n_jobs=n_jobs)
+            return "error"
         j.finished = True
         j.done_frames = j.info.frame_count
         return "ok"
@@ -368,6 +378,7 @@ def _run_chunked_finalize(
     n_jobs: int,
     music_pool: List[str],
     cancel_check: Callable[[], bool],
+    banners: list | None = None,
 ) -> str:
     """concat + mux в фоне. Возвращает ok | cancelled | error."""
     finalize_ok = False
@@ -457,6 +468,15 @@ def _run_chunked_finalize(
         else:
             _skip_job_finalize_error(j, e, log=log, n_jobs=n_jobs)
     if finalize_ok and not j.finalize_error:
+        try:
+            from zaliver.processing.banner_overlay import render_banners
+            if banners:
+                log(f"{j.tag(n_jobs)}: Наложение баннеров: {len(banners)}")
+            render_banners(j.outp, banners, cancel_check=cancel_check)
+        except Exception as e:
+            if str(e) == "cancelled": return "cancelled"
+            _skip_job_finalize_error(j, e, log=log, n_jobs=n_jobs)
+            return "error"
         stamp_output_video_metadata(str(j.outp), log=log)
         wd_path = j.chunk_work_dir
         if wd_path is not None:
@@ -1259,6 +1279,7 @@ class ProcessingService:
                             n_jobs=n_jobs,
                             music_pool=music_pool,
                             cancel_check=cancelled,
+                            banners=(options.get("banners_by_video") or {}).get(os.path.normcase(os.path.abspath(str(j.p))), options.get("banners") or []),
                         )
                         finalize_futures[ff] = j.job_id
 
@@ -1280,6 +1301,7 @@ class ProcessingService:
                             n_jobs=n_jobs,
                             music_pool=music_pool,
                             cancel_check=cancelled,
+                            banners=(options.get("banners_by_video") or {}).get(os.path.normcase(os.path.abspath(str(j.p))), options.get("banners") or []),
                         )
                         finalize_futures[ff] = j.job_id
 

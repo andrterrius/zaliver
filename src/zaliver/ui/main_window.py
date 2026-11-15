@@ -1126,7 +1126,7 @@ class MainWindow(QWidget):
         header_block.addWidget(self.progress_label)
 
         section_nav, section_nav_group, _section_btns = make_work_section_nav(
-            ["Исходники", "Фильтры", "Масштабирование", "Текст", "Музыка"],
+            ["Исходники", "Фильтры", "Масштабирование", "Текст", "Баннеры", "Музыка"],
             parent=home,
         )
         header_block.addWidget(section_nav)
@@ -1883,6 +1883,9 @@ class MainWindow(QWidget):
         self._uniquify_section_stack.addWidget(wrap_work_section_page(fx))
         self._uniquify_section_stack.addWidget(wrap_work_section_page(scale_gb))
         self._uniquify_section_stack.addWidget(wrap_work_section_page(text_gb))
+        from zaliver.ui.banner_editor import BannerEditor
+        self.banner_editor = BannerEditor(self._settings, "uniquify/banners", self._text_overlay_preview_videos)
+        self._uniquify_section_stack.addWidget(wrap_work_section_page(self.banner_editor))
         self._uniquify_section_stack.addWidget(wrap_work_section_page(bg_tracks))
         section_nav_group.idClicked.connect(self._uniquify_section_stack.setCurrentIndex)
 
@@ -12434,6 +12437,8 @@ class MainWindow(QWidget):
             ],
             "random_bounds": bounds,
             "text_overlay": self._text_overlay_options_dict(),
+            "banners": self.banner_editor.options(),
+            "banners_by_video": self.banner_editor.options_by_video(),
         }
 
     def _start(self) -> None:

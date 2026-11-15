@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import secrets
 import threading
+import tempfile
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
@@ -270,6 +271,7 @@ class StitchingService:
                 "обрабатывается следующее."
             )
 
+        banner_temp = None
         try:
             out_dir = Path(options["output_dir"])
             part_pools = collect_stitch_part_pools(options)
@@ -299,6 +301,19 @@ class StitchingService:
             except OSError as e:
                 self._sink.on_finished(False, f"Не удалось создать выходную папку: {e}")
                 return
+
+            banners_by_video = options.get('banners_by_video')
+            if banners_by_video and any(banners_by_video.values()):
+                from zaliver.processing.banner_overlay import prepare_banner_sources
+                banner_temp = tempfile.TemporaryDirectory(prefix='.zaliver_banners_', dir=str(out_dir))
+                lengths = [len(pool) for pool in part_pools]
+                sources = [path for pool in part_pools for path in pool]
+                sources = prepare_banner_sources(sources, banners_by_video, banner_temp.name,
+                                                 cancel_check=lambda: self._cancelled, log=log)
+                offset = 0
+                for i, length in enumerate(lengths):
+                    part_pools[i] = sources[offset:offset + length]
+                    offset += length
 
             text_overlay_enabled = False
             raw_text_overlay = options.get("text_overlay")
@@ -516,6 +531,16 @@ class StitchingService:
             errors: List[str] = []
 
             def on_job_done(j: StitchJob) -> None:
+                if j.finished and j.output_path.is_file() and options.get("banners") and not options.get("banners_by_video"):
+                    try:
+                        from zaliver.processing.banner_overlay import render_banners
+                        log(f"Наложение баннеров: {len(options['banners'])} — {j.output_path.name}")
+                        render_banners(j.output_path, options["banners"], cancel_check=cancelled)
+                    except Exception as e:
+                        j.finished = False
+                        j.error = "Отменено." if str(e) == "cancelled" else str(e)
+                        log(f"Баннеры: {j.error}")
+
                 nonlocal done_count
                 done_count += 1
                 self._sink.on_progress(done_count, n_jobs, j.output_path.name)
@@ -640,6 +665,8 @@ class StitchingService:
         except Exception as e:
             self._sink.on_finished(False, str(e).strip() or repr(e))
         finally:
+            if banner_temp is not None:
+                banner_temp.cleanup()
             buf = getattr(self, "_ready_buffer", None)
             if buf is not None:
                 buf.close()

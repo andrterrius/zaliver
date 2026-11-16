@@ -245,10 +245,22 @@ class BannerCanvas(QWidget):
             b['y'] = max(.02-original['h'], min(.98, original['y']+dy))
         else:
             left, top = original['x'], original['y']; right, bottom = left+original['w'], top+original['h']
-            if 'l' in mode: left = min(right-.02, left+dx)
-            else: right = max(left+.02, right+dx)
-            if 't' in mode: top = min(bottom-.02, top+dy)
-            else: bottom = max(top+.02, bottom+dy)
+            if e.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                if 'l' in mode: left = min(right-.02, left+dx)
+                else: right = max(left+.02, right+dx)
+                if 't' in mode: top = min(bottom-.02, top+dy)
+                else: bottom = max(top+.02, bottom+dy)
+            else:
+                # Use the larger relative movement and keep the opposite corner fixed.
+                fx = 1 + (-dx if 'l' in mode else dx) / original['w']
+                fy = 1 + (-dy if 't' in mode else dy) / original['h']
+                factor = fx if abs(fx-1) >= abs(fy-1) else fy
+                factor = max(.02 / original['w'], .02 / original['h'], factor)
+                width, height = original['w'] * factor, original['h'] * factor
+                if 'l' in mode: left = right - width
+                else: right = left + width
+                if 't' in mode: top = bottom - height
+                else: bottom = top + height
             b.update(x=left, y=top, w=right-left, h=bottom-top)
         self.changed.emit(); self.update()
 
@@ -295,6 +307,10 @@ class BannerEditor(QWidget):
         center_x.clicked.connect(lambda: self.center('x'))
         center_y.clicked.connect(lambda: self.center('y'))
         layout.addWidget(self.list); layout.addWidget(self.canvas)
+        hint = QLabel("Тяни за угол баннера. Зажми Shift для изменения размера без сохранения пропорций.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
         self.repeat_first = QCheckBox('Повторить эти настройки для остальных видео')
         self.repeat_first.setChecked(settings.value(key + '/repeat_first', False, type=bool))
         layout.addWidget(self.repeat_first, alignment=Qt.AlignmentFlag.AlignHCenter)

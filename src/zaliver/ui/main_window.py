@@ -1705,7 +1705,7 @@ class MainWindow(QWidget):
         self._scale_panel = QWidget()
         scale_outer.addWidget(self._scale_panel)
         scale_layout = QGridLayout(self._scale_panel)
-        scale_layout.addWidget(QLabel("Потяни за угол видео. Зажми Shift для пропорций или Alt для обрезки. Ctrl+Z — отмена."), 0, 0, 1, 3)
+        scale_layout.addWidget(QLabel("Тяни за угол видео. Зажми Shift для свободного изменения размера или Alt для обрезки. Ctrl+Z отменяет последнее действие."), 0, 0, 1, 3)
         self.scale_background = QComboBox()
         self.scale_background.addItem("Чёрный", "black")
         self.scale_background.addItem("Размытое видео", "blur")

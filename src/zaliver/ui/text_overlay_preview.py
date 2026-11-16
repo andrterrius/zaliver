@@ -325,7 +325,7 @@ class ScalePreviewWidget(QWidget):
             dy = event.position().y() - self._resize_start.y()
             sx = max(.1, min(2., self._drag_start[0] + 2*dx*(-1 if self._crop_corner[0] else 1)/f.width()))
             sy = max(.1, min(2., self._drag_start[1] + 2*dy*(-1 if self._crop_corner[1] else 1)/f.height()))
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            if not event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 start_x, start_y = self._drag_start
                 factor = max(.1 / min(start_x, start_y), min(2. / max(start_x, start_y), (sx/start_x + sy/start_y)/2))
                 sx, sy = start_x * factor, start_y * factor

@@ -43,3 +43,27 @@ def test_failed_caption_read_is_not_treated_as_empty():
     area.evaluate.side_effect = RuntimeError("editor unavailable")
     with pytest.raises(RuntimeError, match="editor unavailable"):
         reels_upload._read_caption_text(area)
+
+
+def test_empty_description_clears_studio_caption():
+    assert reels_upload._build_tiktok_caption("Title", "  ") == ""
+    page = MagicMock()
+    area = MagicMock()
+    with patch.object(reels_upload, "_pick_caption_area", return_value=area), patch.object(
+        reels_upload, "_read_caption_text", return_value="filename"
+    ), patch.object(reels_upload, "_caption_is_empty_now", side_effect=[False, True]), patch.object(
+        reels_upload, "_clear_caption_field", return_value=True
+    ) as clear:
+        assert reels_upload._verify_or_refill_caption(page, "")
+        clear.assert_called_once_with(page, area)
+
+
+def test_empty_caption_verification_detects_restored_filename():
+    page = MagicMock()
+    area = MagicMock()
+    with patch.object(reels_upload, "_pick_caption_area", return_value=area), patch.object(
+        reels_upload, "_read_caption_text", side_effect=["", "filename"]
+    ):
+        assert not reels_upload._caption_remains_correct(page, "")
+    assert not reels_upload._caption_write_ok("", "filename")
+    assert reels_upload._caption_write_ok("", "")

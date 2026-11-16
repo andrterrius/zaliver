@@ -1967,8 +1967,10 @@ def _caption_compare_norm(text: str) -> str:
 def _build_tiktok_caption(title: str, description: str) -> str:
     title = (title or "").strip()
     description = (description or "").strip()
-    if not title or not description:
-        return title or description
+    if not description:
+        return ""
+    if not title:
+        return description
     normalized_title = _caption_compare_norm(title)
     normalized_description = _caption_compare_norm(description)
     if normalized_description == normalized_title or normalized_description.startswith(
@@ -2044,7 +2046,7 @@ def _pick_caption_area(page, *, timeout_s: float = 30.0):
 
 def _caption_write_ok(wanted: str, got: str, *, video_stem: str = "") -> bool:
     if not _caption_compare_norm(wanted):
-        return True
+        return _caption_field_is_empty(got)
     return _caption_still_ours(wanted, got, video_stem=video_stem) and (
         _caption_gaps_preserved(wanted, got)
     )
@@ -2193,8 +2195,6 @@ def _verify_or_refill_caption(
     """Если текст не наш — стереть, дождаться пустого поля, затем написать."""
     global _CAPTION_SKIP_NONEMPTY_LOG
     text = (caption or "").strip()
-    if not _caption_compare_norm(text):
-        return True
     area = _pick_caption_area(page, timeout_s=2.0)
     if area is None:
         return False
@@ -2211,14 +2211,14 @@ def _verify_or_refill_caption(
     if not _caption_is_empty_now(page, area):
         return False
     _CAPTION_SKIP_NONEMPTY_LOG = ""
+    if not _caption_compare_norm(text):
+        return True
     return _fill_caption(
         page, caption, video_stem=video_stem, find_timeout_s=8.0
     )
 
 
 def _caption_remains_correct(page, caption: str, *, video_stem: str = "") -> bool:
-    if not _caption_compare_norm(caption):
-        return True
     for _ in range(3):
         page.wait_for_timeout(500)
         area = _pick_caption_area(page, timeout_s=2.0)

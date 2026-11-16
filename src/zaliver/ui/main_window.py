@@ -3048,6 +3048,7 @@ class MainWindow(QWidget):
                 "Настройки",
             ]
         )
+        self._nav.item(3).setHidden(True)
         # Yt+Inst: уникализация, нарезка, склейка и настройки (YT+IG разделы).
         if self._platform == PLATFORM_YT_INST:
             for i in range(3, self._nav.count()):
@@ -12337,9 +12338,9 @@ class MainWindow(QWidget):
             elif self._text_layers and isinstance(self._text_layers[0], dict):
                 self._text_layers[0]["text"] = value
         if source != "slice" and hasattr(self, "_slice_tab"):
-            self._slice_tab.set_text_overlay_text(value)
+            self._slice_tab.set_shared_text_overlay_text(value)
         if source != "stitch" and hasattr(self, "_stitch_tab"):
-            self._stitch_tab.set_text_overlay_text(value)
+            self._stitch_tab.set_shared_text_overlay_text(value)
 
     def _apply_ai_text_overlay(self, text: str) -> None:
         value = text if text is not None else ""

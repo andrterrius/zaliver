@@ -58,6 +58,7 @@ from zaliver.ui.channel_setup_helpers import (
     make_magic_wand_button,
 )
 from zaliver.ui.platform import normalize_platform
+from zaliver.ui.text_layers import TextLayersMixin
 from zaliver.ui.text_overlay_io import make_text_overlay_io_buttons
 from zaliver.ui.text_overlay_preview import TextOverlayPreviewWidget
 from zaliver.ui.widgets import (
@@ -82,7 +83,7 @@ DEFAULT_STITCH_TEXT_OVERLAY_ANCHOR_X = 0.5
 DEFAULT_STITCH_TEXT_OVERLAY_ANCHOR_Y = 0.5
 
 
-class StitchingTabPane(QWidget):
+class StitchingTabPane(TextLayersMixin, QWidget):
     start_requested = pyqtSignal()
     cancel_requested = pyqtSignal()
 
@@ -107,6 +108,7 @@ class StitchingTabPane(QWidget):
         self._music_files: list[str] = []
         self._text_glow_color = "#00FFFF"
         self._text_text_color = "#FFFFFF"
+        self._text_outline_color = "#000000"
         self._text_font_path = ""
         self._text_overlay_preview_index_part1 = 0
         self._text_overlay_preview_index_part2 = 0
@@ -116,6 +118,7 @@ class StitchingTabPane(QWidget):
         self._syncing_text_overlay = False
         self._build_ui()
         self.load_settings()
+        self._init_text_layers("stitch/text_overlay_layers")
 
     def build_options(self) -> dict[str, Any]:
         return {
@@ -194,6 +197,10 @@ class StitchingTabPane(QWidget):
             glow_enabled=bool(self.text_overlay_glow_enabled.isChecked()),
             glow_color=self._text_glow_color,
             text_color=self._text_text_color,
+            opacity=self.text_overlay_opacity.value() / 100,
+            outline_width=self.text_overlay_outline_width.value(),
+            outline_color=self._text_outline_color,
+            center_lines=self.text_overlay_center_lines.isChecked(),
             letter_spacing=int(self.text_overlay_letter_spacing.value()),
             custom_font_path=self._text_font_path,
             font_bold=bool(self.text_overlay_font_bold.isChecked()),
@@ -207,7 +214,7 @@ class StitchingTabPane(QWidget):
             after_frame_change=bool(self.text_overlay_after_frame_change.isChecked()),
         )
 
-    def text_overlay_options_dict(self) -> dict[str, Any]:
+    def _current_text_overlay_options_dict(self) -> dict[str, Any]:
         d = self.text_overlay_settings().to_dict()
         d["wave_amp_frac_min"] = float(self.text_overlay_wave_amp.lowValue() / 100.0)
         d["wave_amp_frac_max"] = float(self.text_overlay_wave_amp.highValue() / 100.0)
@@ -215,7 +222,7 @@ class StitchingTabPane(QWidget):
         d["wave_frame_speed_max"] = float(self.text_overlay_wave_speed.highValue() / 100.0)
         return d
 
-    def apply_text_overlay_options(self, raw: dict[str, Any]) -> None:
+    def _apply_single_text_overlay_options(self, raw: dict[str, Any]) -> None:
         """Применить настройки текста (в т.ч. из импорта JSON)."""
         from zaliver.ui.text_overlay_io import normalize_text_overlay_export_dict
 
@@ -244,6 +251,11 @@ class StitchingTabPane(QWidget):
             self.text_overlay_orientation.setCurrentIndex(idx)
         self._text_glow_color = str(d.get("glow_color") or "#00FFFF")
         self._text_text_color = str(d.get("text_color") or "#FFFFFF")
+        self._text_outline_color = str(d.get("outline_color") or "#000000")
+        self.text_overlay_opacity.setValue(round(float(d.get("opacity", 1.0)) * 100))
+        self.text_overlay_outline_width.setValue(int(d.get("outline_width", 0)))
+        self.text_overlay_center_lines.setChecked(bool(d.get("center_lines", False)))
+        self._sync_color_btn(self.text_overlay_outline_btn, self._text_outline_color)
         self.text_overlay_glow_enabled.setChecked(bool(d.get("glow_enabled", True)))
         try:
             ls = int(d.get("letter_spacing", 0))
@@ -282,7 +294,7 @@ class StitchingTabPane(QWidget):
         self._sync_text_overlay_preview(ax, ay)
         self.save_settings()
         cb = self._on_text_overlay_text_changed
-        if cb is not None:
+        if cb is not None and not getattr(self, "_text_layers_loading", False) and getattr(self, "_text_layer_index", 0) == 0:
             cb(self.text_overlay_text())
 
     def _apply_fixed_text_overlay_defaults(self) -> None:
@@ -348,6 +360,8 @@ class StitchingTabPane(QWidget):
     def _on_text_overlay_edit_changed(self) -> None:
         self._schedule_preview()
         if self._syncing_text_overlay or self._loading_settings:
+            return
+        if getattr(self, "_text_layer_index", 0) != 0 or getattr(self, "_text_layers_loading", False):
             return
         text = self.text_overlay_text()
         try:
@@ -464,6 +478,17 @@ class StitchingTabPane(QWidget):
             bool(s.value("stitch/text_overlay_font_bold", True, type=bool))
         )
         self._sync_color_btn(self.text_overlay_glow_btn, self._text_glow_color)
+        self._text_outline_color = s.value("stitch/text_overlay_outline_color", "#000000", type=str) or "#000000"
+        for widget in (self.text_overlay_opacity, self.text_overlay_outline_width, self.text_overlay_center_lines):
+            widget.blockSignals(True)
+        try:
+            self.text_overlay_opacity.setValue(s.value("stitch/text_overlay_opacity", 100, type=int))
+            self.text_overlay_outline_width.setValue(s.value("stitch/text_overlay_outline_width", 0, type=int))
+            self.text_overlay_center_lines.setChecked(s.value("stitch/text_overlay_center_lines", False, type=bool))
+        finally:
+            for widget in (self.text_overlay_opacity, self.text_overlay_outline_width, self.text_overlay_center_lines):
+                widget.blockSignals(False)
+        self._sync_color_btn(self.text_overlay_outline_btn, self._text_outline_color)
         self._sync_color_btn(self.text_overlay_text_btn, self._text_text_color)
         self._sync_wave_labels()
         self._update_text_overlay_controls()
@@ -484,11 +509,14 @@ class StitchingTabPane(QWidget):
         self._sync_transition_controls()
 
     def save_settings(self) -> None:
+        if getattr(self, "_text_layers_loading", False):
+            return
         # Во время _build_ui / load_settings слоты не должны писать настройки.
         if getattr(self, "_loading_settings", False):
             return
         if not hasattr(self, "text_overlay_enabled"):
             return
+        self._save_text_layers()
         s = self._settings
         s.setValue("stitch/output_folder", self.output_dir_edit.text().strip())
         s.setValue("stitch/part_count", len(self._part_files))
@@ -518,7 +546,7 @@ class StitchingTabPane(QWidget):
                 "stitch/transition_random", bool(self.transition_random.isChecked())
             )
         s.setValue("stitch/text_overlay_enabled", bool(self.text_overlay_enabled.isChecked()))
-        s.setValue(_SHARED_TEXT_OVERLAY_TEXT_KEY, self.text_overlay_text())
+        s.setValue(_SHARED_TEXT_OVERLAY_TEXT_KEY, self._text_layers[0].get("text", "") if getattr(self, "_text_layers", None) else self.text_overlay_text())
         s.setValue(
             "stitch/text_overlay_from_middle",
             bool(self.text_overlay_from_middle.isChecked()),
@@ -534,6 +562,10 @@ class StitchingTabPane(QWidget):
         )
         s.setValue("stitch/text_overlay_glow_color", self._text_glow_color)
         s.setValue("stitch/text_overlay_text_color", self._text_text_color)
+        s.setValue("stitch/text_overlay_opacity", self.text_overlay_opacity.value())
+        s.setValue("stitch/text_overlay_outline_width", self.text_overlay_outline_width.value())
+        s.setValue("stitch/text_overlay_outline_color", self._text_outline_color)
+        s.setValue("stitch/text_overlay_center_lines", self.text_overlay_center_lines.isChecked())
         s.setValue("stitch/text_overlay_font_path", self._text_font_path)
         s.setValue(
             "stitch/text_overlay_font_bold", bool(self.text_overlay_font_bold.isChecked())
@@ -853,6 +885,7 @@ class StitchingTabPane(QWidget):
         tp = QVBoxLayout(self._text_panel)
         tp.setContentsMargins(0, 0, 0, 0)
         tp.setSpacing(8)
+        self._add_text_layer_controls(tp)
         self.text_overlay_from_middle = QCheckBox("Текст с середины видео до конца")
         self.text_overlay_from_middle.setChecked(True)
         self.text_overlay_from_middle.toggled.connect(self._on_from_middle_toggled)
@@ -971,6 +1004,25 @@ class StitchingTabPane(QWidget):
         opts.addWidget(self.text_overlay_letter_spacing, 3, 1)
         opts.addWidget(QLabel("Шрифт"), 4, 0)
         opts.addWidget(font_row_w, 4, 1)
+        self.text_overlay_center_lines = QCheckBox("Центрировать строки")
+        self.text_overlay_opacity = QSpinBox()
+        self.text_overlay_opacity.setRange(0, 100)
+        self.text_overlay_opacity.setValue(100)
+        self.text_overlay_opacity.setSuffix(" %")
+        self.text_overlay_outline_width = QSpinBox()
+        self.text_overlay_outline_width.setRange(0, 40)
+        self.text_overlay_outline_width.setSuffix(" px")
+        self.text_overlay_outline_btn = QPushButton("Цвет обводки")
+        self.text_overlay_outline_btn.clicked.connect(self._pick_outline)
+        self.text_overlay_center_lines.toggled.connect(self._schedule_preview)
+        self.text_overlay_opacity.valueChanged.connect(self._schedule_preview)
+        self.text_overlay_outline_width.valueChanged.connect(self._schedule_preview)
+        opts.addWidget(self.text_overlay_center_lines, 7, 1)
+        opts.addWidget(QLabel("Непрозрачность текста"), 8, 0)
+        opts.addWidget(self.text_overlay_opacity, 8, 1)
+        opts.addWidget(QLabel("Толщина обводки"), 9, 0)
+        opts.addWidget(self.text_overlay_outline_width, 9, 1)
+        opts.addWidget(self.text_overlay_outline_btn, 10, 1)
         self.text_overlay_wave_amp = ValueRangeSlider(
             minimum=0,
             maximum=35,
@@ -1502,6 +1554,13 @@ class StitchingTabPane(QWidget):
         self._sync_text_overlay_preview()
         self.save_settings()
 
+    def _pick_outline(self) -> None:
+        picked = QColorDialog.getColor(QColor(self._text_outline_color), self, "Цвет обводки")
+        if picked.isValid():
+            self._text_outline_color = picked.name().upper()
+            self._sync_color_btn(self.text_overlay_outline_btn, self._text_outline_color)
+            self._schedule_preview()
+
     def _pick_text(self) -> None:
         picked = QColorDialog.getColor(QColor(self._text_text_color), self, "Цвет текста")
         if not picked.isValid():
@@ -1526,6 +1585,8 @@ class StitchingTabPane(QWidget):
         preview.setMinimumHeight(220)
         preview.setMaximumHeight(320)
         preview.positionChanged.connect(self._on_preview_position_changed)
+        preview.layerSelected.connect(self.text_layer_combo.setCurrentIndex)
+        preview.fontSizeChanged.connect(self.text_overlay_font_size.setValue)
         col.addWidget(preview)
 
         btn_prev = QPushButton("‹")
@@ -1715,9 +1776,7 @@ class StitchingTabPane(QWidget):
             current = videos[idx]
         preview.set_background_video(current, force=force)
         overlay_on = bool(self.text_overlay_enabled.isChecked())
-        after_cut = bool(self.text_overlay_after_frame_change.isChecked())
-        # «После смены кадра» — текст только после первой части.
-        preview.set_text_visible(overlay_on and not (part == 1 and after_cut))
+        preview.set_text_visible(overlay_on)
 
     def _sync_text_overlay_preview(
         self, anchor_x: float | None = None, anchor_y: float | None = None
@@ -1748,11 +1807,14 @@ class StitchingTabPane(QWidget):
             preview.set_glow_enabled(glow_on)
             preview.set_glow_color(self._text_glow_color)
             preview.set_text_color(self._text_text_color)
+            preview.set_text_style(self.text_overlay_opacity.value() / 100, self.text_overlay_outline_width.value(), self._text_outline_color, self.text_overlay_center_lines.isChecked())
             preview.set_letter_spacing(letter_spacing)
             preview.set_font_path(self._text_font_path)
             preview.set_font_bold(font_bold)
             preview.set_wave_settings(wave_amp, wave_speed)
-            preview.set_text(text)
+            is_first = preview is self.text_overlay_preview_part1
+            preview.set_text("" if is_first and self.text_overlay_after_frame_change.isChecked() else text)
+            self._sync_other_text_layers(preview, hide_after_frame=is_first)
             if anchor_x is not None and anchor_y is not None:
                 preview.set_anchor(anchor_x, anchor_y)
             preview.blockSignals(False)

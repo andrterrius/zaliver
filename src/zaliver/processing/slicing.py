@@ -2590,27 +2590,26 @@ def generate_video_from_segment(
     scaled_overlay: ScaledTextOverlay | None = None
     if text_overlay_cfg:
         toc = TextOverlaySettings.from_dict(text_overlay_cfg)
-        # API/headless workers have no Qt GUI — use Pillow metrics (avoid 0xC0000005).
-        scaled_overlay = compute_scaled_overlay_for_worker(
-            toc, video_w=width, video_h=height
-        )
-        if scaled_overlay is not None and scaled_overlay.lines:
-            if bool(getattr(toc, "after_frame_change", False)) and len(scene_durations) >= 2:
-                # Текст с середины визуального перехода (или стыка cut).
-                enable_at = float(scene_durations[0]) - stitch_overlap * 0.5
-                scaled_overlay.enable_after_sec = max(0.0, enable_at)
-                scaled_overlay.from_middle = False
-                _log(
-                    f"    Текст после смены кадра (с {scaled_overlay.enable_after_sec:.3f}с)…",
-                    log,
-                )
-            else:
-                _log(
-                    f"    Текст в одном проходе ({len(scaled_overlay.lines)} строк)…",
-                    log,
-                )
-        else:
-            scaled_overlay = None
+        if toc.enabled:
+            settings_layers = [toc] + [
+                TextOverlaySettings.from_dict({**item, "enabled": True, "layers": []})
+                for item in toc.layers
+            ]
+            scaled_layers = []
+            for layer in settings_layers:
+                # The worker uses Pillow metrics when there is no Qt GUI.
+                layer.layers = []
+                scaled = compute_scaled_overlay_for_worker(layer, video_w=width, video_h=height)
+                if scaled is None or not scaled.lines:
+                    continue
+                if layer.after_frame_change and len(scene_durations) >= 2:
+                    scaled.enable_after_sec = max(0.0, float(scene_durations[0]) - stitch_overlap * 0.5)
+                    scaled.from_middle = False
+                scaled_layers.append(scaled)
+            if scaled_layers:
+                scaled_overlay = scaled_layers[0]
+                scaled_overlay.layers = scaled_layers[1:]
+                _log(f"    Текст в одном проходе ({len(scaled_layers)} текстов)…", log)
 
     prefer_gpu_render = bool(use_gpu or use_gpu_finalize)
     # ====== СОЗДАЕМ ВИДЕО ======
